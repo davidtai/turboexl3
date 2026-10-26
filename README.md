@@ -50,6 +50,7 @@ own chain.
   `attn_io`, `decode_merge`, `unfused`, `ref`.
 
 Each function's doc comment states its shapes, dtypes, the chain whose bytes it gives and when it refuses.
+[docs/KERNELS.md](docs/KERNELS.md) lists every kernel beside the chain it replaces and how its bytes relate to that chain.
 
 ## Wiring
 
