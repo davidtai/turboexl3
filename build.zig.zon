@@ -1,0 +1,17 @@
+.{
+    .name = .turboexl3,
+    .version = "0.1.0",
+    // the high 32 bits are crc32("turboexl3"), as `zig build` checks; the low 32 the package's random id
+    .fingerprint = 0xaadded286f3c91b5,
+    .minimum_zig_version = "0.17.0",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "LICENSE",
+        "NOTICE",
+        "README.md",
+        "CONSUMING.md",
+    },
+    .dependencies = .{},
+}

@@ -1,0 +1,60 @@
+turboexl3
+Copyright (c) 2026 David Tai
+
+turboexl3 as a whole is distributed under the MIT License (see LICENSE). It
+incorporates or is derived from third-party material that remains under its own
+license, listed below. Those licenses continue to apply to those portions.
+The source comments at each site name their upstream too.
+
+turboexl3 was written as mlx-stream's EXL3 kernel library (mlx-stream,
+https://github.com/davidtai/mlx-stream, Copyright (c) 2026 David Tai, MIT), a
+plugin for mlx-serve (https://github.com/ddalcu/mlx-serve, Copyright (c) 2026
+David Dalcu, MIT).
+
+================================================================================
+MIT License
+================================================================================
+
+--------------------------------------------------------------------------------
+MLX
+https://github.com/ml-explore/mlx
+Copyright (c) 2023-2025 Apple Inc.
+Licensed under the MIT License.
+
+src/steel_nax.metal inlines MLX's steel headers (`steel/defines.h`,
+`steel/utils/type_traits.h`, `steel/utils/integral_constant.h` and
+`steel/gemm/nax.h`), each section marked with its MLX source path and copyright
+line; the prefill GEMMs build on their NAX tiles. The fused attention
+projections reproduce the roundings of MLX's `rms_single_row` and `rope_impl`.
+
+--------------------------------------------------------------------------------
+ExLlamaV3
+https://github.com/turboderp-org/exllamav3
+Copyright (c) turboderp
+Licensed under the MIT License.
+
+The EXL3 format turboexl3 decodes (the MUL1 and MCG codebooks, the trellis
+packing, the tensor-core permutation and the Hadamard suh / svh transforms)
+follows exllamav3 v1.4.2 (codebook.cuh, exl3_dq.cuh, pack.cu, hadamard.cu,
+quantize.py); src/format.zig and src/lane.zig cite what they reproduce.
+
+--------------------------------------------------------------------------------
+Sushi
+Copyright (c) 2026 Theinruj Toranavikrai
+Copyright (c) 2026 David Dalcu
+Licensed under the MIT License.
+
+src/format.zig, the EXL3 host reference every turboexl3 kernel is held to, is
+ported from Sushi's `src/exl3/expert_exl3.zig` (its pins are Sushi's), and
+turboexl3's entry points mirror the `sushi_exl3` module's.
+
+--------------------------------------------------------------------------------
+mlx-serve
+https://github.com/ddalcu/mlx-serve
+Copyright (c) 2026 David Dalcu
+Licensed under the MIT License.
+
+Where a turboexl3 kernel replaces a chain of mlx-serve's own kernels byte for
+byte, it repeats their statements: the fused MoE router (softmax mode), the
+QSA split-K merge, the hd-128 and hd-256 QK-norm + RoPE, the table SwiGLU and
+the strided sigmoid gate. Each site names the kernel it follows.
