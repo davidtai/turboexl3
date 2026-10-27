@@ -449,7 +449,7 @@ fn timeIt(g: *G, comptime F: type, f: F, rounds: u32, calls: u32) !f64 {
 // start; min and median us per call. TURBOEXL3_PF_ARMS (default "b128,sushi"), TURBOEXL3_PF_E (128), TURBOEXL3_PF_N (80),
 // TURBOEXL3_PF_ROWS (default 4096,1359: production's 4096-token chunk and the standard cell's tail), TURBOEXL3_PF_SKEW (lognormal
 // sigma of expert popularity, 0 = uniform), TURBOEXL3_PF_STAGES=1 adds each library stage timed alone. TURBOEXL3_PF_INDS (comma
-// list of u32 [rows, 10] routing files, MLX_SERVE_TURBOEXL3_PF_CAPTURE's output) replays served routing instead of
+// list of u32 [rows, 10] routing files, `Config.pf_capture_dir`'s output) replays served routing instead of
 // TURBOEXL3_PF_ROWS: one case per file, rows from the file's size, experts must cover its largest index.
 test "turboexl3 gpu prefill timing: the fused chain vs Sushi's prefill arm (TURBOEXL3_PF_TIME=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;

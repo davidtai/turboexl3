@@ -1,0 +1,13 @@
+    constexpr uint N = uint(NHW);
+    constexpr uint NW = N / 2u;
+    constexpr uint WMASK = (WBITS >= 16) ? 0xffffu : ((1u << uint(WBITS)) - 1u);
+    constexpr int CB = int(CODEBOOK);
+    constexpr int KDC = int(KD);
+    constexpr int NDC = int(ND);
+    constexpr int NOPSC = int(NOPS);
+    constexpr int SGS = int(SGT);
+    constexpr int K16 = KDC / 16;
+    constexpr int N16 = NDC / 16;
+    constexpr int NB = NDC / 32;
+    constexpr int STEPS = KDC / 32;
+    const uint L = thread_index_in_simdgroup;

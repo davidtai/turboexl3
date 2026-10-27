@@ -18,6 +18,20 @@ pub fn bf16Bits(f: f32) u16 {
     return @intCast((u +% rounding) >> 16);
 }
 
+/// A test's pin file (src/kernels/test/pins/*.metal): the Metal statements the test searches the kernel texts for, one per
+/// line, exactly as it searches for them (a final newline ends the last line).
+pub fn pins(comptime text: []const u8) []const []const u8 {
+    comptime {
+        @setEvalBranchQuota(1_000_000);
+        const body = if (text.len > 0 and text[text.len - 1] == '\n') text[0 .. text.len - 1] else text;
+        var out: [std.mem.count(u8, body, "\n") + 1][]const u8 = undefined;
+        var it = std.mem.splitScalar(u8, body, '\n');
+        for (&out) |*o| o.* = it.next().?;
+        const final = out;
+        return &final;
+    }
+}
+
 /// A point in a graph's scope (`mark`): `resetTo` frees every array tracked after it.
 pub const Mark = struct { n: usize };
 

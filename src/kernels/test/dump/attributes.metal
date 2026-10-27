@@ -1,0 +1,1 @@
+, uint3 threadgroup_position_in_grid [[threadgroup_position_in_grid]], uint simdgroup_index_in_threadgroup [[simdgroup_index_in_threadgroup]], uint thread_index_in_simdgroup [[thread_index_in_simdgroup]], uint thread_index_in_threadgroup [[thread_index_in_threadgroup]]) {

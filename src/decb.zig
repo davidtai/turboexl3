@@ -35,11 +35,7 @@ pub const Gate = struct { base: mlx.mlx_array, row_stride: u32, head_stride: u32
 
 /// dense.zig's 128-point Hadamard butterfly: the two statements every prep and finish there runs on v[4] (lane L holds
 /// element L + 32 j of the block), verbatim; a CPU test below pins them inside text_prep_s and dfinish_v
-const had128 =
-    \\    for (uint s = 0; s < 5u; ++s) { const uint bit = 1u << s; for (uint j = 0; j < 4u; ++j) { const float p = simd_shuffle_xor(v[j], ushort(bit)); v[j] = (L & bit) ? (p - v[j]) : (v[j] + p); } }
-    \\    { float t0 = v[0] + v[1], t1 = v[0] - v[1], t2 = v[2] + v[3], t3 = v[2] - v[3]; v[0] = t0 + t2; v[1] = t1 + t3; v[2] = t0 - t2; v[3] = t1 - t3; }
-    \\
-;
+const had128 = @embedFile("kernels/decb/had128.metal");
 
 // ------------------------------------------------------------------------- o_proj over the gated output: the producers
 
@@ -48,122 +44,25 @@ const had128 =
 /// counter zeroing): yv = T(attn[h, row, d] * sigtab[gate(row, h, d)]) with i = h HD + d, then f16(yv) * suh, the butterfly, x HAD_SCALE, f16,
 /// lane order (LANE_ORDER 1), the 128-block sums xs and DEC-ONE's arrival counters zeroed. attn T [1, H, rows, HD], the
 /// gate at gate[row GROW + h GHEAD + GOFF + d]; one simdgroup per (block, row), prep_sc's launch shape.
-pub const text_prep_gate_sc: [:0]const u8 =
-    \\    constexpr uint DIMC = uint(DIM);
-    \\    constexpr uint NB = DIMC / 128u;
-    \\    constexpr uint HDC = uint(HD);
-    \\    constexpr float HAD_SCALE = 0.08838834764831845f;
-    \\    const uint b = threadgroup_position_in_grid.x;
-    \\    const uint row = threadgroup_position_in_grid.y;
-    \\    const uint S = threadgroups_per_grid.y;
-    \\    const uint L = thread_index_in_simdgroup;
-    \\    float v[4];
-    \\    for (uint j = 0; j < 4u; ++j) {
-    \\        const uint i = b * 128u + L + 32u * j;
-    \\        const uint hh = i / HDC;
-    \\        const uint d = i - hh * HDC;
-    \\        const T xv = attn[(ulong(hh) * S + row) * HDC + d];
-    \\        const T gv = gate[ulong(row) * uint(GROW) + hh * uint(GHEAD) + uint(GOFF) + d];
-    \\        const T yv = xv * sigtab[as_type<ushort>(gv)];
-    \\        v[j] = float(half(float(yv))) * float(suh[i]);
-    \\    }
-    \\
-    ++ had128 ++ prep_sc_tail;
+pub const text_prep_gate_sc: [:0]const u8 = @embedFile("kernels/decb/prep_gate_sc.metal") ++ had128 ++ prep_sc_tail;
 
 /// text_prep_s's lane-order store and block sum, then text_prep_sc's counter zeroing (their statements verbatim)
-const prep_sc_tail =
-    \\    float sum = 0.0f;
-    \\    for (uint j = 0; j < 4u; ++j) {
-    \\        const uint i = b * 128u + L + 32u * j;
-    \\        const uint r = i & 15u;
-    \\        const uint q = (r & 7u) >> 1u;
-    \\        const uint m = (r & 1u) | ((r >> 3u) << 1u);
-    \\        const half hv = half(v[j] * HAD_SCALE);
-    \\        xp[row * DIMC + ((LANE_ORDER != 0) ? ((i & ~15u) + 4u * q + m) : i)] = hv;
-    \\        sum += float(hv);
-    \\    }
-    \\    sum = simd_sum(sum);
-    \\    if (L == 0u) xs[row * NB + b] = sum;
-    \\    // DEC-ONE: the arrival counters of the GEMV launch that follows, one per (output block, row chunk)
-    \\    for (uint g = (row * NB + b) * 32u + L; g < uint(NCNT); g += uint(NTH)) cnt[g] = 0u;
-    \\
-;
+const prep_sc_tail = @embedFile("kernels/decb/prep_sc_tail.metal");
 
 /// The qmerge form: the QSA core's split-K merge (the host's `msv_attn_qsa256_qmerge` text up to its store, verbatim),
 /// its value rounded to T where the merge stores it, the gate product in T, staged; then simdgroups 0 and 1 run o_proj's
 /// prepare (text_prep_s's statements) on the head's two 128-blocks of the row. Grid (256, rows, heads), one threadgroup
 /// per (row, head) as the merge's; pacc f32 [heads, rows, NS, 256], pml f32 [heads, rows, NS, 2].
 pub const text_merge_gate_sc: [:0]const u8 = merge_body ++
-    \\// the merge's value in T (where the merge stores it), the gate's product in T, staged for the prepare
-    \\threadgroup T gst[BD];
-    \\const T xv = T(acc / Z);
-    \\const T gv = gate[ulong(s) * uint(GROW) + uint(hq) * uint(GHEAD) + uint(GOFF) + uint(d)];
-    \\gst[d] = xv * sigtab[as_type<ushort>(gv)];
-    \\threadgroup_barrier(mem_flags::mem_threadgroup);
-    \\const uint HQN = threadgroups_per_grid.z;
-    \\const uint row = uint(s);
-    \\{
-    \\    constexpr uint DIMC = uint(DIM);
-    \\    constexpr uint NB = DIMC / 128u;
-    \\    constexpr float HAD_SCALE = 0.08838834764831845f;
-    \\    const uint sgi = simdgroup_index_in_threadgroup;
-    \\    const uint L = thread_index_in_simdgroup;
-    \\    if (sgi < 2u) {
-    \\    const uint b = uint(hq) * 2u + sgi;
-    \\    float v[4];
-    \\    for (uint j = 0; j < 4u; ++j) { const uint i = b * 128u + L + 32u * j; v[j] = float(half(float(gst[sgi * 128u + L + 32u * j]))) * float(suh[i]); }
-    \\
-    ++ had128 ++
-    \\    float sum = 0.0f;
-    \\    for (uint j = 0; j < 4u; ++j) {
-    \\        const uint i = b * 128u + L + 32u * j;
-    \\        const uint r = i & 15u;
-    \\        const uint q = (r & 7u) >> 1u;
-    \\        const uint m = (r & 1u) | ((r >> 3u) << 1u);
-    \\        const half hv = half(v[j] * HAD_SCALE);
-    \\        xp[row * DIMC + ((LANE_ORDER != 0) ? ((i & ~15u) + 4u * q + m) : i)] = hv;
-    \\        sum += float(hv);
-    \\    }
-    \\    sum = simd_sum(sum);
-    \\    if (L == 0u) xs[row * NB + b] = sum;
-    \\    }
-    \\    // DEC-ONE: the arrival counters of the GEMV launch that follows, one per (output block, row chunk)
-    \\    for (uint g = (row * HQN + uint(hq)) * 256u + uint(d); g < uint(NCNT); g += uint(NTH)) cnt[g] = 0u;
-    \\}
-    \\
-;
+    @embedFile("kernels/decb/merge_gate_sc_1.metal") ++
+    had128 ++
+    @embedFile("kernels/decb/merge_gate_sc_2.metal");
 
 /// The host's `QSA_ATTN_MERGE_SOURCE` (transformer.zig) without its final store line, verbatim (the host's CPU test pins
 /// this against its own text)
-pub const merge_body =
-    \\constexpr int BD = 256;
-    \\const int d = int(thread_index_in_threadgroup);
-    \\const int s = int(threadgroup_position_in_grid.y);
-    \\const int hq = int(threadgroup_position_in_grid.z);
-    \\const int qL = pacc_shape[1];
-    \\const int NS = pacc_shape[2];
-    \\const long pbase = ((long)hq * (long)qL + (long)s) * NS;
-    \\
-    \\// Every thread reads all NS (m, l) pairs. NS <= 64 and the pairs land in
-    \\// cache after the first thread of the threadgroup touches them, which is
-    \\// cheaper than a barrier plus threadgroup storage for two floats.
-    \\float M = -INFINITY;
-    \\for (int j = 0; j < NS; ++j) {
-    \\  if (pml[(pbase + j) * 2 + 1] > 0.0f) M = metal::max(M, pml[(pbase + j) * 2]);
-    \\}
-    \\float Z = 0.0f;
-    \\float acc = 0.0f;
-    \\for (int j = 0; j < NS; ++j) {
-    \\  const float lj = pml[(pbase + j) * 2 + 1];
-    \\  if (lj <= 0.0f) continue;
-    \\  const float w = metal::exp2(pml[(pbase + j) * 2] - M);
-    \\  Z += w * lj;
-    \\  acc += w * pacc[(pbase + j) * BD + d];
-    \\}
-    \\
-;
+pub const merge_body = @embedFile("kernels/decb/merge_body.metal");
 /// The merge's store (the host's last line), whose value the qmerge form keeps: T(acc / Z)
-pub const merge_store = "out[((long)hq * (long)qL + (long)s) * BD + d] = T(acc / Z);";
+pub const merge_store = @embedFile("kernels/decb/merge_store.metal");
 
 // ------------------------------------------------------------------------------------------------ the indexer epilogue
 
@@ -171,148 +70,40 @@ pub const merge_store = "out[((long)hq * (long)qL + (long)s) * BD + d] = T(acc /
 /// N_READS 4, one simdgroup; `rope_single_impl` / `rope_impl`'s rotation against the angle row) on one 128-wide index
 /// query head: `src` its finished values (threadgroup), `arow` the row's cos | sin, `dst` its q_rope row. Names mapped:
 /// lane -> L, HD -> IHD, eps -> qeps, w -> qn, angles -> arow, T -> OUT_T.
-const idx_qrope =
-    \\            uint base = L * 4;
-    \\            float acc = 0.0f;
-    \\            for (uint i = 0; i < 4; ++i) {
-    \\                float v = float(src[base + i]);
-    \\                acc += v * v;
-    \\            }
-    \\            acc = simd_sum(acc);
-    \\            float inv = metal::precise::rsqrt(acc / float(IHD) + float(qeps));
-    \\            OUT_T nrm[4];
-    \\            for (uint i = 0; i < 4; ++i) {
-    \\                nrm[i] = qn[base + i] * OUT_T(float(src[base + i]) * inv);
-    \\            }
-    \\            constexpr uint half_rd = uint(RD) / 2;
-    \\            float partner[4];
-    \\            for (uint i = 0; i < 4; ++i) {
-    \\                partner[i] = simd_shuffle(float(nrm[i]), L ^ (half_rd / 4));
-    \\            }
-    \\            for (uint i = 0; i < 4; ++i) {
-    \\                uint j = base + i;
-    \\                OUT_T r;
-    \\                if (j < half_rd) {
-    \\                    r = OUT_T(float(nrm[i]) * arow[j] - partner[i] * arow[half_rd + j]);
-    \\                } else if (j < uint(RD)) {
-    \\                    r = OUT_T(partner[i] * arow[j] + float(nrm[i]) * arow[j - half_rd]);
-    \\                } else {
-    \\                    r = nrm[i];
-    \\                }
-    \\                dst[j] = r;
-    \\            }
-    \\
-;
+const idx_qrope = @embedFile("kernels/decb/idx_qrope.metal");
 
 /// The host's pooled-key statements (`QSA_POOL_ROPE_SOURCE`, transformer.zig) for the one block a call completes: rows
 /// r < ln of the block are the ring's leftover (`ring`, bf16 as the ring holds them), the rest the call's first rows
 /// (`ist`, the finish's bf16 values); one simdgroup, lane owns dims [4 lane, 4 lane + 4). Names mapped: xs -> pxs, inv ->
 /// pinv, eps -> peps, inv_r -> invr, norm_w -> kn, cosv / sinv row 0 -> pcos / psin, out -> op, R -> RATIO, d -> pd,
 /// a / b -> pa / pb, o -> po; the read kb[kbase + r * 128 + j] -> the block's row r.
-const idx_pool =
-    \\        uint lane = L;
-    \\        uint kbase = lane * 4;
-    \\        float pxs[4];
-    \\        float sumsq = 0.0f;
-    \\        for (uint j = 0; j < 4; ++j) {
-    \\            float acc = 0.0f;
-    \\            for (uint r = 0; r < uint(RATIO); ++r) acc = float((r < uint(ln)) ? OUT_T(ring[r * 128 + kbase + j]) : OUT_T(ist[r - uint(ln)][kbase + j])) + acc;
-    \\            const OUT_T pooled = OUT_T(acc * invr);
-    \\            pxs[j] = float(pooled);
-    \\            sumsq += pxs[j] * pxs[j];
-    \\        }
-    \\        sumsq = simd_sum(sumsq);
-    \\        float pinv = metal::precise::rsqrt(sumsq / 128.0f + peps);
-    \\        for (uint j = 0; j < 4; ++j) {
-    \\            const OUT_T nv = kn[lane * 4 + j] * OUT_T(pxs[j] * pinv);
-    \\            const float nf = float(nv);
-    \\            const float up = simd_shuffle_down(nf, ushort(HALF / 4));
-    \\            const float dn = simd_shuffle_up(nf, ushort(HALF / 4));
-    \\            uint pd = lane * 4 + j;
-    \\            OUT_T po = nv;
-    \\            if (pd < uint(RD)) {
-    \\                const OUT_T rot = pd < uint(HALF) ? OUT_T(-up) : OUT_T(dn);
-    \\                const OUT_T pa = OUT_T(nf * float(pcos[pd]));
-    \\                const OUT_T pb = OUT_T(float(rot) * float(psin[pd]));
-    \\                po = OUT_T(float(pa) + float(pb));
-    \\            }
-    \\            op[pd] = po;
-    \\        }
-    \\
-;
+const idx_pool = @embedFile("kernels/decb/idx_pool.metal");
 
 /// The indexer epilogue's threadgroup staging in DEC-ONE's launch: each finished row's 128-block (the chunk's rows,
 /// rr = sg)
-const idx_dec_decl =
-    \\    threadgroup OUT_T ist[RBC][128];
-    \\    constexpr uint IHD = 128u;
-    \\
-;
+const idx_dec_decl = @embedFile("kernels/decb/idx_dec_decl.metal");
 
 /// The indexer epilogue in DEC-ONE's last-arriver finish: dense.dec_finish_v (the planes summed in slice order, the
 /// deferred map, f16, the butterfly), dec_finish_store's value (x HAD_SCALE x svh, f16, OUT_T) kept and stored, then the
 /// query-head epilogue (blocks < NQB) on the row; after the row loop the key block's chunk-0 last arriver builds the
 /// pooled key from the rows its simdgroups staged
 const idx_dec_finish = dense.dec_finish_v ++
-    \\        OUT_T yv[4];
-    \\        for (uint j = 0; j < 4u; ++j) { const uint o = ob * 128u + L + 32u * j; yv[j] = OUT_T(float(half(v[j] * HAD_SCALE * float(svh[o])))); y[row * OUTC + o] = yv[j]; }
-    \\        for (uint j = 0; j < 4u; ++j) ist[rr][L + 32u * j] = yv[j];
-    \\        simdgroup_barrier(mem_flags::mem_threadgroup);
-    \\        if (QEPI != 0 && ob < uint(NQB)) {
-    \\            const threadgroup OUT_T* src = ist[rr];
-    \\            const device float* arow = angles + ulong(row) * uint(RD);
-    \\            device OUT_T* dst = oq + (ulong(ob) * ulong(ROWSC) + row) * IHD;
-    \\
-    ++ idx_qrope ++
-    \\        }
-    \\    }
-    \\    threadgroup_barrier(mem_flags::mem_threadgroup);
-    \\    if (POOL != 0 && ob == uint(NQB) && chunk == 0u && sg == 0u) {
-    \\
-    ++ idx_pool ++
-    \\    }
-    \\
-;
+    @embedFile("kernels/decb/idx_dec_finish_1.metal") ++
+    idx_qrope ++
+    @embedFile("kernels/decb/idx_dec_finish_2.metal") ++
+    idx_pool ++
+    @embedFile("kernels/decb/idx_dec_finish_3.metal");
 
 /// The indexer epilogue on the chain's finish (DEC-ONE off): dense.dfinish_v, dfinish_store's value kept and stored, the
 /// query-head epilogue on the (block, row) simdgroup, and the pooled key in the key block's row-0 simdgroup, which
 /// finishes the block's rows 1.. itself (dfinish_v's statements on row rq: the same values the other simdgroups store)
-const idx_dfin_tail =
-    \\    threadgroup OUT_T ist[RATIO][128];
-    \\    constexpr uint IHD = 128u;
-    \\    OUT_T yv[4];
-    \\    for (uint j = 0; j < 4u; ++j) { const uint o = b * 128u + L + 32u * j; yv[j] = OUT_T(float(half(v[j] * HAD_SCALE * float(svh[o])))); y[row * DIMC + o] = yv[j]; }
-    \\    for (uint j = 0; j < 4u; ++j) ist[0][L + 32u * j] = yv[j];
-    \\    simdgroup_barrier(mem_flags::mem_threadgroup);
-    \\    if (QEPI != 0 && b < uint(NQB)) {
-    \\            const threadgroup OUT_T* src = ist[0];
-    \\            const device float* arow = angles + ulong(row) * uint(RD);
-    \\            device OUT_T* dst = oq + (ulong(b) * ulong(ROWSC) + row) * IHD;
-    \\
-    ++ idx_qrope ++
-    \\    }
-    \\    if (POOL != 0 && b == uint(NQB) && row == 0u) {
-    \\        for (uint rq = 1u; rq < uint(RATIO) - uint(ln); ++rq) {
-    \\            float xsum = 0.0f;
-    \\            if (DEFER != 0) for (uint q = 0; q < INB; ++q) xsum += xs[rq * INB + q];
-    \\            float v[4];
-    \\            for (uint j = 0; j < 4u; ++j) {
-    \\                const uint o = b * 128u + L + 32u * j;
-    \\                float acc = z[ulong(rq) * ulong(DIMC) + o];
-    \\                for (uint k = 1u; k < KSC; ++k) acc += z[(ulong(k) * ulong(ROWSC) + rq) * ulong(DIMC) + o];
-    \\                if (DEFER != 0) acc = fma(acc, MUL1_A, MUL1_C * xsum);
-    \\                v[j] = float(half(acc));
-    \\            }
-    \\
-    ++ had128 ++
-    \\            for (uint j = 0; j < 4u; ++j) { const uint o = b * 128u + L + 32u * j; ist[rq][L + 32u * j] = OUT_T(float(half(v[j] * HAD_SCALE * float(svh[o])))); }
-    \\        }
-    \\        simdgroup_barrier(mem_flags::mem_threadgroup);
-    \\
-    ++ idx_pool ++
-    \\    }
-    \\
-;
+const idx_dfin_tail = @embedFile("kernels/decb/idx_dfin_tail_1.metal") ++
+    idx_qrope ++
+    @embedFile("kernels/decb/idx_dfin_tail_2.metal") ++
+    had128 ++
+    @embedFile("kernels/decb/idx_dfin_tail_3.metal") ++
+    idx_pool ++
+    @embedFile("kernels/decb/idx_dfin_tail_4.metal");
 
 /// The indexer projection over prep_sc's rows (DEC-ONE, prepare in its own launch): y, z, oq, op
 pub const text_dec0_idx: [:0]const u8 = dense.dec_head ++ idx_dec_decl ++ dense.dec_gemv0 ++ dense.dec_gemv_arrive ++ dense.dec_xsum0 ++ idx_dec_finish;
@@ -325,15 +116,8 @@ pub const text_dfinish_idx: [:0]const u8 = dense.dfinish_v ++ idx_dfin_tail;
 
 /// The planes' store: dec_finish_store's value written to its head's query plane (columns [0, PH) of the head's PW) or
 /// gate plane, [rows, NHP, PH] each, instead of y [rows, OUT]
-const planes_store_dec =
-    \\        for (uint j = 0; j < 4u; ++j) { const uint o = ob * 128u + L + 32u * j; const OUT_T yv = OUT_T(float(half(v[j] * HAD_SCALE * float(svh[o])))); const uint hh = o / uint(PW); const uint c = o - hh * uint(PW); device OUT_T* dstp = (c < uint(PH)) ? yq : yg; dstp[(ulong(row) * uint(NHP) + hh) * uint(PH) + (c % uint(PH))] = yv; }
-    \\    }
-    \\
-;
-const planes_store_dfin =
-    \\    for (uint j = 0; j < 4u; ++j) { const uint o = b * 128u + L + 32u * j; const OUT_T yv = OUT_T(float(half(v[j] * HAD_SCALE * float(svh[o])))); const uint hh = o / uint(PW); const uint c = o - hh * uint(PW); device OUT_T* dstp = (c < uint(PH)) ? yq : yg; dstp[(ulong(row) * uint(NHP) + hh) * uint(PH) + (c % uint(PH))] = yv; }
-    \\
-;
+const planes_store_dec = @embedFile("kernels/decb/planes_store_dec.metal");
+const planes_store_dfin = @embedFile("kernels/decb/planes_store_dfin.metal");
 
 /// The planes over prep_sc's rows (DEC-ONE, prepare in its own launch): yq, yg, z
 pub const text_dec0_planes: [:0]const u8 = dense.dec_head ++ dense.dec_gemv0 ++ dense.dec_gemv_arrive ++ dense.dec_xsum0 ++ dense.dec_finish_v ++ planes_store_dec;
@@ -454,7 +238,7 @@ fn ci(v: anytype) c_int {
 }
 
 /// Everything of a Dense a launch config bakes in: its shape (rate, codebook, window, output dtype), its K split and the
-/// deferred MUL1 map (DEC-ONE's tiling knobs, MLX_SERVE_TURBOEXL3_DENSE_RB / _BT, are process-wide)
+/// deferred MUL1 map (DEC-ONE's row tiling is the same for every shape)
 fn denseTag(d: *const dense.Dense) u64 {
     var h = std.hash.Wyhash.init(0x4DEC8);
     const dt: u64 = switch (d.shape.out_dtype) {
@@ -469,7 +253,7 @@ fn denseTag(d: *const dense.Dense) u64 {
 }
 
 /// DEC-ONE's row tiling for `rows` (Dense.decCfgs's arithmetic): rows per chunk, output tiles per threadgroup, chunks.
-/// Cached per row count: maxRb / btFor read the process-wide tuning env, which stays out of the per-call path.
+/// Cached per row count.
 const Tiling = struct { rb: u32, bt: u32, chunks: u32 };
 var tiling_cache: [decode.Kernels.max_rows + 1]?Tiling = @splat(null);
 fn tiling(rows: usize) !Tiling {
@@ -478,7 +262,7 @@ fn tiling(rows: usize) !Tiling {
     defer unlock();
     if (tiling_cache[rows]) |t| return t;
     const rows_u: u32 = @intCast(rows);
-    const rb: u32 = @min(rows_u, dense.Dense.maxRb());
+    const rb: u32 = dense.Dense.rbFor(rows_u);
     const bt = dense.Dense.btFor(rb);
     if (8 % bt != 0) return error.BadExl3Shape;
     const t: Tiling = .{ .rb = rb, .bt = bt, .chunks = (rows_u + rb - 1) / rb };
@@ -589,7 +373,7 @@ fn preparedRows(d: *dense.Dense, s: mlx.mlx_stream, xp: mlx.mlx_array, xs: mlx.m
     }
     const c = try d.cfgs(rows);
     var z: [1]mlx.mlx_array = undefined;
-    try ks.applyConfig(d.dgemv, c.gemv, &.{ xp, trellis }, &z, s);
+    try ks.applyConfig(if (c.lean) d.dgemv_lean else d.dgemv, c.gemv, &.{ xp, trellis }, &z, s);
     defer _ = mlx.mlx_array_free(z[0]);
     var y: [1]mlx.mlx_array = undefined;
     try ks.applyConfig(d.dfinish, c.finish, &.{ z[0], svh, xs }, &y, s);
@@ -744,7 +528,7 @@ pub fn qPlanes(s: mlx.mlx_stream, x2: mlx.mlx_array, rows: usize, q: Member, hea
     defer freeAll(&po);
     const gin = [_]mlx.mlx_array{ po[0], q.trellis };
     var z: [1]mlx.mlx_array = undefined;
-    try ks.applyConfig(d.dgemv, c.gemv, &gin, &z, s);
+    try ks.applyConfig(if (c.lean) d.dgemv_lean else d.dgemv, c.gemv, &gin, &z, s);
     defer _ = mlx.mlx_array_free(z[0]);
     const shapes = [_][]const c_int{ &plane, &plane };
     const dtypes = [_]mlx.mlx_dtype{ odt, odt };
@@ -926,7 +710,7 @@ pub fn indexerQk(s: mlx.mlx_stream, x2: mlx.mlx_array, rows: usize, idx: Member,
         defer freeAll(&po);
         const gin = [_]mlx.mlx_array{ po[0], idx.trellis };
         var z: [1]mlx.mlx_array = undefined;
-        try ks.applyConfig(d.dgemv, c.gemv, &gin, &z, s);
+        try ks.applyConfig(if (c.lean) d.dgemv_lean else d.dgemv, c.gemv, &gin, &z, s);
         defer _ = mlx.mlx_array_free(z[0]);
         const shapes = [_][]const c_int{ &y_shape, oq_shape, op_shape };
         const dtypes = [_]mlx.mlx_dtype{ bf, bf, bf };
@@ -974,6 +758,7 @@ fn stmtLines(a: std.mem.Allocator, text: []const u8) ![][]const u8 {
 }
 
 test "turboexl3 decode merges texts: dense's split finishes are its old texts, and every variant carries the chain's value-setting statements" {
+    const pin = comptime @import("test_support.zig").pins(@embedFile("kernels/test/pins/decb_dense_statements.metal"));
     const a = testing.allocator;
     // the butterfly the merges splice is dense's: its prep's and its finish's statements, verbatim
     try testing.expect(has(dense.text_prep_s, had128) and has(dense.dfinish_v, had128));
@@ -992,18 +777,18 @@ test "turboexl3 decode merges texts: dense's split finishes are its old texts, a
     }
     for ([_][]const u8{ text_dfinish_idx, text_dfinish_planes }) |t| try testing.expect(std.mem.startsWith(u8, t, dense.dfinish_v));
     // the finish's output value, as the chain's store forms it, in every variant
-    const store_dec = "OUT_T(float(half(v[j] * HAD_SCALE * float(svh[o]))))";
+    const store_dec = pin[0];
     for ([_][]const u8{ text_dec0_idx, text_dec1_idx, text_dfinish_idx, text_dec0_planes, text_dec1_planes, text_dfinish_planes }) |t| try testing.expect(has(t, store_dec));
     try testing.expect(has(dense.dec_finish_store, store_dec) and has(dense.dfinish_store, store_dec));
     // the indexer's chain variant finishes the key block's rows 1.. with dfinish_v's statements (row -> rq)
     const Pair = struct { chain: []const u8, rows1: []const u8 };
     const pairs = [_]Pair{
-        .{ .chain = "if (DEFER != 0) for (uint q = 0; q < INB; ++q) xsum += xs[row * INB + q];", .rows1 = "if (DEFER != 0) for (uint q = 0; q < INB; ++q) xsum += xs[rq * INB + q];" },
-        .{ .chain = "float acc = z[ulong(row) * ulong(DIMC) + o];", .rows1 = "float acc = z[ulong(rq) * ulong(DIMC) + o];" },
-        .{ .chain = "for (uint k = 1u; k < KSC; ++k) acc += z[(ulong(k) * ulong(ROWSC) + row) * ulong(DIMC) + o];", .rows1 = "for (uint k = 1u; k < KSC; ++k) acc += z[(ulong(k) * ulong(ROWSC) + rq) * ulong(DIMC) + o];" },
-        .{ .chain = "if (DEFER != 0) acc = fma(acc, MUL1_A, MUL1_C * xsum);", .rows1 = "if (DEFER != 0) acc = fma(acc, MUL1_A, MUL1_C * xsum);" },
-        .{ .chain = "v[j] = float(half(acc));", .rows1 = "v[j] = float(half(acc));" },
-        .{ .chain = "const uint o = b * 128u + L + 32u * j;", .rows1 = "const uint o = b * 128u + L + 32u * j;" },
+        .{ .chain = pin[1], .rows1 = pin[2] },
+        .{ .chain = pin[3], .rows1 = pin[4] },
+        .{ .chain = pin[5], .rows1 = pin[6] },
+        .{ .chain = pin[7], .rows1 = pin[7] },
+        .{ .chain = pin[8], .rows1 = pin[8] },
+        .{ .chain = pin[9], .rows1 = pin[9] },
     };
     for (pairs) |p| {
         try testing.expect(has(dense.dfinish_v, p.chain));
@@ -1013,79 +798,81 @@ test "turboexl3 decode merges texts: dense's split finishes are its old texts, a
     const v_lines = try stmtLines(a, dense.dfinish_v);
     defer a.free(v_lines);
     for (v_lines) |l| {
-        var known = has(l, "constexpr") or has(l, "threadgroup_position_in_grid") or has(l, "thread_index_in_simdgroup") or has(l, "MUL1_") or
-            std.mem.eql(u8, l, "float xsum = 0.0f;") or std.mem.eql(u8, l, "float v[4];") or std.mem.eql(u8, l, "for (uint j = 0; j < 4u; ++j) {") or std.mem.eql(u8, l, "}") or
+        var known = has(l, pin[10]) or has(l, pin[11]) or has(l, pin[12]) or has(l, "MUL1_") or
+            std.mem.eql(u8, l, pin[13]) or std.mem.eql(u8, l, pin[14]) or std.mem.eql(u8, l, pin[15]) or std.mem.eql(u8, l, "}") or
             has(had128, l);
         for (pairs) |p| known = known or std.mem.eql(u8, l, p.chain);
         try testing.expect(known);
     }
     // the gated prepares: the gate product as the host's strided gate kernel forms it, then text_prep_s's statements
     // (the host's CPU test pins `xv * sigtab[as_type<ushort>(gv)]` to its strided gate kernel's store)
-    try testing.expect(has(text_prep_gate_sc, "const T yv = xv * sigtab[as_type<ushort>(gv)];"));
-    try testing.expect(has(text_prep_gate_sc, "v[j] = float(half(float(yv))) * float(suh[i]);"));
-    try testing.expect(has(text_merge_gate_sc, "gst[d] = xv * sigtab[as_type<ushort>(gv)];"));
-    try testing.expect(has(text_merge_gate_sc, "v[j] = float(half(float(gst[sgi * 128u + L + 32u * j]))) * float(suh[i]); }"));
-    try testing.expect(has(text_merge_gate_sc, "const T xv = T(acc / Z);"));
-    try testing.expect(has(merge_store, "= T(acc / Z);"));
+    try testing.expect(has(text_prep_gate_sc, pin[16]));
+    try testing.expect(has(text_prep_gate_sc, pin[17]));
+    try testing.expect(has(text_merge_gate_sc, pin[18]));
+    try testing.expect(has(text_merge_gate_sc, pin[19]));
+    try testing.expect(has(text_merge_gate_sc, pin[20]));
+    try testing.expect(has(merge_store, pin[21]));
     const ps_lines = try stmtLines(a, dense.text_prep_s);
     defer a.free(ps_lines);
     for (ps_lines) |l| {
         // text_prep_s's statements after its input read (x's own read is where the gate's product replaces it)
-        if (has(l, "x[row * DIMC + i]") or has(l, "threadgroup_position_in_grid") or has(l, "thread_index_in_simdgroup")) continue;
+        if (has(l, pin[22]) or has(l, pin[11]) or has(l, pin[12])) continue;
         try testing.expect(has(text_prep_gate_sc, l));
-        if (!has(l, "constexpr") and !has(l, "float v[4];")) try testing.expect(has(text_merge_gate_sc, l));
+        if (!has(l, pin[10]) and !has(l, pin[14])) try testing.expect(has(text_merge_gate_sc, l));
     }
-    try testing.expect(has(dense.text_prep_sc, "for (uint g = (row * NB + b) * 32u + L; g < uint(NCNT); g += uint(NTH)) cnt[g] = 0u;"));
-    try testing.expect(has(text_prep_gate_sc, "for (uint g = (row * NB + b) * 32u + L; g < uint(NCNT); g += uint(NTH)) cnt[g] = 0u;"));
+    try testing.expect(has(dense.text_prep_sc, pin[23]));
+    try testing.expect(has(text_prep_gate_sc, pin[23]));
     for ([_][]const u8{ text_prep_gate_sc, text_merge_gate_sc }) |t| try testing.expectEqual(@as(usize, 1), count(t, had128));
     try testing.expectEqual(@as(usize, 2), count(text_dfinish_idx, had128)); // dfinish_v's and the rows-1.. finish's
 }
 
 test "turboexl3 decode merges texts: the indexer epilogues are the host's hd-128 QK-norm+RoPE and pooled-key statements, names mapped" {
+    const pin = comptime @import("test_support.zig").pins(@embedFile("kernels/test/pins/decb_indexer.metal"));
     // QK_NORM_ROPE_SOURCE's arithmetic lines (transformer.zig), with lane -> L, HD -> IHD, eps -> qeps, w -> qn, angles -> arow,
     // T -> OUT_T (the host's CPU test checks these copies against its own text)
     const qrope = [_][]const u8{
-        "uint base = L * 4;",
-        "float v = float(src[base + i]);",
-        "acc += v * v;",
-        "acc = simd_sum(acc);",
-        "float inv = metal::precise::rsqrt(acc / float(IHD) + float(qeps));",
-        "nrm[i] = qn[base + i] * OUT_T(float(src[base + i]) * inv);",
-        "constexpr uint half_rd = uint(RD) / 2;",
-        "partner[i] = simd_shuffle(float(nrm[i]), L ^ (half_rd / 4));",
-        "r = OUT_T(float(nrm[i]) * arow[j] - partner[i] * arow[half_rd + j]);",
-        "r = OUT_T(partner[i] * arow[j] + float(nrm[i]) * arow[j - half_rd]);",
-        "r = nrm[i];",
+        pin[0],
+        pin[1],
+        pin[2],
+        pin[3],
+        pin[4],
+        pin[5],
+        pin[6],
+        pin[7],
+        pin[8],
+        pin[9],
+        pin[10],
     };
     // QSA_POOL_ROPE_SOURCE's arithmetic lines, names mapped as idx_pool's doc says
     const pool = [_][]const u8{
-        "float acc = 0.0f;",
-        "const OUT_T pooled = OUT_T(acc * invr);",
-        "pxs[j] = float(pooled);",
-        "sumsq += pxs[j] * pxs[j];",
-        "sumsq = simd_sum(sumsq);",
-        "float pinv = metal::precise::rsqrt(sumsq / 128.0f + peps);",
-        "const OUT_T nv = kn[lane * 4 + j] * OUT_T(pxs[j] * pinv);",
-        "const float nf = float(nv);",
-        "const float up = simd_shuffle_down(nf, ushort(HALF / 4));",
-        "const float dn = simd_shuffle_up(nf, ushort(HALF / 4));",
-        "const OUT_T rot = pd < uint(HALF) ? OUT_T(-up) : OUT_T(dn);",
-        "const OUT_T pa = OUT_T(nf * float(pcos[pd]));",
-        "const OUT_T pb = OUT_T(float(rot) * float(psin[pd]));",
-        "po = OUT_T(float(pa) + float(pb));",
-        "+ acc;",
+        pin[11],
+        pin[12],
+        pin[13],
+        pin[14],
+        pin[15],
+        pin[16],
+        pin[17],
+        pin[18],
+        pin[19],
+        pin[20],
+        pin[21],
+        pin[22],
+        pin[23],
+        pin[24],
+        pin[25],
     };
     for ([_][]const u8{ text_dec0_idx, text_dec1_idx, text_dfinish_idx }) |t| {
         for (qrope) |l| try testing.expect(has(t, l));
         for (pool) |l| try testing.expect(has(t, l));
         // the block sum folds rows 0..R-1 in order, each row's bf16 value read as f32
-        try testing.expect(has(t, "for (uint r = 0; r < uint(RATIO); ++r) acc = float("));
+        try testing.expect(has(t, pin[26]));
     }
-    try testing.expectEqual(@as(usize, 1), count(idx_qrope, "simd_sum"));
-    try testing.expectEqual(@as(usize, 1), count(idx_pool, "simd_sum"));
+    try testing.expectEqual(@as(usize, 1), count(idx_qrope, pin[27]));
+    try testing.expectEqual(@as(usize, 1), count(idx_pool, pin[27]));
 }
 
 test "turboexl3 decode merges texts: the signatures' names are used and no name is followed by MLX's shape / strides / ndim suffixes" {
+    const pin = comptime @import("test_support.zig").pins(@embedFile("kernels/test/pins/decb_signatures.metal"));
     const Sig = struct { txt: []const u8, names: []const [*:0]const u8, unused: []const []const u8 = &.{} };
     const sigs = [_]Sig{
         .{ .txt = text_prep_gate_sc, .names = &(prep_gate_sc_in ++ prep_sc_out) },
@@ -1114,7 +901,7 @@ test "turboexl3 decode merges texts: the signatures' names are used and no name 
             try testing.expect(!has(sg.txt, needle));
         }
     };
-    try testing.expect(has(text_merge_gate_sc, "pacc_shape[1]") and has(text_merge_gate_sc, "pacc_shape[2]"));
+    try testing.expect(has(text_merge_gate_sc, pin[0]) and has(text_merge_gate_sc, pin[1]));
 }
 
 test "turboexl3 decode merges texts: the q_proj planes address each head's query and gate halves, every column once" {
@@ -1143,8 +930,9 @@ test "turboexl3 decode merges: the gated prepares zero exactly DEC-ONE's counter
     // heads): g = (row heads + hq) 256 + d steps by 256 rows heads. Both cover [0, NCNT) exactly once for every count
     // DEC-ONE uses at o_proj (out 2560: 20 blocks x chunks).
     const a = testing.allocator;
-    for ([_]u32{ 1, 2, 3, 4, 8, 16 }) |rows| {
-        const chunks = (rows + @min(rows, 4) - 1) / @min(rows, 4);
+    for ([_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 16 }) |rows| {
+        const rb = dense.Dense.rbFor(rows);
+        const chunks = (rows + rb - 1) / rb;
         const ncnt: u32 = @max(20 * chunks, 8);
         const nb: u32 = 6144 / 128;
         var seen = try a.alloc(u8, ncnt);

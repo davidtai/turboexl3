@@ -4,6 +4,9 @@
     // the high 32 bits are crc32("turboexl3"), as `zig build` checks; the low 32 the package's random id
     .fingerprint = 0xaadded286f3c91b5,
     .minimum_zig_version = "0.17.0",
+    // what a fetched package carries: the module (src, its .metal files included), the license and notices, the docs
+    // README.md and CONSUMING.md link (docs/), the contributor rules (AGENTS.md, CLAUDE.md) and the check they name
+    // (tools/check_texts.py; nothing builds it). plugin/ is built from a checkout, never fetched.
     .paths = .{
         "build.zig",
         "build.zig.zon",
@@ -12,6 +15,10 @@
         "NOTICE",
         "README.md",
         "CONSUMING.md",
+        "docs",
+        "AGENTS.md",
+        "CLAUDE.md",
+        "tools",
     },
     .dependencies = .{},
 }

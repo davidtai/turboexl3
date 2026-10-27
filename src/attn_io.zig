@@ -1,6 +1,6 @@
 //! A gated, QK-normed, partially rotated attention layer's EXL3 projections at prefill rows, fused into fewer passes and
 //! launches, byte for byte the chain they replace (`Dense.linear` per projection plus MLX's ops). The host takes them per
-//! call (MLX_SERVE_ATTN_IN, MLX_SERVE_ATTN_OUT); Qwen3.8-Flash-Next's 12 full-attention layers are the client.
+//! call; Qwen3.8-Flash-Next's 12 full-attention layers are the client.
 //!
 //! `attnIn` (ATTN-IN): q (each head's 512 columns = [query 256 | gate 256]), k and v of one input x.
 //! 1. One prepare launch (`text_prep3`): x read once, xp_m = H128(f16(x) * suh_m) for the three members, natural order;
@@ -25,10 +25,10 @@
 //! exact in f32 before the one rounding, as MLX's Sigmoid and Multiply), then `text_prep`'s statements; the inner product
 //! and finish are `linear`'s (the finish is `Dense.finish` itself with `linear`'s config).
 //!
-//! Rows <= 16 (the GEMV path) and the fused-GEMM option (MLX_SERVE_TURBOEXL3_DENSE_PREFILL=fused) are refused
+//! Rows <= 16 (the GEMV path) and the fused-GEMM option (`Dense.fused_prefill`) are refused
 //! (error.Exl3EngineNotImplemented): the host keeps its chain there.
 //!
-//! The four-member prepare (the host's MLX_SERVE_ATTN_IDXPREP): the layer's QSA indexer projection reads the same x as
+//! The four-member prepare: the layer's QSA indexer projection reads the same x as
 //! q|gate, k and v, so its prepare joins step 1 as a fourth member (`prepare4`, `text_prep4`: x read once for the four
 //! rotated copies, every member's statements `text_prep3`'s). The indexer's inner product and finish are `linear`'s own
 //! launches over its copy (`linearPrepared`: `Dense.innerOf` / `Dense.finishOf` on the path `linear` takes at those rows),
@@ -42,25 +42,7 @@ const dense = @import("dense.zig");
 
 /// One prepare for three members: xp_m half [rows, DIM] = H128(f16(x[row]) * suh_m) per 128-block, natural order (dense
 /// `text_prep` at LANE_ORDER 0, member by member on the one f16 value of x); one simdgroup per (block, row).
-pub const text_prep3 =
-    \\    constexpr uint DIMC = uint(DIM);
-    \\    constexpr float HAD_SCALE = 0.08838834764831845f;
-    \\    const uint b = threadgroup_position_in_grid.x;
-    \\    const uint row = threadgroup_position_in_grid.y;
-    \\    const uint L = thread_index_in_simdgroup;
-    \\    float xh[4];
-    \\    for (uint j = 0; j < 4u; ++j) { const uint i = b * 128u + L + 32u * j; xh[j] = float(half(float(x[row * DIMC + i]))); }
-    \\    for (uint m = 0; m < 3u; ++m) {
-    \\        const device half* suh = (m == 0u) ? suh0 : ((m == 1u) ? suh1 : suh2);
-    \\        device half* xp = (m == 0u) ? xp0 : ((m == 1u) ? xp1 : xp2);
-    \\        float v[4];
-    \\        for (uint j = 0; j < 4u; ++j) { const uint i = b * 128u + L + 32u * j; v[j] = xh[j] * float(suh[i]); }
-    \\        for (uint s = 0; s < 5u; ++s) { const uint bit = 1u << s; for (uint j = 0; j < 4u; ++j) { const float p = simd_shuffle_xor(v[j], ushort(bit)); v[j] = (L & bit) ? (p - v[j]) : (v[j] + p); } }
-    \\        { float t0 = v[0] + v[1], t1 = v[0] - v[1], t2 = v[2] + v[3], t3 = v[2] - v[3]; v[0] = t0 + t2; v[1] = t1 + t3; v[2] = t0 - t2; v[3] = t1 - t3; }
-    \\        for (uint j = 0; j < 4u; ++j) { const uint i = b * 128u + L + 32u * j; xp[row * DIMC + i] = half(v[j] * HAD_SCALE); }
-    \\    }
-    \\
-;
+pub const text_prep3 = @embedFile("kernels/attn_io/prep3.metal");
 
 /// One finish for q|gate, k and v with the attention epilogue. Grid (units x 64 threads, rows); unit u < HQ: query head u
 /// (q_proj blocks 4u, 4u+1), HQ <= u < 2 HQ: head u - HQ's gate half (blocks 4h+2, 4h+3), then HK k heads (k_proj blocks
@@ -73,147 +55,22 @@ pub const text_prep3 =
 pub const text_finish_attn: [:0]const u8 = finish_attn_head ++ finish_attn_tail;
 
 /// `text_finish_attn` up to the finished y[] (the unit's block of its member: f16 round, H128, x svh, f16 round, OUT_T)
-const finish_attn_head =
-    \\    constexpr uint HDC = uint(HD);
-    \\    constexpr uint QDIM = 2u * uint(HQ) * HDC;
-    \\    constexpr uint KDIM = uint(HK) * HDC;
-    \\    constexpr uint half_rd = uint(RD) / 2u;
-    \\    constexpr float HAD_SCALE = 0.08838834764831845f;
-    \\    threadgroup OUT_T ys[HD];
-    \\    threadgroup OUT_T nrm[HD];
-    \\    threadgroup float local_sums[32];
-    \\    threadgroup float local_inv[1];
-    \\    const uint u = threadgroup_position_in_grid.x;
-    \\    const uint row = threadgroup_position_in_grid.y;
-    \\    const uint S = threadgroups_per_grid.y;
-    \\    const uint sg = simdgroup_index_in_threadgroup;
-    \\    const uint L = thread_index_in_simdgroup;
-    \\    const uint tid = thread_index_in_threadgroup;
-    \\    const bool on_q = u < 2u * uint(HQ);
-    \\    const bool is_g = on_q && u >= uint(HQ);
-    \\    const bool is_k = !on_q && u < 2u * uint(HQ) + uint(HK);
-    \\    const bool is_v = !on_q && !is_k;
-    \\    const uint h = on_q ? (is_g ? u - uint(HQ) : u) : (is_k ? u - 2u * uint(HQ) : u - 2u * uint(HQ) - uint(HK));
-    \\    const device half* z = on_q ? zq : (is_k ? zk : zv);
-    \\    const device half* svh = on_q ? svq : (is_k ? svk : svv);
-    \\    const uint dimc = on_q ? QDIM : KDIM;
-    \\    const uint blk = on_q ? (4u * h + (is_g ? 2u : 0u) + sg) : (2u * h + sg);
-    \\    float v[4];
-    \\    for (uint j = 0; j < 4u; ++j) v[j] = float(half(float(z[row * dimc + blk * 128u + L + 32u * j])));
-    \\    for (uint s = 0; s < 5u; ++s) { const uint bit = 1u << s; for (uint j = 0; j < 4u; ++j) { const float p = simd_shuffle_xor(v[j], ushort(bit)); v[j] = (L & bit) ? (p - v[j]) : (v[j] + p); } }
-    \\    { float t0 = v[0] + v[1], t1 = v[0] - v[1], t2 = v[2] + v[3], t3 = v[2] - v[3]; v[0] = t0 + t2; v[1] = t1 + t3; v[2] = t0 - t2; v[3] = t1 - t3; }
-    \\    OUT_T y[4];
-    \\    for (uint j = 0; j < 4u; ++j) { const uint o = blk * 128u + L + 32u * j; y[j] = OUT_T(float(half(v[j] * HAD_SCALE * float(svh[o])))); }
-    \\
-;
+const finish_attn_head = @embedFile("kernels/attn_io/finish_attn_head.metal");
 
 /// `text_finish_attn`'s epilogue from the finished y[] on: the gate / v stores, the q / k heads' RMSNorm and NeoX rotation
-const finish_attn_tail =
-    \\    const uint c0 = sg * 128u + L;
-    \\    if (is_g) {
-    \\        for (uint j = 0; j < 4u; ++j) og[(ulong(row) * uint(HQ) + h) * HDC + c0 + 32u * j] = y[j];
-    \\    } else if (is_v) {
-    \\        for (uint j = 0; j < 4u; ++j) ov[(ulong(h) * S + row) * HDC + c0 + 32u * j] = y[j];
-    \\    } else {
-    \\        for (uint j = 0; j < 4u; ++j) ys[c0 + 32u * j] = y[j];
-    \\        threadgroup_barrier(mem_flags::mem_threadgroup);
-    \\        const uint base = tid * 4u;
-    \\        float acc = 0.0f;
-    \\        for (uint i = 0; i < 4u; ++i) {
-    \\            float xv = float(ys[base + i]);
-    \\            acc += xv * xv;
-    \\        }
-    \\        acc = simd_sum(acc);
-    \\        if (sg == 0u) {
-    \\            local_sums[L] = 0.0f;
-    \\        }
-    \\        threadgroup_barrier(mem_flags::mem_threadgroup);
-    \\        if (L == 0u) {
-    \\            local_sums[sg] = acc;
-    \\        }
-    \\        threadgroup_barrier(mem_flags::mem_threadgroup);
-    \\        if (sg == 0u) {
-    \\            acc = simd_sum(local_sums[L]);
-    \\            if (L == 0u) {
-    \\                local_inv[0] = metal::precise::rsqrt(acc / float(HDC) + float(eps));
-    \\            }
-    \\        }
-    \\        threadgroup_barrier(mem_flags::mem_threadgroup);
-    \\        const float inv = local_inv[0];
-    \\        const device OUT_T* w = is_k ? kw : qw;
-    \\        for (uint i = 0; i < 4u; ++i) {
-    \\            nrm[base + i] = OUT_T(w[base + i] * OUT_T(float(ys[base + i]) * inv));
-    \\        }
-    \\        threadgroup_barrier(mem_flags::mem_threadgroup);
-    \\        const device float* arow = angles + ulong(row) * uint(RD);
-    \\        device OUT_T* dst = is_k ? (ok + (ulong(h) * S + row) * HDC) : (oq + (ulong(h) * S + row) * HDC);
-    \\        for (uint i = 0; i < 4u; ++i) {
-    \\            const uint j = base + i;
-    \\            OUT_T r;
-    \\            if (j >= uint(RD)) {
-    \\                r = nrm[j];
-    \\            } else if (j < half_rd) {
-    \\                r = OUT_T(float(nrm[j]) * arow[j] - float(nrm[j + half_rd]) * arow[half_rd + j]);
-    \\            } else {
-    \\                r = OUT_T(float(nrm[j - half_rd]) * arow[j] + float(nrm[j]) * arow[j - half_rd]);
-    \\            }
-    \\            dst[j] = r;
-    \\        }
-    \\    }
-    \\
-;
+const finish_attn_tail = @embedFile("kernels/attn_io/finish_attn_tail.metal");
 
 /// o_proj's prepare over the gated attention output: x[row, i] = T(attn[h, row, d] * sigtab[gate(row, h, d)]) with
 /// i = h HD + d (MLX's Sigmoid by its own table, MLX's Multiply in T), then dense `text_prep`'s statements (LANE_ORDER 0).
 /// attn T [1, H, rows, HD] (the QSA core's head-major output), gate T at gate[row GROW + h GHEAD + GOFF + d] (q_proj's
 /// [1, rows, 2 H HD] with GROW 2 H HD, GHEAD 2 HD, GOFF HD; ATTN-IN's [1, rows, H, HD] with GROW H HD, GHEAD HD, GOFF 0),
 /// sigtab T [65536]; xp half [rows, DIM]; one simdgroup per (block, row).
-pub const text_prep_gate =
-    \\    constexpr uint DIMC = uint(DIM);
-    \\    constexpr uint HDC = uint(HD);
-    \\    constexpr float HAD_SCALE = 0.08838834764831845f;
-    \\    const uint b = threadgroup_position_in_grid.x;
-    \\    const uint row = threadgroup_position_in_grid.y;
-    \\    const uint S = threadgroups_per_grid.y;
-    \\    const uint L = thread_index_in_simdgroup;
-    \\    float v[4];
-    \\    for (uint j = 0; j < 4u; ++j) {
-    \\        const uint i = b * 128u + L + 32u * j;
-    \\        const uint hh = i / HDC;
-    \\        const uint d = i - hh * HDC;
-    \\        const T av = attn[(ulong(hh) * S + row) * HDC + d];
-    \\        const T gv = gate[ulong(row) * uint(GROW) + hh * uint(GHEAD) + uint(GOFF) + d];
-    \\        const T xv = av * sigtab[as_type<ushort>(gv)];
-    \\        v[j] = float(half(float(xv))) * float(suh[i]);
-    \\    }
-    \\    for (uint s = 0; s < 5u; ++s) { const uint bit = 1u << s; for (uint j = 0; j < 4u; ++j) { const float p = simd_shuffle_xor(v[j], ushort(bit)); v[j] = (L & bit) ? (p - v[j]) : (v[j] + p); } }
-    \\    { float t0 = v[0] + v[1], t1 = v[0] - v[1], t2 = v[2] + v[3], t3 = v[2] - v[3]; v[0] = t0 + t2; v[1] = t1 + t3; v[2] = t0 - t2; v[3] = t1 - t3; }
-    \\    for (uint j = 0; j < 4u; ++j) { const uint i = b * 128u + L + 32u * j; xp[row * DIMC + i] = half(v[j] * HAD_SCALE); }
-    \\
-;
+pub const text_prep_gate = @embedFile("kernels/attn_io/prep_gate.metal");
 
 /// `text_prep3` with a fourth member (the QSA indexer projection of the same x): xp_m half [rows, DIM] =
 /// H128(f16(x[row]) * suh_m) per 128-block, natural order, for m = 0..3; each member's statements are `text_prep3`'s (so
 /// dense `text_prep`'s at LANE_ORDER 0) on the one f16 value of x; one simdgroup per (block, row).
-pub const text_prep4 =
-    \\    constexpr uint DIMC = uint(DIM);
-    \\    constexpr float HAD_SCALE = 0.08838834764831845f;
-    \\    const uint b = threadgroup_position_in_grid.x;
-    \\    const uint row = threadgroup_position_in_grid.y;
-    \\    const uint L = thread_index_in_simdgroup;
-    \\    float xh[4];
-    \\    for (uint j = 0; j < 4u; ++j) { const uint i = b * 128u + L + 32u * j; xh[j] = float(half(float(x[row * DIMC + i]))); }
-    \\    for (uint m = 0; m < 4u; ++m) {
-    \\        const device half* suh = (m == 0u) ? suh0 : ((m == 1u) ? suh1 : ((m == 2u) ? suh2 : suh3));
-    \\        device half* xp = (m == 0u) ? xp0 : ((m == 1u) ? xp1 : ((m == 2u) ? xp2 : xp3));
-    \\        float v[4];
-    \\        for (uint j = 0; j < 4u; ++j) { const uint i = b * 128u + L + 32u * j; v[j] = xh[j] * float(suh[i]); }
-    \\        for (uint s = 0; s < 5u; ++s) { const uint bit = 1u << s; for (uint j = 0; j < 4u; ++j) { const float p = simd_shuffle_xor(v[j], ushort(bit)); v[j] = (L & bit) ? (p - v[j]) : (v[j] + p); } }
-    \\        { float t0 = v[0] + v[1], t1 = v[0] - v[1], t2 = v[2] + v[3], t3 = v[2] - v[3]; v[0] = t0 + t2; v[1] = t1 + t3; v[2] = t0 - t2; v[3] = t1 - t3; }
-    \\        for (uint j = 0; j < 4u; ++j) { const uint i = b * 128u + L + 32u * j; xp[row * DIMC + i] = half(v[j] * HAD_SCALE); }
-    \\    }
-    \\
-;
+pub const text_prep4 = @embedFile("kernels/attn_io/prep4.metal");
 
 /// ATTN-IN's epilogue over the projections in the standard basis (the un-rotated trunk's q|gate, k and v: one plain
 /// matmul each, or the columns of one joined product). `text_finish_attn` with its finish replaced by a read: unit u's
@@ -222,54 +79,12 @@ pub const text_prep4 =
 /// blocks and every statement from y[] on are `text_finish_attn`'s (`finish_attn_tail` verbatim).
 pub const text_epi_attn: [:0]const u8 = epi_attn_head ++ finish_attn_tail;
 
-const epi_attn_head =
-    \\    constexpr uint HDC = uint(HD);
-    \\    constexpr uint half_rd = uint(RD) / 2u;
-    \\    threadgroup OUT_T ys[HD];
-    \\    threadgroup OUT_T nrm[HD];
-    \\    threadgroup float local_sums[32];
-    \\    threadgroup float local_inv[1];
-    \\    const uint u = threadgroup_position_in_grid.x;
-    \\    const uint row = threadgroup_position_in_grid.y;
-    \\    const uint S = threadgroups_per_grid.y;
-    \\    const uint sg = simdgroup_index_in_threadgroup;
-    \\    const uint L = thread_index_in_simdgroup;
-    \\    const uint tid = thread_index_in_threadgroup;
-    \\    const bool on_q = u < 2u * uint(HQ);
-    \\    const bool is_g = on_q && u >= uint(HQ);
-    \\    const bool is_k = !on_q && u < 2u * uint(HQ) + uint(HK);
-    \\    const bool is_v = !on_q && !is_k;
-    \\    const uint h = on_q ? (is_g ? u - uint(HQ) : u) : (is_k ? u - 2u * uint(HQ) : u - 2u * uint(HQ) - uint(HK));
-    \\    const device OUT_T* z = on_q ? zq : (is_k ? zk : zv);
-    \\    const uint zs = on_q ? uint(QS) : (is_k ? uint(KS) : uint(VS));
-    \\    const uint zo = on_q ? uint(QO) : (is_k ? uint(KO) : uint(VO));
-    \\    const uint blk = on_q ? (4u * h + (is_g ? 2u : 0u) + sg) : (2u * h + sg);
-    \\    OUT_T y[4];
-    \\    for (uint j = 0; j < 4u; ++j) y[j] = z[ulong(row) * zs + zo + blk * 128u + L + 32u * j];
-    \\
-;
+const epi_attn_head = @embedFile("kernels/attn_io/epi_attn_head.metal");
 
 /// ATTN-OUT's input in the standard basis, the row o_proj's plain matmul reads: xg T [rows, DIM] with
 /// xg[row, h HD + d] = T(attn[h, row, d] * sigtab[gate(row, h, d)]), `text_prep_gate`'s product statements verbatim (MLX's
 /// Sigmoid by its table, its Multiply in T) and no prepare; operands as `text_prep_gate`'s, one simdgroup per (block, row).
-pub const text_gate_plain =
-    \\    constexpr uint DIMC = uint(DIM);
-    \\    constexpr uint HDC = uint(HD);
-    \\    const uint b = threadgroup_position_in_grid.x;
-    \\    const uint row = threadgroup_position_in_grid.y;
-    \\    const uint S = threadgroups_per_grid.y;
-    \\    const uint L = thread_index_in_simdgroup;
-    \\    for (uint j = 0; j < 4u; ++j) {
-    \\        const uint i = b * 128u + L + 32u * j;
-    \\        const uint hh = i / HDC;
-    \\        const uint d = i - hh * HDC;
-    \\        const T av = attn[(ulong(hh) * S + row) * HDC + d];
-    \\        const T gv = gate[ulong(row) * uint(GROW) + hh * uint(GHEAD) + uint(GOFF) + d];
-    \\        const T xv = av * sigtab[as_type<ushort>(gv)];
-    \\        xg[ulong(row) * DIMC + i] = xv;
-    \\    }
-    \\
-;
+pub const text_gate_plain = @embedFile("kernels/attn_io/gate_plain.metal");
 
 const epi_in = [_][*:0]const u8{ "zq", "zk", "zv", "qw", "kw", "angles", "eps" };
 const gate_plain_in = [_][*:0]const u8{ "attn", "gate", "sigtab" };
@@ -315,9 +130,9 @@ fn kernelsGet() !*const Kernels {
     defer kernels_lock.store(0, .release);
     if (kernels) |*k| return k;
     const prep3 = ks.newKernel("turboexl3_attn_prep3", &prep3_in, &prep3_out, text_prep3, decode.header, true) orelse return error.KernelCreateFailed;
-    errdefer _ = mlx.mlx_fast_metal_kernel_free(prep3);
+    errdefer decode.freeKernel(prep3);
     const fin = ks.newKernel("turboexl3_attn_finish", &fin_in, &fin_out, text_finish_attn, decode.header, true) orelse return error.KernelCreateFailed;
-    errdefer _ = mlx.mlx_fast_metal_kernel_free(fin);
+    errdefer decode.freeKernel(fin);
     const pg = ks.newKernel("turboexl3_attn_prep_gate", &prep_gate_in, &prep_gate_out, text_prep_gate, decode.header, true) orelse return error.KernelCreateFailed;
     kernels = .{ .prep3 = prep3, .fin = fin, .prep_gate = pg };
     return &kernels.?;
@@ -343,7 +158,7 @@ fn stdKernelsGet() ![2]mlx.mlx_fast_metal_kernel {
     defer kernels_lock.store(0, .release);
     if (std_kernels) |k| return k;
     const epi = ks.newKernel("turboexl3_attn_epi_std", &epi_in, &fin_out, text_epi_attn, decode.header, true) orelse return error.KernelCreateFailed;
-    errdefer _ = mlx.mlx_fast_metal_kernel_free(epi);
+    errdefer decode.freeKernel(epi);
     const gate = ks.newKernel("turboexl3_attn_gate_std", &gate_plain_in, &gate_plain_out, text_gate_plain, decode.header, true) orelse return error.KernelCreateFailed;
     std_kernels = .{ epi, gate };
     return std_kernels.?;
@@ -402,12 +217,9 @@ pub const Gate = struct {
 };
 
 /// Does `Dense.linear` take `prefillInner`'s paths at `rows` (the register-path GEMM or dequantize + matmul)? Not at GEMV
-/// rows, not with the fused-GEMM option, and not on register-path rows while the register-path toggle is set (its
-/// per-call file check stays `linear`'s alone).
+/// rows and not with the fused-GEMM option.
 pub fn innerServes(d: *const dense.Dense, rows: usize) bool {
-    if (rows <= decode.Kernels.max_rows or d.fused_prefill) return false;
-    if (rows <= d.small_rows and std.c.getenv("MLX_SERVE_TURBOEXL3_DENSE_SMALL_TOGGLE") != null) return false;
-    return true;
+    return rows > decode.Kernels.max_rows and !d.fused_prefill;
 }
 
 /// The inner product `Dense.linear` computes for `rows` prepared rows (natural order) where `innerServes`: z half
@@ -682,11 +494,12 @@ fn linesWith(a: std.mem.Allocator, text: []const u8, marker: []const u8) ![][]co
 }
 
 test "turboexl3 attn_io: the prepares and the finish repeat dense's prepare / finish statements (the Hadamard, the roundings)" {
+    const pin = comptime @import("test_support.zig").pins(@embedFile("kernels/test/pins/attn_io_dense_statements.metal"));
     const a = testing.allocator;
     // the butterfly and the local 4-point stage, verbatim, in every text
-    const fly = try linesWith(a, dense.text_prep, "simd_shuffle_xor");
+    const fly = try linesWith(a, dense.text_prep, pin[0]);
     defer a.free(fly);
-    const local4 = try linesWith(a, dense.text_prep, "float t0 = v[0] + v[1]");
+    const local4 = try linesWith(a, dense.text_prep, pin[1]);
     defer a.free(local4);
     try testing.expectEqual(@as(usize, 1), fly.len);
     try testing.expectEqual(@as(usize, 1), local4.len);
@@ -695,38 +508,39 @@ test "turboexl3 attn_io: the prepares and the finish repeat dense's prepare / fi
         try testing.expect(std.mem.indexOf(u8, t, local4[0]) != null);
     }
     // the prepare's f16 input rounding and suh product, and its output rounding (LANE_ORDER 0: dst = i)
-    try testing.expect(std.mem.indexOf(u8, dense.text_prep, "v[j] = float(half(float(x[row * DIMC + i]))) * float(suh[i]);") != null);
-    try testing.expect(std.mem.indexOf(u8, text_prep3, "xh[j] = float(half(float(x[row * DIMC + i])));") != null);
-    try testing.expect(std.mem.indexOf(u8, text_prep3, "v[j] = xh[j] * float(suh[i]);") != null);
-    try testing.expect(std.mem.indexOf(u8, text_prep_gate, "v[j] = float(half(float(xv))) * float(suh[i]);") != null);
-    try testing.expect(std.mem.indexOf(u8, dense.text_prep, "half(v[j] * HAD_SCALE);") != null);
-    try testing.expect(std.mem.indexOf(u8, text_prep3, "xp[row * DIMC + i] = half(v[j] * HAD_SCALE);") != null);
-    try testing.expect(std.mem.indexOf(u8, text_prep_gate, "xp[row * DIMC + i] = half(v[j] * HAD_SCALE);") != null);
+    try testing.expect(std.mem.indexOf(u8, dense.text_prep, pin[2]) != null);
+    try testing.expect(std.mem.indexOf(u8, text_prep3, pin[3]) != null);
+    try testing.expect(std.mem.indexOf(u8, text_prep3, pin[4]) != null);
+    try testing.expect(std.mem.indexOf(u8, text_prep_gate, pin[5]) != null);
+    try testing.expect(std.mem.indexOf(u8, dense.text_prep, pin[6]) != null);
+    try testing.expect(std.mem.indexOf(u8, text_prep3, pin[7]) != null);
+    try testing.expect(std.mem.indexOf(u8, text_prep_gate, pin[7]) != null);
     // the finish's input and output roundings
-    try testing.expect(std.mem.indexOf(u8, dense.text_finish, "v[j] = float(half(float(z[row * DIMC + b * 128u + L + 32u * j])));") != null);
-    try testing.expect(std.mem.indexOf(u8, text_finish_attn, "v[j] = float(half(float(z[row * dimc + blk * 128u + L + 32u * j])));") != null);
-    try testing.expect(std.mem.indexOf(u8, dense.text_finish, "OUT_T(float(half(v[j] * HAD_SCALE * float(svh[o]))))") != null);
-    try testing.expect(std.mem.indexOf(u8, text_finish_attn, "y[j] = OUT_T(float(half(v[j] * HAD_SCALE * float(svh[o]))));") != null);
+    try testing.expect(std.mem.indexOf(u8, dense.text_finish, pin[8]) != null);
+    try testing.expect(std.mem.indexOf(u8, text_finish_attn, pin[9]) != null);
+    try testing.expect(std.mem.indexOf(u8, dense.text_finish, pin[10]) != null);
+    try testing.expect(std.mem.indexOf(u8, text_finish_attn, pin[11]) != null);
 }
 
 test "turboexl3 attn_io: the epilogue is the host's hd-256 norm + rope statements (MLX's rms_single_row and rope_impl roundings)" {
+    const pin = comptime @import("test_support.zig").pins(@embedFile("kernels/test/pins/attn_io_epilogue.metal"));
     // the lines of the host's QK_NORM_ROPE_256_SOURCE (transformer.zig) that carry arithmetic, with its names mapped to ours
     // (src[base + i] -> ys[base + i], T -> OUT_T, HD -> HDC, simd_lane / simd_group -> L / sg)
     const want = [_][]const u8{
-        "acc += xv * xv;",
-        "acc = simd_sum(acc);",
-        "local_sums[L] = 0.0f;",
-        "local_sums[sg] = acc;",
-        "acc = simd_sum(local_sums[L]);",
-        "local_inv[0] = metal::precise::rsqrt(acc / float(HDC) + float(eps));",
-        "nrm[base + i] = OUT_T(w[base + i] * OUT_T(float(ys[base + i]) * inv));",
-        "r = OUT_T(float(nrm[j]) * arow[j] - float(nrm[j + half_rd]) * arow[half_rd + j]);",
-        "r = OUT_T(float(nrm[j - half_rd]) * arow[j] + float(nrm[j]) * arow[j - half_rd]);",
-        "const uint base = tid * 4u;",
+        pin[0],
+        pin[1],
+        pin[2],
+        pin[3],
+        pin[4],
+        pin[5],
+        pin[6],
+        pin[7],
+        pin[8],
+        pin[9],
     };
     for (want) |w| try testing.expect(std.mem.indexOf(u8, text_finish_attn, w) != null);
     // the gate's product in T (MLX's Multiply), the sigmoid by table (MLX's Sigmoid of the 16-bit pattern)
-    try testing.expect(std.mem.indexOf(u8, text_prep_gate, "const T xv = av * sigtab[as_type<ushort>(gv)];") != null);
+    try testing.expect(std.mem.indexOf(u8, text_prep_gate, pin[10]) != null);
 }
 
 /// The finish's unit -> (member, head, blocks) rule, as the kernel decodes it.
@@ -786,24 +600,25 @@ test "turboexl3 attn_io: the gated prepare's gate layouts address the q_proj gat
 // ---- the four-member prepare (its GPU byte tests are attn_io_test.zig's) ----
 
 test "turboexl3 attn_io: text_prep4 is text_prep3 with a fourth member (every arithmetic line verbatim, so dense's prepare at LANE_ORDER 0), over the names its signature binds" {
+    const pin = comptime @import("test_support.zig").pins(@embedFile("kernels/test/pins/attn_io_prep4.metal"));
     // every line of text_prep3 but its member loop's bound and its three-way member selection
     var kept: usize = 0;
     var it = std.mem.splitScalar(u8, text_prep3, '\n');
     while (it.next()) |raw| {
         const line = std.mem.trim(u8, raw, " ");
-        if (line.len == 0 or std.mem.indexOf(u8, line, "m < 3u") != null or std.mem.indexOf(u8, line, "suh0 : ") != null or std.mem.indexOf(u8, line, "xp0 : ") != null) continue;
+        if (line.len == 0 or std.mem.indexOf(u8, line, pin[0]) != null or std.mem.indexOf(u8, line, pin[1]) != null or std.mem.indexOf(u8, line, pin[2]) != null) continue;
         try testing.expect(std.mem.indexOf(u8, text_prep4, line) != null);
         kept += 1;
     }
     try testing.expect(kept >= 12);
     // the four-way loop and selection
-    try testing.expect(std.mem.indexOf(u8, text_prep4, "for (uint m = 0; m < 4u; ++m) {") != null);
-    try testing.expect(std.mem.indexOf(u8, text_prep4, "const device half* suh = (m == 0u) ? suh0 : ((m == 1u) ? suh1 : ((m == 2u) ? suh2 : suh3));") != null);
-    try testing.expect(std.mem.indexOf(u8, text_prep4, "device half* xp = (m == 0u) ? xp0 : ((m == 1u) ? xp1 : ((m == 2u) ? xp2 : xp3));") != null);
+    try testing.expect(std.mem.indexOf(u8, text_prep4, pin[3]) != null);
+    try testing.expect(std.mem.indexOf(u8, text_prep4, pin[4]) != null);
+    try testing.expect(std.mem.indexOf(u8, text_prep4, pin[5]) != null);
     // the f16 input rounding, the suh product and the output rounding (LANE_ORDER 0: dst = i), as the prepares' test pins them
-    try testing.expect(std.mem.indexOf(u8, text_prep4, "xh[j] = float(half(float(x[row * DIMC + i])));") != null);
-    try testing.expect(std.mem.indexOf(u8, text_prep4, "v[j] = xh[j] * float(suh[i]);") != null);
-    try testing.expect(std.mem.indexOf(u8, text_prep4, "xp[row * DIMC + i] = half(v[j] * HAD_SCALE);") != null);
+    try testing.expect(std.mem.indexOf(u8, text_prep4, pin[6]) != null);
+    try testing.expect(std.mem.indexOf(u8, text_prep4, pin[7]) != null);
+    try testing.expect(std.mem.indexOf(u8, text_prep4, pin[8]) != null);
     // every input and output named, none followed by a suffix MLX would bind a shape / strides / ndim buffer for
     for (prep4_in ++ prep4_out) |nm| {
         const name = std.mem.span(nm);
@@ -816,6 +631,7 @@ test "turboexl3 attn_io: text_prep4 is text_prep3 with a fourth member (every ar
 // ---- the un-rotated trunk (its GPU checks are gpu_test.zig's) ----
 
 test "turboexl3 attn_io un-rotated trunk texts: the standard-basis epilogue is ATTN-IN's finish epilogue verbatim behind a plain read, and the gated input is ATTN-OUT's product without the prepare" {
+    const pin = comptime @import("test_support.zig").pins(@embedFile("kernels/test/pins/attn_io_std.metal"));
     const has = struct {
         fn f(hay: []const u8, needle: []const u8) bool {
             return std.mem.indexOf(u8, hay, needle) != null;
@@ -832,20 +648,20 @@ test "turboexl3 attn_io un-rotated trunk texts: the standard-basis epilogue is A
         const line = std.mem.trim(u8, raw, " ");
         if (line.len == 0) continue;
         const finish_only = has(line, "QDIM") or has(line, "KDIM") or has(line, "HAD_SCALE") or has(line, "svh") or has(line, "dimc") or
-            has(line, "float v[4];") or has(line, "simd_shuffle_xor") or has(line, "float t0") or has(line, "const device half* z");
+            has(line, pin[0]) or has(line, pin[1]) or has(line, pin[2]) or has(line, pin[3]);
         if (!finish_only) try testing.expect(has(epi_attn_head, line));
     }
-    try testing.expect(!has(text_epi_attn, "simd_shuffle_xor") and !has(text_epi_attn, "svh") and !has(text_epi_attn, "half("));
-    try testing.expect(has(text_epi_attn, "y[j] = z[ulong(row) * zs + zo + blk * 128u + L + 32u * j];"));
+    try testing.expect(!has(text_epi_attn, pin[1]) and !has(text_epi_attn, "svh") and !has(text_epi_attn, pin[4]));
+    try testing.expect(has(text_epi_attn, pin[5]));
     // the gated input: `text_prep_gate`'s product lines, written as T, no rotation
     for ([_][]const u8{
-        "const uint hh = i / HDC;",
-        "const uint d = i - hh * HDC;",
-        "const T av = attn[(ulong(hh) * S + row) * HDC + d];",
-        "const T gv = gate[ulong(row) * uint(GROW) + hh * uint(GHEAD) + uint(GOFF) + d];",
-        "const T xv = av * sigtab[as_type<ushort>(gv)];",
+        pin[6],
+        pin[7],
+        pin[8],
+        pin[9],
+        pin[10],
     }) |l| try testing.expect(has(text_prep_gate, l) and has(text_gate_plain, l));
-    try testing.expect(has(text_gate_plain, "xg[ulong(row) * DIMC + i] = xv;") and !has(text_gate_plain, "suh") and !has(text_gate_plain, "simd_shuffle_xor"));
+    try testing.expect(has(text_gate_plain, pin[11]) and !has(text_gate_plain, "suh") and !has(text_gate_plain, pin[1]));
     // every input and output named, none followed by a suffix MLX would bind a shape / strides / ndim buffer for
     const Sig = struct { txt: []const u8, names: []const [*:0]const u8 };
     for ([_]Sig{ .{ .txt = text_epi_attn, .names = &(epi_in ++ fin_out) }, .{ .txt = text_gate_plain, .names = &(gate_plain_in ++ gate_plain_out) } }) |sg| for (sg.names) |nm| {

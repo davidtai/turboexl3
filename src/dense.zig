@@ -1,20 +1,23 @@
 //! A dense EXL3 linear (one trellis, no experts): y [rows, out] = finish(innerGemv(prepare(x))) with exllamav3's rounding
 //! points, for the trunk of a fully EXL3 model (attention / GDN projections, shared expert, lm_head, MTP). Decode rows
-//! (<= DECODE_ROWS_MAX) run prepare (f16 round, suh, H128), a multi-row trellis GEMV that decodes every weight once for up
-//! to 8 rows (split-K partial planes) and finish (sum the planes, H128, svh, f16 round); MLX_SERVE_TURBOEXL3_DENSE=rowslot keeps
-//! the row-slot kernels of `unfused.zig` (one decode per row) for A/B. Rows up to `small_rows` (default 32: a prefill's
-//! snapshot tail) run the expert chain's register-path GEMM with one op (`prefill.gemm1s_text`): each 32-row tile decodes
-//! the trellis once straight into the matrix units' B registers, no f16 W_hat. Wider calls dequantize the trellis to an f16
-//! W_hat [in, out] once, run MLX's matmul on the prepared rows (f32 accumulation, f16 output = the finish's first rounding)
-//! and finish. Output in x's dtype. Held to `format.project` per row.
-//! DEC-ONE (MLX_SERVE_DEC_ONE, on unless "0"): decode rows in one GEMV launch instead of three. The threadgroup that
-//! arrives last at its (128-wide output block, row chunk) runs the finish there (an integer arrival counter: no float
-//! atomics, the K slices still summed in slice order), and the prepare runs inside the launch (threadgroup memory) or in
-//! its own launch (MLX_SERVE_DEC_ONE_PREP): the three-launch chain's bytes either way.
-//! The resident trunk (TRUNKRES; the host's MLX_SERVE_EXL3_TRUNK=resident): prefill rows take an admitted trellis's W_hat
+//! (<= DECODE_ROWS_MAX) run prepare (f16 round, suh, H128), a multi-row trellis GEMV that decodes every weight once per
+//! row chunk (split-K partial planes; `Dense.chainRb`: chunks of up to `lean_rb` (8) rows, a chunk past `max_rb` (5) rows
+//! on the lean GEMV text, or of up to 5 with `Config.dense_lean` off) and finish (sum the planes, H128, svh, f16 round);
+//! `Dense.rowslot` keeps the row-slot kernels of `unfused.zig` (one decode per row), the tests' reference. Rows up to
+//! `small_rows` (32: a prefill's snapshot tail) run the expert chain's register-path GEMM with one op
+//! (`prefill.gemm1s_text`): each 32-row tile decodes the trellis once straight into the matrix units' B registers, no
+//! f16 W_hat. Wider calls dequantize the trellis to an f16 W_hat [in, out] once, run MLX's matmul on the prepared rows
+//! (f32 accumulation, f16 output = the finish's first rounding) and finish. Output in x's dtype. Held to
+//! `format.project` per row.
+//! DEC-ONE (`Config.dec_one`, on by default): calls of up to `dec_rows` (4) rows run in one GEMV launch instead of three
+//! (wider decode calls keep the three). The threadgroup that arrives last at its (128-wide output block, row chunk) runs
+//! the finish there (an integer arrival counter: no float atomics, the K slices still summed in slice order), and the
+//! prepare runs inside the launch (threadgroup memory) or in its own launch (`dec_prep_rows`, `dec_prep_out`): the
+//! three-launch chain's bytes either way.
+//! The resident trunk (a host's opt-in): prefill rows take an admitted trellis's W_hat
 //! from the resident table (`residentArm`), decoded by the same launch once per load and kept, so every call's bytes stay
 //! the per-call path's.
-//! The un-rotated trunk (TRUNKUNROT; the host's MLX_SERVE_EXL3_TRUNK=bf16, opt-in, a reordering): the table holds an
+//! The un-rotated trunk (a host's opt-in, a reordering): the table holds an
 //! admitted trellis's linear out of the Hadamard basis instead (`unrotCols` / `unrotRows`, `residentInstall`), and prefill
 //! rows past `unrot_min_rows` are one MLX matmul of x against it in x's dtype (`residentPlain`).
 const std = @import("std");
@@ -24,221 +27,55 @@ const format = @import("format.zig");
 const decode = @import("decode.zig");
 const unfused = @import("unfused.zig");
 const prefill = @import("prefill.zig");
+const config = @import("config.zig");
 
 /// prepare for a dense linear: xp half [rows, IN] = H128(f16(x[row]) * suh) per 128-block; LANE_ORDER 1 writes the GEMV's
 /// lane order within each 16-block, 0 the natural order the matmul path needs; one simdgroup per (block, row); x any float dtype
-pub const text_prep =
-    \\    constexpr uint DIMC = uint(DIM);
-    \\    constexpr float HAD_SCALE = 0.08838834764831845f;
-    \\    const uint b = threadgroup_position_in_grid.x;
-    \\    const uint row = threadgroup_position_in_grid.y;
-    \\    const uint L = thread_index_in_simdgroup;
-    \\    float v[4];
-    \\    for (uint j = 0; j < 4u; ++j) { const uint i = b * 128u + L + 32u * j; v[j] = float(half(float(x[row * DIMC + i]))) * float(suh[i]); }
-    \\    for (uint s = 0; s < 5u; ++s) { const uint bit = 1u << s; for (uint j = 0; j < 4u; ++j) { const float p = simd_shuffle_xor(v[j], ushort(bit)); v[j] = (L & bit) ? (p - v[j]) : (v[j] + p); } }
-    \\    { float t0 = v[0] + v[1], t1 = v[0] - v[1], t2 = v[2] + v[3], t3 = v[2] - v[3]; v[0] = t0 + t2; v[1] = t1 + t3; v[2] = t0 - t2; v[3] = t1 - t3; }
-    \\    for (uint j = 0; j < 4u; ++j) {
-    \\        const uint i = b * 128u + L + 32u * j;
-    \\        const uint r = i & 15u;
-    \\        const uint q = (r & 7u) >> 1u;
-    \\        const uint m = (r & 1u) | ((r >> 3u) << 1u);
-    \\        const uint dst = (LANE_ORDER != 0) ? ((i & ~15u) + 4u * q + m) : i;
-    \\        xp[row * DIMC + dst] = half(v[j] * HAD_SCALE);
-    \\    }
-    \\
-;
+pub const text_prep = @embedFile("kernels/dense/prep.metal");
 
 /// text_prep (lane order for the multi-row GEMV, natural for the fused prefill GEMM) plus xs f32 [rows, IN/128], the sum of
 /// each 128-block's rounded values (what a deferred MUL1 affine map needs: sum_i x_i (A t_i + C) = A sum_i x_i t_i + C sum_i x_i)
-pub const text_prep_s =
-    \\    constexpr uint DIMC = uint(DIM);
-    \\    constexpr uint NB = DIMC / 128u;
-    \\    constexpr float HAD_SCALE = 0.08838834764831845f;
-    \\    const uint b = threadgroup_position_in_grid.x;
-    \\    const uint row = threadgroup_position_in_grid.y;
-    \\    const uint L = thread_index_in_simdgroup;
-    \\    float v[4];
-    \\    for (uint j = 0; j < 4u; ++j) { const uint i = b * 128u + L + 32u * j; v[j] = float(half(float(x[row * DIMC + i]))) * float(suh[i]); }
-    \\    for (uint s = 0; s < 5u; ++s) { const uint bit = 1u << s; for (uint j = 0; j < 4u; ++j) { const float p = simd_shuffle_xor(v[j], ushort(bit)); v[j] = (L & bit) ? (p - v[j]) : (v[j] + p); } }
-    \\    { float t0 = v[0] + v[1], t1 = v[0] - v[1], t2 = v[2] + v[3], t3 = v[2] - v[3]; v[0] = t0 + t2; v[1] = t1 + t3; v[2] = t0 - t2; v[3] = t1 - t3; }
-    \\    float sum = 0.0f;
-    \\    for (uint j = 0; j < 4u; ++j) {
-    \\        const uint i = b * 128u + L + 32u * j;
-    \\        const uint r = i & 15u;
-    \\        const uint q = (r & 7u) >> 1u;
-    \\        const uint m = (r & 1u) | ((r >> 3u) << 1u);
-    \\        const half hv = half(v[j] * HAD_SCALE);
-    \\        xp[row * DIMC + ((LANE_ORDER != 0) ? ((i & ~15u) + 4u * q + m) : i)] = hv;
-    \\        sum += float(hv);
-    \\    }
-    \\    sum = simd_sum(sum);
-    \\    if (L == 0u) xs[row * NB + b] = sum;
-    \\
-;
+pub const text_prep_s = @embedFile("kernels/dense/prep_s.metal");
 
 /// finish for a dense linear: y OUT_T [rows, OUT] = f16(H128(f16(z)) * svh) per 128-block; z f32 (decode) or f16 (prefill)
-pub const text_finish =
-    \\    constexpr uint DIMC = uint(DIM);
-    \\    constexpr float HAD_SCALE = 0.08838834764831845f;
-    \\    const uint b = threadgroup_position_in_grid.x;
-    \\    const uint row = threadgroup_position_in_grid.y;
-    \\    const uint L = thread_index_in_simdgroup;
-    \\    float v[4];
-    \\    for (uint j = 0; j < 4u; ++j) v[j] = float(half(float(z[row * DIMC + b * 128u + L + 32u * j])));
-    \\    for (uint s = 0; s < 5u; ++s) { const uint bit = 1u << s; for (uint j = 0; j < 4u; ++j) { const float p = simd_shuffle_xor(v[j], ushort(bit)); v[j] = (L & bit) ? (p - v[j]) : (v[j] + p); } }
-    \\    { float t0 = v[0] + v[1], t1 = v[0] - v[1], t2 = v[2] + v[3], t3 = v[2] - v[3]; v[0] = t0 + t2; v[1] = t1 + t3; v[2] = t0 - t2; v[3] = t1 - t3; }
-    \\    for (uint j = 0; j < 4u; ++j) { const uint o = b * 128u + L + 32u * j; y[row * DIMC + o] = OUT_T(float(half(v[j] * HAD_SCALE * float(svh[o])))); }
-    \\
-;
+pub const text_finish = @embedFile("kernels/dense/finish.metal");
 
 /// text_finish over a call whose inner product arrives as up to four row pieces zp0..zp3 (`Dense.finishPieces`; f16
 /// [rows_p, DIM]; piece p holds the call's rows [R_p, R_{p+1}), R_0 = 0, R1..R3 0-dim ints, an unused piece's bound at the
 /// call's rows): row `row` reads its piece's row, then text_finish's statements, so y OUT_T [rows, DIM] is the one-call
 /// finish's bit for bit
-pub const text_finish_pieces =
-    \\    constexpr uint DIMC = uint(DIM);
-    \\    constexpr float HAD_SCALE = 0.08838834764831845f;
-    \\    const uint b = threadgroup_position_in_grid.x;
-    \\    const uint row = threadgroup_position_in_grid.y;
-    \\    const uint L = thread_index_in_simdgroup;
-    \\    const uint r1 = uint(R1), r2 = uint(R2), r3 = uint(R3);
-    \\    const device half* z = (row >= r3) ? zp3 : ((row >= r2) ? zp2 : ((row >= r1) ? zp1 : zp0));
-    \\    const uint pr = row - ((row >= r3) ? r3 : ((row >= r2) ? r2 : ((row >= r1) ? r1 : 0u)));
-    \\    float v[4];
-    \\    for (uint j = 0; j < 4u; ++j) v[j] = float(half(float(z[pr * DIMC + b * 128u + L + 32u * j])));
-    \\    for (uint s = 0; s < 5u; ++s) { const uint bit = 1u << s; for (uint j = 0; j < 4u; ++j) { const float p = simd_shuffle_xor(v[j], ushort(bit)); v[j] = (L & bit) ? (p - v[j]) : (v[j] + p); } }
-    \\    { float t0 = v[0] + v[1], t1 = v[0] - v[1], t2 = v[2] + v[3], t3 = v[2] - v[3]; v[0] = t0 + t2; v[1] = t1 + t3; v[2] = t0 - t2; v[3] = t1 - t3; }
-    \\    for (uint j = 0; j < 4u; ++j) { const uint o = b * 128u + L + 32u * j; y[row * DIMC + o] = OUT_T(float(half(v[j] * HAD_SCALE * float(svh[o])))); }
-    \\
-;
+pub const text_finish_pieces = @embedFile("kernels/dense/finish_pieces.metal");
 
 /// dequantize: W half [IN, OUT] from the trellis [IN/16, OUT/16, n]; one simdgroup per tile, lane L decodes its 8 weights:
 /// weight m of lane L is row 2 (L & 3) + {0, 1, 8, 9}[m & 3], column (L >> 2) + 8 (m >> 2) of the tile (the GEMV's layout)
-pub const text_dequant =
-    \\    constexpr uint N = uint(NHW);
-    \\    constexpr uint NW = N / 2u;
-    \\    constexpr uint WMASK = (WBITS >= 16) ? 0xffffu : ((1u << uint(WBITS)) - 1u);
-    \\    constexpr int CB = int(CODEBOOK);
-    \\    constexpr uint INC = uint(IN);
-    \\    constexpr uint OUTC = uint(OUT);
-    \\    constexpr uint OUT_TILES = OUTC / 16u;
-    \\    const uint tile_id = threadgroup_position_in_grid.x * 4u + simdgroup_index_in_threadgroup;
-    \\    const uint L = thread_index_in_simdgroup;
-    \\    if (tile_id >= (INC / 16u) * OUT_TILES) return;
-    \\    const uint tk = tile_id / OUT_TILES;
-    \\    const uint tn = tile_id - tk * OUT_TILES;
-    \\    const device uint* tile = (const device uint*)(w) + ulong(tile_id) * ulong(NW);
-    \\    const uint qb = exl3_gen_qb<N>(L);
-    \\    const uint ga = exl3_gen_a<N>(L);
-    \\    const uint lp = exl3_gen_lp<N>(L);
-    \\    const auto ww = exl3_tile_load<N, 0>(tile, qb, ga, lp);
-    \\    uint cw[8];
-    \\    cw[0] = exl3_tile_cw<N, WMASK, 0, 0>(ww, lp); cw[1] = exl3_tile_cw<N, WMASK, 1, 0>(ww, lp); cw[2] = exl3_tile_cw<N, WMASK, 2, 0>(ww, lp); cw[3] = exl3_tile_cw<N, WMASK, 3, 0>(ww, lp);
-    \\    cw[4] = exl3_tile_cw<N, WMASK, 4, 0>(ww, lp); cw[5] = exl3_tile_cw<N, WMASK, 5, 0>(ww, lp); cw[6] = exl3_tile_cw<N, WMASK, 6, 0>(ww, lp); cw[7] = exl3_tile_cw<N, WMASK, 7, 0>(ww, lp);
-    \\    for (uint m = 0; m < 8u; ++m) {
-    \\        const uint r = turboexl3_row_of(L, m & 3u);
-    \\        const uint c = (L >> 2u) + 8u * (m >> 2u);
-    \\        W[ulong(tk * 16u + r) * ulong(OUTC) + tn * 16u + c] = exl3_decode<CB>(cw[m]);
-    \\    }
-    \\
-;
+pub const text_dequant = @embedFile("kernels/dense/dequant.metal");
 
 /// multi-row GEMV: every weight is decoded once per threadgroup and applied to RB rows. z f32 [KS * ROWS, OUT]: K-slice
 /// ks's partial sums of row r at z[ks * ROWS + r]. One 128-thread threadgroup per (BT output tiles, row chunk of RB rows,
 /// K slice); the four simdgroups split the slice's input tiles; 2 BT RB f32 accumulators per lane. A row's summation order
 /// (tile order per lane, the quad fold, simdgroups 0..3, then the slices in order in the finish) depends on KS alone, so a
 /// row's bytes do not change with how many rows share the launch.
-pub const text_dgemv =
-    \\    constexpr uint N = uint(NHW);
-    \\    constexpr uint NW = N / 2u;
-    \\    constexpr uint WMASK = (WBITS >= 16) ? 0xffffu : ((1u << uint(WBITS)) - 1u);
-    \\    constexpr int CB = int(CODEBOOK);
-    \\    constexpr uint INC = uint(IN);
-    \\    constexpr uint OUTC = uint(OUT);
-    \\    constexpr uint IN_TILES = INC / 16u;
-    \\    constexpr uint OUT_TILES = OUTC / 16u;
-    \\    constexpr uint KSC = uint(KS);
-    \\    constexpr uint BTC = uint(BT);
-    \\    constexpr uint RBC = uint(RB);
-    \\    constexpr uint ROWSC = uint(ROWS);
-    \\    const uint blk = threadgroup_position_in_grid.x;
-    \\    const uint r0 = threadgroup_position_in_grid.y * RBC;
-    \\    const uint ksl = threadgroup_position_in_grid.z;
-    \\    const uint sg = simdgroup_index_in_threadgroup;
-    \\    const uint L = thread_index_in_simdgroup;
-    \\    const uint tid = thread_index_in_threadgroup;
-    \\    threadgroup float red[4][RBC * 16u * BTC];
-    \\    const uint qb = exl3_gen_qb<N>(L);
-    \\    const uint ga = exl3_gen_a<N>(L);
-    \\    const uint lp = exl3_gen_lp<N>(L);
-    \\    float a[RBC][BTC][2];
-    \\    for (uint r = 0; r < RBC; ++r) for (uint t = 0; t < BTC; ++t) { a[r][t][0] = 0.0f; a[r][t][1] = 0.0f; }
-    \\    constexpr uint PER = IN_TILES / (KSC * 4u);
-    \\    const uint tk0 = (ksl * 4u + sg) * PER;
-    \\    const device uint* wbase = (const device uint*)(w);
-    \\    const device half* xbase = xp + 4u * (L & 3u);   // lane order: the quad's four rows of each tile
-    \\    for (uint tk = tk0; tk < tk0 + PER; ++tk) {
-    \\        float xr[RBC][4];
-    \\        for (uint r = 0; r < RBC; ++r) {
-    \\            // a chunk's spare rows (ROWS not a multiple of RB) reread the last row; their sums are never written
-    \\            const uint row = min(r0 + r, ROWSC - 1u);
-    \\            const half4 x4 = *reinterpret_cast<const device half4*>(xbase + ulong(row) * ulong(INC) + tk * 16u);
-    \\            xr[r][0] = float(x4.x); xr[r][1] = float(x4.y); xr[r][2] = float(x4.z); xr[r][3] = float(x4.w);
-    \\        }
-    \\        for (uint t = 0; t < BTC; ++t) {
-    \\            const device uint* tile = wbase + (ulong(tk) * OUT_TILES + blk * BTC + t) * ulong(NW);
-    \\            const auto ww = exl3_tile_load<N, 0>(tile, qb, ga, lp);
-    \\            uint cw[8];
-    \\            cw[0] = exl3_tile_cw<N, WMASK, 0, 0>(ww, lp); cw[1] = exl3_tile_cw<N, WMASK, 1, 0>(ww, lp); cw[2] = exl3_tile_cw<N, WMASK, 2, 0>(ww, lp); cw[3] = exl3_tile_cw<N, WMASK, 3, 0>(ww, lp);
-    \\            cw[4] = exl3_tile_cw<N, WMASK, 4, 0>(ww, lp); cw[5] = exl3_tile_cw<N, WMASK, 5, 0>(ww, lp); cw[6] = exl3_tile_cw<N, WMASK, 6, 0>(ww, lp); cw[7] = exl3_tile_cw<N, WMASK, 7, 0>(ww, lp);
-    \\            for (uint m = 0; m < 8u; ++m) {
-    \\                // DEFER: MUL1's byte sum t; the finish applies A and C (C times the row's input sum)
-    \\                const float wv = (DEFER != 0) ? exl3_mul1_t(cw[m]) : float(exl3_decode<CB>(cw[m]));
-    \\                for (uint r = 0; r < RBC; ++r) a[r][t][m >> 2] = fma(xr[r][m & 3u], wv, a[r][t][m >> 2]);
-    \\            }
-    \\        }
-    \\    }
-    \\    for (uint r = 0; r < RBC; ++r) turboexl3_fold<BTC>(a[r], &red[sg][r * 16u * BTC], L);
-    \\    threadgroup_barrier(mem_flags::mem_threadgroup);
-    \\    for (uint i = tid; i < RBC * 16u * BTC; i += 128u) {
-    \\        const uint r = i / (16u * BTC);
-    \\        const uint row = r0 + r;
-    \\        if (row < ROWSC) z[(ulong(ksl) * ulong(ROWSC) + row) * ulong(OUTC) + blk * (16u * BTC) + (i - r * 16u * BTC)] = ((red[0][i] + red[1][i]) + red[2][i]) + red[3][i];
-    \\    }
-    \\
-;
+pub const text_dgemv = dgemv_1 ++ dgemv_x ++ dgemv_2 ++ dgemv_m ++ dgemv_3;
+/// text_dgemv's pieces: its setup, its input loads (a row's lane quad as floats, live through every codeword of the tile), its
+/// tile and codeword loads, its codeword loop, and its fold and plane store
+const dgemv_1 = @embedFile("kernels/dense/dgemv_1.metal");
+const dgemv_x = @embedFile("kernels/dense/dgemv_x.metal");
+const dgemv_2 = @embedFile("kernels/dense/dgemv_2.metal");
+const dgemv_m = @embedFile("kernels/dense/dgemv_m.metal");
+const dgemv_3 = @embedFile("kernels/dense/dgemv_3.metal");
+
+/// text_dgemv with its codeword loop taken by input element (the lean GEMV, the chain's chunks past 5 rows): element j of
+/// a row feeds codeword j's weight into accumulator 0 and codeword j + 4's into accumulator 1 (dgemv_j), so every
+/// accumulator takes text_dgemv's FMAs in text_dgemv's order (m = 0..3, then 4..7) on the same operands, and a row's inputs
+/// stay half until their use. A lane keeps 2 BT RB accumulators and at most 2 RB input registers (a row's four halves),
+/// 32 at RB 8 and BT 1, where text_dgemv's 4 RB input floats make 48. text_dgemv's bytes.
+pub const text_dgemv_lean = dgemv_1 ++ dgemv_2 ++ dgemv_j ++ dgemv_3;
+const dgemv_j = @embedFile("kernels/dense/dgemv_j.metal");
 
 /// text_dfinish up to the 128-point butterfly (decb.zig's finish variants reuse these statements verbatim)
-pub const dfinish_v =
-    \\    constexpr uint DIMC = uint(DIM);
-    \\    constexpr uint KSC = uint(KS);
-    \\    constexpr uint ROWSC = uint(ROWS);
-    \\    constexpr float HAD_SCALE = 0.08838834764831845f;
-    \\    const uint b = threadgroup_position_in_grid.x;
-    \\    const uint row = threadgroup_position_in_grid.y;
-    \\    const uint L = thread_index_in_simdgroup;
-    \\    constexpr uint INB = uint(INBLK);
-    \\    const float MUL1_A = float(as_type<half>(ushort(0x1EEEu)));
-    \\    const float MUL1_C = 1024.0f * MUL1_A + float(as_type<half>(ushort(0xC931u)));
-    \\    float xsum = 0.0f;
-    \\    if (DEFER != 0) for (uint q = 0; q < INB; ++q) xsum += xs[row * INB + q];
-    \\    float v[4];
-    \\    for (uint j = 0; j < 4u; ++j) {
-    \\        const uint o = b * 128u + L + 32u * j;
-    \\        float acc = z[ulong(row) * ulong(DIMC) + o];
-    \\        for (uint k = 1u; k < KSC; ++k) acc += z[(ulong(k) * ulong(ROWSC) + row) * ulong(DIMC) + o];
-    \\        if (DEFER != 0) acc = fma(acc, MUL1_A, MUL1_C * xsum);
-    \\        v[j] = float(half(acc));
-    \\    }
-    \\    for (uint s = 0; s < 5u; ++s) { const uint bit = 1u << s; for (uint j = 0; j < 4u; ++j) { const float p = simd_shuffle_xor(v[j], ushort(bit)); v[j] = (L & bit) ? (p - v[j]) : (v[j] + p); } }
-    \\    { float t0 = v[0] + v[1], t1 = v[0] - v[1], t2 = v[2] + v[3], t3 = v[2] - v[3]; v[0] = t0 + t2; v[1] = t1 + t3; v[2] = t0 - t2; v[3] = t1 - t3; }
-    \\
-;
+pub const dfinish_v = @embedFile("kernels/dense/dfinish_v.metal");
 /// text_dfinish's output: x HAD_SCALE x svh, f16, OUT_T
-pub const dfinish_store =
-    \\    for (uint j = 0; j < 4u; ++j) { const uint o = b * 128u + L + 32u * j; y[row * DIMC + o] = OUT_T(float(half(v[j] * HAD_SCALE * float(svh[o])))); }
-    \\
-;
+pub const dfinish_store = @embedFile("kernels/dense/dfinish_store.metal");
 /// finish of the multi-row GEMV: y OUT_T [ROWS, OUT] = f16(H128(f16(sum of the KS planes, in slice order)) * svh)
 pub const text_dfinish = dfinish_v ++ dfinish_store;
 
@@ -255,188 +92,31 @@ pub const text_dfinish = dfinish_v ++ dfinish_store;
 // rounding happens where the three-launch chain rounds it.
 
 /// DEC-ONE's constants and GEMV setup (text_dgemv's, plus the output block of this threadgroup's columns)
-pub const dec_head =
-    \\    constexpr uint N = uint(NHW);
-    \\    constexpr uint NW = N / 2u;
-    \\    constexpr uint WMASK = (WBITS >= 16) ? 0xffffu : ((1u << uint(WBITS)) - 1u);
-    \\    constexpr int CB = int(CODEBOOK);
-    \\    constexpr uint INC = uint(IN);
-    \\    constexpr uint OUTC = uint(OUT);
-    \\    constexpr uint IN_TILES = INC / 16u;
-    \\    constexpr uint OUT_TILES = OUTC / 16u;
-    \\    constexpr uint KSC = uint(KS);
-    \\    constexpr uint BTC = uint(BT);
-    \\    constexpr uint RBC = uint(RB);
-    \\    constexpr uint ROWSC = uint(ROWS);
-    \\    constexpr uint NCHC = (ROWSC + RBC - 1u) / RBC;   // row chunks
-    \\    constexpr uint NB = INC / 128u;                   // input 128-blocks
-    \\    constexpr uint GC = 8u / BTC;                     // column groups per 128-wide output block
-    \\    constexpr uint ARR = GC * KSC;                    // arrivals per (output block, row chunk)
-    \\    constexpr uint PER = IN_TILES / (KSC * 4u);
-    \\    constexpr uint SPAN = 64u * PER;                  // a K slice's inputs
-    \\    constexpr uint SPB = SPAN / 128u;                 // its 128-blocks (the prepare inside takes SPAN % 128 == 0)
-    \\    constexpr float HAD_SCALE = 0.08838834764831845f;
-    \\    const uint blk = threadgroup_position_in_grid.x;
-    \\    const uint chunk = threadgroup_position_in_grid.y;
-    \\    const uint r0 = chunk * RBC;
-    \\    const uint ksl = threadgroup_position_in_grid.z;
-    \\    const uint sg = simdgroup_index_in_threadgroup;
-    \\    const uint L = thread_index_in_simdgroup;
-    \\    const uint tid = thread_index_in_threadgroup;
-    \\    const uint ob = blk / GC;
-    \\    threadgroup float red[4][RBC * 16u * BTC];
-    \\    threadgroup uint arrived_last;
-    \\    device TURBOEXL3_COH float* zc = (device TURBOEXL3_COH float*)z;
-    \\
-;
+pub const dec_head = @embedFile("kernels/dense/dec_head.metal");
 
 /// DEC-ONE with the prepare inside: the threadgroup's K slice of its row chunk into threadgroup memory (text_prep_s's
 /// arithmetic, lane order, spare rows from the chunk's last row as text_dgemv reads them), one simdgroup per (128-block, row)
-pub const dec_prep1 =
-    \\    threadgroup half xt[RBC * SPAN];
-    \\    device TURBOEXL3_COH float* xsc = (device TURBOEXL3_COH float*)xsx;
-    \\    for (uint pi = sg; pi < SPB * RBC; pi += 4u) {
-    \\        const uint rr = pi / SPB;
-    \\        const uint b = ksl * SPB + (pi - rr * SPB);
-    \\        const uint row = min(r0 + rr, ROWSC - 1u);
-    \\        float v[4];
-    \\        for (uint j = 0; j < 4u; ++j) { const uint i = b * 128u + L + 32u * j; v[j] = float(half(float(x[row * INC + i]))) * float(suh[i]); }
-    \\        for (uint s = 0; s < 5u; ++s) { const uint bit = 1u << s; for (uint j = 0; j < 4u; ++j) { const float p = simd_shuffle_xor(v[j], ushort(bit)); v[j] = (L & bit) ? (p - v[j]) : (v[j] + p); } }
-    \\        { float t0 = v[0] + v[1], t1 = v[0] - v[1], t2 = v[2] + v[3], t3 = v[2] - v[3]; v[0] = t0 + t2; v[1] = t1 + t3; v[2] = t0 - t2; v[3] = t1 - t3; }
-    \\        float sum = 0.0f;
-    \\        for (uint j = 0; j < 4u; ++j) {
-    \\            const uint i = b * 128u + L + 32u * j;
-    \\            const uint r = i & 15u;
-    \\            const uint q = (r & 7u) >> 1u;
-    \\            const uint m = (r & 1u) | ((r >> 3u) << 1u);
-    \\            const half hv = half(v[j] * HAD_SCALE);
-    \\            xt[rr * SPAN + ((i & ~15u) + 4u * q + m) - ksl * SPAN] = hv;
-    \\            sum += float(hv);
-    \\        }
-    \\        sum = simd_sum(sum);
-    \\        // the deferred map's input sums: the block's first column group publishes them (it arrives like every other)
-    \\        if (DEFER != 0 && (blk % GC) == 0u && L == 0u && r0 + rr < ROWSC) xsc[((ob * NCHC + chunk) * RBC + rr) * NB + b] = sum;
-    \\    }
-    \\    threadgroup_barrier(mem_flags::mem_threadgroup);
-    \\
-;
+pub const dec_prep1 = @embedFile("kernels/dense/dec_prep1.metal");
 
 /// the GEMV's input loads: prep_sc's rows in device memory (text_dgemv's) ...
-pub const dec_gemv0 =
-    \\    const uint qb = exl3_gen_qb<N>(L);
-    \\    const uint ga = exl3_gen_a<N>(L);
-    \\    const uint lp = exl3_gen_lp<N>(L);
-    \\    float a[RBC][BTC][2];
-    \\    for (uint r = 0; r < RBC; ++r) for (uint t = 0; t < BTC; ++t) { a[r][t][0] = 0.0f; a[r][t][1] = 0.0f; }
-    \\    const uint tk0 = (ksl * 4u + sg) * PER;
-    \\    const device uint* wbase = (const device uint*)(w);
-    \\    const device half* xbase = xp + 4u * (L & 3u);   // lane order: the quad's four rows of each tile
-    \\    for (uint tk = tk0; tk < tk0 + PER; ++tk) {
-    \\        float xr[RBC][4];
-    \\        for (uint r = 0; r < RBC; ++r) {
-    \\            const uint row = min(r0 + r, ROWSC - 1u);
-    \\            const half4 x4 = *reinterpret_cast<const device half4*>(xbase + ulong(row) * ulong(INC) + tk * 16u);
-    \\            xr[r][0] = float(x4.x); xr[r][1] = float(x4.y); xr[r][2] = float(x4.z); xr[r][3] = float(x4.w);
-    \\        }
-    \\
-;
+pub const dec_gemv0 = @embedFile("kernels/dense/dec_gemv0.metal");
 
 /// ... or the slice prepared in threadgroup memory
-pub const dec_gemv1 =
-    \\    const uint qb = exl3_gen_qb<N>(L);
-    \\    const uint ga = exl3_gen_a<N>(L);
-    \\    const uint lp = exl3_gen_lp<N>(L);
-    \\    float a[RBC][BTC][2];
-    \\    for (uint r = 0; r < RBC; ++r) for (uint t = 0; t < BTC; ++t) { a[r][t][0] = 0.0f; a[r][t][1] = 0.0f; }
-    \\    const uint tk0 = (ksl * 4u + sg) * PER;
-    \\    const device uint* wbase = (const device uint*)(w);
-    \\    const uint tks = ksl * 4u * PER;   // the slice's first input tile
-    \\    for (uint tk = tk0; tk < tk0 + PER; ++tk) {
-    \\        float xr[RBC][4];
-    \\        for (uint r = 0; r < RBC; ++r) {
-    \\            const half4 x4 = *reinterpret_cast<const threadgroup half4*>(xt + r * SPAN + (tk - tks) * 16u + 4u * (L & 3u));
-    \\            xr[r][0] = float(x4.x); xr[r][1] = float(x4.y); xr[r][2] = float(x4.z); xr[r][3] = float(x4.w);
-    \\        }
-    \\
-;
+pub const dec_gemv1 = @embedFile("kernels/dense/dec_gemv1.metal");
 
 /// text_dgemv's tile loop, quad fold and simdgroup sum (the z plane values), then the arrival
-pub const dec_gemv_arrive =
-    \\        for (uint t = 0; t < BTC; ++t) {
-    \\            const device uint* tile = wbase + (ulong(tk) * OUT_TILES + blk * BTC + t) * ulong(NW);
-    \\            const auto ww = exl3_tile_load<N, 0>(tile, qb, ga, lp);
-    \\            uint cw[8];
-    \\            cw[0] = exl3_tile_cw<N, WMASK, 0, 0>(ww, lp); cw[1] = exl3_tile_cw<N, WMASK, 1, 0>(ww, lp); cw[2] = exl3_tile_cw<N, WMASK, 2, 0>(ww, lp); cw[3] = exl3_tile_cw<N, WMASK, 3, 0>(ww, lp);
-    \\            cw[4] = exl3_tile_cw<N, WMASK, 4, 0>(ww, lp); cw[5] = exl3_tile_cw<N, WMASK, 5, 0>(ww, lp); cw[6] = exl3_tile_cw<N, WMASK, 6, 0>(ww, lp); cw[7] = exl3_tile_cw<N, WMASK, 7, 0>(ww, lp);
-    \\            for (uint m = 0; m < 8u; ++m) {
-    \\                // DEFER: MUL1's byte sum t; the finish applies A and C (C times the row's input sum)
-    \\                const float wv = (DEFER != 0) ? exl3_mul1_t(cw[m]) : float(exl3_decode<CB>(cw[m]));
-    \\                for (uint r = 0; r < RBC; ++r) a[r][t][m >> 2] = fma(xr[r][m & 3u], wv, a[r][t][m >> 2]);
-    \\            }
-    \\        }
-    \\    }
-    \\    for (uint r = 0; r < RBC; ++r) turboexl3_fold<BTC>(a[r], &red[sg][r * 16u * BTC], L);
-    \\    threadgroup_barrier(mem_flags::mem_threadgroup);
-    \\    for (uint i = tid; i < RBC * 16u * BTC; i += 128u) {
-    \\        const uint r = i / (16u * BTC);
-    \\        const uint row = r0 + r;
-    \\        if (row < ROWSC) zc[(ulong(ksl) * ulong(ROWSC) + row) * ulong(OUTC) + blk * (16u * BTC) + (i - r * 16u * BTC)] = ((red[0][i] + red[1][i]) + red[2][i]) + red[3][i];
-    \\    }
-    \\    // arrival: this threadgroup's stores fenced device-wide before its one count; the count that reaches ARR finishes
-    \\    // the output block here, every other threadgroup is done (nothing waits)
-    \\    atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device);
-    \\    threadgroup_barrier(mem_flags::mem_device);
-    \\    if (tid == 0u) {
-    \\        atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device);
-    \\        const uint old = atomic_fetch_add_explicit((device atomic_uint*)cnt + (ob * NCHC + chunk), 1u, memory_order_relaxed);
-    \\        atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device);
-    \\        arrived_last = (old == ARR - 1u) ? 1u : 0u;
-    \\    }
-    \\    threadgroup_barrier(mem_flags::mem_threadgroup);
-    \\    if (arrived_last == 0u) return;
-    \\    atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device);
-    \\    // text_dfinish for this output block, simdgroup rr for the chunk's row rr
-    \\    const float MUL1_A = float(as_type<half>(ushort(0x1EEEu)));
-    \\    const float MUL1_C = 1024.0f * MUL1_A + float(as_type<half>(ushort(0xC931u)));
-    \\    for (uint rr = sg; rr < RBC; rr += 4u) {
-    \\        const uint row = r0 + rr;
-    \\        if (row >= ROWSC) break;
-    \\        float xsum = 0.0f;
-    \\
-;
+pub const dec_gemv_arrive = @embedFile("kernels/dense/dec_gemv_arrive.metal");
 
 /// the finish's input sums: prep_sc's (text_dfinish's loop) ...
-pub const dec_xsum0 =
-    \\        if (DEFER != 0) for (uint q = 0; q < NB; ++q) xsum += xs[row * NB + q];
-    \\
-;
+pub const dec_xsum0 = @embedFile("kernels/dense/dec_xsum0.metal");
 
 /// ... or the ones the output block's first column groups published
-pub const dec_xsum1 =
-    \\        if (DEFER != 0) for (uint q = 0; q < NB; ++q) xsum += xsc[((ob * NCHC + chunk) * RBC + rr) * NB + q];
-    \\
-;
+pub const dec_xsum1 = @embedFile("kernels/dense/dec_xsum1.metal");
 
 /// text_dfinish's planes-in-slice-order sum, deferred map, f16 round and H128 (decb.zig's finish variants reuse them)
-pub const dec_finish_v =
-    \\        float v[4];
-    \\        for (uint j = 0; j < 4u; ++j) {
-    \\            const uint o = ob * 128u + L + 32u * j;
-    \\            float acc = zc[ulong(row) * ulong(OUTC) + o];
-    \\            for (uint k = 1u; k < KSC; ++k) acc += zc[(ulong(k) * ulong(ROWSC) + row) * ulong(OUTC) + o];
-    \\            if (DEFER != 0) acc = fma(acc, MUL1_A, MUL1_C * xsum);
-    \\            v[j] = float(half(acc));
-    \\        }
-    \\        for (uint s = 0; s < 5u; ++s) { const uint bit = 1u << s; for (uint j = 0; j < 4u; ++j) { const float p = simd_shuffle_xor(v[j], ushort(bit)); v[j] = (L & bit) ? (p - v[j]) : (v[j] + p); } }
-    \\        { float t0 = v[0] + v[1], t1 = v[0] - v[1], t2 = v[2] + v[3], t3 = v[2] - v[3]; v[0] = t0 + t2; v[1] = t1 + t3; v[2] = t0 - t2; v[3] = t1 - t3; }
-    \\
-;
+pub const dec_finish_v = @embedFile("kernels/dense/dec_finish_v.metal");
 /// dec_finish's output (svh and f16 round) and the end of the finish's row loop
-pub const dec_finish_store =
-    \\        for (uint j = 0; j < 4u; ++j) { const uint o = ob * 128u + L + 32u * j; y[row * OUTC + o] = OUT_T(float(half(v[j] * HAD_SCALE * float(svh[o])))); }
-    \\    }
-    \\
-;
+pub const dec_finish_store = @embedFile("kernels/dense/dec_finish_store.metal");
 /// text_dfinish's planes-in-slice-order sum, deferred map, f16 round, H128, svh and f16 round
 const dec_finish = dec_finish_v ++ dec_finish_store;
 
@@ -446,19 +126,11 @@ pub const text_dec0: [:0]const u8 = dec_head ++ dec_gemv0 ++ dec_gemv_arrive ++ 
 pub const text_dec1: [:0]const u8 = dec_head ++ dec_prep1 ++ dec_gemv1 ++ dec_gemv_arrive ++ dec_xsum1 ++ dec_finish;
 
 /// text_prep_s (lane order) that also zeroes the arrival counters of the DEC-ONE launch after it
-pub const text_prep_sc: [:0]const u8 = text_prep_s ++
-    \\    // DEC-ONE: the arrival counters of the GEMV launch that follows, one per (output block, row chunk)
-    \\    for (uint g = (row * NB + b) * 32u + L; g < uint(NCNT); g += uint(NTH)) cnt[g] = 0u;
-    \\
-;
+pub const text_prep_sc: [:0]const u8 = text_prep_s ++ @embedFile("kernels/dense/prep_sc.metal");
 
 /// the arrival counters for DEC-ONE with the prepare inside: a launch nothing it reads depends on (svh is a weight), so
 /// MLX needs no barrier before it and it runs beside the previous op; the barrier DEC-ONE's own input needs covers it
-pub const text_dec_zero =
-    \\    const uint i = thread_position_in_grid.x;
-    \\    if (i < uint(NCNT)) cnt[i] = 0u;
-    \\
-;
+pub const text_dec_zero = @embedFile("kernels/dense/dec_zero.metal");
 
 const dec0_in = [_][*:0]const u8{ "xp", "xs", "w", "svh", "cnt" };
 const dec0_out = [_][*:0]const u8{ "y", "z" };
@@ -483,43 +155,7 @@ const finishp_in = [_][*:0]const u8{ "zp0", "zp1", "zp2", "zp3", "svh", "R1", "R
 
 pub const Shape = struct { in: u32, out: u32, rate: format.Rate, dec: format.Decode, out_dtype: mlx.mlx_dtype };
 
-/// A/B aid: MLX_SERVE_TURBOEXL3_DENSE_SMALL_TOGGLE=<path>: while <path> exists the register path is off (dequantize + matmul),
-/// so one server alternates the two per request; read only on calls the register path would take (17..small_rows rows).
-var small_toggle: ?[*:0]const u8 = null;
-var small_toggle_read = false;
-extern "c" fn access(path: [*:0]const u8, mode: c_int) c_int;
-fn smallToggledOff() bool {
-    if (!small_toggle_read) {
-        small_toggle_read = true;
-        small_toggle = std.c.getenv("MLX_SERVE_TURBOEXL3_DENSE_SMALL_TOGGLE");
-        if (small_toggle) |t| std.debug.print("[turboexl3] dense register-path toggle: dequantize + matmul while {s} exists\n", .{std.mem.sliceTo(t, 0)});
-    }
-    const t = small_toggle orelse return false;
-    return access(t, 0) == 0;
-}
-
-/// MLX_SERVE_DEC_ONE's value: unset, empty or anything but "0" on (the default: the three-launch chain's bytes either way),
-/// "0" off.
-pub fn decOneOn(raw: ?[]const u8) bool {
-    const v = raw orelse return true;
-    return !std.mem.eql(u8, v, "0");
-}
-
-/// DEC-ONE's switch, MLX_SERVE_DEC_ONE read once (`decOneOn`)
-var dec_env_read = false;
-var dec_env_on = false;
 var dec_said = false;
-fn decEnvOn() bool {
-    if (!dec_env_read) {
-        dec_env_read = true;
-        dec_env_on = decOneOn(if (std.c.getenv("MLX_SERVE_DEC_ONE")) |v| std.mem.span(v) else null);
-    }
-    return dec_env_on;
-}
-fn envRows(name: [*:0]const u8, default: u32) u32 {
-    const v = std.c.getenv(name) orelse return default;
-    return @min(@as(u32, @intCast(decode.Kernels.max_rows)), std.fmt.parseInt(u32, std.mem.span(v), 10) catch default);
-}
 
 /// The kernels of one dense linear shape; configs per row count (decode) plus the prefill set.
 pub const Dense = struct {
@@ -529,25 +165,29 @@ pub const Dense = struct {
     finish: mlx.mlx_fast_metal_kernel,
     dequant: mlx.mlx_fast_metal_kernel,
     dgemv: mlx.mlx_fast_metal_kernel,
+    /// the lean GEMV text (text_dgemv_lean), for the chain's chunks past 5 rows
+    dgemv_lean: mlx.mlx_fast_metal_kernel,
     dfinish: mlx.mlx_fast_metal_kernel,
     prep_s: mlx.mlx_fast_metal_kernel,
     /// MUL1 packs: the GEMV sums x times the codeword's byte sum and the finish applies the affine map once per output
-    /// (MLX_SERVE_TURBOEXL3_DENSE_DEFER=0 decodes every weight to its f16 value instead, the reference's rounding)
+    /// (false decodes every weight to its f16 value, the reference's rounding)
     defer_affine: bool,
     /// K slices of the multi-row GEMV: fixed per shape (so a row's summation order is too)
     ks_split: u32,
-    /// MLX_SERVE_TURBOEXL3_DENSE=rowslot: the per-row-slot GEMV (every row decodes the trellis again), for A/B
+    /// the chain's row chunks under `lean_rb` with the chunks past 5 rows on the lean GEMV text (so 6..8 rows take one
+    /// chunk, 9..16 two); false keeps text_dgemv under max_rb (`Config.dense_lean`). Set before the first call.
+    lean: bool,
+    /// the per-row-slot GEMV (every row decodes the trellis again): the tests' reference, off in service
     rowslot: bool,
     /// prefill rows through the fused GEMM (`prefill.zig`'s one-op text: the trellis decoded per 64-deep stage into threadgroup
-    /// memory, M tiles of the single "expert") when MLX_SERVE_TURBOEXL3_DENSE_PREFILL=fused; the default stays dequantize + MLX
-    /// matmul, which is faster on every trunk shape (one decode per call beats one per 128-row tile). Shapes need in and out multiples of 64.
+    /// memory, M tiles of the single "expert"), the tests' arm; service stays on dequantize + MLX matmul, which is faster on
+    /// every trunk shape (one decode per call beats one per 128-row tile). Shapes need in and out multiples of 64.
     gemm_pf: mlx.mlx_fast_metal_kernel,
     fused_prefill: bool,
-    /// the fused GEMM's options: the expert chain's served set (`root.pfOptions`) where the rate and codebook allow it;
-    /// MLX_SERVE_TURBOEXL3_DENSE_PF_LEGACY=1 keeps the pre-port set (128-row tiles, one buffer, general reader, f16 decode)
+    /// the fused GEMM's options: the expert chain's served set (`root.pfOptions`) where the rate and codebook allow it
     pf: PfOpts,
-    /// rows above the GEMV's max_rows and up to this take the register-path GEMM (`smallInner`); MLX_SERVE_TURBOEXL3_DENSE_SMALL
-    /// =<rows> (0 = off, up to small_rows_cap), default 32
+    /// rows above the GEMV's max_rows and up to this take the register-path GEMM (`smallInner`; 0 = off, up to
+    /// small_rows_cap)
     small_rows: u32,
     gemm_rs: mlx.mlx_fast_metal_kernel,
     /// per row count: the register path's prep / finish configs, its launch config and tile table
@@ -555,11 +195,11 @@ pub const Dense = struct {
     xs_dummy: mlx.mlx_array = .{ .ctx = null },
     cfg: [decode.Kernels.max_rows + 1]?Cfg = @splat(null),
     dequant_cfg: ?mlx.mlx_fast_metal_kernel_config = null,
-    /// DEC-ONE (`decEnvOn`: on unless MLX_SERVE_DEC_ONE=0): decode calls of up to `dec_rows` rows
-    /// (MLX_SERVE_DEC_ONE_ROWS, default 4) run the GEMV with the finish in each output block's last-arriving threadgroup.
+    /// DEC-ONE (`Config.dec_one`): decode calls of up to `dec_rows` rows (4) run the GEMV with the finish in each output
+    /// block's last-arriving threadgroup.
     /// The prepare runs inside that launch too (one GEMV launch, beside a counter-zeroing launch that waits on nothing) for
-    /// calls of up to `dec_prep_rows` rows (MLX_SERVE_DEC_ONE_PREP, default 1) or of up to `dec_prep_out` outputs at any
-    /// decode width (MLX_SERVE_DEC_ONE_PREP_OUT, default 1024: the small, latency-bound linears), where its threadgroup
+    /// calls of up to `dec_prep_rows` rows (1) or of up to `dec_prep_out` outputs at any
+    /// decode width (1024: the small, latency-bound linears), where its threadgroup
     /// buffer fits; otherwise in prep_sc's launch (two launches). The defaults because every column group of a call redoes
     /// the rotation of its K slice (RB / (8 BT) rotations per tile decode, on an ALU-bound GEMV) and the slice's rows take
     /// up to 20 KB of threadgroup memory at four rows. Bytes are the three-launch chain's in every arm.
@@ -576,7 +216,8 @@ pub const Dense = struct {
     /// splits a call never builds it
     finish_pieces: ?mlx.mlx_fast_metal_kernel = null,
 
-    pub const Cfg = struct { prep: mlx.mlx_fast_metal_kernel_config, gemv: mlx.mlx_fast_metal_kernel_config, finish: mlx.mlx_fast_metal_kernel_config };
+    /// `lean`: `gemv` is the lean GEMV text's config (text_dgemv_lean), not text_dgemv's
+    pub const Cfg = struct { prep: mlx.mlx_fast_metal_kernel_config, gemv: mlx.mlx_fast_metal_kernel_config, finish: mlx.mlx_fast_metal_kernel_config, lean: bool = false };
     /// DEC-ONE at one row count: `prep` is prep_sc's config (prepare outside) or dec_zero's (inside); `gemv` dec0's or dec1's
     pub const DecCfg = struct { prep_in: bool, prep: mlx.mlx_fast_metal_kernel_config, gemv: mlx.mlx_fast_metal_kernel_config };
     const Small = struct { io: Cfg, gemm: mlx.mlx_fast_metal_kernel_config, tiles: mlx.mlx_array };
@@ -590,11 +231,8 @@ pub const Dense = struct {
         intr: bool = true,
         defer_affine: bool = true,
 
-        pub const legacy: PfOpts = .{ .bm = 128, .dbuf = false, .unroll = false, .fragb = false, .intr = false, .defer_affine = false };
-
         /// the served set, less what this shape's rate or codebook cannot take
         pub fn forShape(shape: Shape) PfOpts {
-            if (std.c.getenv("MLX_SERVE_TURBOEXL3_DENSE_PF_LEGACY")) |v| if (v[0] == '1') return legacy;
             return .{ .intr = shape.rate.n % 16 == 0, .defer_affine = shape.dec.codebook == .mul1 };
         }
     };
@@ -602,54 +240,59 @@ pub const Dense = struct {
     /// M tiles the fused GEMM's host-built table holds; a longer call takes dequantize + matmul
     pub const pf_tiles_cap: usize = 512;
 
-    /// rows sharing one decode per threadgroup (a call's further rows take more chunks); MLX_SERVE_TURBOEXL3_DENSE_RB=1..8 pins
-    /// the cap for tuning (more rows per decode means more accumulators and input registers per lane)
-    pub fn maxRb() u32 {
-        if (std.c.getenv("MLX_SERVE_TURBOEXL3_DENSE_RB")) |v| {
-            const k = std.fmt.parseInt(u32, std.mem.span(v), 10) catch 0;
-            if (k >= 1 and k <= 8) return k;
-        }
-        return 4;
+    /// the most rows sharing one decode per threadgroup on text_dgemv's loop (a call's further rows take more chunks, each
+    /// decoding the trellis again): 5. Through the tile loop a lane keeps a chunk's 2 BT RB accumulators and its 4 RB inputs
+    /// live, (2 BT + 4) RB floats: 32 at RB 4 (BT 2), 30 at RB 5 (BT 1) and 36 at RB 6 (BT 1). Past 32 the lane spills
+    /// registers, so no chunk on it passes 32. A row's sums do not depend on the rows beside it, so neither do its bytes.
+    pub const max_rb: u32 = 5;
+    /// the chain's cap on the lean text: 2 BT RB accumulators and 2 RB input registers, 32 at 8 rows (BT 1)
+    pub const lean_rb: u32 = 8;
+
+    /// rows per chunk for `rows` rows under `cap`: the fewest chunks of at most `cap` rows, the rows spread evenly over them
+    pub fn rbCap(rows: u32, cap: u32) u32 {
+        const chunks = (rows + cap - 1) / cap;
+        return (rows + chunks - 1) / chunks;
     }
 
-    /// output tiles per threadgroup for RB rows: 2 BT RB f32 accumulators per lane (8 at 1-2 rows, 4 RB at 3-4, 2 RB beyond);
-    /// MLX_SERVE_TURBOEXL3_DENSE_BT=1|2|4 pins it for tuning
+    /// DEC-ONE's chunks (and the decode merges', which tile as DEC-ONE does), and the chain's without `lean`: their GEMV
+    /// loop is text_dgemv's, so max_rb's cap (6 -> 3 + 3, 7 -> 4 + 3, 8 -> 4 + 4, 9 -> 5 + 4, 11 -> 4 + 4 + 3, 16 -> 4 x 4)
+    pub fn rbFor(rows: u32) u32 {
+        return rbCap(rows, max_rb);
+    }
+
+    /// the chain's rows per chunk: with `lean`, lean_rb's cap, so 1..8 rows one chunk and 9..16 two (9 -> 5 + 4,
+    /// 11 -> 6 + 5, 13 -> 7 + 6, 16 -> 8 + 8); without it rbFor's
+    pub fn chainRb(self: *const Dense, rows: u32) u32 {
+        return rbCap(rows, if (self.lean) lean_rb else max_rb);
+    }
+
+    /// whether the chain's chunks of `rb` rows run the lean text: with `lean`, past max_rb rows (up to max_rb,
+    /// text_dgemv's accumulators and inputs fit in 32 floats)
+    pub fn leanFor(self: *const Dense, rb: u32) bool {
+        return self.lean and rb > max_rb;
+    }
+
+    /// output tiles per threadgroup for RB rows: 2 BT RB f32 accumulators per lane (8 at 1-2 rows, 4 RB at 3-4, 2 RB beyond)
     pub fn btFor(rb: u32) u32 {
-        if (std.c.getenv("MLX_SERVE_TURBOEXL3_DENSE_BT")) |v| switch (v[0]) {
-            '1' => return 1,
-            '2' => return 2,
-            '4' => return 4,
-            else => {},
-        };
         return if (rb == 1) 4 else if (rb <= 4) 2 else 1;
     }
 
-    /// the smallest K split that puts 160 threadgroups (4 per core of a 40-core GPU) in flight at one row (BT 4);
-    /// MLX_SERVE_TURBOEXL3_DENSE_KS pins it when it divides the input tiles
+    /// the smallest K split that puts 160 threadgroups (4 per core of a 40-core GPU) in flight at one row (BT 4); fixed per
+    /// shape, so every row count sums alike
     pub fn ksFor(in: u32, out: u32) u32 {
         const q = (in / 16) / 4; // KS divides this: each of the 4 simdgroups of a slice gets IN_TILES / (4 KS) tiles
-        if (std.c.getenv("MLX_SERVE_TURBOEXL3_DENSE_KS")) |v| {
-            const k = std.fmt.parseInt(u32, std.mem.span(v), 10) catch 0;
-            if (k >= 1 and q % k == 0) return k;
-        }
         const groups = (out / 16) / 4;
-        // MLX_SERVE_TURBOEXL3_DENSE_PERMAX=<tiles>: at most this many input tiles per simdgroup (its K loop is one dependent
-        // chain of loads, the latency floor at verify widths); still the shape's own split, so every row count sums alike
-        const permax: u32 = if (std.c.getenv("MLX_SERVE_TURBOEXL3_DENSE_PERMAX")) |v| std.fmt.parseInt(u32, std.mem.span(v), 10) catch 0 else 0;
         var d: u32 = 1;
         while (d <= q) : (d += 1) {
             if (q % d != 0) continue;
-            if (permax != 0 and q / d > permax) continue;
             if (groups * d >= 160) return d;
         }
         return q;
     }
 
-    /// whether a decode with `dec` takes the deferred MUL1 map (MLX_SERVE_TURBOEXL3_DENSE_DEFER=0 turns it off)
+    /// whether a decode with `dec` takes the deferred MUL1 map (MUL1 only)
     pub fn deferFor(dec: format.Decode) bool {
-        if (dec.codebook != .mul1) return false;
-        const v = std.c.getenv("MLX_SERVE_TURBOEXL3_DENSE_DEFER") orelse return true;
-        return v[0] != '0';
+        return dec.codebook == .mul1;
     }
 
     pub fn init(shape: Shape) !Dense {
@@ -661,32 +304,22 @@ pub const Dense = struct {
             .finish = ks.newKernel("turboexl3_dense_finish", &finish_in, &finish_out, text_finish, decode.header, true) orelse return error.KernelCreateFailed,
             .dequant = ks.newKernel("turboexl3_dense_dequant", &dequant_in, &dequant_out, text_dequant, decode.header, true) orelse return error.KernelCreateFailed,
             .dgemv = ks.newKernel("turboexl3_dense_dgemv", &dgemv_in, &gemv_out, text_dgemv, decode.header, true) orelse return error.KernelCreateFailed,
+            .dgemv_lean = ks.newKernel("turboexl3_dense_dgemv_lean", &dgemv_in, &gemv_out, text_dgemv_lean, decode.header, true) orelse return error.KernelCreateFailed,
             .dfinish = ks.newKernel("turboexl3_dense_dfinish", &dfinish_in, &finish_out, text_dfinish, decode.header, true) orelse return error.KernelCreateFailed,
             .prep_s = ks.newKernel("turboexl3_dense_prep_s", &prep_in, &prep_s_out, text_prep_s, decode.header, true) orelse return error.KernelCreateFailed,
             .defer_affine = deferFor(shape.dec),
             .ks_split = ksFor(shape.in, shape.out),
-            .rowslot = blk: {
-                const v = std.c.getenv("MLX_SERVE_TURBOEXL3_DENSE") orelse break :blk false;
-                break :blk std.mem.eql(u8, std.mem.span(v), "rowslot");
-            },
+            .lean = config.get().dense_lean,
+            .rowslot = false,
             .gemm_pf = ks.newKernel("turboexl3_dense_pf_gemm", &prefill.gemm1_in, &prefill.gemm1_out, prefill.gemm1_text, prefill.header_nax, true) orelse return error.KernelCreateFailed,
-            .fused_prefill = shape.in % 64 == 0 and shape.out % 64 == 0 and blk: {
-                const v = std.c.getenv("MLX_SERVE_TURBOEXL3_DENSE_PREFILL") orelse break :blk false;
-                break :blk std.mem.eql(u8, std.mem.span(v), "fused");
-            },
+            .fused_prefill = false,
             .pf = PfOpts.forShape(shape),
-            .small_rows = blk: {
-                const v = std.c.getenv("MLX_SERVE_TURBOEXL3_DENSE_SMALL") orelse break :blk 32;
-                break :blk @min(small_rows_cap, std.fmt.parseInt(u32, std.mem.span(v), 10) catch 32);
-            },
+            .small_rows = if (config.get().nax) 32 else 0,
             .gemm_rs = ks.newKernel("turboexl3_dense_rs_gemm", &prefill.gemm1_in, &prefill.gemm1_out, prefill.gemm1s_text, prefill.header_nax_small, true) orelse return error.KernelCreateFailed,
-            .dec_on = decEnvOn(),
-            .dec_rows = envRows("MLX_SERVE_DEC_ONE_ROWS", 4),
-            .dec_prep_rows = envRows("MLX_SERVE_DEC_ONE_PREP", 1),
-            .dec_prep_out = blk: {
-                const v = std.c.getenv("MLX_SERVE_DEC_ONE_PREP_OUT") orelse break :blk 1024;
-                break :blk std.fmt.parseInt(u32, std.mem.span(v), 10) catch 1024;
-            },
+            .dec_on = config.get().dec_one,
+            .dec_rows = 4,
+            .dec_prep_rows = 1,
+            .dec_prep_out = 1024,
             .dec0 = ks.newKernel("turboexl3_dense_dec0", &dec0_in, &dec0_out, text_dec0, decode.header5, true) orelse return error.KernelCreateFailed,
             .dec1 = ks.newKernel("turboexl3_dense_dec1", &dec1_in, &dec1_out, text_dec1, decode.header5, true) orelse return error.KernelCreateFailed,
             .prep_sc = ks.newKernel("turboexl3_dense_prep_sc", &prep_in, &prep_sc_out, text_prep_sc, decode.header, true) orelse return error.KernelCreateFailed,
@@ -712,7 +345,7 @@ pub const Dense = struct {
         const IN: c_int = @intCast(self.shape.in);
         const OUT: c_int = @intCast(self.shape.out);
         const t = self.templ();
-        const rb: u32 = @min(rows_u, maxRb());
+        const rb: u32 = rbFor(rows_u);
         const bt = btFor(rb);
         if (8 % bt != 0) return error.BadExl3Shape;
         const chunks: u32 = (rows_u + rb - 1) / rb;
@@ -811,8 +444,8 @@ pub const Dense = struct {
             inline for (.{ cc.prep, cc.gemv }) |k| _ = mlx.mlx_fast_metal_kernel_config_free(k);
             c.* = null;
         };
-        inline for (.{ self.prep, self.gemv, self.finish, self.dequant, self.dgemv, self.dfinish, self.prep_s, self.gemm_pf, self.gemm_rs, self.dec0, self.dec1, self.prep_sc, self.dec_zero }) |k| _ = mlx.mlx_fast_metal_kernel_free(k);
-        if (self.finish_pieces) |k| _ = mlx.mlx_fast_metal_kernel_free(k);
+        inline for (.{ self.prep, self.gemv, self.finish, self.dequant, self.dgemv, self.dgemv_lean, self.dfinish, self.prep_s, self.gemm_pf, self.gemm_rs, self.dec0, self.dec1, self.prep_sc, self.dec_zero }) |k| decode.freeKernel(k);
+        if (self.finish_pieces) |k| decode.freeKernel(k);
         self.finish_pieces = null;
     }
 
@@ -833,13 +466,14 @@ pub const Dense = struct {
         return c;
     }
 
-    /// prepare (lane order), the multi-row GEMV over row chunks of RB = min(rows, 8) and its KS-plane finish
+    /// prepare (lane order), the multi-row GEMV over row chunks of RB = chainRb(rows) (on the lean text past 5 rows) and its
+    /// KS-plane finish
     fn buildMultiCfg(self: *const Dense, rows: usize) !Cfg {
         const r: c_int = @intCast(rows);
         const IN: c_int = @intCast(self.shape.in);
         const OUT: c_int = @intCast(self.shape.out);
         const t = self.templ();
-        const rb: u32 = @min(@as(u32, @intCast(rows)), maxRb());
+        const rb: u32 = self.chainRb(@intCast(rows));
         const bt = btFor(rb);
         const chunks: u32 = (@as(u32, @intCast(rows)) + rb - 1) / rb;
         const ksv: c_int = @intCast(self.ks_split);
@@ -849,6 +483,7 @@ pub const Dense = struct {
             .prep = try ks.buildConfig(.{ .grid = .{ (self.shape.in / 128) * 32, @intCast(rows), 1 }, .threadgroup = .{ 32, 1, 1 }, .out_shapes = &.{ &[_]c_int{ r, IN }, &[_]c_int{ r, @intCast(self.shape.in / 128) } }, .out_dtypes = &.{ .float16, .float32 }, .template = &.{ .{ .name = "DIM", .value = .{ .int = IN } }, .{ .name = "LANE_ORDER", .value = .{ .int = 1 } } } }),
             .gemv = try ks.buildConfig(.{ .grid = .{ (self.shape.out / 16 / bt) * 128, chunks, self.ks_split }, .threadgroup = .{ 128, 1, 1 }, .out_shapes = &.{&[_]c_int{ ksv * r, OUT }}, .out_dtypes = &.{.float32}, .template = &.{ t[0], t[1], t[2], .{ .name = "IN", .value = .{ .int = IN } }, .{ .name = "OUT", .value = .{ .int = OUT } }, .{ .name = "KS", .value = .{ .int = ksv } }, .{ .name = "BT", .value = .{ .int = @intCast(bt) } }, .{ .name = "RB", .value = .{ .int = @intCast(rb) } }, .{ .name = "ROWS", .value = .{ .int = r } }, defer_t } }),
             .finish = try ks.buildConfig(.{ .grid = .{ (self.shape.out / 128) * 32, @intCast(rows), 1 }, .threadgroup = .{ 32, 1, 1 }, .out_shapes = &.{&[_]c_int{ r, OUT }}, .out_dtypes = &.{self.shape.out_dtype}, .template = &.{ .{ .name = "DIM", .value = .{ .int = OUT } }, out_t, .{ .name = "KS", .value = .{ .int = ksv } }, .{ .name = "ROWS", .value = .{ .int = r } }, .{ .name = "INBLK", .value = .{ .int = @intCast(self.shape.in / 128) } }, defer_t } }),
+            .lean = self.leanFor(rb),
         };
     }
 
@@ -1002,13 +637,12 @@ pub const Dense = struct {
     }
 
     /// What `linear` runs at `rows` rows: its branches in its order, the decode GEMV (prep_s, dgemv, dfinish), the register-path
-    /// GEMM, the fused GEMM (MLX_SERVE_TURBOEXL3_DENSE_PREFILL=fused) or dequantize + MLX matmul; the register path's toggle file
-    /// read once, as one `linear` call reads it.
+    /// GEMM, the fused GEMM (`fused_prefill`) or dequantize + MLX matmul.
     pub const Path = enum { gemv, small, fused, matmul };
 
     pub fn pathFor(self: *const Dense, rows: usize) Path {
         if (rows <= decode.Kernels.max_rows) return .gemv;
-        if (rows <= self.small_rows and !self.fused_prefill and !smallToggledOff()) return .small;
+        if (rows <= self.small_rows and !self.fused_prefill) return .small;
         if (self.fused_prefill and (rows + self.pf.bm - 1) / self.pf.bm <= pf_tiles_cap) return .fused;
         return .matmul;
     }
@@ -1168,7 +802,7 @@ pub const Dense = struct {
                 defer for (po) |a| {
                     _ = mlx.mlx_array_free(a);
                 };
-                const z = try one(self.dgemv, c.gemv, &.{ po[0], trellis }, s);
+                const z = try one(if (c.lean) self.dgemv_lean else self.dgemv, c.gemv, &.{ po[0], trellis }, s);
                 defer _ = mlx.mlx_array_free(z);
                 return one(self.dfinish, c.finish, &.{ z, svh, po[1] }, s);
             }
@@ -1182,7 +816,7 @@ pub const Dense = struct {
             defer _ = mlx.mlx_array_free(z);
             return one(self.finish, c.finish, &.{ z, svh }, s);
         }
-        if (rows <= self.small_rows and !self.fused_prefill and !smallToggledOff()) {
+        if (rows <= self.small_rows and !self.fused_prefill) {
             const c = try self.smallFor(s, rows);
             const xp = try one(self.prep, c.io.prep, &.{ x, suh }, s);
             defer _ = mlx.mlx_array_free(xp);
@@ -1227,7 +861,7 @@ pub const Dense = struct {
     }
 };
 
-// ---- The resident trunk (memory for compute; the host's MLX_SERVE_EXL3_TRUNK=resident or bf16): W_hat kept ----
+// ---- The resident trunk (memory for compute; a host's opt-in): W_hat kept ----
 //
 // Prefill rows (`pathFor` .matmul: `linearOn`, `innerOf`, attn_io's `prefillInner`) decode the whole trellis to an f16 W_hat
 // on every call, so every chunk decodes every tile of every trunk linear again and writes its 2 B per weight. Armed with the
@@ -1358,13 +992,11 @@ const Resident = struct {
 /// Arms the resident table: admit `trellises` (the host's handles, borrowed: the model holds them) with each one's W_hat
 /// bytes (in x out x 2, checked against its shape), replacing any earlier set (its kept arrays dropped). Nothing is decoded
 /// here.
-/// error.ResidentTableFull past half the table's slots, error.BadExl3Shape for a handle that is not a trellis of its bytes,
-/// error.Exl3EngineNotImplemented under the fused dense GEMM (MLX_SERVE_TURBOEXL3_DENSE_PREFILL=fused: its prefill rows never
-/// dequantize, so nothing would be kept and the bill would stay pending); on an error nothing stays admitted.
+/// error.ResidentTableFull past half the table's slots, error.BadExl3Shape for a handle that is not a trellis of its bytes;
+/// on an error nothing stays admitted.
 pub fn residentArm(trellises: []const mlx.mlx_array, bytes: []const u64) !void {
     if (trellises.len != bytes.len) return error.BadExl3Shape;
     residentRelease();
-    if (std.c.getenv("MLX_SERVE_TURBOEXL3_DENSE_PREFILL")) |v| if (std.mem.eql(u8, std.mem.span(v), "fused")) return error.Exl3EngineNotImplemented;
     Resident.acquire();
     defer Resident.unlock();
     errdefer Resident.table = .{};
@@ -1493,7 +1125,7 @@ fn residentFail(key: usize, err: anyerror) void {
     std.debug.print("[turboexl3] resident trunk: a W_hat could not be kept ({s}); its linear dequantizes per call\n", .{@errorName(err)});
 }
 
-// ---- The un-rotated trunk (the host's MLX_SERVE_EXL3_TRUNK=bf16, opt-in; a reordering): out of the Hadamard basis ----
+// ---- The un-rotated trunk (a host's opt-in; a reordering): out of the Hadamard basis ----
 //
 // `linear`'s prefill rows compute y = finish(f16(prep(x)) W_hat). prep is per 128-block of x: f16(H128(f16(x) * suh)), where
 // `text_prep`'s lane L holds block element L + 32 j, the five xor-shuffle stages run over the lane bits and the four-point
@@ -1524,49 +1156,13 @@ pub const max_join: usize = 4;
 
 /// Un-rotation pass 1: r f32 [rows, DIM] = the unscaled +-1 H128 of each 128-column block of each row of w (f16 W_hat
 /// [rows, DIM]): `text_finish`'s layout and butterfly, one simdgroup per (block, row)
-pub const text_unrot_cols =
-    \\    constexpr uint DIMC = uint(DIM);
-    \\    const uint b = threadgroup_position_in_grid.x;
-    \\    const uint row = threadgroup_position_in_grid.y;
-    \\    const uint L = thread_index_in_simdgroup;
-    \\    float v[4];
-    \\    for (uint j = 0; j < 4u; ++j) v[j] = float(w[ulong(row) * DIMC + b * 128u + L + 32u * j]);
-    \\    for (uint s = 0; s < 5u; ++s) { const uint bit = 1u << s; for (uint j = 0; j < 4u; ++j) { const float p = simd_shuffle_xor(v[j], ushort(bit)); v[j] = (L & bit) ? (p - v[j]) : (v[j] + p); } }
-    \\    { float t0 = v[0] + v[1], t1 = v[0] - v[1], t2 = v[2] + v[3], t3 = v[2] - v[3]; v[0] = t0 + t2; v[1] = t1 + t3; v[2] = t0 - t2; v[3] = t1 - t3; }
-    \\    for (uint j = 0; j < 4u; ++j) r[ulong(row) * DIMC + b * 128u + L + 32u * j] = v[j];
-    \\
-;
+pub const text_unrot_cols = @embedFile("kernels/dense/unrot_cols.metal");
 
 /// Un-rotation pass 2: W OUT_T [rows, DIM] = OUT_T(((H' r)[i, o] / 128) * suh[i] * svh[o]) for pass 1's r, one rounding.
 /// One 256-thread threadgroup per (128-row block, 32-column strip): the strip read into threadgroup memory row by row
 /// (coalesced; 33-float rows keep a column's reads on distinct banks), simdgroup sg transforming the strip's columns
 /// sg + 8 q with `text_prep`'s layout and butterfly (lane L holding rows L + 32 j), the strip written back row by row
-pub const text_unrot_rows =
-    \\    constexpr uint DIMC = uint(DIM);
-    \\    threadgroup float t[128u * 33u];
-    \\    const uint cs = threadgroup_position_in_grid.x;
-    \\    const uint rb = threadgroup_position_in_grid.y;
-    \\    const uint tid = thread_index_in_threadgroup;
-    \\    const uint sg = simdgroup_index_in_threadgroup;
-    \\    const uint L = thread_index_in_simdgroup;
-    \\    for (uint e = tid; e < 4096u; e += 256u) t[(e >> 5u) * 33u + (e & 31u)] = r[ulong(rb * 128u + (e >> 5u)) * DIMC + cs * 32u + (e & 31u)];
-    \\    threadgroup_barrier(mem_flags::mem_threadgroup);
-    \\    for (uint q = 0; q < 4u; ++q) {
-    \\        const uint c = sg + 8u * q;
-    \\        float v[4];
-    \\        for (uint j = 0; j < 4u; ++j) v[j] = t[(L + 32u * j) * 33u + c];
-    \\    for (uint s = 0; s < 5u; ++s) { const uint bit = 1u << s; for (uint j = 0; j < 4u; ++j) { const float p = simd_shuffle_xor(v[j], ushort(bit)); v[j] = (L & bit) ? (p - v[j]) : (v[j] + p); } }
-    \\    { float t0 = v[0] + v[1], t1 = v[0] - v[1], t2 = v[2] + v[3], t3 = v[2] - v[3]; v[0] = t0 + t2; v[1] = t1 + t3; v[2] = t0 - t2; v[3] = t1 - t3; }
-    \\        for (uint j = 0; j < 4u; ++j) t[(L + 32u * j) * 33u + c] = v[j];
-    \\    }
-    \\    threadgroup_barrier(mem_flags::mem_threadgroup);
-    \\    for (uint e = tid; e < 4096u; e += 256u) {
-    \\        const uint i = rb * 128u + (e >> 5u);
-    \\        const uint o = cs * 32u + (e & 31u);
-    \\        W[ulong(i) * DIMC + o] = OUT_T(t[(e >> 5u) * 33u + (e & 31u)] * 0.0078125f * float(suh[i]) * float(svh[o]));
-    \\    }
-    \\
-;
+pub const text_unrot_rows = @embedFile("kernels/dense/unrot_rows.metal");
 
 const unrot_cols_in = [_][*:0]const u8{"w"};
 const unrot_cols_out = [_][*:0]const u8{"r"};
@@ -1582,7 +1178,7 @@ fn unrotKernels() ![2]mlx.mlx_fast_metal_kernel {
     defer unrot_kernels_lock.store(0, .release);
     if (unrot_kernels) |k| return k;
     const cols = ks.newKernel("turboexl3_unrot_cols", &unrot_cols_in, &unrot_cols_out, text_unrot_cols, decode.header, true) orelse return error.KernelCreateFailed;
-    errdefer _ = mlx.mlx_fast_metal_kernel_free(cols);
+    errdefer decode.freeKernel(cols);
     const rows = ks.newKernel("turboexl3_unrot_rows", &unrot_rows_in, &unrot_rows_out, text_unrot_rows, decode.header, true) orelse return error.KernelCreateFailed;
     unrot_kernels = .{ cols, rows };
     return unrot_kernels.?;
@@ -2051,24 +1647,25 @@ test "turboexl3 dense un-rotated trunk: the un-rotation equals diag(suh) H W_hat
 }
 
 test "turboexl3 dense un-rotated trunk texts: the un-rotation kernels repeat the dense butterfly verbatim, name their signatures, bind no MLX shape buffers" {
+    const pin = comptime @import("test_support.zig").pins(@embedFile("kernels/test/pins/dense_unrot.metal"));
     const t = std.testing;
     const has = struct {
         fn f(hay: []const u8, needle: []const u8) bool {
             return std.mem.indexOf(u8, hay, needle) != null;
         }
     }.f;
-    const fly = "for (uint s = 0; s < 5u; ++s) { const uint bit = 1u << s; for (uint j = 0; j < 4u; ++j) { const float p = simd_shuffle_xor(v[j], ushort(bit)); v[j] = (L & bit) ? (p - v[j]) : (v[j] + p); } }";
-    const local4 = "{ float t0 = v[0] + v[1], t1 = v[0] - v[1], t2 = v[2] + v[3], t3 = v[2] - v[3]; v[0] = t0 + t2; v[1] = t1 + t3; v[2] = t0 - t2; v[3] = t1 - t3; }";
+    const fly = pin[0];
+    const local4 = pin[1];
     for ([_][]const u8{ text_prep, text_finish, text_unrot_cols, text_unrot_rows }) |txt| {
         try t.expect(has(txt, fly));
         try t.expect(has(txt, local4));
     }
     // pass 1 reads the block's element L + 32 j of the row, as `text_finish` reads z; pass 2 the column's rows L + 32 j
-    try t.expect(has(text_finish, "z[row * DIMC + b * 128u + L + 32u * j]"));
-    try t.expect(has(text_unrot_cols, "w[ulong(row) * DIMC + b * 128u + L + 32u * j]"));
-    try t.expect(has(text_unrot_rows, "v[j] = t[(L + 32u * j) * 33u + c];"));
+    try t.expect(has(text_finish, pin[2]));
+    try t.expect(has(text_unrot_cols, pin[3]));
+    try t.expect(has(text_unrot_rows, pin[4]));
     // the one rounding: 1/128, suh, svh in f32, then the output dtype
-    try t.expect(has(text_unrot_rows, "OUT_T(t[(e >> 5u) * 33u + (e & 31u)] * 0.0078125f * float(suh[i]) * float(svh[o]))"));
+    try t.expect(has(text_unrot_rows, pin[5]));
     const Sig = struct { txt: []const u8, names: []const [*:0]const u8 };
     for ([_]Sig{ .{ .txt = text_unrot_cols, .names = &(unrot_cols_in ++ unrot_cols_out) }, .{ .txt = text_unrot_rows, .names = &(unrot_rows_in ++ unrot_rows_out) } }) |sg| for (sg.names) |nm| {
         const name = std.mem.span(nm);
@@ -2159,14 +1756,16 @@ test "turboexl3 dense resident trunk: the table admits each trellis once, bills 
 }
 
 test "turboexl3 dense texts: inputs read, outputs written, the dequant layout names the GEMV's row/column rule" {
+    const pin = comptime @import("test_support.zig").pins(@embedFile("kernels/test/pins/dense_texts.metal"));
     const t = std.testing;
-    try t.expect(std.mem.indexOf(u8, text_prep, "xp[row * DIMC") != null);
-    try t.expect(std.mem.indexOf(u8, text_finish, "y[row * DIMC + o] = OUT_T(") != null);
-    try t.expect(std.mem.indexOf(u8, text_dequant, "turboexl3_row_of(L, m & 3u)") != null);
-    try t.expect(std.mem.indexOf(u8, text_dequant, "(L >> 2u) + 8u * (m >> 2u)") != null);
+    try t.expect(std.mem.indexOf(u8, text_prep, pin[0]) != null);
+    try t.expect(std.mem.indexOf(u8, text_finish, pin[1]) != null);
+    try t.expect(std.mem.indexOf(u8, text_dequant, pin[2]) != null);
+    try t.expect(std.mem.indexOf(u8, text_dequant, pin[3]) != null);
 }
 
 test "turboexl3 dense one-launch decode (DEC-ONE) texts: every value-setting line is the three-launch chain's, the signatures' names are used, no MLX shape buffers" {
+    const pin = comptime @import("test_support.zig").pins(@embedFile("kernels/test/pins/dense_dec_one.metal"));
     const t = std.testing;
     const has = struct {
         fn f(hay: []const u8, needle: []const u8) bool {
@@ -2175,13 +1774,13 @@ test "turboexl3 dense one-launch decode (DEC-ONE) texts: every value-setting lin
     }.f;
     // the GEMV (text_dgemv): weights, FMA order, quad fold, simdgroup sum
     const gemv_lines = [_][]const u8{
-        "const auto ww = exl3_tile_load<N, 0>(tile, qb, ga, lp);",
-        "const float wv = (DEFER != 0) ? exl3_mul1_t(cw[m]) : float(exl3_decode<CB>(cw[m]));",
-        "for (uint r = 0; r < RBC; ++r) a[r][t][m >> 2] = fma(xr[r][m & 3u], wv, a[r][t][m >> 2]);",
-        "for (uint r = 0; r < RBC; ++r) turboexl3_fold<BTC>(a[r], &red[sg][r * 16u * BTC], L);",
-        "= ((red[0][i] + red[1][i]) + red[2][i]) + red[3][i];",
-        "const half4 x4 = *reinterpret_cast<const device half4*>(xbase + ulong(row) * ulong(INC) + tk * 16u);",
-        "xr[r][0] = float(x4.x); xr[r][1] = float(x4.y); xr[r][2] = float(x4.z); xr[r][3] = float(x4.w);",
+        pin[0],
+        pin[1],
+        pin[2],
+        pin[3],
+        pin[4],
+        pin[5],
+        pin[6],
     };
     for (gemv_lines) |l| {
         try t.expect(has(text_dgemv, l));
@@ -2190,34 +1789,34 @@ test "turboexl3 dense one-launch decode (DEC-ONE) texts: every value-setting lin
     for (gemv_lines[0..5]) |l| try t.expect(has(text_dec1, l));
     // the finish (text_dfinish): planes in slice order, deferred map, rounding, H128, svh
     const fin_lines = [_][]const u8{
-        "acc += z",
-        "if (DEFER != 0) acc = fma(acc, MUL1_A, MUL1_C * xsum);",
-        "v[j] = float(half(acc));",
-        "for (uint s = 0; s < 5u; ++s) { const uint bit = 1u << s; for (uint j = 0; j < 4u; ++j) { const float p = simd_shuffle_xor(v[j], ushort(bit)); v[j] = (L & bit) ? (p - v[j]) : (v[j] + p); } }",
-        "{ float t0 = v[0] + v[1], t1 = v[0] - v[1], t2 = v[2] + v[3], t3 = v[2] - v[3]; v[0] = t0 + t2; v[1] = t1 + t3; v[2] = t0 - t2; v[3] = t1 - t3; }",
-        "OUT_T(float(half(v[j] * HAD_SCALE * float(svh[o]))));",
-        "const float MUL1_A = float(as_type<half>(ushort(0x1EEEu)));",
-        "const float MUL1_C = 1024.0f * MUL1_A + float(as_type<half>(ushort(0xC931u)));",
-        "for (uint k = 1u; k < KSC; ++k) acc += z",
+        pin[7],
+        pin[8],
+        pin[9],
+        pin[10],
+        pin[11],
+        pin[12],
+        pin[13],
+        pin[14],
+        pin[15],
     };
     for (fin_lines) |l| {
         try t.expect(has(text_dfinish, l));
         try t.expect(has(text_dec0, l));
         try t.expect(has(text_dec1, l));
     }
-    try t.expect(has(text_dfinish, "if (DEFER != 0) for (uint q = 0; q < INB; ++q) xsum += xs[row * INB + q];"));
-    try t.expect(has(text_dec0, "if (DEFER != 0) for (uint q = 0; q < NB; ++q) xsum += xs[row * NB + q];"));
+    try t.expect(has(text_dfinish, pin[16]));
+    try t.expect(has(text_dec0, pin[17]));
     // the prepare inside (text_prep_s): rounding, suh, H128, scale, lane order, block sum
     const prep_lines = [_][]const u8{
-        "v[j] = float(half(float(x[row * ",
-        "]))) * float(suh[i]); }",
-        "for (uint s = 0; s < 5u; ++s) { const uint bit = 1u << s; for (uint j = 0; j < 4u; ++j) { const float p = simd_shuffle_xor(v[j], ushort(bit)); v[j] = (L & bit) ? (p - v[j]) : (v[j] + p); } }",
-        "const uint q = (r & 7u) >> 1u;",
-        "const uint m = (r & 1u) | ((r >> 3u) << 1u);",
-        "const half hv = half(v[j] * HAD_SCALE);",
-        "sum += float(hv);",
-        "sum = simd_sum(sum);",
-        "((i & ~15u) + 4u * q + m)",
+        pin[18],
+        pin[19],
+        pin[10],
+        pin[20],
+        pin[21],
+        pin[22],
+        pin[23],
+        pin[24],
+        pin[25],
     };
     for (prep_lines) |l| {
         try t.expect(has(text_prep_s, l));
@@ -2226,9 +1825,9 @@ test "turboexl3 dense one-launch decode (DEC-ONE) texts: every value-setting lin
     try t.expect(has(text_prep_sc, text_prep_s));
     // arrival: one relaxed count per threadgroup between device fences; the partials through coherent pointers
     for ([_][:0]const u8{ text_dec0, text_dec1 }) |txt| {
-        try t.expect(has(txt, "atomic_fetch_add_explicit((device atomic_uint*)cnt + (ob * NCHC + chunk), 1u, memory_order_relaxed)"));
-        try t.expect(has(txt, "device TURBOEXL3_COH float* zc = (device TURBOEXL3_COH float*)z;"));
-        try t.expect(!has(txt, "atomic<float>") and !has(txt, "atomic_float"));
+        try t.expect(has(txt, pin[26]));
+        try t.expect(has(txt, pin[27]));
+        try t.expect(!has(txt, pin[28]) and !has(txt, pin[29]));
     }
     // MLX adds a shape / strides / ndim buffer for any input name followed by those suffixes in the source
     // `unused`: an input the kernel takes only for ordering (dec_zero's svh: a materialized weight, so the zeroing waits on nothing)
@@ -2253,11 +1852,47 @@ test "turboexl3 dense one-launch decode (DEC-ONE) texts: every value-setting lin
     try t.expect(!Dense.decPrepFits(sh, 8, 4, 2)); // PER 5: a slice ends inside a 128-block
 }
 
-test "turboexl3 dense DEC-ONE switch: unset or empty on, 0 off, anything else on" {
+test "turboexl3 dense: the served plan per shape (DEC-ONE from the config, K split, row tiling, MUL1's deferred map)" {
     const t = std.testing;
-    try t.expect(decOneOn(null));
-    try t.expect(decOneOn(""));
-    try t.expect(!decOneOn("0"));
-    try t.expect(decOneOn("1"));
-    try t.expect(decOneOn("yes"));
+    try t.expectEqual(@as(u32, 4), Dense.btFor(1));
+    try t.expectEqual(@as(u32, 2), Dense.btFor(4));
+    try t.expectEqual(@as(u32, 1), Dense.btFor(Dense.max_rb));
+    // the row chunks: the fewest of at most max_rb rows, spread evenly; at most ceil(rows / 4) of them (decodes of each
+    // weight), and a lane's accumulators + inputs, (2 BT + 4) RB floats, within 32
+    const want_rb = [_]u32{ 1, 2, 3, 4, 5, 3, 4, 4, 5, 5, 4, 4, 5, 5, 5, 4 };
+    for (want_rb, 1..) |rb, rows| {
+        const r: u32 = @intCast(rows);
+        try t.expectEqual(rb, Dense.rbFor(r));
+        try t.expect((r + rb - 1) / rb <= (r + 3) / 4);
+        try t.expect((2 * Dense.btFor(rb) + 4) * rb <= 32);
+    }
+    // the chain on the lean text (lean_rb 8): one chunk to 8 rows, two to 16; text_dgemv's state to max_rb rows, the lean
+    // text's (2 BT RB accumulators, 2 RB input registers) past them
+    const want_lean = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 5, 5, 6, 6, 7, 7, 8, 8 };
+    for (want_lean, 1..) |rb, rows| {
+        const r: u32 = @intCast(rows);
+        try t.expectEqual(rb, Dense.rbCap(r, Dense.lean_rb));
+        try t.expectEqual((r + 7) / 8, (r + rb - 1) / rb);
+        if (rb <= Dense.max_rb) try t.expect((2 * Dense.btFor(rb) + 4) * rb <= 32) else try t.expect((2 * Dense.btFor(rb) + 2) * rb <= 32);
+    }
+    // the GDN qkv in-projection: 160 input tiles in 4 simdgroups, 160 output groups put 160 threadgroups in flight unsplit
+    try t.expectEqual(@as(u32, 1), Dense.ksFor(2560, 10240));
+    // the shared expert's down projection: 40 output groups take 5 slices, the least divisor of its 10 that reaches 160
+    try t.expectEqual(@as(u32, 5), Dense.ksFor(640, 2560));
+    try t.expect(Dense.deferFor(.mul1) and !Dense.deferFor(.mcg));
+}
+
+test "turboexl3 dense lean GEMV text: text_dgemv but its input loads and codeword loop, every accumulator's FMAs in its order" {
+    const t = std.testing;
+    try t.expect(std.mem.eql(u8, text_dgemv, dgemv_1 ++ dgemv_x ++ dgemv_2 ++ dgemv_m ++ dgemv_3));
+    try t.expect(std.mem.eql(u8, text_dgemv_lean, dgemv_1 ++ dgemv_2 ++ dgemv_j ++ dgemv_3));
+    try t.expect(std.mem.indexOf(u8, text_dgemv_lean, dgemv_x) == null and std.mem.indexOf(u8, text_dgemv_lean, dgemv_m) == null);
+    // the lean loop: one input per row at a time, both accumulators of codewords j and j + 4, the codewords' decode as
+    // dgemv_m's (counted by their statements' lines)
+    var nl: usize = 0;
+    var it = std.mem.splitScalar(u8, dgemv_j, '\n');
+    while (it.next()) |l| {
+        if (std.mem.trim(u8, l, " ").len > 0) nl += 1;
+    }
+    try t.expectEqual(@as(usize, 12), nl);
 }

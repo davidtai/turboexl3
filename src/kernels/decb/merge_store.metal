@@ -1,0 +1,1 @@
+out[((long)hq * (long)qL + (long)s) * BD + d] = T(acc / Z);

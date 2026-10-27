@@ -1,8 +1,9 @@
-//! The unfused decode chain (the benchmark's `lib_steps` arm): the same math as `decode.zig`'s two launches, as the
-//! separately launched steps a host would compose from GEMMs: per projection a prepare (f16 round, suh, H128, f16 round),
-//! a raw trellis GEMV (f32 inner sums) and a finish (f16 round, H128, svh, f16 round); SwiGLU; the top-k weighted reduce.
-//! Eleven launches per layer. Every kernel reads the same lane plan and decode helpers as the fused chain, so the
-//! difference between the two arms is fusion alone (launch count, intermediate traffic), not the reader.
+//! The unfused decode chain: the same math as `decode.zig`'s form 1 (two launches), as the separately launched steps a
+//! host would compose from GEMMs: per projection a prepare (f16 round, suh, H128, f16 round), a raw trellis GEMV (f32
+//! inner sums) and a finish (f16 round, H128, svh, f16 round); SwiGLU; the top-k weighted reduce. Eleven launches per
+//! layer (`Steps`; nothing in the library or its benchmark runs it now, and dense.zig's row-slot reference arm launches
+//! `text_gemv`). Every kernel reads the same lane plan and decode helpers as the fused chain, so a comparison of the two
+//! measures fusion alone (launch count, intermediate traffic), not the reader.
 const std = @import("std");
 const mlx = @import("sdk").mlx;
 const ks = @import("sdk").kernel_launch;
@@ -11,120 +12,20 @@ const lane = @import("lane.zig");
 const decode = @import("decode.zig");
 
 /// prepare: xp half [RK, DIM] = H128(f16(x[row]) * suh[slot]) per 128-block, f16; one simdgroup per (block, row-slot)
-pub const text_prep =
-    \\    constexpr uint DIMC = uint(DIM);
-    \\    constexpr uint TOPKC = uint(TOPK);
-    \\    constexpr float HAD_SCALE = 0.08838834764831845f;
-    \\    const uint b = threadgroup_position_in_grid.x;
-    \\    const uint rk = threadgroup_position_in_grid.y;
-    \\    const uint L = thread_index_in_simdgroup;
-    \\    const uint e = slots[rk];
-    \\    const uint row = rk / TOPKC;
-    \\    float v[4];
-    \\    for (uint j = 0; j < 4u; ++j) { const uint i = b * 128u + L + 32u * j; v[j] = float(half(x[row * DIMC + i])) * float(suh[e * DIMC + i]); }
-    \\    for (uint s = 0; s < 5u; ++s) { const uint bit = 1u << s; for (uint j = 0; j < 4u; ++j) { const float p = simd_shuffle_xor(v[j], ushort(bit)); v[j] = (L & bit) ? (p - v[j]) : (v[j] + p); } }
-    \\    { float t0 = v[0] + v[1], t1 = v[0] - v[1], t2 = v[2] + v[3], t3 = v[2] - v[3]; v[0] = t0 + t2; v[1] = t1 + t3; v[2] = t0 - t2; v[3] = t1 - t3; }
-    \\    // lane order: within each 16-wide tile, position r = 2 q + {0, 1, 8, 9}[m] is stored at 4 q + m, so a GEMV lane
-    \\    // (its quad q = L & 3) loads its four rows of a tile as one half4
-    \\    for (uint j = 0; j < 4u; ++j) {
-    \\        const uint i = b * 128u + L + 32u * j;
-    \\        const uint r = i & 15u;
-    \\        const uint q = (r & 7u) >> 1u;
-    \\        const uint m = (r & 1u) | ((r >> 3u) << 1u);
-    \\        xp[rk * DIMC + (i & ~15u) + 4u * q + m] = half(v[j] * HAD_SCALE);
-    \\    }
-    \\
-;
+pub const text_prep = @embedFile("kernels/unfused/prep.metal");
 
 /// raw GEMV: z f32 [RK, OUT] = xp[rk] . W[slot] (inner sums, unrounded); one 128-thread threadgroup per (128-wide out
 /// block, row-slot), the four simdgroups split the input tiles, each lane loads its quad's four rows of a tile as one half4
-pub const text_gemv =
-    \\    constexpr uint N = uint(NHW);
-    \\    constexpr uint NW = N / 2u;
-    \\    constexpr uint WMASK = (WBITS >= 16) ? 0xffffu : ((1u << uint(WBITS)) - 1u);
-    \\    constexpr int CB = int(CODEBOOK);
-    \\    constexpr uint INC = uint(IN);
-    \\    constexpr uint OUTC = uint(OUT);
-    \\    constexpr uint IN_TILES = INC / 16u;
-    \\    constexpr uint OUT_TILES = OUTC / 16u;
-    \\    constexpr bool INTK = (N % 16u) == 0u;
-    \\    const uint blk = threadgroup_position_in_grid.x;
-    \\    const uint rk = threadgroup_position_in_grid.y;
-    \\    const uint sg = simdgroup_index_in_threadgroup;
-    \\    const uint L = thread_index_in_simdgroup;
-    \\    const uint tid = thread_index_in_threadgroup;
-    \\    const uint e = slots[rk];
-    \\    threadgroup float red[4][128];
-    \\    const uint base = INTK ? exl3_int_qb<N>(L) : exl3_lane_base<N>(L);
-    \\    const uint ia = INTK ? exl3_int_a<N>(L) : 0u;
-    \\    const uint ib = INTK ? exl3_int_b<N>(L) : 0u;
-    \\    uint off[8];
-    \\    for (uint m = 0; m < 8u; ++m) off[m] = INTK ? 0u : exl3_lane_off<N>(L, m, base);
-    \\    float a[8][2];
-    \\    for (uint t = 0; t < 8u; ++t) { a[t][0] = 0.0f; a[t][1] = 0.0f; }
-    \\    const uint tk_per = IN_TILES / 4u;
-    \\    const device uint* wbase = (const device uint*)(w) + ulong(e) * ulong(IN_TILES) * ulong(OUT_TILES) * ulong(NW);
-    \\    const device half* xrow = xp + ulong(rk) * ulong(INC) + 4u * (L & 3u);   // lane order: the quad's four rows
-    \\    for (uint tk = sg * tk_per; tk < (sg + 1u) * tk_per; ++tk) {
-    \\        const half4 x4 = *reinterpret_cast<const device half4*>(xrow + tk * 16u);
-    \\        const float xr[4] = { float(x4.x), float(x4.y), float(x4.z), float(x4.w) };
-    \\        for (uint t = 0; t < 8u; ++t) {
-    \\            const uint tn = blk * 8u + t;
-    \\            const device uint* tile = wbase + (ulong(tk) * OUT_TILES + tn) * ulong(NW);
-    \\            if (INTK) {
-    \\                const IntWords ww = exl3_int_words<N>(tile, base, ia);
-    \\                uint cw[8];
-    \\                cw[0] = exl3_int_cw<N, WMASK, 0>(ww, ib); cw[1] = exl3_int_cw<N, WMASK, 1>(ww, ib); cw[2] = exl3_int_cw<N, WMASK, 2>(ww, ib); cw[3] = exl3_int_cw<N, WMASK, 3>(ww, ib);
-    \\                cw[4] = exl3_int_cw<N, WMASK, 4>(ww, ib); cw[5] = exl3_int_cw<N, WMASK, 5>(ww, ib); cw[6] = exl3_int_cw<N, WMASK, 6>(ww, ib); cw[7] = exl3_int_cw<N, WMASK, 7>(ww, ib);
-    \\                for (uint m = 0; m < 8u; ++m) a[t][m >> 2] = fma(xr[m & 3u], float(exl3_decode<CB>(cw[m])), a[t][m >> 2]);
-    \\            } else {
-    \\                const LaneWords ww = exl3_lane_words<N>(tile, base);
-    \\                for (uint m = 0; m < 8u; ++m) a[t][m >> 2] = fma(xr[m & 3u], float(exl3_decode<CB>(exl3_lane_cw<WMASK>(ww, off[m]))), a[t][m >> 2]);
-    \\            }
-    \\        }
-    \\    }
-    \\    for (uint t = 0; t < 8u; ++t) for (uint c = 0; c < 2u; ++c) { a[t][c] += simd_shuffle_xor(a[t][c], ushort(1)); a[t][c] += simd_shuffle_xor(a[t][c], ushort(2)); }
-    \\    if ((L & 3u) == 0u) for (uint t = 0; t < 8u; ++t) { red[sg][t * 16u + (L >> 2)] = a[t][0]; red[sg][t * 16u + (L >> 2) + 8u] = a[t][1]; }
-    \\    threadgroup_barrier(mem_flags::mem_threadgroup);
-    \\    z[ulong(rk) * ulong(OUTC) + blk * 128u + tid] = ((red[0][tid] + red[1][tid]) + red[2][tid]) + red[3][tid];
-    \\
-;
+pub const text_gemv = @embedFile("kernels/unfused/gemv.metal");
 
 /// finish: y f32 [RK, DIM] = f16(H128(f16(z)) * svh[slot]) per 128-block; one simdgroup per (block, row-slot)
-pub const text_finish =
-    \\    constexpr uint DIMC = uint(DIM);
-    \\    constexpr float HAD_SCALE = 0.08838834764831845f;
-    \\    const uint b = threadgroup_position_in_grid.x;
-    \\    const uint rk = threadgroup_position_in_grid.y;
-    \\    const uint L = thread_index_in_simdgroup;
-    \\    const uint e = slots[rk];
-    \\    float v[4];
-    \\    for (uint j = 0; j < 4u; ++j) v[j] = float(half(z[rk * DIMC + b * 128u + L + 32u * j]));
-    \\    for (uint s = 0; s < 5u; ++s) { const uint bit = 1u << s; for (uint j = 0; j < 4u; ++j) { const float p = simd_shuffle_xor(v[j], ushort(bit)); v[j] = (L & bit) ? (p - v[j]) : (v[j] + p); } }
-    \\    { float t0 = v[0] + v[1], t1 = v[0] - v[1], t2 = v[2] + v[3], t3 = v[2] - v[3]; v[0] = t0 + t2; v[1] = t1 + t3; v[2] = t0 - t2; v[3] = t1 - t3; }
-    \\    for (uint j = 0; j < 4u; ++j) { const uint o = b * 128u + L + 32u * j; y[rk * DIMC + o] = float(half(v[j] * HAD_SCALE * float(svh[e * DIMC + o]))); }
-    \\
-;
+pub const text_finish = @embedFile("kernels/unfused/finish.metal");
 
 /// SwiGLU: h = silu(g) * u, elementwise over [RK, DIM]
-pub const text_swiglu =
-    \\    const uint i = thread_position_in_grid.x;
-    \\    const float gv = g[i];
-    \\    h[i] = (gv / (1.0f + metal::exp(-gv))) * u[i];
-    \\
-;
+pub const text_swiglu = @embedFile("kernels/unfused/swiglu.metal");
 
 /// reduce: y f32 [R, DIM] = sum_k scores[r k] * yk[r k], in slot order
-pub const text_reduce =
-    \\    constexpr uint DIMC = uint(DIM);
-    \\    constexpr uint TOPKC = uint(TOPK);
-    \\    const uint d = thread_position_in_grid.x;
-    \\    const uint r = thread_position_in_grid.y;
-    \\    float acc = 0.0f;
-    \\    for (uint k = 0; k < TOPKC; ++k) acc = fma(scores[r * TOPKC + k], yk[(r * TOPKC + k) * DIMC + d], acc);
-    \\    y[r * DIMC + d] = acc;
-    \\
-;
+pub const text_reduce = @embedFile("kernels/unfused/reduce.metal");
 
 pub const header: [:0]const u8 = decode.header;
 
@@ -177,7 +78,7 @@ pub const Steps = struct {
             inline for (.{ cc.prep_h, cc.prep_i, cc.gemv_gu, cc.gemv_d, cc.fin_i, cc.fin_h, cc.swiglu, cc.reduce }) |k| _ = mlx.mlx_fast_metal_kernel_config_free(k);
             c.* = null;
         };
-        inline for (.{ self.prep, self.gemv, self.finish, self.swiglu, self.reduce }) |k| _ = mlx.mlx_fast_metal_kernel_free(k);
+        inline for (.{ self.prep, self.gemv, self.finish, self.swiglu, self.reduce }) |k| decode.freeKernel(k);
     }
 
     fn cfgs(self: *Steps, rows: usize) !Cfgs {
@@ -249,11 +150,12 @@ pub const Steps = struct {
 };
 
 test "turboexl3 unfused texts: the inputs each signature names are read, the outputs written" {
+    const pin = comptime @import("test_support.zig").pins(@embedFile("kernels/test/pins/unfused_texts.metal"));
     const t = std.testing;
     for (prep_in) |n| try t.expect(std.mem.indexOf(u8, text_prep, std.mem.span(n)) != null);
     for (gemv_in) |n| try t.expect(std.mem.indexOf(u8, text_gemv, std.mem.span(n)) != null);
     for (finish_in) |n| try t.expect(std.mem.indexOf(u8, text_finish, std.mem.span(n)) != null);
-    try t.expect(std.mem.indexOf(u8, text_prep, "xp[rk * DIMC") != null);
-    try t.expect(std.mem.indexOf(u8, text_gemv, "z[ulong(rk) * ulong(OUTC)") != null);
-    try t.expect(std.mem.indexOf(u8, text_reduce, "y[r * DIMC + d] = acc") != null);
+    try t.expect(std.mem.indexOf(u8, text_prep, pin[0]) != null);
+    try t.expect(std.mem.indexOf(u8, text_gemv, pin[1]) != null);
+    try t.expect(std.mem.indexOf(u8, text_reduce, pin[2]) != null);
 }

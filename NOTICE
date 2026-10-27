@@ -21,7 +21,7 @@ https://github.com/ml-explore/mlx
 Copyright (c) 2023-2025 Apple Inc.
 Licensed under the MIT License.
 
-src/steel_nax.metal inlines MLX's steel headers (`steel/defines.h`,
+src/kernels/steel_nax.metal inlines MLX's steel headers (`steel/defines.h`,
 `steel/utils/type_traits.h`, `steel/utils/integral_constant.h` and
 `steel/gemm/nax.h`), each section marked with its MLX source path and copyright
 line; the prefill GEMMs build on their NAX tiles. The fused attention

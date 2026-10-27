@@ -1,0 +1,11 @@
+acc += xv * xv;
+acc = simd_sum(acc);
+local_sums[L] = 0.0f;
+local_sums[sg] = acc;
+acc = simd_sum(local_sums[L]);
+local_inv[0] = metal::precise::rsqrt(acc / float(HDC) + float(eps));
+nrm[base + i] = OUT_T(w[base + i] * OUT_T(float(ys[base + i]) * inv));
+r = OUT_T(float(nrm[j]) * arow[j] - float(nrm[j + half_rd]) * arow[half_rd + j]);
+r = OUT_T(float(nrm[j - half_rd]) * arow[j] + float(nrm[j]) * arow[j - half_rd]);
+const uint base = tid * 4u;
+const T xv = av * sigtab[as_type<ushort>(gv)];

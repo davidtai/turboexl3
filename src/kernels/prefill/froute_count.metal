@@ -1,0 +1,16 @@
+    threadgroup atomic_uint fr_cnt[1024];
+    threadgroup uint fr_pref[32];
+    atomic_store_explicit(&fr_cnt[tid], 0u, memory_order_relaxed);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint i = tid; i < SC; i += 1024u) atomic_fetch_add_explicit(&fr_cnt[uint(inds[i])], 1u, memory_order_relaxed);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const uint fr_n = atomic_load_explicit(&fr_cnt[tid], memory_order_relaxed);
+    const uint fr_incl = simd_prefix_inclusive_sum(fr_n);
+    if (L == 31u) fr_pref[sg] = fr_incl;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (sg == 0u) fr_pref[L] = simd_prefix_exclusive_sum(fr_pref[L]);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    uint lo = fr_pref[sg] + fr_incl - fr_n;
+    atomic_store_explicit(&fr_cnt[tid], lo, memory_order_relaxed);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint i = tid; i < SC; i += 1024u) order[atomic_fetch_add_explicit(&fr_cnt[uint(inds[i])], 1u, memory_order_relaxed)] = i;

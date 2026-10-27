@@ -1,15 +1,19 @@
 //! turboexl3: EXL3 trellis routed experts on Metal, every admitted rate (even n in [16, 128]: K1..K8, fractional
-//! included), both codebooks (MUL1, MCG), every codeword window (8..16), any 16-aligned geometry. Its API is the
-//! `sushi_exl3` module's (lib/sushi, MIT) so a host switches engines by import: `Spec`, `parseExpertQuant`,
+//! included), both codebooks (MUL1, MCG), every codeword window (8..16), any geometry whose widths are multiples of 128.
+//! Its API is the `sushi_exl3` module's (lib/sushi, MIT) so a host switches engines by import: `Spec`, `parseExpertQuant`,
 //! `admitTopK`, `trellisAdmitted`, `Bank{gate,up,down: Proj{trellis,suh,svh}}`, `moe`, `moeWithShared`,
 //! `moeClamped`, `format.Decode`, `kernels.DECODE_ROWS_MAX`. The reference every kernel is held to is `format.project`.
 //!
-//! Status: M2 form 3 / form 5 + M3. `moe` serves decode rows (<= DECODE_ROWS_MAX) through the split-K chain (`decode.Kernels3`,
-//! or form 5 `decode.Kernels5`: the same bytes in three launches with expert-grouped row-slots, MLX_SERVE_TURBOEXL3_DECODE_FORM=5)
-//! and prefill rows through the fused GEMM chain (`prefill.zig`); the clamped (GLM) form still refuses
-//! `error.Exl3EngineNotImplemented`.
+//! Status: `moe` serves decode rows (<= DECODE_ROWS_MAX) through the form `Config.decode_form` names: forms 3, 7, 8 and 9
+//! run form 3's split-K chain (`decode.Kernels3`; 9, the default, in four or five launches), forms 5 and 6 the same bytes
+//! in three or two launches with expert-grouped row-slots (`decode.Kernels5`); prefill rows run the fused GEMM chain
+//! (`prefill.zig`). The clamped (GLM) form still refuses `error.Exl3EngineNotImplemented`. A consumer's choices are one
+//! `Config` (`configure`); the library reads no environment.
 const std = @import("std");
 const mlx = @import("sdk").mlx;
+pub const config = @import("config.zig");
+pub const Config = config.Config;
+pub const configure = config.configure;
 pub const format = @import("format.zig");
 pub const spec = @import("spec.zig");
 pub const lane = @import("lane.zig");
@@ -109,23 +113,22 @@ fn kernelsFor(geo: decode.Geometry, out_dtype: mlx.mlx_dtype) !*decode.Kernels3 
     }
     const i = free_slot orelse return error.Exl3EngineCacheFull;
     // form 3 at 1 output tile per threadgroup (2 f32 accumulators per lane, 4 grouped) and a K partition of 4 slices, expert-grouped
-    // row-slots (2 per lead): the fastest at 4 and 8 rows on the M5 Max, a tie at 1 row. A/B knobs:
-    // MLX_SERVE_TURBOEXL3_BT=2 (two tiles), MLX_SERVE_TURBOEXL3_GROUP=1 (no grouping).
-    var k3 = try decode.Kernels3.initWith(geo, btFromEnv(), 4, groupFromEnv());
+    // row-slots (2 per lead): the fastest at 4 and 8 rows on the M5 Max, a tie at 1 row
+    var k3 = try decode.Kernels3.initWith(geo, 1, 4, 2);
     k3.out_dtype = out_dtype;
+    k3.fused_fin_fold = config.get().fused_fin_fold;
     // the shared expert's gate|up K slices per GEMV threadgroup in `moeFusedShared` (of its 20; a value that does not divide
-    // them runs 1): 4 by default, MLX_SERVE_TURBOEXL3_SHARED_SPT overrides. Launch shape only: the planes, so the bytes, stay.
-    k3.sspt = envU32In("MLX_SERVE_TURBOEXL3_SHARED_SPT", 4, &.{ 1, 2, 4, 5, 10, 20 });
+    // them runs 1). Launch shape only: the planes, so the bytes, stay.
+    k3.sspt = config.get().shared_spt;
     cache[i] = k3;
     return &cache[i].?;
 }
 
-/// MLX_SERVE_TURBOEXL3_SLOT_STATS=1: a diagnostic that reads every decode call's routing back to the host (a sync per layer,
-/// so never on in a timed run) and prints, every 480 calls, how the row-slots of a call repeat experts: the multiplicity
-/// histogram that sizes the grouping (GROUP 2 covers pairs; 3 and 4 would want wider groups) and the decode work a perfect
-/// grouping would save.
+/// `Config.slot_stats`: a diagnostic that reads every decode call's routing back to the host (a sync per layer, so never on in
+/// a timed run) and prints, every 480 calls, how the row-slots of a call repeat experts: the multiplicity histogram that
+/// sizes the grouping (GROUP 2 covers pairs; 3 and 4 would want wider groups) and the decode work a perfect grouping would
+/// save.
 const SlotStats = struct {
-    var state: ?bool = null;
     var calls: u64 = 0;
     var calls_rows: [17]u64 = @splat(0);
     var slots_total: [17]u64 = @splat(0);
@@ -133,11 +136,7 @@ const SlotStats = struct {
     var mult: [17][6]u64 = @splat(@splat(0)); // [rows][multiplicity 1..4, 5+]
 
     fn enabled() bool {
-        if (state) |on| return on;
-        const v = std.c.getenv("MLX_SERVE_TURBOEXL3_SLOT_STATS");
-        const on = v != null and v.?[0] == '1';
-        state = on;
-        return on;
+        return config.get().slot_stats;
     }
 
     fn record(inds: mlx.mlx_array, rows: usize, K: usize) !void {
@@ -200,9 +199,9 @@ fn kernels5For(geo: decode.Geometry, out_dtype: mlx.mlx_dtype) !*decode.Kernels5
         } else if (free_slot == null) free_slot = i;
     }
     const i = free_slot orelse return error.Exl3EngineCacheFull;
-    // form 3's K partition (4 slices), so form 3's bytes; MLX_SERVE_TURBOEXL3_BT5 output tiles per gate|up threadgroup (1, 2,
-    // 4, 8; default 4), MLX_SERVE_TURBOEXL3_GMAX row-slots per expert group (1..4, default 4)
-    var k5 = try decode.Kernels5.init(geo, envU32In("MLX_SERVE_TURBOEXL3_BT5", 4, &.{ 1, 2, 4, 8 }), 4, envU32In("MLX_SERVE_TURBOEXL3_GMAX", 4, &.{ 1, 2, 3, 4 }));
+    // form 3's K partition (4 slices), so form 3's bytes; 4 output tiles per gate|up threadgroup, up to 4 row-slots per
+    // expert group
+    var k5 = try decode.Kernels5.init(geo, 4, 4, 4);
     k5.out_dtype = out_dtype;
     cache5[i] = k5;
     if (!decode_form_logged) {
@@ -213,58 +212,13 @@ fn kernels5For(geo: decode.Geometry, out_dtype: mlx.mlx_dtype) !*decode.Kernels5
 }
 var decode_form_logged = false;
 
-fn envU32In(name: [*:0]const u8, default: u32, allowed: []const u32) u32 {
-    const v = std.c.getenv(name) orelse return default;
-    const n = std.fmt.parseInt(u32, std.mem.span(v), 10) catch return default;
-    for (allowed) |a| if (a == n) return n;
-    return default;
-}
-
 /// The decode form (3, 5, 6 = form 5 with the slot reduce in the down launch, 7 = form 3 with fin / dfin's H128s in registers,
 /// 8 = form 7 with the prepare inside the gate|up launch, 9 = form 8 at one row and form 7 from two; 7, 8 and 9 keep form 3's
-/// bytes): `decode_form_override` (tests), else MLX_SERVE_TURBOEXL3_DECODE_FORM (`decodeFormOf`: default 9); while the file
-/// MLX_SERVE_TURBOEXL3_DECODE_TOGGLE=<path> exists, form 3 (a same-server A/B aid: one access() per decode call).
+/// bytes): `decode_form_override` (tests), else `Config.decode_form`.
 pub var decode_form_override: ?u8 = null;
-var decode_form_env: ?u8 = null;
-var decode_toggle: ?[*:0]const u8 = null;
-var decode_toggle_read = false;
-extern "c" fn access(path: [*:0]const u8, mode: c_int) c_int;
 
 fn decodeForm() u8 {
-    if (decode_form_override) |f| return f;
-    const f = decode_form_env orelse blk: {
-        const form = decodeFormOf(if (std.c.getenv("MLX_SERVE_TURBOEXL3_DECODE_FORM")) |v| std.mem.span(v) else null);
-        decode_form_env = form;
-        break :blk form;
-    };
-    if (f == 3) return f;
-    if (!decode_toggle_read) {
-        decode_toggle_read = true;
-        decode_toggle = std.c.getenv("MLX_SERVE_TURBOEXL3_DECODE_TOGGLE");
-        if (decode_toggle) |t| std.debug.print("[turboexl3] decode form toggle: form 3 while {s} exists\n", .{std.mem.sliceTo(t, 0)});
-    }
-    const t = decode_toggle orelse return f;
-    return if (access(t, 0) == 0) 3 else f;
-}
-
-/// MLX_SERVE_TURBOEXL3_DECODE_FORM's value: "3", "5", "6", "7", "8" or "9" that form; unset, empty or anything else 9 (form
-/// 9's launches carry form 3's bytes in fewer dependent launches).
-pub fn decodeFormOf(raw: ?[]const u8) u8 {
-    const v = raw orelse return 9;
-    if (v.len != 1) return 9;
-    return switch (v[0]) {
-        '3' => 3,
-        '5' => 5,
-        '6' => 6,
-        '7' => 7,
-        '8' => 8,
-        else => 9,
-    };
-}
-
-fn btFromEnv() u32 {
-    const v = std.c.getenv("MLX_SERVE_TURBOEXL3_BT") orelse return 1;
-    return if (v[0] == '2') 2 else 1;
+    return decode_form_override orelse config.get().decode_form;
 }
 
 /// The dense-linear kernels of every (in, out, rate, decode, dtype) this process has served: the trunk of a fully EXL3 model
@@ -289,7 +243,10 @@ fn denseFor(shape: dense.Shape) !*dense.Dense {
 }
 
 /// A dense EXL3 linear: y [..., out] in x's dtype for x [..., in], trellis U16/I16 [in/16, out/16, n], suh F16 [in], svh F16
-/// [out]. Rows up to `kernels.DECODE_ROWS_MAX` take the GEMV kernels, wider calls the dequantize-and-matmul path.
+/// [out]. Rows up to `kernels.DECODE_ROWS_MAX` take the GEMV kernels (DEC-ONE's one launch up to 4 rows), rows 17 to 32
+/// the register-path GEMM (`Config.nax`), wider calls MLX's matmul against the dequantized trellis: decoded per call, or
+/// the W_hat a host's resident table keeps, or the un-rotated W_std it installed (one matmul of x, past 32 rows). The
+/// fused GEMM (`Dense.fused_prefill`) is the tests' arm. dense.zig's module comment has each path.
 pub fn linear(s: mlx.mlx_stream, x: mlx.mlx_array, trellis: mlx.mlx_array, suh: mlx.mlx_array, svh: mlx.mlx_array, dec: format.Decode) !mlx.mlx_array {
     return linearOn(s, s, x, trellis, suh, svh, dec);
 }
@@ -334,8 +291,7 @@ fn linearOn(s: mlx.mlx_stream, rs: mlx.mlx_stream, x: mlx.mlx_array, trellis: ml
     return y;
 }
 
-// ── The un-rotated trunk: the resident trunk out of the Hadamard basis (dense.zig's module comment; the host's
-// MLX_SERVE_EXL3_TRUNK=bf16) ──
+// ── The un-rotated trunk: the resident trunk out of the Hadamard basis (dense.zig's module comment) ──
 
 /// What `trunkUnrot` installed: the groups (and of them the joins), their members and W_std bytes (the W_hat bytes they took
 /// the place of), and the groups that kept their W_hat path.
@@ -570,7 +526,7 @@ pub fn decodeMergeIndexer(s: mlx.mlx_stream, x: mlx.mlx_array, idx: Proj, ep: de
     return r;
 }
 
-/// The fused attention projections (`attn_io.zig`; the host's MLX_SERVE_ATTN_IN / MLX_SERVE_ATTN_OUT).
+/// The fused attention projections (`attn_io.zig`).
 pub const attn_io = @import("attn_io.zig");
 
 /// The `Dense` `linear` would take for one projection of x (in, its dtype), the trellis and suh / svh checked as `linear`
@@ -704,7 +660,7 @@ pub fn linearGatedStd(s: mlx.mlx_stream, attn: mlx.mlx_array, gate: attn_io.Gate
     return y;
 }
 
-// ── `linear` in two pieces around the host's fused GDN norm-gate (the host's MLX_SERVE_GDN_OUT) ──
+// ── `linear` in two pieces around the host's fused GDN norm-gate ──
 // in_proj_z stops at its inner product (`linearInnerSplit`), the host's kernel runs z's finish, the norm-gate and out_proj's
 // prepare in one launch, and out_proj continues from those prepared rows (`linearPrepared`). Each piece is `linear`'s own
 // launches with `linear`'s configs on `linear`'s `Dense`; `linearFinish` and `linearPrep` are the launches left out, for the
@@ -767,7 +723,7 @@ pub fn linearPrep(s: mlx.mlx_stream, x: mlx.mlx_array, p: Proj, dec: format.Deco
     return d.prepare(s, v.x2, p.suh, v.rows);
 }
 
-// ── `linear` of one call split into row pieces (the host's MLX_SERVE_GDN_OVERLAP) ──
+// ── `linear` of one call split into row pieces ──
 // Three steps the host interleaves with its own launches and streams: `linearPiecesBegin` checks that the whole call and
 // every piece take the matmul path (refusing with error.Exl3EngineNotImplemented before any launch) and dequantizes the
 // trellis once; `linearPieceInner` runs one piece's prepare and matmul on the piece's stream (`linearPiecePrepared`: the
@@ -828,65 +784,21 @@ var pf_lock: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
 var pf_cache: [8]?prefill.Prefill = @splat(null);
 var pf_logged: bool = false;
 
-/// The served prefill variant: 128-row tiles with the register path for <= 32-row remainders in one launch (mixed), the
-/// double-buffered weight stage, unrolled MMA sub-steps, the stage in NAX fragment order and the integer-rate reader where the
-/// rate allows it (faster than Sushi's prefill arm at 26.5 and 80 rows per expert; outputs identical across these
-/// options). A/B knobs: MLX_SERVE_TURBOEXL3_PF_BM=64|128|256, MLX_SERVE_TURBOEXL3_PF_SMALL=off|all|mixed and
-/// MLX_SERVE_TURBOEXL3_PF_DBUF / _UNROLL / _FRAGB / _INTR / _DEFER = 0|1. The deferred MUL1 map (faster at small row counts per
-/// expert) multiplies by the exact affine weight A t + C where the reference rounds it to f16 first, as the
-/// decode chain does (MLX_SERVE_TURBOEXL3_DEFER). Down-GEMM A/B knobs (off by default, bytes identical):
-/// MLX_SERVE_TURBOEXL3_PF_DBK128=1 (128-deep K stages, 32 KB of threadgroup memory) and MLX_SERVE_TURBOEXL3_PF_NCB=1|2|4 (output
-/// blocks per threadgroup). MLX_SERVE_TURBOEXL3_PF_SINTR=1 (off by default, bytes identical): the register path (the mixed
-/// launch's <= 32-row tiles, or small=all) reads its codewords with intr's integer-rate reader too.
-/// The GEMMs' A operands in the fragments' slot order per 16-element block (`prefill.Options.alay` 2: one 8-byte load per
-/// fragment row half; MLX_SERVE_TURBOEXL3_PF_ALAY=0|1|2 overrides) and each expert's full 128-row runs in 128-row tiles beside
-/// the mixed launch (`prefill.Options.t128`; MLX_SERVE_TURBOEXL3_PF_T128=0 turns them off): both on by default, bytes
-/// identical.
+/// The served prefill variant: 64-row tiles (bm 64) with the register path for <= 32-row remainders in one launch (mixed),
+/// the double-buffered weight stage, unrolled MMA sub-steps, the stage in NAX fragment order and the integer-rate reader
+/// where the rate allows it (outputs identical across these options). The deferred MUL1 map (faster at small row counts
+/// per expert) multiplies by the exact affine weight A t + C where the reference rounds it to f16 first, as the decode
+/// chain does. The GEMMs' A operands in the fragments' slot order (`Config.pf_alay`) and each expert's full 128-row runs
+/// in 128-row tiles beside the mixed launch (`Config.pf_t128`) give the same bytes either way.
 fn pfOptions() prefill.Options {
     // bm 64: faster than 128 on captured routing at every call size, bytes identical
     // ncb 4: the down GEMM's threadgroups take 4 column blocks each (faster on small calls, neutral on large; bytes identical)
     // sintr: the register path's integer-rate reader (faster at every call size, bytes identical)
     // froute: argsort + table in one launch (one launch fewer, bytes identical)
     var o: prefill.Options = .{ .bm = 64, .small = .mixed, .dbuf = true, .unroll = true, .fragb = true, .intr = true, .defer_affine = true, .ncb = 4, .sintr = true, .froute = true };
-    if (std.c.getenv("MLX_SERVE_TURBOEXL3_PF_BM")) |v| {
-        const k = std.fmt.parseInt(u32, std.mem.span(v), 10) catch 0;
-        if (k == 64 or k == 128 or k == 256) o.bm = k;
-    }
-    if (std.c.getenv("MLX_SERVE_TURBOEXL3_PF_SMALL")) |v| {
-        const m = std.mem.span(v);
-        if (std.mem.eql(u8, m, "off")) o.small = .off;
-        if (std.mem.eql(u8, m, "all")) o.small = .all;
-        if (std.mem.eql(u8, m, "mixed")) o.small = .mixed;
-    }
-    if (std.c.getenv("MLX_SERVE_TURBOEXL3_PF_DBUF")) |v| o.dbuf = v[0] == '1';
-    if (std.c.getenv("MLX_SERVE_TURBOEXL3_PF_UNROLL")) |v| o.unroll = v[0] == '1';
-    if (std.c.getenv("MLX_SERVE_TURBOEXL3_PF_FRAGB")) |v| o.fragb = v[0] == '1';
-    if (std.c.getenv("MLX_SERVE_TURBOEXL3_PF_INTR")) |v| o.intr = v[0] == '1';
-    if (std.c.getenv("MLX_SERVE_TURBOEXL3_PF_SINTR")) |v| o.sintr = v[0] == '1';
-    if (std.c.getenv("MLX_SERVE_TURBOEXL3_PF_FROUTE")) |v| o.froute = v[0] == '1';
-    if (std.c.getenv("MLX_SERVE_TURBOEXL3_PF_AUX")) |v| {
-        const k = std.fmt.parseInt(u8, std.mem.span(v), 10) catch 0;
-        if (k == 0 or k == 4 or k == 8 or k == 16 or k == 32) o.aux = k;
-    }
-    if (std.c.getenv("MLX_SERVE_TURBOEXL3_PF_DEFER")) |v| o.defer_affine = v[0] == '1';
-    if (std.c.getenv("MLX_SERVE_TURBOEXL3_PF_SPLIT")) |v| o.split = if (v[0] == '2') 2 else 1;
-    if (std.c.getenv("MLX_SERVE_TURBOEXL3_PF_DBK128")) |v| o.bk128 = v[0] == '1';
-    if (std.c.getenv("MLX_SERVE_TURBOEXL3_PF_NCB")) |v| {
-        const k = std.fmt.parseInt(u8, std.mem.span(v), 10) catch 0;
-        if (k == 1 or k == 2 or k == 4) o.ncb = k;
-    }
-    o.alay = 2;
-    if (std.c.getenv("MLX_SERVE_TURBOEXL3_PF_ALAY")) |v| if (v[0] != 0) {
-        o.alay = if (v[0] == '1') 1 else if (v[0] == '2') 2 else 0;
-    };
-    o.t128 = pfT128On(if (std.c.getenv("MLX_SERVE_TURBOEXL3_PF_T128")) |v| std.mem.span(v) else null);
+    o.alay = config.get().pf_alay;
+    o.t128 = config.get().pf_t128;
     return o;
-}
-
-/// MLX_SERVE_TURBOEXL3_PF_T128's value: unset, empty or anything but "0" on.
-pub fn pfT128On(raw: ?[]const u8) bool {
-    const v = raw orelse return true;
-    return !std.mem.eql(u8, v, "0");
 }
 
 fn prefillFor(geo: prefill.Geometry) !*prefill.Prefill {
@@ -921,14 +833,9 @@ fn prefillFor(geo: prefill.Geometry) !*prefill.Prefill {
     pf_cache[i] = try prefill.Prefill.init(geo, o);
     if (!pf_logged) {
         pf_logged = true;
-        std.debug.print("[turboexl3] prefill engaged: fused EXL3 GEMM chain (bm={d} dbuf={} unroll={} fragb={} intr={} sintr={} defer={} split={d} small={s} down_bk={d} down_ncb={d} froute={} aux={d} alay={d} t128={}); MLX_SERVE_TURBOEXL3_PREFILL=0 hands prefill rows back to the host\n", .{ o.bm, o.dbuf, o.unroll, o.fragb, o.intr, o.sintr, o.defer_affine, o.split, @tagName(o.small), o.downStage(), o.ncb, o.froute, o.aux, o.alay, o.t128 });
+        std.debug.print("[turboexl3] prefill engaged: fused EXL3 GEMM chain (bm={d} dbuf={} unroll={} fragb={} intr={} sintr={} defer={} split={d} small={s} down_bk={d} down_ncb={d} froute={} aux={d} alay={d} t128={})\n", .{ o.bm, o.dbuf, o.unroll, o.fragb, o.intr, o.sintr, o.defer_affine, o.split, @tagName(o.small), o.downStage(), o.ncb, o.froute, o.aux, o.alay, o.t128 });
     }
     return &pf_cache[i].?;
-}
-
-fn groupFromEnv() u32 {
-    const v = std.c.getenv("MLX_SERVE_TURBOEXL3_GROUP") orelse return 2;
-    return if (v[0] == '1') 1 else 2;
 }
 
 fn freeArr(a: mlx.mlx_array) void {
@@ -936,8 +843,9 @@ fn freeArr(a: mlx.mlx_array) void {
 }
 
 /// Routed SwiGLU experts over `x` [B, S, D] for the top-k `inds`/`scores` [B, S, K], in x's shape and dtype.
-/// Rows up to `kernels.DECODE_ROWS_MAX` take the two-launch decode chain; wider calls refuse
-/// `Exl3EngineNotImplemented` until M3 (the host keeps its prefill arm for them). Gate, up and down must share a rate.
+/// Rows up to `kernels.DECODE_ROWS_MAX` take the decode form `Config.decode_form` names (form 9 by default: four or five
+/// launches); wider calls take the fused prefill chain (`moePrefill`), or refuse `Exl3EngineNotImplemented` when
+/// `Config.prefill` or `Config.nax` is off (the host keeps its prefill arm for them). Gate, up and down must share a rate.
 pub fn moe(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array, scores: mlx.mlx_array, dec: format.Decode, verify_rows: bool) !mlx.mlx_array {
     _ = verify_rows;
     const geo = try validateCall(x, bank, inds, scores);
@@ -947,7 +855,7 @@ pub fn moe(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array,
     const rows: usize = @intCast(rows_c);
     const K: c_int = mlx.getShape(inds)[2];
     if (rows > kernels.DECODE_ROWS_MAX) {
-        if (std.c.getenv("MLX_SERVE_TURBOEXL3_PREFILL")) |v| if (v[0] == '0') return error.Exl3EngineNotImplemented;
+        if (!config.get().prefill or !config.get().nax) return error.Exl3EngineNotImplemented;
         return moePrefill(s, x, bank, inds, scores, dec, geo, rows, K);
     }
     if (SlotStats.enabled()) SlotStats.record(inds, rows, @intCast(K)) catch {};
@@ -992,7 +900,7 @@ pub fn moe(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array,
 
 /// Prefill rows (> DECODE_ROWS_MAX) through the fused chain (`prefill.zig`): sorted by expert, the trellis decoded inside the
 /// GEMMs' weight loader; output in x's shape and dtype.
-/// MLX_SERVE_TURBOEXL3_PF_CAPTURE=<dir>: each prefill call's routing (u32 [rows, K], the slots `moePrefill` reads) written to
+/// `Config.pf_capture_dir`: each prefill call's routing (u32 [rows, K], the slots `moePrefill` reads) written to
 /// <dir>/pf-<call>-r<rows>.u32 for the first 512 calls, so the prefill timing test can replay real routing
 /// (TURBOEXL3_PF_INDS). The eval syncs every call: a capture run, never a timed one.
 const PfCapture = struct {
@@ -1002,13 +910,13 @@ const PfCapture = struct {
     extern "c" fn fclose(f: *anyopaque) c_int;
 
     fn record(inds1: mlx.mlx_array, rows: usize) !void {
-        const dir = std.c.getenv("MLX_SERVE_TURBOEXL3_PF_CAPTURE") orelse return;
+        const dir = config.get().pf_capture_dir orelse return;
         if (calls >= 512) return;
         defer calls += 1;
         try mlx.check(mlx.mlx_array_eval(inds1));
         const n = mlx.mlx_array_size(inds1);
         var path_buf: [512]u8 = undefined;
-        const path = try std.fmt.bufPrintSentinel(&path_buf, "{s}/pf-{d:0>4}-r{d}.u32", .{ std.mem.span(dir), calls, rows }, 0);
+        const path = try std.fmt.bufPrintSentinel(&path_buf, "{s}/pf-{d:0>4}-r{d}.u32", .{ dir, calls, rows }, 0);
         const f = fopen(path, "wb") orelse return error.CaptureOpen;
         defer _ = fclose(f);
         const ptr: *const anyopaque = switch (mlx.mlx_array_dtype(inds1)) {
@@ -1144,8 +1052,8 @@ pub fn moeFusedShared(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx
 }
 var fused_shared_logged = false;
 
-/// `moeFusedShared` with the routing folded into form 9's routed prepare launch (`decode.Kernels3.moeSharedRouted`; the
-/// host's MLX_SERVE_DECC_ROUTE, and MLX_SERVE_DECC_GATE for the shared gate's logit). `logits` [.., rows, E] is the router
+/// `moeFusedShared` with the routing folded into form 9's routed prepare launch (`decode.Kernels3.moeSharedRouted`).
+/// `logits` [.., rows, E] is the router
 /// gemv's output in x's dtype and `k` the experts per token: the top-k and the renormalized softmax weights are the host's
 /// fused router kernel's (softmax mode, `mlxserve_moe_router_softmax`, `decode.text_router_softmax`), computed inside
 /// the launch. `logit` is the shared gate's logit per row as `moeFusedShared` takes it, or null with `gate_vec` the gate's
@@ -1251,6 +1159,7 @@ pub fn moeClamped(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx.mlx
 }
 
 test {
+    _ = config;
     _ = format;
     _ = spec;
     _ = lane;
@@ -1260,23 +1169,13 @@ test {
     _ = prefill;
 }
 
-test "turboexl3 root switches: the decode form defaults to 9 and takes 3, 5, 6, 7, 8; the 128-row prefill tiles are on unless 0" {
+test "turboexl3 root: the served prefill options follow the config, and the decode form is the config's" {
     const t = std.testing;
-    try t.expectEqual(@as(u8, 9), decodeFormOf(null));
-    try t.expectEqual(@as(u8, 9), decodeFormOf(""));
-    try t.expectEqual(@as(u8, 9), decodeFormOf("9"));
-    try t.expectEqual(@as(u8, 9), decodeFormOf("4"));
-    try t.expectEqual(@as(u8, 9), decodeFormOf("33"));
-    for ([_]u8{ 3, 5, 6, 7, 8 }) |f| {
-        const v = [1]u8{'0' + f};
-        try t.expectEqual(f, decodeFormOf(&v));
-    }
-    try t.expect(pfT128On(null) and pfT128On("") and pfT128On("1") and pfT128On("yes"));
-    try t.expect(!pfT128On("0"));
-    // the served prefill options (`pfOptions` without the environment) take the 128-row tiles; the vector-layout prep / mid /
-    // finish and bm 128 do not
-    const o: prefill.Options = .{ .bm = 64, .small = .mixed, .dbuf = true, .unroll = true, .fragb = true, .intr = true, .defer_affine = true, .ncb = 4, .sintr = true, .froute = true, .alay = 2, .t128 = true };
-    try t.expect(o.valid());
+    const saved = config.get().*;
+    defer config.configure(saved) catch unreachable;
+    // the served set takes the 128-row tiles in fragment order; the vector-layout prep / mid / finish and bm 128 do not
+    const o = pfOptions();
+    try t.expect(o.valid() and o.t128 and o.alay == 2 and o.bm == 64);
     var v = o;
     v.bm = 128;
     try t.expect(!v.valid());
@@ -1284,4 +1183,11 @@ test "turboexl3 root switches: the decode form defaults to 9 and takes 3, 5, 6, 
     v.alay = 0;
     v.aux = 8;
     try t.expect(!v.valid());
+    try config.configure(.{ .pf_alay = 0, .pf_t128 = false, .decode_form = 5 });
+    const p = pfOptions();
+    try t.expect(p.alay == 0 and !p.t128);
+    try t.expectEqual(@as(u8, 5), decodeForm());
+    decode_form_override = 3;
+    defer decode_form_override = null;
+    try t.expectEqual(@as(u8, 3), decodeForm());
 }

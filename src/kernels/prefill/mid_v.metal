@@ -1,0 +1,31 @@
+    constexpr uint IC = uint(INTER);
+    constexpr uint NBC = IC / 128u;
+    constexpr float HAD_SCALE = 0.08838834764831845f;
+    const uint L = thread_index_in_simdgroup;
+    const uint w = threadgroup_position_in_grid.x * uint(ASG) + simdgroup_index_in_threadgroup;
+    if (w >= uint(order_shape[0]) * NBC) return;
+    const uint p = w / NBC;
+    const uint b = w - p * NBC;
+    const uint e = uint(inds[order[p]]);
+    const uint i0 = b * 128u + 4u * L;
+    const half4 zg4 = *reinterpret_cast<const device half4*>(zg + ulong(p) * IC + i0);
+    const half4 zu4 = *reinterpret_cast<const device half4*>(zu + ulong(p) * IC + i0);
+    float g[4] = {float(zg4[0]), float(zg4[1]), float(zg4[2]), float(zg4[3])};
+    float u[4] = {float(zu4[0]), float(zu4[1]), float(zu4[2]), float(zu4[3])};
+    turboexl3_h128v4(g, L);
+    turboexl3_h128v4(u, L);
+    const half4 vg4 = *reinterpret_cast<const device half4*>(svh_g + ulong(e) * IC + i0);
+    const half4 vu4 = *reinterpret_cast<const device half4*>(svh_u + ulong(e) * IC + i0);
+    const half4 sd4 = *reinterpret_cast<const device half4*>(suh_d + ulong(e) * IC + i0);
+    float d[4];
+    for (uint j = 0; j < 4u; ++j) {
+        const float gg = float(half(g[j] * HAD_SCALE * float(vg4[j])));
+        const float uu = float(half(u[j] * HAD_SCALE * float(vu4[j])));
+        const float h = (gg / (1.0f + metal::precise::exp(-gg))) * uu;
+        d[j] = float(half(h)) * float(sd4[j]);
+    }
+    turboexl3_h128v4(d, L);
+    const half4 hd = half4(half(d[0] * HAD_SCALE), half(d[1] * HAD_SCALE), half(d[2] * HAD_SCALE), half(d[3] * HAD_SCALE));
+    *reinterpret_cast<device half4*>(xd + ulong(p) * IC + i0) = hd;
+    const float sd = turboexl3_sum_x4<int(XSO)>(hd, L);
+    if (L == 0u) xsd[ulong(p) * NBC + b] = sd;

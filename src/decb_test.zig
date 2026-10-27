@@ -183,7 +183,7 @@ test "turboexl3 gpu decode merges: o_proj's prepare inside the gate kernel and i
     const merge_ins = [_][*:0]const u8{ "pacc", "pml" };
     const merge_outs = [_][*:0]const u8{"out"};
     const ref_merge = ks.newKernel("turboexl3_test_qmerge", &merge_ins, &merge_outs, merge_src, "", false) orelse return error.KernelCreateFailed;
-    defer _ = mlx.mlx_fast_metal_kernel_free(ref_merge);
+    defer decode.freeKernel(ref_merge);
     var tally: Tally = .{};
     for ([_]u32{ 112, 80 }) |n| {
         const o = try decbProj(a, &g, rnd, HQ * HD, HIDDEN, n);
@@ -191,7 +191,8 @@ test "turboexl3 gpu decode merges: o_proj's prepare inside the gate kernel and i
         const geo: dense.Shape = .{ .in = HQ * HD, .out = HIDDEN, .rate = format.Rate.fromN(n).?, .dec = .mul1, .out_dtype = .bfloat16 };
         var dref = try decbDense(geo, .chain);
         defer dref.deinit();
-        for ([_]u32{ 1, 2, 3, 4, 8, 16 }) |rows| {
+        // 5, 6 and 9 rows besides 8 and 16: DEC-ONE's tilings past 4 rows under a cap of 5 (one chunk, 3 + 3, 5 + 4)
+        for ([_]u32{ 1, 2, 3, 4, 5, 6, 8, 9, 16 }) |rows| {
             const mark = g.mark();
             defer g.resetTo(mark);
             const r = ci(rows);
@@ -286,7 +287,8 @@ test "turboexl3 gpu decode merges: q_proj's finish writing the query and gate pl
         const geo: dense.Shape = .{ .in = HIDDEN, .out = 2 * HQ * HD, .rate = format.Rate.fromN(n).?, .dec = .mul1, .out_dtype = .bfloat16 };
         var dref = try decbDense(geo, .chain);
         defer dref.deinit();
-        for ([_]u32{ 1, 2, 3, 4, 8, 16 }) |rows| {
+        // 5, 6 and 9 rows besides 8 and 16: DEC-ONE's tilings past 4 rows under a cap of 5 (one chunk, 3 + 3, 5 + 4)
+        for ([_]u32{ 1, 2, 3, 4, 5, 6, 8, 9, 16 }) |rows| {
             const mark = g.mark();
             defer g.resetTo(mark);
             const r = ci(rows);
@@ -345,7 +347,8 @@ test "turboexl3 gpu decode merges: the indexer projection's finish normalizing a
     const cases = [_]Case{
         .{ .rows = 4, .ln = 0, .offset = 16384 }, .{ .rows = 4, .ln = 1, .offset = 16385 }, .{ .rows = 4, .ln = 2, .offset = 16386 }, .{ .rows = 4, .ln = 3, .offset = 2051 },
         .{ .rows = 1, .ln = 3, .offset = 16387 }, .{ .rows = 2, .ln = 2, .offset = 16386 }, .{ .rows = 2, .ln = 3, .offset = 9999 },  .{ .rows = 3, .ln = 1, .offset = 16385 },
-        .{ .rows = 3, .ln = 3, .offset = 16387 }, .{ .rows = 8, .ln = 0, .offset = 4096 },  .{ .rows = 16, .ln = 2, .offset = 30 },
+        .{ .rows = 3, .ln = 3, .offset = 16387 }, .{ .rows = 8, .ln = 0, .offset = 4096 },  .{ .rows = 16, .ln = 2, .offset = 30 },   .{ .rows = 5, .ln = 0, .offset = 16388 },
+        .{ .rows = 6, .ln = 2, .offset = 777 },   .{ .rows = 9, .ln = 1, .offset = 16389 },
     };
     for ([_]u32{ 80, 112 }) |n| {
         const p = try decbProj(a, &g, rnd, HIDDEN, OUTI, n);

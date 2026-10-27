@@ -1,0 +1,14 @@
+    constexpr uint EC = uint(EXP);
+    constexpr uint BMC = uint(BMT);
+    constexpr uint SR = 32u * uint(SPL);
+    const uint SC = uint(inds_shape[0]);
+    const uint TBIG = (SC + BMC - 1u) / BMC + EC;
+    const uint TALL = TBIG + uint(SPL) * EC;
+    const uint tid = thread_index_in_threadgroup;
+    const uint sg = simdgroup_index_in_threadgroup;
+    const uint L = thread_index_in_simdgroup;
+    threadgroup uint lo_s[1025];
+    threadgroup uint prefb[32];
+    threadgroup uint prefs[32];
+    threadgroup uint totb_s;
+    threadgroup uint tots_s;

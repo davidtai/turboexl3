@@ -1,7 +1,8 @@
 //! turboexl3 as a package: one module, `turboexl3` (src/root.zig). Its files import `std` and one module the consumer
 //! supplies, `sdk`: a namespace with `mlx` (mlx-c's bindings plus `check`, `getShape` and `streamIsGpu`) and `kernel_launch`
 //! (MLX custom Metal kernels and their launches: `newKernel`, `Launch`, `TemplateArg`, `buildConfig`, `applyConfig`).
-//! README.md describes both; CONSUMING.md shows the wiring mlx-stream uses.
+//! README.md describes both; CONSUMING.md gives what every consumer supplies (the `sdk` module) and how the quant plugin
+//! in plugin/, the recommended consumer, builds turboexl3 in.
 //!
 //!     const t3 = b.dependency("turboexl3", .{ .target = target, .optimize = optimize }).module("turboexl3");
 //!     t3.addImport("sdk", sdk);

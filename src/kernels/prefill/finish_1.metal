@@ -1,0 +1,12 @@
+    constexpr uint HC = uint(HID);
+    constexpr uint TOPKC = uint(TOPK);
+    constexpr uint BPTC = uint(BPT);
+    constexpr float HAD_SCALE = 0.08838834764831845f;
+    const uint b = threadgroup_position_in_grid.x * BPTC + simdgroup_index_in_threadgroup;
+    const uint r = threadgroup_position_in_grid.y;
+    const uint L = thread_index_in_simdgroup;
+    float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    for (uint k = 0; k < TOPKC; ++k) {
+        const uint src = r * TOPKC + k;
+        const uint p = inv[src];
+        const uint e = uint(inds[src]);

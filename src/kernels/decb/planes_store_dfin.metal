@@ -1,0 +1,1 @@
+    for (uint j = 0; j < 4u; ++j) { const uint o = b * 128u + L + 32u * j; const OUT_T yv = OUT_T(float(half(v[j] * HAD_SCALE * float(svh[o])))); const uint hh = o / uint(PW); const uint c = o - hh * uint(PW); device OUT_T* dstp = (c < uint(PH)) ? yq : yg; dstp[(ulong(row) * uint(NHP) + hh) * uint(PH) + (c % uint(PH))] = yv; }

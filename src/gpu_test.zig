@@ -196,7 +196,7 @@ test "turboexl3 gpu: the two-launch decode chain equals the host reference at ev
 
 // The host's path: `root.moe` on a bf16 x [1, rows, D], i32 inds [1, rows, K] and bf16 scores, output in x's dtype.
 // The routed bank (10 of 12 experts at K5) and the host's shared expert as a one-expert bank (top-1 at K7, every row on expert
-// 0: MLX_SERVE_EXL3_SHARED_MOE's call).
+// 0).
 test "turboexl3 gpu: root.moe (the sushi_exl3-shaped entry) equals the reference through the bf16 host operands (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
     const s = mlx.mlx_default_gpu_stream_new();
@@ -282,10 +282,10 @@ test "turboexl3 gpu: dense.linear equals format.project per row at the trunk's r
     };
     // 1..5, 8: one chunk of the multi-row GEMV at every RB it serves; 9 and 16: two chunks (a partial one at 9); 17, 31, 32:
     // the register-path GEMM (one partial or full 32-row tile); 40, 129, 200: prefill (dequantize + matmul at the default
-    // small_rows; MLX_SERVE_TURBOEXL3_DENSE_PREFILL=fused: the fused GEMM, one partial 64-row tile or several plus a partial)
+    // small_rows; `fused_prefill`: the fused GEMM, one partial 64-row tile or several plus a partial)
     const row_counts = [_]u32{ 1, 2, 3, 4, 5, 8, 9, 16, 17, 31, 32, 40, 129, 200 };
-    // the trunk's widest GEMV shapes (a GDN qkv in-projection, an out-projection: the K splits MLX_SERVE_TURBOEXL3_DENSE_PERMAX
-    // changes) at decode and verify widths only, so the host reference stays seconds
+    // the trunk's widest GEMV shapes (a GDN qkv in-projection, an out-projection: the deepest K splits) at decode and verify
+    // widths only, so the host reference stays seconds
     const big = [_]Shape{ .{ .in = 2560, .out = 10240, .n = 112, .dec = .mul1 }, .{ .in = 6144, .out = 2560, .n = 112, .dec = .mul1 } };
     const big_rows = [_]u32{ 1, 3, 4, 9 };
     for (shapes ++ big, 0..) |sh, si| {
@@ -606,6 +606,7 @@ test "turboexl3 gpu: dense multi-row GEMV, a row's bytes are the same alone and 
     defer g.deinit();
     const dense = @import("dense.zig");
     const Shape = struct { in: u32, out: u32, n: u32 };
+    var checks: usize = 0;
     for ([_]Shape{ .{ .in = 2560, .out = 640, .n = 112 }, .{ .in = 640, .out = 2560, .n = 96 }, .{ .in = 2560, .out = 10240, .n = 112 }, .{ .in = 6144, .out = 2560, .n = 112 } }) |sh| {
         var prng = std.Random.DefaultPrng.init(0xB17E ^ sh.out);
         const rnd = prng.random();
@@ -633,9 +634,16 @@ test "turboexl3 gpu: dense multi-row GEMV, a row's bytes are the same alone and 
             const y = try g.adopt(try d.linear(s, xr, trellis, suh, svh, 1));
             _ = try g.hostF32(y, alone[r * sh.out ..][0..sh.out]);
         }
-        for ([_]u32{ 2, 3, 4, 5, 8, 9, 16 }) |rows| {
+        // the chain on text_dgemv (cap 5) and on the lean text past 5 rows (cap 8), a Dense each (the configs cache per Dense)
+        var dl = try dense.Dense.init(.{ .in = sh.in, .out = sh.out, .rate = rate, .dec = .mul1, .out_dtype = .float32 });
+        defer dl.deinit();
+        dl.rowslot = false;
+        dl.dec_on = false;
+        dl.lean = true;
+        d.lean = false;
+        for ([_]*dense.Dense{ &d, &dl }) |dd| for ([_]u32{ 2, 3, 4, 5, 6, 7, 8, 9, 11, 16 }) |rows| {
             const xr = try g.hostArray(std.mem.sliceAsBytes(x[0 .. rows * sh.in]), &.{ ci(rows), ci(sh.in) }, .float32);
-            const y = try g.adopt(try d.linear(s, xr, trellis, suh, svh, rows));
+            const y = try g.adopt(try dd.linear(s, xr, trellis, suh, svh, rows));
             const got = try a.alloc(f32, rows * sh.out);
             defer a.free(got);
             _ = try g.hostF32(y, got);
@@ -643,13 +651,17 @@ test "turboexl3 gpu: dense multi-row GEMV, a row's bytes are the same alone and 
             for (got, alone[0 .. rows * sh.out]) |p, q| {
                 if (@as(u32, @bitCast(p)) != @as(u32, @bitCast(q))) diff += 1;
             }
-            std.debug.print("TURBOEXL3_ROWBYTES dense in={d} out={d} n={d} ks={d} rows={d} differing={d}/{d} {s}\n", .{ sh.in, sh.out, sh.n, d.ks_split, rows, diff, got.len, if (diff == 0) "PASS" else "FAIL" });
+            const rb = dd.chainRb(rows);
+            std.debug.print("TURBOEXL3_ROWBYTES dense in={d} out={d} n={d} ks={d} rows={d} rb={d} lean={} differing={d}/{d} {s}\n", .{ sh.in, sh.out, sh.n, d.ks_split, rows, rb, dd.leanFor(rb), diff, got.len, if (diff == 0) "PASS" else "FAIL" });
             try testing.expectEqual(@as(usize, 0), diff);
-        }
+            checks += 1;
+        };
     }
+    // reached only when every check passed (each failure returns above)
+    std.debug.print("TURBOEXL3_ROWBYTES_DONE checks={d} PASS\n", .{checks});
 }
 
-// Two streams (the host's MLX_SERVE_SIDE_STREAM=gdnz): the dense linear split across two MLX streams, the prepare on the first
+// Two streams (a host's side stream): the dense linear split across two MLX streams, the prepare on the first
 // and the prefill rows' inner product and finish on the second, records the same launches on the same operands, so its bytes
 // are the one-stream bytes. Both results are built before one eval, so the second queue runs beside the first. Prefill rows
 // (8192, 1328, 40) cross the streams on both inner products (dequantize + matmul, the default; the fused GEMM); register-path
@@ -760,7 +772,7 @@ test "turboexl3 gpu: dense timing, multi-row vs row-slot vs affine q8 (TURBOEXL3
     // TURBOEXL3_DENSE_TIME_TAIL=1: the snapshot tail's row counts, arm 0 = the register-path GEMM, arm 1 = dequantize + matmul
     const tail = std.c.getenv("TURBOEXL3_DENSE_TIME_TAIL") != null;
     const prefill = tail or std.c.getenv("TURBOEXL3_DENSE_TIME_PREFILL") != null;
-    const row_counts: []const u32 = if (tail) &.{ 17, 24, 31, 32, 48, 64, 96, 128 } else if (prefill) &.{ 1359, 4096, 8192 } else &.{ 1, 2, 3, 4, 5, 8 };
+    const row_counts: []const u32 = if (tail) &.{ 17, 24, 31, 32, 48, 64, 96, 128 } else if (prefill) &.{ 1359, 4096, 8192 } else &.{ 1, 2, 3, 4, 5, 6, 7, 8 };
     const calls = 16;
     for (shapes) |sh| {
         var prng = std.Random.DefaultPrng.init(0x7173 ^ sh.out);
@@ -878,18 +890,21 @@ test "turboexl3 gpu: dense timing, multi-row vs row-slot vs affine q8 (TURBOEXL3
                 std.debug.print("TURBOEXL3_DENSE_PF_TIME {s} in={d} out={d} n={d} rows={d} bm={d} defer={} fused_us={d:.1} dequant_matmul_us={d:.1} q8_us={d:.1} fused_vs_dequant={d:.2}x fused_vs_q8={d:.2}x fused_tflops={d:.1} dequant_tflops={d:.1}\n", .{
                     sh.name, sh.in, sh.out, sh.n, rows, multi.pf.bm, multi.pf.defer_affine, med[0], med[1], med[2], med[1] / med[0], med[2] / med[0], tflops / med[0], tflops / med[1],
                 });
-            } else std.debug.print("TURBOEXL3_DENSE_TIME {s} in={d} out={d} n={d} ks={d} rows={d} multi_us={d:.1} rowslot_us={d:.1} q8_us={d:.1} multi_vs_rowslot={d:.2}x multi_vs_q8={d:.2}x\n", .{
-                sh.name, sh.in, sh.out, sh.n, multi.ks_split, rows, med[0], med[1], med[2], med[1] / med[0], med[2] / med[0],
+            } else std.debug.print("TURBOEXL3_DENSE_TIME {s} in={d} out={d} n={d} ks={d} rows={d} multi_us={d:.1} rowslot_us={d:.1} q8_us={d:.1} multi_vs_rowslot={d:.2}x multi_vs_q8={d:.2}x rb={d} lean={}\n", .{
+                sh.name, sh.in, sh.out, sh.n, multi.ks_split, rows, med[0], med[1], med[2], med[1] / med[0], med[2] / med[0], multi.chainRb(rows), multi.leanFor(multi.chainRb(rows)),
             });
         }
     }
 }
 
-// DEC-ONE (MLX_SERVE_DEC_ONE, on by default): the dense linear at decode rows in one GEMV launch (the finish in each output
+// DEC-ONE (`Config.dec_one`, on by default): the dense linear at decode rows in one GEMV launch (the finish in each output
 // block's last-arriving threadgroup, the prepare inside the launch or in its own) must give the three-launch chain's bytes.
-// The dense timing list's trunk shapes at their rates, rows 1-4 (the verify widths) and 8 (two row chunks), both prepare
-// placements, the deferred MUL1 map on and off, bf16 operands (served) and f32, and one MCG case; every check against the
-// chain (DEC-ONE off) on the same inputs, plus each row alone against itself among the call's rows.
+// The dense timing list's trunk shapes at their rates, rows 1-9, 11 and 16, both prepare placements, the deferred MUL1 map
+// on and off, bf16 operands (served) and f32, and one MCG case; every check against the chain (DEC-ONE off) on the same
+// inputs: the chain on the lean text past 5 rows (cap 8: 6-8 rows one chunk, 9 = 5 + 4, 11 = 6 + 5, 16 = 8 + 8) and on
+// text_dgemv (cap 5: 6 = 3 + 3, 7 = 4 + 3, 11 = 4 + 4 + 3, 16 = 4 x 4), DEC-ONE at text_dgemv's cap. And every row of every
+// call against the same row alone (a 1-row DEC-ONE call on it, once per variant): a row's bytes depend neither on the rows
+// beside it, nor on how the call's rows are cut into chunks, nor on which GEMV text ran them.
 test "turboexl3 gpu: the one-launch decode linear (DEC-ONE) equals the three-launch chain byte for byte (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
     const s = mlx.mlx_default_gpu_stream_new();
@@ -915,7 +930,7 @@ test "turboexl3 gpu: the one-launch decode linear (DEC-ONE) equals the three-lau
     };
     const Variant = struct { defer_affine: bool, bf16: bool };
     const variants = [_]Variant{ .{ .defer_affine = true, .bf16 = true }, .{ .defer_affine = true, .bf16 = false }, .{ .defer_affine = false, .bf16 = true } };
-    const row_set = [_]u32{ 1, 2, 3, 4, 8 };
+    const row_set = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 16 };
     var failed = false;
     var checks: usize = 0;
     for (shapes) |sh| {
@@ -936,7 +951,7 @@ test "turboexl3 gpu: the one-launch decode linear (DEC-ONE) equals the three-lau
         const trellis = try g.hostArray(std.mem.sliceAsBytes(tw), &.{ ci(sh.in / 16), ci(sh.out / 16), ci(sh.n) }, .uint16);
         const suh = try g.hostArray(std.mem.sliceAsBytes(su), &.{ci(sh.in)}, .float16);
         const svh = try g.hostArray(std.mem.sliceAsBytes(sv), &.{ci(sh.out)}, .float16);
-        const max_rows: u32 = 8;
+        const max_rows: u32 = 16;
         const xf = try a.alloc(f32, max_rows * sh.in);
         defer a.free(xf);
         for (xf) |*v| v.* = rnd.floatNorm(f32);
@@ -946,48 +961,59 @@ test "turboexl3 gpu: the one-launch decode linear (DEC-ONE) equals the three-lau
             const geo: dense.Shape = .{ .in = sh.in, .out = sh.out, .rate = rate, .dec = sh.dec, .out_dtype = dt };
             var dref = try dense.Dense.init(geo);
             defer dref.deinit();
+            var dplain = try dense.Dense.init(geo);
+            defer dplain.deinit();
             var din = try dense.Dense.init(geo);
             defer din.deinit();
             var dout = try dense.Dense.init(geo);
             defer dout.deinit();
-            for ([_]*dense.Dense{ &dref, &din, &dout }) |d| {
+            for ([_]*dense.Dense{ &dref, &dplain, &din, &dout }) |d| {
                 d.rowslot = false;
                 d.defer_affine = v.defer_affine;
                 d.dec_rows = @intCast(decode.Kernels.max_rows);
             }
             dref.dec_on = false;
+            dref.lean = true;
+            dplain.dec_on = false;
+            dplain.lean = false;
             din.dec_on = true;
             din.dec_prep_rows = @intCast(decode.Kernels.max_rows);
             dout.dec_on = true;
             dout.dec_prep_rows = 0;
             dout.dec_prep_out = 0;
+            // each row alone: a 1-row DEC-ONE call on x's row r (one chunk of one row, whatever the row cap)
             const alone = try a.alloc(f32, max_rows * sh.out);
             defer a.free(alone);
+            for (0..max_rows) |r| {
+                const xr = try g.astype(try g.hostArray(std.mem.sliceAsBytes(xf[r * sh.in ..][0..sh.in]), &.{ 1, ci(sh.in) }, .float32), dt);
+                const y = try g.adopt(try din.linear(s, xr, trellis, suh, svh, 1));
+                _ = try g.hostF32(try g.astype(y, .float32), alone[r * sh.out ..][0..sh.out]);
+            }
             for (row_set) |rows| {
                 const x = try g.astype(try g.hostArray(std.mem.sliceAsBytes(xf[0 .. rows * sh.in]), &.{ ci(rows), ci(sh.in) }, .float32), dt);
                 const n_out = rows * sh.out;
-                const got = try a.alloc(f32, 3 * n_out);
+                const got = try a.alloc(f32, 4 * n_out);
                 defer a.free(got);
-                for ([_]*dense.Dense{ &dref, &din, &dout }, 0..) |d, k| {
+                for ([_]*dense.Dense{ &dref, &din, &dout, &dplain }, 0..) |d, k| {
                     const y = try g.adopt(try d.linear(s, x, trellis, suh, svh, rows));
                     _ = try g.hostF32(try g.astype(y, .float32), got[k * n_out ..][0..n_out]);
                 }
-                // row 0 alone through DEC-ONE: the row's bytes do not depend on the rows beside it
-                if (rows == 1) @memcpy(alone[0..sh.out], got[n_out .. 2 * n_out]);
                 const prep_in = try din.decPrepInside(rows);
-                for ([_][]const u8{ "inside", "own_launch" }, 1..) |arm, k| {
+                // each arm against the chain (on the chain's own line, 0 by construction) and every row against that row alone
+                for ([_][]const u8{ "chain", "inside", "own_launch", "chain_plain" }, 0..) |arm, k| {
                     var diff: usize = 0;
                     for (got[k * n_out ..][0..n_out], got[0..n_out]) |p, q| {
                         if (@as(u32, @bitCast(p)) != @as(u32, @bitCast(q))) diff += 1;
                     }
                     var diff_alone: usize = 0;
-                    for (got[k * n_out ..][0..sh.out], alone[0..sh.out]) |p, q| {
+                    for (got[k * n_out ..][0..n_out], alone[0..n_out]) |p, q| {
                         if (@as(u32, @bitCast(p)) != @as(u32, @bitCast(q))) diff_alone += 1;
                     }
                     const ok = diff == 0 and diff_alone == 0;
                     checks += 1;
-                    std.debug.print("TURBOEXL3_DEC_BYTES {s} in={d} out={d} n={d} cb={s} ks={d} rows={d} defer={} bf16={} prepare={s}{s} differing={d}/{d} row0_vs_alone={d} {s}\n", .{
-                        sh.name, sh.in, sh.out, sh.n, @tagName(sh.dec.codebook), dref.ks_split, rows, v.defer_affine, v.bf16, arm, if (k == 1 and !prep_in) "(did_not_fit:own_launch)" else "", diff, n_out, diff_alone, if (ok) "PASS" else "FAIL",
+                    const crb = if (k == 0) dref.chainRb(rows) else if (k == 3) dplain.chainRb(rows) else dense.Dense.rbFor(rows);
+                    std.debug.print("TURBOEXL3_DEC_BYTES {s} in={d} out={d} n={d} cb={s} ks={d} rows={d} rb={d} lean={} defer={} bf16={} prepare={s}{s} differing={d}/{d} rows_vs_alone={d}/{d} {s}\n", .{
+                        sh.name, sh.in, sh.out, sh.n, @tagName(sh.dec.codebook), dref.ks_split, rows, crb, k == 0 and dref.leanFor(crb), v.defer_affine, v.bf16, arm, if (k == 1 and !prep_in) "(did_not_fit:own_launch)" else "", diff, n_out, diff_alone, n_out, if (ok) "PASS" else "FAIL",
                     });
                     if (!ok) failed = true;
                 }
@@ -1100,19 +1126,12 @@ test "turboexl3 gpu: decode chain (form 3), a row's bytes are the same alone and
 }
 
 // The host's SwiGLU kernel (transformer.zig SWIGLU_SOURCE, verbatim): the reference for the fused shared expert's SwiGLU.
-const host_swiglu_source =
-    \\uint i = thread_position_in_grid.x;
-    \\if (i >= uint(N_size)) return;
-    \\T g = gate[i];
-    \\T sig = sigtab[as_type<ushort>(g)];
-    \\// mlx Multiply (binary_ops.h), twice: silu(g) = g * sigmoid(g), then * up.
-    \\T act = g * sig;
-    \\y[i] = act * up[i];
-;
+const host_swiglu_source = @embedFile("kernels/test/host_swiglu.metal");
 
-// The gated shared expert inside form 9's launches (`moeShared`), in launches of its own beside them (`moeSharedSide`) and
-// through the v2 heads, against the host's chain: form 3, the shared gate / up / down linears (the three-launch chain), the
-// table SwiGLU and MLX's Sigmoid, Multiply and Add; rows 1..4, both routed MUL1 decodes, form 9's tiles 1 and 2.
+// The gated shared expert inside form 9's launches (`moeShared`, with the fold of fin7s into gu3s past gu8_rows and
+// without), in launches of its own beside them (`moeSharedSide`) and through the v2 heads, against the host's chain: form
+// 3, the shared gate / up / down linears (the three-launch chain), the table SwiGLU and MLX's Sigmoid, Multiply and Add;
+// rows 1..4, both routed MUL1 decodes, form 9's tiles 1 and 2. Ends with TURBOEXL3_SHARED_BYTES_DONE.
 test "turboexl3 gpu: the shared expert fused into form 9's launches equals the host's chain byte for byte (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
     const s = mlx.mlx_default_gpu_stream_new();
@@ -1212,8 +1231,9 @@ test "turboexl3 gpu: the shared expert fused into form 9's launches equals the h
     dg.dec_on = false;
     dd.dec_on = false;
     const swiglu = ks.newKernel("turboexl3_test_host_swiglu", &.{ "gate", "up", "sigtab", "N_size" }, &.{"y"}, host_swiglu_source, "", true) orelse return error.KernelCreateFailed;
-    defer _ = mlx.mlx_fast_metal_kernel_free(swiglu);
+    defer decode.freeKernel(swiglu);
     var failed = false;
+    var checks: usize = 0;
     for ([_]bool{ true, false }) |defer_affine| for ([_]u32{ 1, 2 }) |bt9| {
         var kref = try decode.Kernels3.initWith(geo, 1, 4, 2);
         defer kref.deinit();
@@ -1285,12 +1305,16 @@ test "turboexl3 gpu: the shared expert fused into form 9's launches equals the h
             _ = try g.hostF32(try g.astype(want_a, .float32), want);
             const got = try a.alloc(f32, rows * hidden);
             defer a.free(got);
-            // inside the routed launches (`moeShared`) and in launches of their own beside them (`moeSharedSide`), K slices per
-            // shared GEMV threadgroup (gate|up, down): one each, root.zig's served 4 and 1, and 5 each (a launch shape: the
-            // planes, so the bytes, must not change)
-            for ([_][2]u32{ .{ 1, 1 }, .{ 4, 1 }, .{ 5, 5 } }) |sp| for ([_]bool{ false, true }) |side| {
+            // inside the routed launches (`moeShared`: gu3sf past gu8_rows, "inside_nofold" its gu3s + fin7s) and in
+            // launches of their own beside them (`moeSharedSide`), K slices per shared GEMV threadgroup (gate|up, down): one
+            // each, root.zig's served 4 and 1, and 5 each (a launch shape: the planes, so the bytes, must not change; the
+            // shared arrivals per block change with it: 160, 40, 32 at bt9 2)
+            for ([_][2]u32{ .{ 1, 1 }, .{ 4, 1 }, .{ 5, 5 } }) |sp| for ([_]u8{ 0, 1, 2 }) |mode| {
+                const side = mode == 2;
                 k3.sspt = sp[0];
                 k3.ssptd = sp[1];
+                k3.fused_fin_fold = mode == 0;
+                defer k3.fused_fin_fold = true;
                 const got_a = try g.adopt(if (side) try k3.moeSharedSide(s, xb, sb_, wb, arrays, rows, sb2) else try k3.moeShared(s, xb, sb_, wb, arrays, rows, sb2));
                 _ = try g.hostF32(try g.astype(got_a, .float32), got);
                 var diff: usize = 0;
@@ -1298,7 +1322,8 @@ test "turboexl3 gpu: the shared expert fused into form 9's launches equals the h
                     if (@as(u32, @bitCast(p)) != @as(u32, @bitCast(q))) diff += 1;
                 }
                 const e = ref.compare(got, want);
-                std.debug.print("TURBOEXL3_SHARED_BYTES mode={s} spt={d} sptd={d} routed_defer={} bt9={d} rows={d} ks_gu={d} ks_dn={d} differing={d}/{d} max_abs_over_rms={e:.2} {s}\n", .{ if (side) "side" else "inside", sp[0], sp[1], defer_affine, bt9, rows, sbank.ks_gu, sbank.ks_dn, diff, got.len, e.max_ratio, if (diff == 0) "PASS" else "FAIL" });
+                checks += 1;
+                std.debug.print("TURBOEXL3_SHARED_BYTES mode={s} folded={} spt={d} sptd={d} routed_defer={} bt9={d} rows={d} ks_gu={d} ks_dn={d} differing={d}/{d} max_abs_over_rms={e:.2} {s}\n", .{ if (side) "side" else if (mode == 0) "inside" else "inside_nofold", mode == 0 and rows > k3.gu8_rows, sp[0], sp[1], defer_affine, bt9, rows, sbank.ks_gu, sbank.ks_dn, diff, got.len, e.max_ratio, if (diff == 0) "PASS" else "FAIL" });
                 if (diff != 0) failed = true;
             };
             // the v2 heads (`moeShared2` / `moeSharedSide2`) through every launch-shape knob's code path: output tiles
@@ -1341,6 +1366,7 @@ test "turboexl3 gpu: the shared expert fused into form 9's launches equals the h
                 }
                 const e = ref.compare(got, want);
                 const ran = k3.sharedTiles(rows);
+                checks += 1;
                 std.debug.print("TURBOEXL3_SHARED_BYTES mode={s} ots={d} otsd={d} ots_run={d} otsd_run={d} prep={} lm={} pre={d} first={} gu8_rows={d} routed_defer={} bt9={d} rows={d} ks_gu={d} ks_dn={d} differing={d}/{d} max_abs_over_rms={e:.2} {s}\n", .{ if (side) "side2" else "inside2", v.ots, v.otsd, ran[0], ran[1], v.prep, v.lm, v.pre, v.first, v.gu8r, defer_affine, bt9, rows, sbank.ks_gu, sbank.ks_dn, diff, got.len, e.max_ratio, if (diff == 0) "PASS" else "FAIL" });
                 if (diff != 0) failed = true;
             };
@@ -1348,6 +1374,7 @@ test "turboexl3 gpu: the shared expert fused into form 9's launches equals the h
             k3.gu8_rows = 1;
         }
     };
+    std.debug.print("TURBOEXL3_SHARED_BYTES_DONE checks={d} {s}\n", .{ checks, if (failed) "FAIL" else "PASS" });
     try testing.expect(!failed);
 }
 
@@ -1663,7 +1690,7 @@ test "turboexl3 gpu: the router folded into form 9's prepare launch (and the sha
     var prng = std.Random.DefaultPrng.init(0x4DECC5);
     const rnd = prng.random();
     const router = ks.newKernel("turboexl3_test_router", &decode.router_inputs, &decode.router_outputs, decode.text_router_softmax, "", true) orelse return error.KernelCreateFailed;
-    defer _ = mlx.mlx_fast_metal_kernel_free(router);
+    defer decode.freeKernel(router);
     var failed = false;
     var checks: usize = 0;
     // the shared gate's weight [1, H] and its contiguous vector (the host's mw.shared_gate_vec)
@@ -1731,9 +1758,10 @@ test "turboexl3 gpu: the router folded into form 9's prepare launch (and the sha
         };
     }
 
-    // 2. end to end: moeSharedRouted against the router kernel + moeShared (the host's chain at decode rows), rows
-    // 2..4, both routed deferrals, the gate's logit from MLX's matmul or from the merged launch; 64 experts at the
-    // served rate and the served 512 at a light one (a 512-expert bank at 80 would be 1.6 GB)
+    // 2. end to end: moeSharedRouted (with the fold of fin7s into gu3s and without) against the router kernel + moeShared
+    // without it (the host's chain at decode rows), rows 2..4, both routed deferrals, the gate's logit from MLX's matmul or
+    // from the merged launch; 64 experts at the served rate and the served 512 at a light one (a 512-expert bank at 80
+    // would be 1.6 GB)
     {
         const n_gu: u32 = 112;
         const n_dn: u32 = 96;
@@ -1828,7 +1856,10 @@ test "turboexl3 gpu: the router folded into form 9's prepare launch (and the sha
                     var s1 = mlx.mlx_array_new();
                     try mlx.check(mlx.mlx_reshape(&s1, scores, &[_]c_int{ci(rows * topk)}, 1, s));
                     const scores1 = try g.adopt(s1);
+                    // (moeShared without the fold: gu3s + fin7s, so the folded launch below is held to the unfolded chain)
+                    k3.fused_fin_fold = false;
                     const want = try g.adopt(try k3.moeShared(s, x, slots, scores1, arrays, rows, sb));
+                    k3.fused_fin_fold = true;
                     // the merged launch in prep2's place; one row: gu8s prepares inside the gate|up launch, so it refuses
                     const got_e = k3.moeSharedRouted(s, x, logits, arrays, rows, sb, if (gate and rows >= 2) gvec else null);
                     if (rows == 1) {
@@ -1842,10 +1873,16 @@ test "turboexl3 gpu: the router folded into form 9's prepare launch (and the sha
                         continue;
                     }
                     const got = try g.adopt(try got_e);
-                    const d = try routerDiff(&g, got, want);
-                    checks += 1;
-                    std.debug.print("TURBOEXL3_ROUTER_BYTES part=moe experts={d} n={d} routed_defer={} rows={d} gate={s} differing={d}/{d} {s}\n", .{ ne, n, defer_affine, rows, if (gate) "launch" else "given", d.diff, d.n, if (d.diff == 0) "PASS" else "FAIL" });
-                    if (d.diff != 0) failed = true;
+                    // and the merged launch with the fold off (gu3s + fin7s)
+                    k3.fused_fin_fold = false;
+                    const got_nf = try g.adopt(try k3.moeSharedRouted(s, x, logits, arrays, rows, sb, if (gate and rows >= 2) gvec else null));
+                    k3.fused_fin_fold = true;
+                    for ([_]mlx.mlx_array{ got, got_nf }, [_][]const u8{ "folded", "unfolded" }) |gy, fname| {
+                        const d = try routerDiff(&g, gy, want);
+                        checks += 1;
+                        std.debug.print("TURBOEXL3_ROUTER_BYTES part=moe experts={d} n={d} routed_defer={} rows={d} gate={s} fold={s} differing={d}/{d} {s}\n", .{ ne, n, defer_affine, rows, if (gate) "launch" else "given", fname, d.diff, d.n, if (d.diff == 0) "PASS" else "FAIL" });
+                        if (d.diff != 0) failed = true;
+                    }
                 };
             }
         }
@@ -1854,7 +1891,7 @@ test "turboexl3 gpu: the router folded into form 9's prepare launch (and the sha
     try testing.expect(!failed);
 }
 
-// ---- The resident trunk: each trunk linear's W_hat kept (dense.zig `residentArm`; the host's MLX_SERVE_EXL3_TRUNK=resident) ----
+// ---- The resident trunk: each trunk linear's W_hat kept (dense.zig `residentArm`) ----
 //
 // Every trunk linear kind of Qwen3.8-Flash-Next's 5.05bpw pack (shape and rate) through `root.linear` at the prefill row
 // counts (33, the first that dequantizes, up to 8703), each against the per-call path (`dense.resident_bypass`, the table
@@ -2140,7 +2177,7 @@ test "turboexl3 gpu resident trunk: ATTN-IN and ATTN-OUT over resident W_hat giv
     try testing.expect(ok and !failed);
 }
 
-// ---- The un-rotated trunk: W_std out of the Hadamard basis (dense.zig's module comment; the host's MLX_SERVE_EXL3_TRUNK=bf16) ----
+// ---- The un-rotated trunk: W_std out of the Hadamard basis (dense.zig's module comment) ----
 //
 // On `trunkres_kinds` (every trunk linear kind of the 5.05bpw pack: shape and rate):
 //   unrot   `root.trunkUnrot` on an armed table, each kind's W_std against the f64 reference on three sampled 128 x 128 tiles

@@ -2,6 +2,8 @@
 //! stream, the Metal-source dumps TURBOEXL3_METAL_DUMP=1. mlx-stream reaches it from its own test root (src/tests.zig); a
 //! standalone build compiles it as a test root over `sdk` and `mlx_host` (README.md).
 comptime {
+    _ = @import("config.zig");
+    _ = @import("steel.zig");
     _ = @import("format.zig");
     _ = @import("spec.zig");
     _ = @import("lane.zig");

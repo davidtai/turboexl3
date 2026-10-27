@@ -1,0 +1,10 @@
+    constexpr uint EC = uint(EXP);
+    constexpr uint BMC = uint(BMT);
+    const uint SC = uint(inds_shape[0]);
+    const uint TMAXC = (SC + BMC - 1u) / BMC + EC;
+    const uint tid = thread_index_in_threadgroup;
+    const uint sg = simdgroup_index_in_threadgroup;
+    const uint L = thread_index_in_simdgroup;
+    threadgroup uint lo_s[1025];
+    threadgroup uint pref[32];
+    threadgroup uint total_s;

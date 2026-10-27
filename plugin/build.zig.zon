@@ -1,0 +1,15 @@
+.{
+    .name = .turboexl3_plugin,
+    .version = "0.1.0",
+    // the high 32 bits are crc32("turboexl3_plugin"), as `zig build` checks; the low 32 the package's random id
+    .fingerprint = 0x1566fd395e1f7a3b,
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{
+        // mlx-serve's plugin kit: `zig build kit` in mlx-serve stages it (zig-out/kit/mlx-serve-plugin-kit-<version>/), a
+        // release ships it as a tarball. Extract or link it here as `kit`.
+        .mlx_serve_kit = .{ .path = "kit" },
+        // the turboexl3 package this folder sits in
+        .turboexl3 = .{ .path = ".." },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "plugin.zig", "config.zig", "nax.zig", "sdk.zig", "mlx.zig" },
+}

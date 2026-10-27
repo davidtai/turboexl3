@@ -1,6 +1,8 @@
-//! The prefill chain (rows > DECODE_ROWS_MAX), M3: the routed slots sorted by expert, each expert's rows in 128-row M tiles,
-//! and the EXL3 trellis decoded inside the GEMMs' weight loader (DIG-X's shape: one 64 x 64 weight stage decoded once into
-//! threadgroup memory feeds 128 rows on the NAX matrix units, f32 accumulation). Seven launches per MoE layer:
+//! The prefill chain (rows > DECODE_ROWS_MAX), M3: the routed slots sorted by expert, each expert's rows in M tiles of
+//! `Options.bm` rows, and the EXL3 trellis decoded inside the GEMMs' weight loader (DIG-X's shape: one 64 x 64 weight stage
+//! decoded once into threadgroup memory feeds 128 rows on the NAX matrix units, f32 accumulation). `Options{}` (128-row
+//! tiles) runs seven launches per MoE layer; the served set (`root.pfOptions`: 64-row tiles with the register path for
+//! each expert's <= 32-row remainder, `froute`, `t128`, below) runs eight, the route in one and each GEMM in two:
 //!
 //!   argsort   MLX's argsort of the flat expert ids: sorted position p -> slot order[p] = row * K + k
 //!   table     one threadgroup: each expert's run [lo, hi) of sorted positions (a binary search per expert), its M tiles,
@@ -38,12 +40,13 @@ const format = @import("format.zig");
 const decode = @import("decode.zig");
 const lane = @import("lane.zig");
 
-/// MLX steel's NAX tiles (NAXTile, tile_matmad_nax over mpp::tensor_ops::matmul2d; steel_nax.metal: MLX 0.32.2's headers,
-/// each section marked with its source path and copyright line), then turboexl3's decode helpers.
-const steel_nax = @embedFile("steel_nax.metal");
-pub const header_nax: [:0]const u8 = sentinel(steel_nax ++ "using namespace mlx::steel;\n" ++ decode.header ++ metal_small_helpers ++ metal_gemm_helpers);
+/// MLX steel's NAX tiles (NAXTile, tile_matmad_nax over mpp::tensor_ops::matmul2d; `steel.zig`: the consumer's MLX
+/// headers, else the vendored kernels/steel_nax.metal), then turboexl3's decode helpers.
+const steel_nax = @import("steel.zig").nax;
+const using_steel = @embedFile("kernels/prefill/using_steel.metal");
+pub const header_nax: [:0]const u8 = sentinel(steel_nax ++ using_steel ++ decode.header ++ metal_small_helpers ++ metal_gemm_helpers);
 /// The register path's header: the NAX tiles, the decoders and its fragment fills.
-pub const header_nax_small: [:0]const u8 = sentinel(steel_nax ++ "using namespace mlx::steel;\n" ++ decode.header ++ metal_small_helpers);
+pub const header_nax_small: [:0]const u8 = sentinel(steel_nax ++ using_steel ++ decode.header ++ metal_small_helpers);
 /// The mixed GEMM's header: both bodies' helpers.
 pub const header_nax_mixed: [:0]const u8 = header_nax;
 
@@ -54,349 +57,61 @@ pub const BK: u32 = 64;
 
 /// The tile table: one threadgroup of 1024 threads, thread e owns expert e (EXP <= 1024). tiles int32 [TMAX, 4] =
 /// (expert, first sorted position, rows, 0) for the tiles in expert order, then rows = 0 to the end.
-pub const text_table =
-    \\    constexpr uint EC = uint(EXP);
-    \\    constexpr uint BMC = uint(BMT);
-    \\    const uint SC = uint(inds_shape[0]);
-    \\    const uint TMAXC = (SC + BMC - 1u) / BMC + EC;
-    \\    const uint tid = thread_index_in_threadgroup;
-    \\    const uint sg = simdgroup_index_in_threadgroup;
-    \\    const uint L = thread_index_in_simdgroup;
-    \\    threadgroup uint lo_s[1025];
-    \\    threadgroup uint pref[32];
-    \\    threadgroup uint total_s;
-    \\    uint lo = SC;
-    \\    if (tid < EC) {
-    \\        uint a = 0u, b = SC;
-    \\        while (a < b) { const uint mid = (a + b) >> 1u; if (uint(inds[order[mid]]) < tid) a = mid + 1u; else b = mid; }
-    \\        lo = a;
-    \\    }
-    \\    lo_s[tid] = lo;
-    \\    if (tid == 0u) lo_s[1024] = SC;
-    \\    threadgroup_barrier(mem_flags::mem_threadgroup);
-    \\    uint cnt = 0u, nt = 0u;
-    \\    if (tid < EC) { cnt = lo_s[tid + 1u] - lo; nt = (cnt + BMC - 1u) / BMC; }
-    \\    const uint incl = simd_prefix_inclusive_sum(nt);
-    \\    if (L == 31u) pref[sg] = incl;
-    \\    threadgroup_barrier(mem_flags::mem_threadgroup);
-    \\    if (sg == 0u) pref[L] = simd_prefix_exclusive_sum(pref[L]);
-    \\    threadgroup_barrier(mem_flags::mem_threadgroup);
-    \\    const uint start = pref[sg] + incl - nt;
-    \\    for (uint t = 0u; t < nt; ++t) {
-    \\        const uint i = start + t;
-    \\        tiles[4u * i] = int(tid); tiles[4u * i + 1u] = int(lo + t * BMC); tiles[4u * i + 2u] = int(min(BMC, cnt - t * BMC)); tiles[4u * i + 3u] = 0;
-    \\    }
-    \\    if (tid == 1023u) total_s = start + nt;
-    \\    threadgroup_barrier(mem_flags::mem_threadgroup);
-    \\    for (uint i = total_s + tid; i < TMAXC; i += 1024u) { tiles[4u * i] = 0; tiles[4u * i + 1u] = 0; tiles[4u * i + 2u] = 0; tiles[4u * i + 3u] = 0; }
-    \\
-;
+pub const text_table = @embedFile("kernels/prefill/table_1.metal") ++ table_bsearch ++ @embedFile("kernels/prefill/table_2.metal");
 
 /// The mixed tile table (`Options.small = .mixed`): each expert's rows in BMT-row tiles, except a remainder of <= 32 * SPL rows
 /// (or an expert of that few rows), which becomes SPL or fewer register-path tiles of <= 32 rows. tiles int32
 /// [TBIG + SPL * EXP, 4]: the BMT-row tiles in expert order from 0, the small tiles in expert order from
 /// TBIG = ceil(S / BMT) + EXP; unused entries rows = 0.
-pub const text_table_mixed =
-    \\    constexpr uint EC = uint(EXP);
-    \\    constexpr uint BMC = uint(BMT);
-    \\    constexpr uint SR = 32u * uint(SPL);
-    \\    const uint SC = uint(inds_shape[0]);
-    \\    const uint TBIG = (SC + BMC - 1u) / BMC + EC;
-    \\    const uint TALL = TBIG + uint(SPL) * EC;
-    \\    const uint tid = thread_index_in_threadgroup;
-    \\    const uint sg = simdgroup_index_in_threadgroup;
-    \\    const uint L = thread_index_in_simdgroup;
-    \\    threadgroup uint lo_s[1025];
-    \\    threadgroup uint prefb[32];
-    \\    threadgroup uint prefs[32];
-    \\    threadgroup uint totb_s;
-    \\    threadgroup uint tots_s;
-    \\    uint lo = SC;
-    \\    if (tid < EC) {
-    \\        uint a = 0u, b = SC;
-    \\        while (a < b) { const uint mid = (a + b) >> 1u; if (uint(inds[order[mid]]) < tid) a = mid + 1u; else b = mid; }
-    \\        lo = a;
-    \\    }
-    \\    lo_s[tid] = lo;
-    \\    if (tid == 0u) lo_s[1024] = SC;
-    \\    threadgroup_barrier(mem_flags::mem_threadgroup);
-    \\    uint cnt = 0u, nb = 0u, ns = 0u, nfull = 0u, r = 0u;
-    \\    if (tid < EC) {
-    \\        cnt = lo_s[tid + 1u] - lo;
-    \\        nfull = cnt / BMC;
-    \\        r = cnt - nfull * BMC;
-    \\        if (r == 0u) nb = nfull;
-    \\        else if (r > SR) nb = nfull + 1u;
-    \\        else { nb = nfull; ns = (r + 31u) / 32u; }
-    \\    }
-    \\    const uint ib = simd_prefix_inclusive_sum(nb);
-    \\    const uint is = simd_prefix_inclusive_sum(ns);
-    \\    if (L == 31u) { prefb[sg] = ib; prefs[sg] = is; }
-    \\    threadgroup_barrier(mem_flags::mem_threadgroup);
-    \\    if (sg == 0u) { prefb[L] = simd_prefix_exclusive_sum(prefb[L]); prefs[L] = simd_prefix_exclusive_sum(prefs[L]); }
-    \\    threadgroup_barrier(mem_flags::mem_threadgroup);
-    \\    const uint sb = prefb[sg] + ib - nb;
-    \\    const uint ss = prefs[sg] + is - ns;
-    \\    for (uint t = 0u; t < nb; ++t) {
-    \\        const uint i = sb + t;
-    \\        tiles[4u * i] = int(tid); tiles[4u * i + 1u] = int(lo + t * BMC); tiles[4u * i + 2u] = int(min(BMC, cnt - t * BMC)); tiles[4u * i + 3u] = 0;
-    \\    }
-    \\    for (uint t = 0u; t < ns; ++t) {
-    \\        const uint i = TBIG + ss + t;
-    \\        tiles[4u * i] = int(tid); tiles[4u * i + 1u] = int(lo + nfull * BMC + 32u * t); tiles[4u * i + 2u] = int(min(32u, r - 32u * t)); tiles[4u * i + 3u] = 0;
-    \\    }
-    \\    if (tid == 1023u) { totb_s = sb + nb; tots_s = ss + ns; }
-    \\    threadgroup_barrier(mem_flags::mem_threadgroup);
-    \\    for (uint i = totb_s + tid; i < TBIG; i += 1024u) { tiles[4u * i] = 0; tiles[4u * i + 1u] = 0; tiles[4u * i + 2u] = 0; tiles[4u * i + 3u] = 0; }
-    \\    for (uint i = TBIG + tots_s + tid; i < TALL; i += 1024u) { tiles[4u * i] = 0; tiles[4u * i + 1u] = 0; tiles[4u * i + 2u] = 0; tiles[4u * i + 3u] = 0; }
-    \\
-;
+pub const text_table_mixed = @embedFile("kernels/prefill/table_mixed_1.metal") ++ table_bsearch ++ @embedFile("kernels/prefill/table_mixed_2.metal");
 
 /// The tables' per-expert binary search over argsort's order (both tables carry it verbatim).
-const table_bsearch =
-    \\    uint lo = SC;
-    \\    if (tid < EC) {
-    \\        uint a = 0u, b = SC;
-    \\        while (a < b) { const uint mid = (a + b) >> 1u; if (uint(inds[order[mid]]) < tid) a = mid + 1u; else b = mid; }
-    \\        lo = a;
-    \\    }
-    \\
-;
+const table_bsearch = @embedFile("kernels/prefill/table_bsearch.metal");
 
 /// `Options.froute`'s replacement for it: count each expert's slots (threadgroup atomics), an exclusive scan of the counts is
 /// each expert's first sorted position, then every slot takes the next position of its expert's run: `order` is written
 /// here (an output), so the launch replaces argsort + table. Within an expert the slots land in arrival order.
-const froute_count =
-    \\    threadgroup atomic_uint fr_cnt[1024];
-    \\    threadgroup uint fr_pref[32];
-    \\    atomic_store_explicit(&fr_cnt[tid], 0u, memory_order_relaxed);
-    \\    threadgroup_barrier(mem_flags::mem_threadgroup);
-    \\    for (uint i = tid; i < SC; i += 1024u) atomic_fetch_add_explicit(&fr_cnt[uint(inds[i])], 1u, memory_order_relaxed);
-    \\    threadgroup_barrier(mem_flags::mem_threadgroup);
-    \\    const uint fr_n = atomic_load_explicit(&fr_cnt[tid], memory_order_relaxed);
-    \\    const uint fr_incl = simd_prefix_inclusive_sum(fr_n);
-    \\    if (L == 31u) fr_pref[sg] = fr_incl;
-    \\    threadgroup_barrier(mem_flags::mem_threadgroup);
-    \\    if (sg == 0u) fr_pref[L] = simd_prefix_exclusive_sum(fr_pref[L]);
-    \\    threadgroup_barrier(mem_flags::mem_threadgroup);
-    \\    uint lo = fr_pref[sg] + fr_incl - fr_n;
-    \\    atomic_store_explicit(&fr_cnt[tid], lo, memory_order_relaxed);
-    \\    threadgroup_barrier(mem_flags::mem_threadgroup);
-    \\    for (uint i = tid; i < SC; i += 1024u) order[atomic_fetch_add_explicit(&fr_cnt[uint(inds[i])], 1u, memory_order_relaxed)] = i;
-    \\
-;
+const froute_count = @embedFile("kernels/prefill/froute_count.metal");
 
 /// The fused route kernels (`Options.froute`): the tables with `froute_count` for the binary search; inputs inds, outputs
 /// order u32 [S] and tiles.
-pub const text_froute: [:0]const u8 = sentinel(replaceOnce(text_table, table_bsearch, froute_count));
-pub const text_froute_m: [:0]const u8 = sentinel(replaceOnce(text_table_mixed, table_bsearch, froute_count));
+pub const text_froute: [:0]const u8 = sentinel(@embedFile("kernels/prefill/table_1.metal") ++ froute_count ++ @embedFile("kernels/prefill/table_2.metal"));
+pub const text_froute_m: [:0]const u8 = sentinel(@embedFile("kernels/prefill/table_mixed_1.metal") ++ froute_count ++ @embedFile("kernels/prefill/table_mixed_2.metal"));
 
 /// The gate and up inputs in sorted order: xg, xu half [S, HID] = H128(f16(x[row]) * suh_e) * 2^-3.5 rounded, per 128-block;
 /// one simdgroup per (block, sorted position), BPT blocks per threadgroup; inv u32 [S]: inv[order[p]] = p. ALAY
 /// (`Options.alay`): each 32-block's element j at slot `turboexl3_alay(j)` (1) or `turboexl3_alay16(j)` (2) of its block; the
 /// block sums are the same.
-pub const text_prep =
-    \\    constexpr uint HC = uint(HID);
-    \\    constexpr uint TOPKC = uint(TOPK);
-    \\    constexpr uint BPTC = uint(BPT);
-    \\    constexpr float HAD_SCALE = 0.08838834764831845f;
-    \\    const uint b = threadgroup_position_in_grid.x * BPTC + simdgroup_index_in_threadgroup;
-    \\    const uint p = threadgroup_position_in_grid.y;
-    \\    const uint L = thread_index_in_simdgroup;
-    \\    const uint src = order[p];
-    \\    const uint r = src / TOPKC;
-    \\    const uint e = uint(inds[src]);
-    \\    if (b == 0u && L == 0u) inv[src] = p;
-    \\    float vg[4], vu[4];
-    \\    for (uint j = 0; j < 4u; ++j) {
-    \\        const uint i = b * 128u + L + 32u * j;
-    \\        const float xv = float(half(float(x[ulong(r) * HC + i])));
-    \\        vg[j] = xv * float(suh_g[ulong(e) * HC + i]);
-    \\        vu[j] = xv * float(suh_u[ulong(e) * HC + i]);
-    \\    }
-    \\    turboexl3_h128x4(vg, L);
-    \\    turboexl3_h128x4(vu, L);
-    \\    float sg = 0.0f, su = 0.0f;
-    \\    const uint lo = (ALAY == 1) ? turboexl3_alay(L) : ((ALAY == 2) ? turboexl3_alay16(L) : L);
-    \\    for (uint j = 0; j < 4u; ++j) {
-    \\        const uint i = b * 128u + 32u * j + lo;
-    \\        const half hg = half(vg[j] * HAD_SCALE);
-    \\        const half hu = half(vu[j] * HAD_SCALE);
-    \\        xg[ulong(p) * HC + i] = hg;
-    \\        xu[ulong(p) * HC + i] = hu;
-    \\        sg += float(hg);
-    \\        su += float(hu);
-    \\    }
-    \\    sg = simd_sum(sg);
-    \\    su = simd_sum(su);
-    \\    if (L == 0u) { xsg[ulong(p) * (HC / 128u) + b] = sg; xsu[ulong(p) * (HC / 128u) + b] = su; }
-    \\
-;
+pub const text_prep = @embedFile("kernels/prefill/prep.metal");
 
 /// gate|up finish, SwiGLU and the down input, per (128-block of inter, sorted position): xd half [S, INTER] (ALAY: in
 /// `text_prep`'s A layout).
-pub const text_mid =
-    \\    constexpr uint IC = uint(INTER);
-    \\    constexpr uint BPTC = uint(BPT);
-    \\    constexpr float HAD_SCALE = 0.08838834764831845f;
-    \\    const uint b = threadgroup_position_in_grid.x * BPTC + simdgroup_index_in_threadgroup;
-    \\    const uint p = threadgroup_position_in_grid.y;
-    \\    const uint L = thread_index_in_simdgroup;
-    \\    const uint e = uint(inds[order[p]]);
-    \\    float g[4], u[4];
-    \\    for (uint j = 0; j < 4u; ++j) {
-    \\        const uint i = b * 128u + L + 32u * j;
-    \\        g[j] = float(zg[ulong(p) * IC + i]);
-    \\        u[j] = float(zu[ulong(p) * IC + i]);
-    \\    }
-    \\    turboexl3_h128x4(g, L);
-    \\    turboexl3_h128x4(u, L);
-    \\    float d[4];
-    \\    for (uint j = 0; j < 4u; ++j) {
-    \\        const uint i = b * 128u + L + 32u * j;
-    \\        const float gg = float(half(g[j] * HAD_SCALE * float(svh_g[ulong(e) * IC + i])));
-    \\        const float uu = float(half(u[j] * HAD_SCALE * float(svh_u[ulong(e) * IC + i])));
-    \\        const float h = (gg / (1.0f + metal::precise::exp(-gg))) * uu;
-    \\        d[j] = float(half(h)) * float(suh_d[ulong(e) * IC + i]);
-    \\    }
-    \\    turboexl3_h128x4(d, L);
-    \\    float sd = 0.0f;
-    \\    const uint lo = (ALAY == 1) ? turboexl3_alay(L) : ((ALAY == 2) ? turboexl3_alay16(L) : L);
-    \\    for (uint j = 0; j < 4u; ++j) { const half hd = half(d[j] * HAD_SCALE); xd[ulong(p) * IC + b * 128u + 32u * j + lo] = hd; sd += float(hd); }
-    \\    sd = simd_sum(sd);
-    \\    if (L == 0u) xsd[ulong(p) * (IC / 128u) + b] = sd;
-    \\
-;
+pub const text_mid = mid_1 ++ mid_2 ++ mid_3 ++ mid_4;
+/// `text_mid` in the pieces the 128-row tiles' mid (`text_mid_t128`) composes: mid_1 ends at the expert line, mid_3 is the
+/// gate and up loads
+const mid_1 = @embedFile("kernels/prefill/mid_1.metal");
+const mid_2 = @embedFile("kernels/prefill/mid_2.metal");
+const mid_3 = @embedFile("kernels/prefill/mid_3.metal");
+const mid_4 = @embedFile("kernels/prefill/mid_4.metal");
 
 /// The down finish and the slot reduce, per (128-block of hidden, row): y OUT_T [R, HID] = sum over the row's slots in slot
 /// order of score * f16(H128(zd[inv[slot]]) * 2^-3.5 * svh_e).
-pub const text_finish =
-    \\    constexpr uint HC = uint(HID);
-    \\    constexpr uint TOPKC = uint(TOPK);
-    \\    constexpr uint BPTC = uint(BPT);
-    \\    constexpr float HAD_SCALE = 0.08838834764831845f;
-    \\    const uint b = threadgroup_position_in_grid.x * BPTC + simdgroup_index_in_threadgroup;
-    \\    const uint r = threadgroup_position_in_grid.y;
-    \\    const uint L = thread_index_in_simdgroup;
-    \\    float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-    \\    for (uint k = 0; k < TOPKC; ++k) {
-    \\        const uint src = r * TOPKC + k;
-    \\        const uint p = inv[src];
-    \\        const uint e = uint(inds[src]);
-    \\        const float w = float(scores[src]);
-    \\        float v[4];
-    \\        for (uint j = 0; j < 4u; ++j) v[j] = float(zd[ulong(p) * HC + b * 128u + L + 32u * j]);
-    \\        turboexl3_h128x4(v, L);
-    \\        for (uint j = 0; j < 4u; ++j) {
-    \\            const uint i = b * 128u + L + 32u * j;
-    \\            acc[j] += w * float(half(v[j] * HAD_SCALE * float(svh_d[ulong(e) * HC + i])));
-    \\        }
-    \\    }
-    \\    for (uint j = 0; j < 4u; ++j) y[ulong(r) * HC + b * 128u + L + 32u * j] = OUT_T(acc[j]);
-    \\
-;
+pub const text_finish = finish_1 ++ finish_2 ++ finish_3 ++ finish_4;
+/// `text_finish` in the pieces the 128-row tiles' finish (`text_finish_t128`) composes: finish_1 ends at the expert line,
+/// finish_3 is the down load
+const finish_1 = @embedFile("kernels/prefill/finish_1.metal");
+const finish_2 = @embedFile("kernels/prefill/finish_2.metal");
+const finish_3 = @embedFile("kernels/prefill/finish_3.metal");
+const finish_4 = @embedFile("kernels/prefill/finish_4.metal");
 
 /// `Options.aux`: prep, mid and finish with each lane holding 4 consecutive elements of its 128-block (8-byte loads and
 /// stores; `turboexl3_h128v4`, `turboexl3_sum_x4`: the same values, so identical bytes) and ASG simdgroups per threadgroup over
 /// the flattened (position or row, block) items instead of one small threadgroup per position.
-pub const text_prep_v =
-    \\    constexpr uint HC = uint(HID);
-    \\    constexpr uint NBC = HC / 128u;
-    \\    constexpr uint TOPKC = uint(TOPK);
-    \\    constexpr float HAD_SCALE = 0.08838834764831845f;
-    \\    const uint L = thread_index_in_simdgroup;
-    \\    const uint w = threadgroup_position_in_grid.x * uint(ASG) + simdgroup_index_in_threadgroup;
-    \\    if (w >= uint(order_shape[0]) * NBC) return;
-    \\    const uint p = w / NBC;
-    \\    const uint b = w - p * NBC;
-    \\    const uint src = order[p];
-    \\    const uint r = src / TOPKC;
-    \\    const uint e = uint(inds[src]);
-    \\    if (b == 0u && L == 0u) inv[src] = p;
-    \\    const uint i0 = b * 128u + 4u * L;
-    \\    typedef metal::remove_cv_t<metal::remove_addrspace_t<metal::remove_reference_t<decltype(x[0])>>> XT;
-    \\    const vec<XT, 4> x4 = *reinterpret_cast<const device vec<XT, 4>*>(x + ulong(r) * HC + i0);
-    \\    const half4 sg4 = *reinterpret_cast<const device half4*>(suh_g + ulong(e) * HC + i0);
-    \\    const half4 su4 = *reinterpret_cast<const device half4*>(suh_u + ulong(e) * HC + i0);
-    \\    float vg[4], vu[4];
-    \\    for (uint j = 0; j < 4u; ++j) {
-    \\        const float xv = float(half(float(x4[j])));
-    \\        vg[j] = xv * float(sg4[j]);
-    \\        vu[j] = xv * float(su4[j]);
-    \\    }
-    \\    turboexl3_h128v4(vg, L);
-    \\    turboexl3_h128v4(vu, L);
-    \\    const half4 hg = half4(half(vg[0] * HAD_SCALE), half(vg[1] * HAD_SCALE), half(vg[2] * HAD_SCALE), half(vg[3] * HAD_SCALE));
-    \\    const half4 hu = half4(half(vu[0] * HAD_SCALE), half(vu[1] * HAD_SCALE), half(vu[2] * HAD_SCALE), half(vu[3] * HAD_SCALE));
-    \\    *reinterpret_cast<device half4*>(xg + ulong(p) * HC + i0) = hg;
-    \\    *reinterpret_cast<device half4*>(xu + ulong(p) * HC + i0) = hu;
-    \\    const float sg = turboexl3_sum_x4<int(XSO)>(hg, L);
-    \\    const float su = turboexl3_sum_x4<int(XSO)>(hu, L);
-    \\    if (L == 0u) { xsg[ulong(p) * NBC + b] = sg; xsu[ulong(p) * NBC + b] = su; }
-    \\
-;
+pub const text_prep_v = @embedFile("kernels/prefill/prep_v.metal");
 
-pub const text_mid_v =
-    \\    constexpr uint IC = uint(INTER);
-    \\    constexpr uint NBC = IC / 128u;
-    \\    constexpr float HAD_SCALE = 0.08838834764831845f;
-    \\    const uint L = thread_index_in_simdgroup;
-    \\    const uint w = threadgroup_position_in_grid.x * uint(ASG) + simdgroup_index_in_threadgroup;
-    \\    if (w >= uint(order_shape[0]) * NBC) return;
-    \\    const uint p = w / NBC;
-    \\    const uint b = w - p * NBC;
-    \\    const uint e = uint(inds[order[p]]);
-    \\    const uint i0 = b * 128u + 4u * L;
-    \\    const half4 zg4 = *reinterpret_cast<const device half4*>(zg + ulong(p) * IC + i0);
-    \\    const half4 zu4 = *reinterpret_cast<const device half4*>(zu + ulong(p) * IC + i0);
-    \\    float g[4] = {float(zg4[0]), float(zg4[1]), float(zg4[2]), float(zg4[3])};
-    \\    float u[4] = {float(zu4[0]), float(zu4[1]), float(zu4[2]), float(zu4[3])};
-    \\    turboexl3_h128v4(g, L);
-    \\    turboexl3_h128v4(u, L);
-    \\    const half4 vg4 = *reinterpret_cast<const device half4*>(svh_g + ulong(e) * IC + i0);
-    \\    const half4 vu4 = *reinterpret_cast<const device half4*>(svh_u + ulong(e) * IC + i0);
-    \\    const half4 sd4 = *reinterpret_cast<const device half4*>(suh_d + ulong(e) * IC + i0);
-    \\    float d[4];
-    \\    for (uint j = 0; j < 4u; ++j) {
-    \\        const float gg = float(half(g[j] * HAD_SCALE * float(vg4[j])));
-    \\        const float uu = float(half(u[j] * HAD_SCALE * float(vu4[j])));
-    \\        const float h = (gg / (1.0f + metal::precise::exp(-gg))) * uu;
-    \\        d[j] = float(half(h)) * float(sd4[j]);
-    \\    }
-    \\    turboexl3_h128v4(d, L);
-    \\    const half4 hd = half4(half(d[0] * HAD_SCALE), half(d[1] * HAD_SCALE), half(d[2] * HAD_SCALE), half(d[3] * HAD_SCALE));
-    \\    *reinterpret_cast<device half4*>(xd + ulong(p) * IC + i0) = hd;
-    \\    const float sd = turboexl3_sum_x4<int(XSO)>(hd, L);
-    \\    if (L == 0u) xsd[ulong(p) * NBC + b] = sd;
-    \\
-;
+pub const text_mid_v = @embedFile("kernels/prefill/mid_v.metal");
 
-pub const text_finish_v =
-    \\    constexpr uint HC = uint(HID);
-    \\    constexpr uint NBC = HC / 128u;
-    \\    constexpr uint TOPKC = uint(TOPK);
-    \\    constexpr float HAD_SCALE = 0.08838834764831845f;
-    \\    const uint L = thread_index_in_simdgroup;
-    \\    const uint w = threadgroup_position_in_grid.x * uint(ASG) + simdgroup_index_in_threadgroup;
-    \\    if (w >= (uint(inv_shape[0]) / TOPKC) * NBC) return;
-    \\    const uint r = w / NBC;
-    \\    const uint b = w - r * NBC;
-    \\    const uint i0 = b * 128u + 4u * L;
-    \\    float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-    \\    for (uint k = 0; k < TOPKC; ++k) {
-    \\        const uint src = r * TOPKC + k;
-    \\        const uint p = inv[src];
-    \\        const uint e = uint(inds[src]);
-    \\        const float wt = float(scores[src]);
-    \\        const half4 z4 = *reinterpret_cast<const device half4*>(zd + ulong(p) * HC + i0);
-    \\        float v[4] = {float(z4[0]), float(z4[1]), float(z4[2]), float(z4[3])};
-    \\        turboexl3_h128v4(v, L);
-    \\        const half4 sv4 = *reinterpret_cast<const device half4*>(svh_d + ulong(e) * HC + i0);
-    \\        for (uint j = 0; j < 4u; ++j) acc[j] += wt * float(half(v[j] * HAD_SCALE * float(sv4[j])));
-    \\    }
-    \\    for (uint j = 0; j < 4u; ++j) y[ulong(r) * HC + i0 + j] = OUT_T(acc[j]);
-    \\
-;
+pub const text_finish_v = @embedFile("kernels/prefill/finish_v.metal");
 
 /// The fused GEMM: z OUT [S, ND] = f16(x [S, KD] (sorted rows) x W_e [KD, ND]) per projection op (NOPS 1: down; 2: gate|up,
 /// op 0 reads x0/w0 and writes z0, op 1 x1/w1/z1). One threadgroup of 2 BMR / 32 simdgroups (BMR / 32 x 2, 32 x 32 outputs
@@ -412,243 +127,21 @@ pub const text_finish_v =
 /// 32-block (1) or 16-block (2) in the fragments' slot order, so lane q's elements start at 8q (one 16-byte load per fragment
 /// row and 32-deep step, `exl3pf_afrag2`) or 4q (one 8-byte load per fragment row and 16-deep slice, `exl3pf_afrag4`)
 /// instead of 2q; H16 (`Options.half_rows`, fragb): a simdgroup with at most 16 rows multiplies only its first fragment row
-/// (`exl3pf_mma_top`).
-pub const text_gemm =
-    \\    constexpr uint N = uint(NHW);
-    \\    constexpr uint WMASK = (WBITS >= 16) ? 0xffffu : ((1u << uint(WBITS)) - 1u);
-    \\    constexpr int CB = int(CODEBOOK);
-    \\    constexpr int KDC = int(KD);
-    \\    constexpr int NDC = int(ND);
-    \\    constexpr int NOPSC = int(NOPS);
-    \\    constexpr int WM = int(BMR) / 32;
-    \\    constexpr int NSGC = 2 * WM;
-    \\    constexpr int NPR = int(WSP);
-    \\    constexpr int DEC = (NPR > 0) ? NPR : NSGC;
-    \\    constexpr int JOBS = 16 / DEC;
-    \\    constexpr int NBUF = (DBUF != 0) ? 2 : 1;
-    \\    constexpr int BNC = 64;
-    \\    constexpr int BKC = 64;
-    \\    constexpr int SUBS = int(BKS) / BKC;
-    \\    constexpr int NCBC = int(NCB);
-    \\    constexpr int SM = 32;
-    \\    constexpr int SN = 32;
-    \\    constexpr int LDB = BKC + 8;
-    \\    constexpr int BSZH = (FRAGB != 0 && (PROBE & 16) == 0) ? BNC * BKC : BNC * LDB;
-    \\    constexpr int BSZ = SUBS * BSZH;
-    \\    constexpr int K16 = KDC / 16;
-    \\    constexpr int N16 = NDC / 16;
-    \\    constexpr int NTG = NDC / BNC / NCBC;
-    \\    constexpr int STAGES = KDC / (BKC * SUBS);
-    \\    threadgroup uint4 bs_mem[NBUF * BSZ * 2 / 16];
-    \\    threadgroup half* Bs = reinterpret_cast<threadgroup half*>(bs_mem);
-    \\    const uint sg = simdgroup_index_in_threadgroup;
-    \\    const uint L = thread_index_in_simdgroup;
-    \\    const int g = int(threadgroup_position_in_grid.x);
-    \\    const int tile = g / (NOPSC * NTG);
-    \\    const int rem = g - tile * (NOPSC * NTG);
-    \\    const int op = rem / NTG;
-    \\    const int n0g = (rem - op * NTG) * (NCBC * BNC);
-    \\    const int e = tiles[4 * tile];
-    \\    const int row0 = tiles[4 * tile + 1];
-    \\    const int rows = tiles[4 * tile + 2];
-    \\    if (rows == 0) return;
-    \\    const bool consumer = int(sg) < NSGC;
-    \\    const bool producer = NPR == 0 || !consumer;
-    \\    const int dsg = (NPR > 0) ? int(sg) - NSGC : int(sg);
-    \\    const int tm = SM * int(sg / 2u);
-    \\    const int tn = SN * int(sg % 2u);
-    \\    const int sgp = consumer ? min(SM, max(0, rows - tm)) : 0;
-    \\    // the expert's trellis from the threadgroup's first output column; column block cb starts 4 cb tiles further
-    \\    const device uint* wb = reinterpret_cast<const device uint*>(op == 0 ? w0 : WSECOND) + (ulong(e) * ulong(K16 * N16) + ulong(n0g / 16)) * ulong(N / 2u);
-    \\    const device half* xa = (op == 0 ? x0 : XSECOND) + ulong(row0 + tm) * ulong(KDC);
-    \\    const uint q = L & 3u;
-    \\    const uint c = L >> 2u;
-    \\    const uint qb = (INTR != 0) ? exl3_int_qb<N>(L) : exl3_gen_qb<N>(L);
-    \\    const uint ga = (INTR != 0) ? exl3_int_a<N>(L) : exl3_gen_a<N>(L);
-    \\    const uint lp = (INTR != 0) ? exl3_int_b<N>(L) : exl3_gen_lp<N>(L);
-    \\    const uint lnx = (((L >> 4u) & 1u) << 4u) | (((L >> 1u) & 1u) << 3u) | (((L >> 3u) & 1u) << 2u) | (((L >> 2u) & 1u) << 1u) | (L & 1u);
-    \\    Arows arw;
-    \\    {
-    \\        const uint fmx = ((L >> 2u) & 4u) | ((L >> 1u) & 3u);
-    \\        const uint qnx = ((L >> 2u) & 2u) | (L & 1u);
-    \\        const device half* xs = xa + ((ALAY == 1) ? 8u : ((ALAY == 2) ? 4u : 2u)) * qnx;
-    \\        const int lastr = max(sgp - 1, 0);
-    \\        arw.r[0] = xs + ulong(min(int(fmx), lastr)) * ulong(KDC);
-    \\        arw.r[1] = xs + ulong(min(int(fmx) + 8, lastr)) * ulong(KDC);
-    \\        arw.r[2] = xs + ulong(min(int(fmx) + 16, lastr)) * ulong(KDC);
-    \\        arw.r[3] = xs + ulong(min(int(fmx) + 24, lastr)) * ulong(KDC);
-    \\    }
-    \\    int boff[JOBS];
-    \\    ulong woff[JOBS];
-    \\    for (int jj = 0; jj < JOBS; ++jj) {
-    \\        const int j = max(dsg, 0) + DEC * jj;
-    \\        const int kt = j >> 2;
-    \\        const int ntl = j & 3;
-    \\        boff[jj] = (FRAGB != 0) ? (ntl * 4 + kt) * 256 : (ntl * 16 + int(c)) * LDB + kt * 16 + 2 * int(q);
-    \\        woff[jj] = (ulong(kt) * ulong(N16) + ulong(ntl)) * ulong(N / 2u);
-    \\    }
-    \\    const bool full = sgp == SM;
-    \\    NAXTile<float, 2, 2> Dt;
-    \\    Dt.clear();
-    \\    if (DBUF != 0) {
-    \\        STEEL_PRAGMA_UNROLL
-    \\        for (int h = 0; h < SUBS; ++h) if (producer) exl3pf_stage<N, WMASK, CB, JOBS, N16, LDB, int(PROBE), int(FRAGB), int(INTR), int(DEFER)>(wb, h, woff, boff, Bs + h * BSZH, qb, ga, lp, lnx);
-    \\        threadgroup_barrier(mem_flags::mem_threadgroup);
-    \\    }
-    \\    for (int cb = 0; cb < NCBC; ++cb) {
-    \\        if (DBUF != 0) {
-    \\            for (int s = 0; s < STAGES; ++s) {
-    \\                // f: the stage's place in the threadgroup's sequence (its buffer); the next stage is s + 1 of this block or 0
-    \\                // of the next
-    \\                const int f = cb * STAGES + s;
-    \\                const bool last = s + 1 == STAGES;
-    \\                const bool more = !last || cb + 1 < NCBC;
-    \\                const device uint* wn = wb + ulong(4 * (last ? cb + 1 : cb)) * ulong(N / 2u);
-    \\                const int sn = last ? 0 : s + 1;
-    \\                STEEL_PRAGMA_UNROLL
-    \\                for (int h = 0; h < SUBS; ++h) {
-    \\                    const threadgroup half* Bc = Bs + (f & 1) * BSZ + h * BSZH;
-    \\                    if (MFIRST != 0 && sgp > 0 && (PROBE & 2) == 0) exl3pf_mma<LDB, KDC, int(PROBE), int(UNR), int(FRAGB), int(ALAY), int(H16)>(Dt, xa, arw, SUBS * s + h, Bc, tn, full, sgp, L);
-    \\                    if (producer && more) exl3pf_stage<N, WMASK, CB, JOBS, N16, LDB, int(PROBE), int(FRAGB), int(INTR), int(DEFER)>(wn, SUBS * sn + h, woff, boff, Bs + ((f + 1) & 1) * BSZ + h * BSZH, qb, ga, lp, lnx);
-    \\                    if (MFIRST == 0 && sgp > 0 && (PROBE & 2) == 0) exl3pf_mma<LDB, KDC, int(PROBE), int(UNR), int(FRAGB), int(ALAY), int(H16)>(Dt, xa, arw, SUBS * s + h, Bc, tn, full, sgp, L);
-    \\                }
-    \\                threadgroup_barrier(mem_flags::mem_threadgroup);
-    \\            }
-    \\        } else {
-    \\            for (int s = 0; s < STAGES; ++s) {
-    \\                threadgroup_barrier(mem_flags::mem_threadgroup);
-    \\                STEEL_PRAGMA_UNROLL
-    \\                for (int h = 0; h < SUBS; ++h) exl3pf_stage<N, WMASK, CB, JOBS, N16, LDB, int(PROBE), int(FRAGB), int(INTR), int(DEFER)>(wb + ulong(4 * cb) * ulong(N / 2u), SUBS * s + h, woff, boff, Bs + h * BSZH, qb, ga, lp, lnx);
-    \\                threadgroup_barrier(mem_flags::mem_threadgroup);
-    \\                STEEL_PRAGMA_UNROLL
-    \\                for (int h = 0; h < SUBS; ++h) if (sgp > 0 && (PROBE & 2) == 0) exl3pf_mma<LDB, KDC, int(PROBE), int(UNR), int(FRAGB), int(ALAY), int(H16)>(Dt, xa, arw, SUBS * s + h, Bs + h * BSZH, tn, full, sgp, L);
-    \\            }
-    \\        }
-    \\        if (sgp > 0) {
-    \\            if (DEFER != 0) exl3pf_affine(Dt, (op == 0 ? xs0 : XSSECOND) + ulong(row0 + tm) * ulong(NBX), int(NBX), sgp, L);
-    \\            device half* zp = (op == 0 ? z0 : ZSECOND) + ulong(row0 + tm) * ulong(NDC) + (n0g + cb * BNC) + tn;
-    \\            if (full) Dt.store(zp, NDC);
-    \\            else Dt.store_safe(zp, NDC, short2(SN, sgp));
-    \\        }
-    \\        if (cb + 1 < NCBC) Dt.clear();
-    \\    }
-    \\
-;
+/// (`exl3pf_mma_top`). `two`: the two lines that name op 1's operands read x1 / w1 / xs1 and write z1 (gate|up), else op 0's
+/// again (down, NOPS 1); `mixed`: the mixed launch's big body, its weight stage `mixed_bs` declared at kernel scope.
+fn gemmText(comptime two: bool, comptime mixed: bool) []const u8 {
+    const stage = if (mixed) @embedFile("kernels/prefill/gemm_mixed_bs.metal") else @embedFile("kernels/prefill/gemm_2.metal");
+    const wx = if (two) @embedFile("kernels/prefill/gemm_op2_wx.metal") else @embedFile("kernels/prefill/gemm_op1_wx.metal");
+    const xsz = if (two) @embedFile("kernels/prefill/gemm_op2_xsz.metal") else @embedFile("kernels/prefill/gemm_op1_xsz.metal");
+    return @embedFile("kernels/prefill/gemm_1.metal") ++ stage ++ @embedFile("kernels/prefill/gemm_3.metal") ++ wx ++ @embedFile("kernels/prefill/gemm_4.metal") ++ xsz ++
+        @embedFile("kernels/prefill/gemm_5.metal");
+}
 
 /// The GEMM's two halves of a K stage. `exl3pf_stage`: simdgroup sg decodes trellis tiles sg, sg + NSG, ... of the stage's
 /// 4 x 4 (lane L: its eight codewords at code positions 8L..8L+7, the tensor-core layout's rows 2q, 2q+1, 2q+8, 2q+9 of
 /// columns c, c+8) into B^T [n][k] as four half2, conflict-free at LDB 72. `exl3pf_mma`: two 32-deep NAX MMAs of the
 /// simdgroup's 32 x 32 outputs (A from device, B^T from threadgroup memory).
-const metal_gemm_helpers =
-    \\struct Arows { const device half* r[4]; };
-    \\template <uint N, uint WMASK, int CB, int JOBS, int N16, int LDB, int P, int FB, int IR, int DF>
-    \\inline void exl3pf_stage(const device uint* wb, int s, thread const ulong* woff, thread const int* boff, threadgroup half* Bs, uint qb, uint ga, uint lp, uint lnx) {
-    \\    for (int jj = 0; jj < JOBS; ++jj) {
-    \\        if (P & 1) {
-    \\            const half k0 = half(float(s & 7) * 0.125f);
-    \\            if (FB != 0) { *reinterpret_cast<threadgroup vec<half, 8>*>(Bs + boff[jj] + lnx * 8u) = vec<half, 8>(k0); continue; }
-    \\            threadgroup half* d = Bs + boff[jj];
-    \\            *reinterpret_cast<threadgroup half2*>(d) = half2(k0, k0);
-    \\            *reinterpret_cast<threadgroup half2*>(d + 8) = half2(k0, k0);
-    \\            *reinterpret_cast<threadgroup half2*>(d + 8 * LDB) = half2(k0, k0);
-    \\            *reinterpret_cast<threadgroup half2*>(d + 8 * LDB + 8) = half2(k0, k0);
-    \\            continue;
-    \\        }
-    \\        const device uint* tw = wb + ulong(s) * ulong(4 * N16) * ulong(N / 2u) + woff[jj];
-    \\        const auto ww = exl3_tile_load<N, IR>(tw, qb, ga, lp);
-    \\        const half v0 = exl3pf_w<CB, DF>(exl3pf_cw<N, WMASK, 0, IR>(ww, lp));
-    \\        const half v1 = exl3pf_w<CB, DF>(exl3pf_cw<N, WMASK, 1, IR>(ww, lp));
-    \\        const half v2 = exl3pf_w<CB, DF>(exl3pf_cw<N, WMASK, 2, IR>(ww, lp));
-    \\        const half v3 = exl3pf_w<CB, DF>(exl3pf_cw<N, WMASK, 3, IR>(ww, lp));
-    \\        const half v4 = exl3pf_w<CB, DF>(exl3pf_cw<N, WMASK, 4, IR>(ww, lp));
-    \\        const half v5 = exl3pf_w<CB, DF>(exl3pf_cw<N, WMASK, 5, IR>(ww, lp));
-    \\        const half v6 = exl3pf_w<CB, DF>(exl3pf_cw<N, WMASK, 6, IR>(ww, lp));
-    \\        const half v7 = exl3pf_w<CB, DF>(exl3pf_cw<N, WMASK, 7, IR>(ww, lp));
-    \\        if ((P & 32) != 0 && FB != 0) {
-    \\            // C14 cost probe (outputs wrong): a 128-point Hadamard's butterflies over the decoded weights, 3 levels in the
-    \\            // lane's 8 values and 4 across lanes (the floor of folding the input rotation into the weights)
-    \\            half v[8] = {v0, v1, v2, v3, v4, v5, v6, v7};
-    \\            for (int h = 1; h < 8; h <<= 1) for (int i = 0; i < 8; ++i) if ((i & h) == 0) { const half a = v[i], b = v[i + h]; v[i] = a + b; v[i + h] = a - b; }
-    \\            for (ushort m = 1; m < 16; m <<= 1) for (int i = 0; i < 8; ++i) { const half o = simd_shuffle_xor(v[i], m); v[i] = (lnx & m) != 0u ? o - v[i] : v[i] + o; }
-    \\            *reinterpret_cast<threadgroup vec<half, 8>*>(Bs + boff[jj] + lnx * 8u) = vec<half, 8>(v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7]);
-    \\            continue;
-    \\        }
-    \\        if (FB != 0) { *reinterpret_cast<threadgroup vec<half, 8>*>(Bs + boff[jj] + lnx * 8u) = vec<half, 8>(v0, v1, v2, v3, v4, v5, v6, v7); continue; }
-    \\        threadgroup half* d = Bs + boff[jj];
-    \\        *reinterpret_cast<threadgroup half2*>(d) = half2(v0, v1);
-    \\        *reinterpret_cast<threadgroup half2*>(d + 8) = half2(v2, v3);
-    \\        *reinterpret_cast<threadgroup half2*>(d + 8 * LDB) = half2(v4, v5);
-    \\        *reinterpret_cast<threadgroup half2*>(d + 8 * LDB + 8) = half2(v6, v7);
-    \\    }
-    \\}
-    \\// FB: the stage holds each NAX lane's B^T fragment (8 halfs, 16 bytes) contiguously, written by the lane whose plan decodes
-    \\// it; the A fragments are read in the same slot order (k 2q, 2q + 1, 2q + 8, 2q + 9 of each row, the register path's rule):
-    \\// two half2 per fragment row and 16-deep slice from natural-order rows, or from rows stored in that slot order (AL 1: one
-    \\// 16-byte load per fragment row and 32-deep step; AL 2: one 8-byte load per fragment row and 16-deep slice). H: a simdgroup
-    \\// with at most 16 rows (sgp <= 16) loads and multiplies only its first fragment row (its rows 16..31 are past the tile and
-    \\// never stored)
-    \\template <int LDB, int KDC, int P, int U, int FB, int AL, int H>
-    \\inline void exl3pf_mma(thread NAXTile<float, 2, 2>& Dt, const device half* xa, thread const Arows& arw, int s, const threadgroup half* Bs, int tn, bool full, int sgp, uint L) {
-    \\    if (FB != 0) {
-    \\        const bool top = H != 0 && sgp <= 16;
-    \\        STEEL_PRAGMA_UNROLL
-    \\        for (int i = 0; i < 2; ++i) {
-    \\            NAXTile<half, 2, 2> At;
-    \\            NAXTile<half, 2, 2> Bt;
-    \\            if (AL == 1) {
-    \\                const int k32 = s * 64 + i * 32;
-    \\                if (P & 4) At.clear();
-    \\                else {
-    \\                    exl3pf_afrag2(At.frag_at(0, 0), At.frag_at(0, 1), arw.r[0] + k32, arw.r[1] + k32);
-    \\                    if (!top) exl3pf_afrag2(At.frag_at(1, 0), At.frag_at(1, 1), arw.r[2] + k32, arw.r[3] + k32);
-    \\                }
-    \\            }
-    \\            STEEL_PRAGMA_UNROLL
-    \\            for (int kk = 0; kk < 2; ++kk) {
-    \\                const int k0 = s * 64 + i * 32 + kk * 16;
-    \\                if (AL != 1) {
-    \\                    if (P & 4) { At.frag_at(0, kk) = vec<half, 8>(0); At.frag_at(1, kk) = vec<half, 8>(0); }
-    \\                    else if (AL == 2) { exl3pf_afrag4(At.frag_at(0, kk), arw.r[0] + k0, arw.r[1] + k0); if (!top) exl3pf_afrag4(At.frag_at(1, kk), arw.r[2] + k0, arw.r[3] + k0); }
-    \\                    else { exl3pf_afrag(At.frag_at(0, kk), arw.r[0] + k0, arw.r[1] + k0); if (!top) exl3pf_afrag(At.frag_at(1, kk), arw.r[2] + k0, arw.r[3] + k0); }
-    \\                }
-    \\                STEEL_PRAGMA_UNROLL
-    \\                for (int nn = 0; nn < 2; ++nn) {
-    \\                    if (P & 8) Bt.frag_at(nn, kk) = vec<half, 8>(0);
-    \\                    else Bt.frag_at(nn, kk) = *reinterpret_cast<const threadgroup vec<half, 8>*>(Bs + ((tn / 16 + nn) * 4 + 2 * i + kk) * 256 + L * 8u);
-    \\                }
-    \\            }
-    \\            if (top) exl3pf_mma_top(Dt, At, Bt);
-    \\            else tile_matmad_nax(Dt, At, metal::bool_constant<false>{}, Bt, metal::bool_constant<true>{});
-    \\        }
-    \\        return;
-    \\    }
-    \\    if (U != 0) {
-    \\        NAXTile<half, 2, 2> At0, At1, Bt0, Bt1;
-    \\        if (P & 4) { At0.clear(); At1.clear(); }
-    \\        else if (full) { At0.load(xa + s * 64, KDC); At1.load(xa + s * 64 + 32, KDC); }
-    \\        else { At0.load_safe(xa + s * 64, KDC, short2(32, sgp)); At1.load_safe(xa + s * 64 + 32, KDC, short2(32, sgp)); }
-    \\        if (P & 8) { Bt0.clear(); Bt1.clear(); }
-    \\        else { Bt0.template load<half, LDB, 1>(Bs + tn * LDB); Bt1.template load<half, LDB, 1>(Bs + tn * LDB + 32); }
-    \\        tile_matmad_nax(Dt, At0, metal::bool_constant<false>{}, Bt0, metal::bool_constant<true>{});
-    \\        tile_matmad_nax(Dt, At1, metal::bool_constant<false>{}, Bt1, metal::bool_constant<true>{});
-    \\        return;
-    \\    }
-    \\    STEEL_PRAGMA_NO_UNROLL
-    \\    for (int i = 0; i < 2; ++i) {
-    \\        NAXTile<half, 2, 2> At;
-    \\        NAXTile<half, 2, 2> Bt;
-    \\        volatile int compiler_barrier;
-    \\        if (P & 4) At.clear();
-    \\        else if (full) At.load(xa + s * 64 + i * 32, KDC);
-    \\        else At.load_safe(xa + s * 64 + i * 32, KDC, short2(32, sgp));
-    \\        if (P & 8) Bt.clear();
-    \\        else Bt.template load<half, LDB, 1>(Bs + tn * LDB + i * 32);
-    \\        tile_matmad_nax(Dt, At, metal::bool_constant<false>{}, Bt, metal::bool_constant<true>{});
-    \\        (void)compiler_barrier;
-    \\    }
-    \\}
-    \\
-;
+const metal_gemm_helpers = @embedFile("kernels/prefill/gemm_helpers.metal");
 
 /// The register-path GEMM for tiles of <= 32 rows (`Options.small`): every simdgroup is an independent work item computing a
 /// 32-row x 32-column output block of one tile, no threadgroup memory and no barriers. Per 32-deep K step a lane loads its NAX
@@ -663,155 +156,21 @@ const metal_gemm_helpers =
 /// readers place that lane's first window at the same start bit, so the same words, word selects, extract offsets and
 /// codewords). ALAY (`Options.alay`): the inputs hold each 32-block (1: one 16-byte load per fragment row and 32-deep step, at
 /// 8q) or each 16-block (2: one 8-byte load per fragment row and 16-deep slice, at 4q) in that slot order; H16
-/// (`Options.half_rows`): an item of at most 16 rows multiplies only its first fragment row.
-pub const text_gemm_small =
-    \\    constexpr uint N = uint(NHW);
-    \\    constexpr uint NW = N / 2u;
-    \\    constexpr uint WMASK = (WBITS >= 16) ? 0xffffu : ((1u << uint(WBITS)) - 1u);
-    \\    constexpr int CB = int(CODEBOOK);
-    \\    constexpr int KDC = int(KD);
-    \\    constexpr int NDC = int(ND);
-    \\    constexpr int NOPSC = int(NOPS);
-    \\    constexpr int SGS = int(SGT);
-    \\    constexpr int K16 = KDC / 16;
-    \\    constexpr int N16 = NDC / 16;
-    \\    constexpr int NB = NDC / 32;
-    \\    constexpr int STEPS = KDC / 32;
-    \\    const uint L = thread_index_in_simdgroup;
-    \\    const int wi = int(threadgroup_position_in_grid.x) * SGS + int(simdgroup_index_in_threadgroup);
-    \\    const int tile = wi / (NOPSC * NB);
-    \\    const int rem = wi - tile * (NOPSC * NB);
-    \\    const int op = rem / NB;
-    \\    const int n0 = (rem - op * NB) * 32;
-    \\    const int rows = tiles[4 * tile + 2];
-    \\    if (rows == 0) return;
-    \\    const int e = tiles[4 * tile];
-    \\    const int row0 = tiles[4 * tile + 1];
-    \\    const uint fm = ((L >> 2u) & 4u) | ((L >> 1u) & 3u);
-    \\    const uint q = ((L >> 2u) & 2u) | (L & 1u);
-    \\    const uint Lp = (L & 16u) | (((L >> 2u) & 1u) << 3u) | (((L >> 1u) & 1u) << 2u) | (((L >> 3u) & 1u) << 1u) | (L & 1u);
-    \\    const uint qb = (SINTR != 0) ? exl3_int_qb<N>(Lp) : exl3_gen_qb<N>(Lp);
-    \\    const uint ga = (SINTR != 0) ? exl3_int_a<N>(Lp) : exl3_gen_a<N>(Lp);
-    \\    const uint lp = (SINTR != 0) ? exl3_int_b<N>(Lp) : exl3_gen_lp<N>(Lp);
-    \\    const device uint* wb = reinterpret_cast<const device uint*>(op == 0 ? w0 : WSECOND) + ulong(e) * ulong(K16 * N16) * ulong(NW) + ulong(n0 / 16) * ulong(NW);
-    \\    const device half* xa = (op == 0 ? x0 : XSECOND) + ulong(row0) * ulong(KDC) + ((ALAY == 1) ? 8u : ((ALAY == 2) ? 4u : 2u)) * q;
-    \\    const device half* ar0 = xa + ulong(min(int(fm), rows - 1)) * ulong(KDC);
-    \\    const device half* ar1 = xa + ulong(min(int(fm) + 8, rows - 1)) * ulong(KDC);
-    \\    const device half* ar2 = xa + ulong(min(int(fm) + 16, rows - 1)) * ulong(KDC);
-    \\    const device half* ar3 = xa + ulong(min(int(fm) + 24, rows - 1)) * ulong(KDC);
-    \\    // H16: an item of at most 16 rows multiplies only its first fragment row (rows 16..31 are past the tile, never stored)
-    \\    const bool top = H16 != 0 && rows <= 16;
-    \\    NAXTile<float, 2, 2> Dt;
-    \\    Dt.clear();
-    \\    for (int st = 0; st < STEPS; ++st) {
-    \\        NAXTile<half, 2, 2> At;
-    \\        NAXTile<half, 2, 2> Bt;
-    \\        if (ALAY == 1) {
-    \\            exl3pf_afrag2(At.frag_at(0, 0), At.frag_at(0, 1), ar0 + st * 32, ar1 + st * 32);
-    \\            if (!top) exl3pf_afrag2(At.frag_at(1, 0), At.frag_at(1, 1), ar2 + st * 32, ar3 + st * 32);
-    \\        }
-    \\        STEEL_PRAGMA_UNROLL
-    \\        for (int kk = 0; kk < 2; ++kk) {
-    \\            const int k0 = st * 32 + kk * 16;
-    \\            if (ALAY == 2) {
-    \\                exl3pf_afrag4(At.frag_at(0, kk), ar0 + k0, ar1 + k0);
-    \\                if (!top) exl3pf_afrag4(At.frag_at(1, kk), ar2 + k0, ar3 + k0);
-    \\            } else if (ALAY != 1) {
-    \\                exl3pf_afrag(At.frag_at(0, kk), ar0 + k0, ar1 + k0);
-    \\                if (!top) exl3pf_afrag(At.frag_at(1, kk), ar2 + k0, ar3 + k0);
-    \\            }
-    \\            STEEL_PRAGMA_UNROLL
-    \\            for (int nn = 0; nn < 2; ++nn) {
-    \\                const device uint* tw = wb + (ulong(st * 2 + kk) * ulong(N16) + ulong(nn)) * ulong(NW);
-    \\                exl3pf_bfrag<N, WMASK, CB, int(DEFER), int(SINTR)>(Bt.frag_at(nn, kk), tw, qb, ga, lp);
-    \\            }
-    \\        }
-    \\        if (top) exl3pf_mma_top(Dt, At, Bt);
-    \\        else tile_matmad_nax(Dt, At, metal::bool_constant<false>{}, Bt, metal::bool_constant<true>{});
-    \\    }
-    \\    if (DEFER != 0) exl3pf_affine(Dt, (op == 0 ? xs0 : XSSECOND) + ulong(row0) * ulong(NBX), int(NBX), rows, L);
-    \\    device half* zp = (op == 0 ? z0 : ZSECOND) + ulong(row0) * ulong(NDC) + n0;
-    \\    if (rows >= 32) Dt.store(zp, NDC);
-    \\    else Dt.store_safe(zp, NDC, short2(32, rows));
-    \\
-;
+/// (`Options.half_rows`): an item of at most 16 rows multiplies only its first fragment row. `two` as `gemmText`'s; `mixed`:
+/// the mixed launch's small body, its work items from GBIGM on over the table's small tiles.
+fn gemmSmallText(comptime two: bool, comptime mixed: bool) []const u8 {
+    const items = if (mixed) @embedFile("kernels/prefill/gemm_mixed_index.metal") else @embedFile("kernels/prefill/gemm_small_2.metal");
+    const wx = if (two) @embedFile("kernels/prefill/gemm_small_op2_wx.metal") else @embedFile("kernels/prefill/gemm_small_op1_wx.metal");
+    const xsz = if (two) @embedFile("kernels/prefill/gemm_small_op2_xsz.metal") else @embedFile("kernels/prefill/gemm_small_op1_xsz.metal");
+    return @embedFile("kernels/prefill/gemm_small_1.metal") ++ items ++ @embedFile("kernels/prefill/gemm_small_3.metal") ++ wx ++ @embedFile("kernels/prefill/gemm_small_4.metal") ++
+        xsz ++ @embedFile("kernels/prefill/gemm_small_5.metal");
+}
 
 /// The register path's fragment fills: A from two natural-order rows (k 2q, 2q + 1, 2q + 8, 2q + 9 of each) or, with ALAY,
 /// from two rows in that slot order (`exl3pf_afrag2`: both 16-deep halves of a 32-deep step; `exl3pf_afrag4`: one slice),
 /// B^T from one trellis tile decoded with the permuted lane plan; the first-fragment-row MMA (`exl3pf_mma_top`, H16); and the
 /// codeword reader both GEMM bodies decode through (`exl3pf_cw`).
-const metal_small_helpers =
-    \\// the deferred MUL1 map on a 32 x 32 accumulator block: lane L holds rows fm + 8 h + 16 mm (BaseNAXFrag::get_coord); each
-    \\// row's input sum is its NB per-128-block partials (prep / mid); rows past `rows` are never stored
-    \\inline void exl3pf_affine(thread NAXTile<float, 2, 2>& Dt, const device float* xsr, int nb, int rows, uint L) {
-    \\    const float MA = float(as_type<half>(ushort(0x1EEEu)));
-    \\    const float MC = 1024.0f * MA + float(as_type<half>(ushort(0xC931u)));
-    \\    const int fm = int(((L >> 2u) & 4u) | ((L >> 1u) & 3u));
-    \\    for (short mm = 0; mm < 2; ++mm) {
-    \\        for (short hh = 0; hh < 2; ++hh) {
-    \\            const int r = fm + 8 * hh + 16 * mm;
-    \\            float sx = 0.0f;
-    \\            if (r < rows) for (int q = 0; q < nb; ++q) sx += xsr[ulong(r) * ulong(nb) + q];
-    \\            for (short nn = 0; nn < 2; ++nn) {
-    \\                for (short jj = 0; jj < 4; ++jj) Dt.frag_at(mm, nn)[hh * 4 + jj] = fma(Dt.frag_at(mm, nn)[hh * 4 + jj], MA, MC * sx);
-    \\            }
-    \\        }
-    \\    }
-    \\}
-    \\// a decoded weight for the GEMMs: the codebook value, or (DF, MUL1) the codeword's byte sum t in [0, 1020], exact in f16; the
-    \\// epilogue then applies w = A t + C as A acc + C sum(x) (A = half 0x1EEE, C = 1024 A + half 0xC931)
-    \\template <int CB, int DF> inline half exl3pf_w(uint cw) {
-    \\    if (DF != 0) return exl3_mul1_th(cw);
-    \\    return exl3_decode<CB>(cw);
-    \\}
-    \\inline void exl3pf_afrag(thread vec<half, 8>& f, const device half* r0, const device half* r1) {
-    \\    const half2 a0 = *reinterpret_cast<const device half2*>(r0);
-    \\    const half2 a1 = *reinterpret_cast<const device half2*>(r0 + 8);
-    \\    const half2 a2 = *reinterpret_cast<const device half2*>(r1);
-    \\    const half2 a3 = *reinterpret_cast<const device half2*>(r1 + 8);
-    \\    f[0] = a0.x; f[1] = a0.y; f[2] = a1.x; f[3] = a1.y; f[4] = a2.x; f[5] = a2.y; f[6] = a3.x; f[7] = a3.y;
-    \\}
-    \\// ALAY 1: rows stored with each 32-block in the fragments' slot order (`turboexl3_alay`), r0 / r1 at the block's half 8q of the
-    \\// fragment's two rows: halfs 0..3 are slots 4q..4q + 3 of the first 16-deep slice (f0), 4..7 those of the second (f1) - the
-    \\// values exl3pf_afrag reads at k0 and k0 + 16 from natural-order rows, one 16-byte load per row instead of four half2
-    \\inline void exl3pf_afrag2(thread vec<half, 8>& f0, thread vec<half, 8>& f1, const device half* r0, const device half* r1) {
-    \\    const vec<half, 8> a = *reinterpret_cast<const device vec<half, 8>*>(r0);
-    \\    const vec<half, 8> b = *reinterpret_cast<const device vec<half, 8>*>(r1);
-    \\    f0[0] = a[0]; f0[1] = a[1]; f0[2] = a[2]; f0[3] = a[3]; f0[4] = b[0]; f0[5] = b[1]; f0[6] = b[2]; f0[7] = b[3];
-    \\    f1[0] = a[4]; f1[1] = a[5]; f1[2] = a[6]; f1[3] = a[7]; f1[4] = b[4]; f1[5] = b[5]; f1[6] = b[6]; f1[7] = b[7];
-    \\}
-    \\// ALAY 2: rows stored with each 16-block in the fragments' slot order (`turboexl3_alay16`, dense.zig's LANE_ORDER rule), r0 / r1
-    \\// at the slice's half 4q of the fragment's two rows: one 8-byte load per row, each straight into one half of the fragment
-    \\inline void exl3pf_afrag4(thread vec<half, 8>& f, const device half* r0, const device half* r1) {
-    \\    const half4 a = *reinterpret_cast<const device half4*>(r0);
-    \\    const half4 b = *reinterpret_cast<const device half4*>(r1);
-    \\    f[0] = a.x; f[1] = a.y; f[2] = a.z; f[3] = a.w; f[4] = b.x; f[5] = b.y; f[6] = b.z; f[7] = b.w;
-    \\}
-    \\// H16: tile_matmad_nax's multiply-accumulates for the first 16-row fragment row only (fragment row 0 of Dt, both 16-deep
-    \\// slices in order): rows 0..15 take the same 16x32x16 MMAs in the same order as the full call, rows 16..31 none
-    \\inline void exl3pf_mma_top(thread NAXTile<float, 2, 2>& Dt, thread NAXTile<half, 2, 2>& At, thread NAXTile<half, 2, 2>& Bt) {
-    \\    STEEL_PRAGMA_UNROLL
-    \\    for (short kk = 0; kk < 2; ++kk) BaseNAXFrag::mma(Dt.frag_at(0, 0), Dt.frag_at(0, 1), At.frag_at(0, kk), metal::bool_constant<false>{}, Bt.frag_at(0, kk), Bt.frag_at(1, kk), metal::bool_constant<true>{});
-    \\}
-    \\// codeword m of a lane: the general reader (lp = its bit offset), or (IR, n % 16 == 0) the integer-rate one (lp = its b:
-    \\// one select only where window m can carry, one extract); both read the same IntWords, so the same bits
-    \\template <uint N, uint WMASK, uint M, int IR> inline uint exl3pf_cw(thread const Exl3BitsM<exl3_rmode<N>()>& w, uint lp) {
-    \\    return exl3_tile_cw<N, WMASK, M, IR>(w, lp);
-    \\}
-    \\template <uint N, uint WMASK, int CB, int DF, int IR>
-    \\inline void exl3pf_bfrag(thread vec<half, 8>& f, const device uint* tw, uint qb, uint ga, uint lp) {
-    \\    const auto ww = exl3_tile_load<N, IR>(tw, qb, ga, lp);
-    \\    f[0] = exl3pf_w<CB, DF>(exl3pf_cw<N, WMASK, 0, IR>(ww, lp));
-    \\    f[1] = exl3pf_w<CB, DF>(exl3pf_cw<N, WMASK, 1, IR>(ww, lp));
-    \\    f[2] = exl3pf_w<CB, DF>(exl3pf_cw<N, WMASK, 2, IR>(ww, lp));
-    \\    f[3] = exl3pf_w<CB, DF>(exl3pf_cw<N, WMASK, 3, IR>(ww, lp));
-    \\    f[4] = exl3pf_w<CB, DF>(exl3pf_cw<N, WMASK, 4, IR>(ww, lp));
-    \\    f[5] = exl3pf_w<CB, DF>(exl3pf_cw<N, WMASK, 5, IR>(ww, lp));
-    \\    f[6] = exl3pf_w<CB, DF>(exl3pf_cw<N, WMASK, 6, IR>(ww, lp));
-    \\    f[7] = exl3pf_w<CB, DF>(exl3pf_cw<N, WMASK, 7, IR>(ww, lp));
-    \\}
-    \\
-;
+const metal_small_helpers = @embedFile("kernels/prefill/small_helpers.metal");
 
 /// The NAX lane L's trellis lane for the register path: L' = (b4, b2, b1, b3, b0).
 pub fn smallLanePlan(l: u32) u32 {
@@ -819,35 +178,7 @@ pub fn smallLanePlan(l: u32) u32 {
 }
 
 /// H128 of a simdgroup's 128 values, lane L holding elements L + 32 j: five shuffle stages, then the two register stages.
-const metal_h128 =
-    \\inline void turboexl3_h128x4(thread float* v, uint L) {
-    \\  for (uint s = 0; s < 5u; ++s) { const uint bit = 1u << s; for (uint j = 0; j < 4u; ++j) { const float p = simd_shuffle_xor(v[j], ushort(bit)); v[j] = (L & bit) ? (p - v[j]) : (v[j] + p); } }
-    \\  const float t0 = v[0] + v[1], t1 = v[0] - v[1], t2 = v[2] + v[3], t3 = v[2] - v[3];
-    \\  v[0] = t0 + t2; v[1] = t1 + t3; v[2] = t0 - t2; v[3] = t1 - t3;
-    \\}
-    \\// the same H128 with lane L holding elements 4L..4L+3: strides 1 and 2 in the lane, 4..64 across lanes (lane bit = stride / 4),
-    \\// in turboexl3_h128x4's level order with its lower a + b / upper a - b, so the same f32 value at every element
-    \\inline void turboexl3_h128v4(thread float* v, uint L) {
-    \\  const float a0 = v[0] + v[1], a1 = v[0] - v[1], a2 = v[2] + v[3], a3 = v[2] - v[3];
-    \\  v[0] = a0 + a2; v[1] = a1 + a3; v[2] = a0 - a2; v[3] = a1 - a3;
-    \\  for (uint s = 0; s < 5u; ++s) { const uint bit = 1u << s; for (uint j = 0; j < 4u; ++j) { const float p = simd_shuffle_xor(v[j], ushort(bit)); v[j] = (L & bit) ? (p - v[j]) : (v[j] + p); } }
-    \\}
-    \\// a 128-block's sum in the strided kernels' order from the vector layout: lane L adds elements L, L + 32, L + 64, L + 96 (lanes
-    \\// L / 4 + 8 j, component L % 4) in that order, then simd_sum: the same per-lane partials, so the same sum
-    \\template <int XSO> inline float turboexl3_sum_x4(half4 h, uint L) {
-    \\  // XSO 1: the lane's own 4 elements in order, then simd_sum (no shuffles; a different f32 order than the strided kernels')
-    \\  if (XSO != 0) return simd_sum(((float(h[0]) + float(h[1])) + float(h[2])) + float(h[3]));
-    \\  float s = 0.0f;
-    \\  for (uint j = 0; j < 4u; ++j) { const half4 o = simd_shuffle(h, ushort((L >> 2u) + 8u * j)); s += float(o[L & 3u]); }
-    \\  return simd_sum(s);
-    \\}
-    \\// `Options.alay`: the slot of element j of a 32-block in the GEMMs' A layout (`prefill.alayPos`): fragment lane q = (j >> 1) & 3
-    \\// holds k 2q, 2q + 1, 2q + 8, 2q + 9 of each 16-deep slice, stored at 8q + 4 (j >> 4) + {0, 1, 2, 3} (alay 1), or at
-    \\// 16 (j >> 4) + 4q + {0, 1, 2, 3} (alay 2: per 16-block, `prefill.alayPos16`)
-    \\inline uint turboexl3_alay(uint j) { return 8u * ((j >> 1u) & 3u) + 4u * (j >> 4u) + ((j & 1u) | (((j >> 3u) & 1u) << 1u)); }
-    \\inline uint turboexl3_alay16(uint j) { return (j & 16u) + 4u * ((j >> 1u) & 3u) + ((j & 1u) | (((j >> 3u) & 1u) << 1u)); }
-    \\
-;
+const metal_h128 = @embedFile("kernels/prefill/h128.metal");
 pub const header_small: [:0]const u8 = sentinel(metal_h128 ++ decode.header);
 
 /// `Options.alay` 1's slot of element j (0..31) of a 32-element block of an A row: the fragment lane q = (j >> 1) & 3 reads k
@@ -873,33 +204,6 @@ fn sentinel(comptime s: []const u8) [:0]const u8 {
     }
 }
 
-fn textWithSecond(comptime two: bool) [:0]const u8 {
-    return textWithSecondOf(text_gemm, two);
-}
-
-fn textWithSecondOf(comptime text: []const u8, comptime two: bool) [:0]const u8 {
-    comptime {
-        @setEvalBranchQuota(10_000_000);
-        var out: []const u8 = text;
-        out = replace(out, "XSSECOND", if (two) "xs1" else "xs0");
-        out = replace(out, "XSECOND", if (two) "x1" else "x0");
-        out = replace(out, "WSECOND", if (two) "w1" else "w0");
-        out = replace(out, "ZSECOND", if (two) "z1" else "z0");
-        return sentinel(out);
-    }
-}
-
-/// `replace` for the mixed GEMM's splices: exactly one occurrence, or the build fails (a missed splice once left the small
-/// path indexing its work items from the wrong origin).
-fn replaceOnce(comptime s: []const u8, comptime needle: []const u8, comptime with: []const u8) []const u8 {
-    comptime {
-        @setEvalBranchQuota(10_000_000);
-        const first = std.mem.indexOf(u8, s, needle) orelse @compileError("splice not found: " ++ needle);
-        if (std.mem.indexOfPos(u8, s, first + needle.len, needle) != null) @compileError("splice found twice: " ++ needle);
-        return replace(s, needle, with);
-    }
-}
-
 fn replace(comptime s: []const u8, comptime needle: []const u8, comptime with: []const u8) []const u8 {
     comptime {
         @setEvalBranchQuota(10_000_000);
@@ -913,28 +217,20 @@ fn replace(comptime s: []const u8, comptime needle: []const u8, comptime with: [
     }
 }
 
-const gemm2_text = textWithSecond(true);
-pub const gemm1_text = textWithSecond(false);
+const gemm2_text = sentinel(gemmText(true, false));
+pub const gemm1_text = sentinel(gemmText(false, false));
 /// The mixed GEMM (`Options.small = .mixed`): one launch, threadgroups below GBIGM take a BMR-row tile (NCB column blocks of it)
-/// through the shared-decode body (`text_gemm`), the rest run NSG independent register-path work items each
-/// (`text_gemm_small`) over the table's small tiles. Both bounds come from the tile table's shape, so the row count compiles
+/// through the shared-decode body (`gemmText`), the rest run NSG independent register-path work items each
+/// (`gemmSmallText`) over the table's small tiles. Both bounds come from the tile table's shape, so the row count compiles
 /// nothing. The weight stage is declared at kernel scope (the big body's `bs_mem`, same size).
-pub const text_gemm_mixed: []const u8 = blk: {
-    @setEvalBranchQuota(10_000_000);
-    var big: []const u8 = replaceOnce(text_gemm, "    threadgroup uint4 bs_mem[NBUF * BSZ * 2 / 16];\n", "");
-    big = replaceOnce(big, "reinterpret_cast<threadgroup half*>(bs_mem)", "reinterpret_cast<threadgroup half*>(mixed_bs)");
-    var small: []const u8 = replaceOnce(text_gemm_small, "const int wi = int(threadgroup_position_in_grid.x) * SGS + int(simdgroup_index_in_threadgroup);", "const int wi = (int(threadgroup_position_in_grid.x) - GBIGM) * SGS + int(simdgroup_index_in_threadgroup);");
-    small = replaceOnce(small, "const int tile = wi / (NOPSC * NB);", "const int stile = wi / (NOPSC * NB);\n    const int tile = TBIGM + stile;\n    if (tile >= int(tiles_shape[0])) return;");
-    small = replaceOnce(small, "const int rem = wi - tile * (NOPSC * NB);", "const int rem = wi - stile * (NOPSC * NB);");
-    break :blk "    threadgroup uint4 mixed_bs[((DBUF != 0) ? 2 : 1) * (int(BKS) / 64) * 64 * ((FRAGB != 0 && (PROBE & 16) == 0) ? 64 : 72) * 2 / 16];\n" ++
-        "    const int TBIGM = int(tiles_shape[0]) - int(TMAXS);\n" ++
-        "    const int GBIGM = TBIGM * int(NOPS) * (int(ND) / 64 / int(NCB));\n" ++
-        "    if (int(threadgroup_position_in_grid.x) < GBIGM) {\n" ++ big ++ "    } else {\n" ++ small ++ "    }\n";
-};
-const gemm2m_text = textWithSecondOf(text_gemm_mixed, true);
-const gemm1m_text = textWithSecondOf(text_gemm_mixed, false);
-const gemm2s_text = textWithSecondOf(text_gemm_small, true);
-pub const gemm1s_text = textWithSecondOf(text_gemm_small, false);
+fn gemmMixedText(comptime two: bool) []const u8 {
+    return @embedFile("kernels/prefill/gemm_mixed_1.metal") ++ gemmText(two, true) ++ @embedFile("kernels/prefill/gemm_mixed_2.metal") ++ gemmSmallText(two, true) ++
+        @embedFile("kernels/prefill/gemm_mixed_3.metal");
+}
+const gemm2m_text = sentinel(gemmMixedText(true));
+const gemm1m_text = sentinel(gemmMixedText(false));
+const gemm2s_text = sentinel(gemmSmallText(true, false));
+pub const gemm1s_text = sentinel(gemmSmallText(false, false));
 
 // ── The 128-row tiles (`Options.t128`, `Prefill.moeT128`) ──
 //
@@ -962,90 +258,19 @@ pub const t128_cut: u8 = 64;
 /// xbase int32 [EXP] (each expert's first remainder position: its rows before it are the 128-row tiles', `text_mid_t128` /
 /// `text_finish_t128`); TBIG and TQ are `t128MixedRows`' and `t128TileRows`' expressions (bounds that hold for any routing);
 /// unused entries rows = 0.
-pub const text_froute_t128: [:0]const u8 = sentinel(
-    \\    constexpr uint EC = uint(EXP);
-    \\    constexpr uint BMC = uint(BMT);
-    \\    constexpr uint SR = 32u * uint(SPL);
-    \\    constexpr uint CU = (uint(CUT) < 127u) ? uint(CUT) : 127u;
-    \\    const uint SC = uint(inds_shape[0]);
-    \\    constexpr uint PER = CU / BMC + ((CU % BMC > SR) ? 1u : 0u);
-    \\    constexpr uint MINR = (BMC < SR + 1u) ? BMC : SR + 1u;
-    \\    const uint TBIG0 = (SC + BMC - 1u) / BMC + EC;
-    \\    const uint TBIG = (T128 != 0) ? max(1u, min(TBIG0, min(EC * PER, SC / MINR))) : TBIG0;
-    \\    const uint TALL = TBIG + uint(SPL) * EC;
-    \\    const uint NPQ = min(EC, SC / (CU + 1u));
-    \\    const uint TQ = (T128 != 0) ? max(1u, NPQ + (SC - (CU + 1u) * NPQ) / 128u) : 1u;
-    \\    const uint tid = thread_index_in_threadgroup;
-    \\    const uint sg = simdgroup_index_in_threadgroup;
-    \\    const uint L = thread_index_in_simdgroup;
-    \\    threadgroup uint lo_s[1025];
-    \\    threadgroup uint prefq[32];
-    \\    threadgroup uint prefb[32];
-    \\    threadgroup uint prefs[32];
-    \\    threadgroup uint totq_s;
-    \\    threadgroup uint totb_s;
-    \\    threadgroup uint tots_s;
-    \\
-++ froute_count ++
-    \\    lo_s[tid] = lo;
-    \\    if (tid == 0u) lo_s[1024] = SC;
-    \\    threadgroup_barrier(mem_flags::mem_threadgroup);
-    \\    uint c0 = 0u, cnt = 0u, nq = 0u, nb = 0u, ns = 0u, nfull = 0u, r = 0u;
-    \\    if (tid < EC) {
-    \\        c0 = lo_s[tid + 1u] - lo;
-    \\        nq = (T128 != 0) ? c0 / 128u : 0u;
-    \\        cnt = c0 - 128u * nq;
-    \\        if (T128 != 0 && cnt > CU) { nq += 1u; cnt = 0u; }
-    \\        nfull = cnt / BMC;
-    \\        r = cnt - nfull * BMC;
-    \\        if (r == 0u) nb = nfull;
-    \\        else if (r > SR) nb = nfull + 1u;
-    \\        else { nb = nfull; ns = (r + 31u) / 32u; }
-    \\    }
-    \\    // the remainder's first sorted position
-    \\    const uint base = lo + c0 - cnt;
-    \\    if (tid < EC) xbase[tid] = int(base);
-    \\    const uint iq = simd_prefix_inclusive_sum(nq);
-    \\    const uint ib = simd_prefix_inclusive_sum(nb);
-    \\    const uint is = simd_prefix_inclusive_sum(ns);
-    \\    if (L == 31u) { prefq[sg] = iq; prefb[sg] = ib; prefs[sg] = is; }
-    \\    threadgroup_barrier(mem_flags::mem_threadgroup);
-    \\    if (sg == 0u) { prefq[L] = simd_prefix_exclusive_sum(prefq[L]); prefb[L] = simd_prefix_exclusive_sum(prefb[L]); prefs[L] = simd_prefix_exclusive_sum(prefs[L]); }
-    \\    threadgroup_barrier(mem_flags::mem_threadgroup);
-    \\    const uint sq = prefq[sg] + iq - nq;
-    \\    const uint sb = prefb[sg] + ib - nb;
-    \\    const uint ss = prefs[sg] + is - ns;
-    \\    for (uint t = 0u; t < nq; ++t) {
-    \\        const uint i = sq + t;
-    \\        tiles128[4u * i] = int(tid); tiles128[4u * i + 1u] = int(lo + 128u * t); tiles128[4u * i + 2u] = int(min(128u, c0 - 128u * t)); tiles128[4u * i + 3u] = 0;
-    \\    }
-    \\    for (uint t = 0u; t < nb; ++t) {
-    \\        const uint i = sb + t;
-    \\        tiles[4u * i] = int(tid); tiles[4u * i + 1u] = int(base + t * BMC); tiles[4u * i + 2u] = int(min(BMC, cnt - t * BMC)); tiles[4u * i + 3u] = 0;
-    \\    }
-    \\    for (uint t = 0u; t < ns; ++t) {
-    \\        const uint i = TBIG + ss + t;
-    \\        tiles[4u * i] = int(tid); tiles[4u * i + 1u] = int(base + nfull * BMC + 32u * t); tiles[4u * i + 2u] = int(min(32u, r - 32u * t)); tiles[4u * i + 3u] = 0;
-    \\    }
-    \\    if (tid == 1023u) { totq_s = sq + nq; totb_s = sb + nb; tots_s = ss + ns; }
-    \\    threadgroup_barrier(mem_flags::mem_threadgroup);
-    \\    for (uint i = totq_s + tid; i < TQ; i += 1024u) { tiles128[4u * i] = 0; tiles128[4u * i + 1u] = 0; tiles128[4u * i + 2u] = 0; tiles128[4u * i + 3u] = 0; }
-    \\    for (uint i = totb_s + tid; i < TBIG; i += 1024u) { tiles[4u * i] = 0; tiles[4u * i + 1u] = 0; tiles[4u * i + 2u] = 0; tiles[4u * i + 3u] = 0; }
-    \\    for (uint i = TBIG + tots_s + tid; i < TALL; i += 1024u) { tiles[4u * i] = 0; tiles[4u * i + 1u] = 0; tiles[4u * i + 2u] = 0; tiles[4u * i + 3u] = 0; }
-    \\
-);
+pub const text_froute_t128: [:0]const u8 = sentinel(@embedFile("kernels/prefill/froute_t128_1.metal") ++ froute_count ++
+    @embedFile("kernels/prefill/froute_t128_2.metal"));
 
 /// The 128-row tiles' mid: `text_mid` with each position's gate and up rows from the launch that computed them (zgt / zut,
 /// the 128-row tiles' outputs, for p < xbase[e]; zg / zu, the mixed launch's, otherwise); one simdgroup holds one position,
 /// so the choice is uniform per simdgroup. Nothing else changes, so the same bytes from the same rows.
-const mid_t128_sel = "    const uint e = uint(inds[order[p]]);\n";
-pub const text_mid_t128: [:0]const u8 = sentinel(replaceOnce(replaceOnce(replaceOnce(text_mid, mid_t128_sel, mid_t128_sel ++
-    "    const bool qt = int(p) < xbase[e];\n    const device half* zgs = qt ? zgt : zg;\n    const device half* zus = qt ? zut : zu;\n"), "g[j] = float(zg[ulong(p) * IC + i]);", "g[j] = float(zgs[ulong(p) * IC + i]);"), "u[j] = float(zu[ulong(p) * IC + i]);", "u[j] = float(zus[ulong(p) * IC + i]);"));
+const mid_t128_pick = @embedFile("kernels/prefill/mid_t128_pick.metal");
+pub const text_mid_t128: [:0]const u8 = sentinel(mid_1 ++ mid_t128_pick ++ mid_2 ++ @embedFile("kernels/prefill/mid_t128_loads.metal") ++ mid_4);
 /// The 128-row tiles' finish: `text_finish` with each slot's down row from the launch that computed it (zdt for p < xbase[e],
 /// else zd)
-const fin_t128_sel = "        const uint e = uint(inds[src]);\n";
-pub const text_finish_t128: [:0]const u8 = sentinel(replaceOnce(replaceOnce(text_finish, fin_t128_sel, fin_t128_sel ++
-    "        const device half* zds = (int(p) < xbase[e]) ? zdt : zd;\n"), "v[j] = float(zd[ulong(p) * HC", "v[j] = float(zds[ulong(p) * HC"));
+const finish_t128_pick = @embedFile("kernels/prefill/finish_t128_pick.metal");
+pub const text_finish_t128: [:0]const u8 = sentinel(finish_1 ++ finish_t128_pick ++ finish_2 ++ @embedFile("kernels/prefill/finish_t128_load.metal") ++
+    finish_4);
 
 const table_in = [_][*:0]const u8{ "inds", "order" };
 const table_out = [_][*:0]const u8{"tiles"};
@@ -1106,7 +331,7 @@ pub const Operands = struct {
 pub const Options = struct {
     bm: u32 = 128,
     dbuf: bool = false,
-    /// .all: every M tile is <= 32 rows and runs the register-path GEMM (`text_gemm_small`), sgt work items per threadgroup
+    /// .all: every M tile is <= 32 rows and runs the register-path GEMM (`gemmSmallText`), sgt work items per threadgroup
     small: Small = .off,
     sgt: u32 = 4,
     /// timing probes only (outputs are wrong), a bit mask: 1 skips the trellis read and decode (constant weights), 2 skips the
@@ -1346,7 +571,7 @@ pub const T128Kernels = struct {
     }
 
     fn deinit(k: T128Kernels) void {
-        inline for (.{ k.route, k.gu_mixed, k.gu_t128, k.dn_mixed, k.dn_t128, k.mid, k.fin }) |x| _ = mlx.mlx_fast_metal_kernel_free(x);
+        inline for (.{ k.route, k.gu_mixed, k.gu_t128, k.dn_mixed, k.dn_t128, k.mid, k.fin }) |x| decode.freeKernel(x);
     }
 };
 
@@ -1402,7 +627,7 @@ pub const Prefill = struct {
     }
 
     pub fn deinit(self: *Prefill) void {
-        inline for (.{ self.table, self.prep_k, self.gemm2, self.gemm1, self.mid_k, self.fin, self.gemm2s, self.gemm1s, self.table_m, self.gemm2m, self.gemm1m, self.froute, self.froute_m, self.prep_v, self.mid_v, self.fin_v }) |k| _ = mlx.mlx_fast_metal_kernel_free(k);
+        inline for (.{ self.table, self.prep_k, self.gemm2, self.gemm1, self.mid_k, self.fin, self.gemm2s, self.gemm1s, self.table_m, self.gemm2m, self.gemm1m, self.froute, self.froute_m, self.prep_v, self.mid_v, self.fin_v }) |k| decode.freeKernel(k);
         if (self.t128_k) |k| k.deinit();
     }
 
@@ -1757,12 +982,13 @@ pub const Prefill = struct {
 };
 
 test "turboexl3 prefill texts: the NAX header carries steel's tiles and turboexl3's decoder; the GEMM's second-op names resolve" {
+    const pin = comptime @import("test_support.zig").pins(@embedFile("kernels/test/pins/prefill_texts.metal"));
     const t = std.testing;
-    try t.expect(std.mem.indexOf(u8, header_nax, "struct NAXTile") != null);
+    try t.expect(std.mem.indexOf(u8, header_nax, pin[0]) != null);
     try t.expect(std.mem.indexOf(u8, header_nax, "exl3_gen_cw") != null);
     try t.expect(std.mem.indexOf(u8, gemm2_text, "XSECOND") == null);
-    try t.expect(std.mem.indexOf(u8, gemm2_text, "op == 0 ? x0 : x1") != null);
-    try t.expect(std.mem.indexOf(u8, gemm1_text, "op == 0 ? x0 : x0") != null);
+    try t.expect(std.mem.indexOf(u8, gemm2_text, pin[1]) != null);
+    try t.expect(std.mem.indexOf(u8, gemm1_text, pin[2]) != null);
     try t.expect(bptFor(20) == 5 and bptFor(5) == 5 and bptFor(7) == 7 and bptFor(16) == 8);
 }
 
@@ -1785,6 +1011,7 @@ test "turboexl3 prefill down options: bk128 doubles the stage (32 KB double-buff
 }
 
 test "turboexl3 prefill alay: a lane's A fragment elements are one aligned 16-byte (32-deep step) or 8-byte (16-deep slice) run; the writers' slot is alayPos / alayPos16" {
+    const pin = comptime @import("test_support.zig").pins(@embedFile("kernels/test/pins/prefill_alay.metal"));
     const t = std.testing;
     // each a permutation of a 32-block; alayPos16 keeps each 16-block's elements in it
     var seen: [32]bool = @splat(false);
@@ -1817,12 +1044,12 @@ test "turboexl3 prefill alay: a lane's A fragment elements are one aligned 16-by
     }
     // prep and mid write lane L's element L of each 32-block at turboexl3_alay(L) / turboexl3_alay16(L): the expressions of
     // alayPos / alayPos16
-    try t.expect(std.mem.indexOf(u8, header_small, "turboexl3_alay(uint j) { return 8u * ((j >> 1u) & 3u) + 4u * (j >> 4u) + ((j & 1u) | (((j >> 3u) & 1u) << 1u)); }") != null);
-    try t.expect(std.mem.indexOf(u8, header_small, "turboexl3_alay16(uint j) { return (j & 16u) + 4u * ((j >> 1u) & 3u) + ((j & 1u) | (((j >> 3u) & 1u) << 1u)); }") != null);
-    for ([_][]const u8{ text_prep, text_mid }) |txt| try t.expect(std.mem.indexOf(u8, txt, "(ALAY == 1) ? turboexl3_alay(L) : ((ALAY == 2) ? turboexl3_alay16(L) : L)") != null);
+    try t.expect(std.mem.indexOf(u8, header_small, pin[0]) != null);
+    try t.expect(std.mem.indexOf(u8, header_small, pin[1]) != null);
+    for ([_][]const u8{ text_prep, text_mid }) |txt| try t.expect(std.mem.indexOf(u8, txt, pin[2]) != null);
     // both GEMM bodies (and so the mixed launch) read the layout and the first-fragment-row switch
     for ([_][]const u8{ gemm2m_text, gemm1m_text, gemm2s_text, gemm1s_text, gemm2_text, gemm1_text }) |txt| {
-        try t.expect(std.mem.indexOf(u8, txt, "((ALAY == 1) ? 8u : ((ALAY == 2) ? 4u : 2u))") != null);
+        try t.expect(std.mem.indexOf(u8, txt, pin[3]) != null);
         try t.expect(std.mem.indexOf(u8, txt, "H16") != null);
     }
 }
@@ -1988,104 +1215,94 @@ test "turboexl3 prefill small sintr: at every register-path lane the integer-rat
 
 /// One kernel as a standalone Metal translation unit (the CPU-side compile check, TURBOEXL3_METAL_DUMP=1): the header, the
 /// template ints and dtypes as file-scope constants, and a [[kernel]] whose arguments mirror what MLX binds (inputs in order,
-/// `<name>_shape` where the source reads it, then outputs, then the thread attributes the sources use). Printed between
-/// @@METAL_BEGIN / @@METAL_END markers; the box splits them and runs `xcrun metal` on each without touching the GPU.
-pub const MetalArg = struct { name: []const u8, ty: []const u8, out: bool = false, shape: bool = false };
-
-pub fn printMetal(name: []const u8, header: []const u8, consts: []const u8, args: []const MetalArg, body: []const u8) void {
-    std.debug.print("@@METAL_BEGIN {s}\n{s}\n{s}\n[[kernel]] void {s}(", .{ name, header, consts, name });
-    var b: usize = 0;
-    for (args) |arg| {
-        std.debug.print("{s}{s} {s}* {s} [[buffer({d})]]", .{ if (b == 0) "" else ", ", if (arg.out) "device" else "const device", arg.ty, arg.name, b });
-        b += 1;
-        if (arg.shape) {
-            std.debug.print(", const constant int* {s}_shape [[buffer({d})]]", .{ arg.name, b });
-            b += 1;
-        }
-    }
-    std.debug.print(", uint3 threadgroup_position_in_grid [[threadgroup_position_in_grid]], uint simdgroup_index_in_threadgroup [[simdgroup_index_in_threadgroup]], uint thread_index_in_simdgroup [[thread_index_in_simdgroup]], uint thread_index_in_threadgroup [[thread_index_in_threadgroup]]) {{\n{s}\n}}\n@@METAL_END\n", .{body});
+/// `<name>_shape` where the source reads it, then outputs, then the thread attributes the sources use; `params`: the list up to
+/// those, a line of the dump test's data file). Printed between @@METAL_BEGIN / @@METAL_END markers; the box splits them
+/// and runs `xcrun metal` on each without touching the GPU.
+pub fn printMetal(name: []const u8, header: []const u8, consts: []const u8, params: []const u8, body: []const u8) void {
+    std.debug.print("@@METAL_BEGIN {s}\n{s}\n{s}\n{s}{s}{s}{s}\n{s}\n{s}\n@@METAL_END\n", .{ name, header, consts, @embedFile("kernels/test/dump/kernel.metal"), name, params, @embedFile("kernels/test/dump/attributes.metal"), body, @embedFile("kernels/test/dump/close.metal") });
 }
 
 test "turboexl3 prefill metal sources: every kernel as a standalone translation unit (TURBOEXL3_METAL_DUMP=1)" {
+    const pin = comptime @import("test_support.zig").pins(@embedFile("kernels/test/dump/prefill.metal"));
     _ = std.c.getenv("TURBOEXL3_METAL_DUMP") orelse return error.SkipZigTest;
-    const gemm_c = "constant constexpr int NHW = 80; constant constexpr int CODEBOOK = 0; constant constexpr int WBITS = 16; constant constexpr int NOPS = 2; constant constexpr int BMR = 128; constant constexpr int DBUF = 1; constant constexpr int PROBE = 0; constant constexpr int WSP = 0; constant constexpr int MFIRST = 0; constant constexpr int UNR = 1; constant constexpr int SGT = 8; constant constexpr int TMAXS = 512; constant constexpr int FRAGB = 1; constant constexpr int INTR = 1; constant constexpr int DEFER = 1; constant constexpr int NBX = 20; constant constexpr int KD = 2560; constant constexpr int ND = 640; constant constexpr int BKS = 64; constant constexpr int NCB = 1; constant constexpr int SINTR = 0; constant constexpr int ALAY = 0; constant constexpr int H16 = 0;";
+    const gemm_c = pin[0];
     // the register path through the integer-rate reader (j = Options.sintr), with the deferred MUL1 map and without it
-    const gemm_j = comptime replaceOnce(gemm_c, "int SINTR = 0;", "int SINTR = 1;");
-    const gemm_j0 = comptime replaceOnce(gemm_j, "int DEFER = 1;", "int DEFER = 0;");
+    const gemm_j = pin[1];
+    const gemm_j0 = pin[2];
     // the A layouts (l = Options.alay 1, l2 = alay 2) and the first-fragment-row MMA (e = Options.half_rows), each alone and
     // with e, on the served gate|up launch (bm 64, 4 simdgroups) and at bm 128; with the A-load probe (p4: the layout's zero
     // fill)
-    const gemm_j64 = comptime replaceOnce(replaceOnce(gemm_j, "int BMR = 128;", "int BMR = 64;"), "int SGT = 8;", "int SGT = 4;");
-    const gemm_jl = comptime replaceOnce(gemm_j64, "int ALAY = 0;", "int ALAY = 1;");
-    const gemm_je = comptime replaceOnce(gemm_j64, "int H16 = 0;", "int H16 = 1;");
-    const gemm_jle = comptime replaceOnce(gemm_jl, "int H16 = 0;", "int H16 = 1;");
-    const gemm_jle128 = comptime replaceOnce(replaceOnce(gemm_c, "int ALAY = 0;", "int ALAY = 1;"), "int H16 = 0;", "int H16 = 1;");
-    const gemm_jle_p4 = comptime replaceOnce(gemm_jle, "int PROBE = 0;", "int PROBE = 4;");
-    const gemm_jl2e = comptime replaceOnce(gemm_je, "int ALAY = 0;", "int ALAY = 2;");
-    const g2 = [_]MetalArg{ .{ .name = "tiles", .ty = "int", .shape = true }, .{ .name = "x0", .ty = "half" }, .{ .name = "x1", .ty = "half" }, .{ .name = "w0", .ty = "uint16_t" }, .{ .name = "w1", .ty = "uint16_t" }, .{ .name = "xs0", .ty = "float" }, .{ .name = "xs1", .ty = "float" }, .{ .name = "z0", .ty = "half", .out = true }, .{ .name = "z1", .ty = "half", .out = true } };
-    const g1 = [_]MetalArg{ .{ .name = "tiles", .ty = "int", .shape = true }, .{ .name = "x0", .ty = "half" }, .{ .name = "w0", .ty = "uint16_t" }, .{ .name = "xs0", .ty = "float" }, .{ .name = "z0", .ty = "half", .out = true } };
-    printMetal("turboexl3_pf_gemm2", header_nax, gemm_c, &g2, gemm2_text);
-    printMetal("turboexl3_pf_gemm1", header_nax, gemm_c, &g1, gemm1_text);
-    printMetal("turboexl3_pf_gemm2s", header_nax_small, gemm_c, &g2, gemm2s_text);
-    printMetal("turboexl3_pf_gemm2m", header_nax_mixed, gemm_c, &g2, gemm2m_text);
-    printMetal("turboexl3_pf_gemm1m", header_nax_mixed, gemm_c, &g1, gemm1m_text);
-    printMetal("turboexl3_pf_gemm2s_j", header_nax_small, gemm_j, &g2, gemm2s_text);
-    printMetal("turboexl3_pf_gemm2s_j0", header_nax_small, gemm_j0, &g2, gemm2s_text);
-    printMetal("turboexl3_pf_gemm2m_j", header_nax_mixed, gemm_j, &g2, gemm2m_text);
-    printMetal("turboexl3_pf_gemm2m_jl", header_nax_mixed, gemm_jl, &g2, gemm2m_text);
-    printMetal("turboexl3_pf_gemm2m_je", header_nax_mixed, gemm_je, &g2, gemm2m_text);
-    printMetal("turboexl3_pf_gemm2m_jle", header_nax_mixed, gemm_jle, &g2, gemm2m_text);
-    printMetal("turboexl3_pf_gemm2m_jle_p4", header_nax_mixed, gemm_jle_p4, &g2, gemm2m_text);
-    printMetal("turboexl3_pf_gemm2_le128", header_nax, gemm_jle128, &g2, gemm2_text);
-    printMetal("turboexl3_pf_gemm2s_jle", header_nax_small, gemm_jle, &g2, gemm2s_text);
-    printMetal("turboexl3_pf_gemm2m_jl2e", header_nax_mixed, gemm_jl2e, &g2, gemm2m_text);
-    printMetal("turboexl3_pf_gemm2s_jl2e", header_nax_small, gemm_jl2e, &g2, gemm2s_text);
+    const gemm_jl = pin[3];
+    const gemm_je = pin[4];
+    const gemm_jle = pin[5];
+    const gemm_jle128 = pin[6];
+    const gemm_jle_p4 = pin[7];
+    const gemm_jl2e = pin[8];
+    const g2 = pin[9];
+    const g1 = pin[10];
+    printMetal("turboexl3_pf_gemm2", header_nax, gemm_c, g2, gemm2_text);
+    printMetal("turboexl3_pf_gemm1", header_nax, gemm_c, g1, gemm1_text);
+    printMetal("turboexl3_pf_gemm2s", header_nax_small, gemm_c, g2, gemm2s_text);
+    printMetal("turboexl3_pf_gemm2m", header_nax_mixed, gemm_c, g2, gemm2m_text);
+    printMetal("turboexl3_pf_gemm1m", header_nax_mixed, gemm_c, g1, gemm1m_text);
+    printMetal("turboexl3_pf_gemm2s_j", header_nax_small, gemm_j, g2, gemm2s_text);
+    printMetal("turboexl3_pf_gemm2s_j0", header_nax_small, gemm_j0, g2, gemm2s_text);
+    printMetal("turboexl3_pf_gemm2m_j", header_nax_mixed, gemm_j, g2, gemm2m_text);
+    printMetal("turboexl3_pf_gemm2m_jl", header_nax_mixed, gemm_jl, g2, gemm2m_text);
+    printMetal("turboexl3_pf_gemm2m_je", header_nax_mixed, gemm_je, g2, gemm2m_text);
+    printMetal("turboexl3_pf_gemm2m_jle", header_nax_mixed, gemm_jle, g2, gemm2m_text);
+    printMetal("turboexl3_pf_gemm2m_jle_p4", header_nax_mixed, gemm_jle_p4, g2, gemm2m_text);
+    printMetal("turboexl3_pf_gemm2_le128", header_nax, gemm_jle128, g2, gemm2_text);
+    printMetal("turboexl3_pf_gemm2s_jle", header_nax_small, gemm_jle, g2, gemm2s_text);
+    printMetal("turboexl3_pf_gemm2m_jl2e", header_nax_mixed, gemm_jl2e, g2, gemm2m_text);
+    printMetal("turboexl3_pf_gemm2s_jl2e", header_nax_small, gemm_jl2e, g2, gemm2s_text);
     // the down GEMM at Qwen's geometry (K 640, N 2560): the served stage (bm 64, fragment order), 128-deep stages (k), several
     // column blocks per threadgroup (n<c>), and the single-buffered padded body at bm 128 (both sub-stage and block loops there);
     // the all-register down GEMM and the served launch (n4) with the register path's integer-rate reader (j)
-    const down_c = "constant constexpr int NHW = 80; constant constexpr int CODEBOOK = 0; constant constexpr int WBITS = 16; constant constexpr int NOPS = 1; constant constexpr int PROBE = 0; constant constexpr int WSP = 0; constant constexpr int MFIRST = 0; constant constexpr int TMAXS = 512; constant constexpr int INTR = 1; constant constexpr int NBX = 5; constant constexpr int KD = 640; constant constexpr int ND = 2560; constant constexpr int SINTR = 0; constant constexpr int ALAY = 0; constant constexpr int H16 = 0;";
-    const served = down_c ++ " constant constexpr int BMR = 64; constant constexpr int SGT = 4; constant constexpr int DBUF = 1; constant constexpr int UNR = 1; constant constexpr int FRAGB = 1; constant constexpr int DEFER = 1;";
-    const served_j = comptime replaceOnce(served, "int SINTR = 0;", "int SINTR = 1;");
-    const served_jle = comptime replaceOnce(replaceOnce(served_j, "int ALAY = 0;", "int ALAY = 1;"), "int H16 = 0;", "int H16 = 1;");
-    printMetal("turboexl3_pf_gemm1m_n4_jle", header_nax_mixed, served_jle ++ " constant constexpr int BKS = 64; constant constexpr int NCB = 4;", &g1, gemm1m_text);
-    printMetal("turboexl3_pf_gemm1s_jle", header_nax_small, served_jle ++ " constant constexpr int BKS = 64; constant constexpr int NCB = 1;", &g1, gemm1s_text);
-    const served_jl2e = comptime replaceOnce(served_jle, "int ALAY = 1;", "int ALAY = 2;");
-    printMetal("turboexl3_pf_gemm1m_n4_jl2e", header_nax_mixed, served_jl2e ++ " constant constexpr int BKS = 64; constant constexpr int NCB = 4;", &g1, gemm1m_text);
-    printMetal("turboexl3_pf_gemm1s", header_nax_small, served ++ " constant constexpr int BKS = 64; constant constexpr int NCB = 1;", &g1, gemm1s_text);
-    printMetal("turboexl3_pf_gemm1s_j", header_nax_small, served_j ++ " constant constexpr int BKS = 64; constant constexpr int NCB = 1;", &g1, gemm1s_text);
-    printMetal("turboexl3_pf_gemm1m_n4_j", header_nax_mixed, served_j ++ " constant constexpr int BKS = 64; constant constexpr int NCB = 4;", &g1, gemm1m_text);
-    printMetal("turboexl3_pf_gemm1m_down", header_nax_mixed, served ++ " constant constexpr int BKS = 64; constant constexpr int NCB = 1;", &g1, gemm1m_text);
-    printMetal("turboexl3_pf_gemm1m_k", header_nax_mixed, served ++ " constant constexpr int BKS = 128; constant constexpr int NCB = 1;", &g1, gemm1m_text);
-    printMetal("turboexl3_pf_gemm1m_n2", header_nax_mixed, served ++ " constant constexpr int BKS = 64; constant constexpr int NCB = 2;", &g1, gemm1m_text);
-    printMetal("turboexl3_pf_gemm1m_n4", header_nax_mixed, served ++ " constant constexpr int BKS = 64; constant constexpr int NCB = 4;", &g1, gemm1m_text);
-    printMetal("turboexl3_pf_gemm1m_kn2", header_nax_mixed, served ++ " constant constexpr int BKS = 128; constant constexpr int NCB = 2;", &g1, gemm1m_text);
-    printMetal("turboexl3_pf_gemm1m_kn4", header_nax_mixed, served ++ " constant constexpr int BKS = 128; constant constexpr int NCB = 4;", &g1, gemm1m_text);
-    printMetal("turboexl3_pf_gemm1_kn2_sb", header_nax, down_c ++ " constant constexpr int BMR = 128; constant constexpr int SGT = 8; constant constexpr int DBUF = 0; constant constexpr int UNR = 0; constant constexpr int FRAGB = 0; constant constexpr int DEFER = 0; constant constexpr int BKS = 128; constant constexpr int NCB = 2;", &g1, gemm1_text);
-    const tbl = [_]MetalArg{ .{ .name = "inds", .ty = "int", .shape = true }, .{ .name = "order", .ty = "uint" }, .{ .name = "tiles", .ty = "int", .out = true } };
-    printMetal("turboexl3_pf_table", header_small, "constant constexpr int EXP = 512; constant constexpr int BMT = 128;", &tbl, text_table);
-    printMetal("turboexl3_pf_table_m", header_small, "constant constexpr int EXP = 512; constant constexpr int BMT = 128; constant constexpr int SPL = 2;", &tbl, text_table_mixed);
-    const frt = [_]MetalArg{ .{ .name = "inds", .ty = "uint", .shape = true }, .{ .name = "order", .ty = "uint", .out = true }, .{ .name = "tiles", .ty = "int", .out = true } };
-    printMetal("turboexl3_pf_froute", header_small, "constant constexpr int EXP = 512; constant constexpr int BMT = 32; constant constexpr int SPL = 1;", &frt, text_froute);
-    printMetal("turboexl3_pf_froute_m", header_small, "constant constexpr int EXP = 512; constant constexpr int BMT = 64; constant constexpr int SPL = 1;", &frt, text_froute_m);
-    const prep = [_]MetalArg{ .{ .name = "x", .ty = "bfloat" }, .{ .name = "inds", .ty = "int" }, .{ .name = "order", .ty = "uint" }, .{ .name = "suh_g", .ty = "half" }, .{ .name = "suh_u", .ty = "half" }, .{ .name = "xg", .ty = "half", .out = true }, .{ .name = "xu", .ty = "half", .out = true }, .{ .name = "inv", .ty = "uint", .out = true }, .{ .name = "xsg", .ty = "float", .out = true }, .{ .name = "xsu", .ty = "float", .out = true } };
-    printMetal("turboexl3_pf_prep", header_small, "constant constexpr int HID = 2560; constant constexpr int TOPK = 10; constant constexpr int BPT = 5; constant constexpr int ALAY = 0;", &prep, text_prep);
-    printMetal("turboexl3_pf_prep_l", header_small, "constant constexpr int HID = 2560; constant constexpr int TOPK = 10; constant constexpr int BPT = 5; constant constexpr int ALAY = 1;", &prep, text_prep);
-    printMetal("turboexl3_pf_prep_l2", header_small, "constant constexpr int HID = 2560; constant constexpr int TOPK = 10; constant constexpr int BPT = 5; constant constexpr int ALAY = 2;", &prep, text_prep);
-    const prep_v = [_]MetalArg{ .{ .name = "x", .ty = "bfloat" }, .{ .name = "inds", .ty = "uint" }, .{ .name = "order", .ty = "uint", .shape = true }, .{ .name = "suh_g", .ty = "half" }, .{ .name = "suh_u", .ty = "half" }, .{ .name = "xg", .ty = "half", .out = true }, .{ .name = "xu", .ty = "half", .out = true }, .{ .name = "inv", .ty = "uint", .out = true }, .{ .name = "xsg", .ty = "float", .out = true }, .{ .name = "xsu", .ty = "float", .out = true } };
-    printMetal("turboexl3_pf_prep_v", header_small, "constant constexpr int HID = 2560; constant constexpr int TOPK = 10; constant constexpr int ASG = 8; constant constexpr int XSO = 1;", &prep_v, text_prep_v);
-    const mid = [_]MetalArg{ .{ .name = "zg", .ty = "half" }, .{ .name = "zu", .ty = "half" }, .{ .name = "inds", .ty = "int" }, .{ .name = "order", .ty = "uint" }, .{ .name = "svh_g", .ty = "half" }, .{ .name = "svh_u", .ty = "half" }, .{ .name = "suh_d", .ty = "half" }, .{ .name = "xd", .ty = "half", .out = true }, .{ .name = "xsd", .ty = "float", .out = true } };
-    printMetal("turboexl3_pf_mid", header_small, "constant constexpr int INTER = 640; constant constexpr int BPT = 5; constant constexpr int ALAY = 0;", &mid, text_mid);
-    printMetal("turboexl3_pf_mid_l", header_small, "constant constexpr int INTER = 640; constant constexpr int BPT = 5; constant constexpr int ALAY = 1;", &mid, text_mid);
-    printMetal("turboexl3_pf_mid_l2", header_small, "constant constexpr int INTER = 640; constant constexpr int BPT = 5; constant constexpr int ALAY = 2;", &mid, text_mid);
-    const mid_v = [_]MetalArg{ .{ .name = "zg", .ty = "half" }, .{ .name = "zu", .ty = "half" }, .{ .name = "inds", .ty = "uint" }, .{ .name = "order", .ty = "uint", .shape = true }, .{ .name = "svh_g", .ty = "half" }, .{ .name = "svh_u", .ty = "half" }, .{ .name = "suh_d", .ty = "half" }, .{ .name = "xd", .ty = "half", .out = true }, .{ .name = "xsd", .ty = "float", .out = true } };
-    printMetal("turboexl3_pf_mid_v", header_small, "constant constexpr int INTER = 640; constant constexpr int ASG = 8; constant constexpr int XSO = 0;", &mid_v, text_mid_v);
-    const fin = [_]MetalArg{ .{ .name = "zd", .ty = "half" }, .{ .name = "inds", .ty = "int" }, .{ .name = "inv", .ty = "uint" }, .{ .name = "scores", .ty = "float" }, .{ .name = "svh_d", .ty = "half" }, .{ .name = "y", .ty = "bfloat", .out = true } };
-    printMetal("turboexl3_pf_fin", header_small, "constant constexpr int HID = 2560; constant constexpr int TOPK = 10; constant constexpr int BPT = 5; typedef bfloat OUT_T;", &fin, text_finish);
-    const fin_v = [_]MetalArg{ .{ .name = "zd", .ty = "half" }, .{ .name = "inds", .ty = "uint" }, .{ .name = "inv", .ty = "uint", .shape = true }, .{ .name = "scores", .ty = "float" }, .{ .name = "svh_d", .ty = "half" }, .{ .name = "y", .ty = "bfloat", .out = true } };
-    printMetal("turboexl3_pf_fin_v", header_small, "constant constexpr int HID = 2560; constant constexpr int TOPK = 10; constant constexpr int ASG = 8; typedef bfloat OUT_T;", &fin_v, text_finish_v);
+    const down_c = pin[11];
+    const served = down_c ++ pin[12];
+    const served_j = pin[13];
+    const served_jle = pin[14];
+    printMetal("turboexl3_pf_gemm1m_n4_jle", header_nax_mixed, served_jle ++ pin[15], g1, gemm1m_text);
+    printMetal("turboexl3_pf_gemm1s_jle", header_nax_small, served_jle ++ pin[16], g1, gemm1s_text);
+    const served_jl2e = pin[17];
+    printMetal("turboexl3_pf_gemm1m_n4_jl2e", header_nax_mixed, served_jl2e ++ pin[15], g1, gemm1m_text);
+    printMetal("turboexl3_pf_gemm1s", header_nax_small, served ++ pin[16], g1, gemm1s_text);
+    printMetal("turboexl3_pf_gemm1s_j", header_nax_small, served_j ++ pin[16], g1, gemm1s_text);
+    printMetal("turboexl3_pf_gemm1m_n4_j", header_nax_mixed, served_j ++ pin[15], g1, gemm1m_text);
+    printMetal("turboexl3_pf_gemm1m_down", header_nax_mixed, served ++ pin[16], g1, gemm1m_text);
+    printMetal("turboexl3_pf_gemm1m_k", header_nax_mixed, served ++ pin[18], g1, gemm1m_text);
+    printMetal("turboexl3_pf_gemm1m_n2", header_nax_mixed, served ++ pin[19], g1, gemm1m_text);
+    printMetal("turboexl3_pf_gemm1m_n4", header_nax_mixed, served ++ pin[15], g1, gemm1m_text);
+    printMetal("turboexl3_pf_gemm1m_kn2", header_nax_mixed, served ++ pin[20], g1, gemm1m_text);
+    printMetal("turboexl3_pf_gemm1m_kn4", header_nax_mixed, served ++ pin[21], g1, gemm1m_text);
+    printMetal("turboexl3_pf_gemm1_kn2_sb", header_nax, down_c ++ pin[22], g1, gemm1_text);
+    const tbl = pin[23];
+    printMetal("turboexl3_pf_table", header_small, pin[24], tbl, text_table);
+    printMetal("turboexl3_pf_table_m", header_small, pin[25], tbl, text_table_mixed);
+    const frt = pin[26];
+    printMetal("turboexl3_pf_froute", header_small, pin[27], frt, text_froute);
+    printMetal("turboexl3_pf_froute_m", header_small, pin[28], frt, text_froute_m);
+    const prep = pin[29];
+    printMetal("turboexl3_pf_prep", header_small, pin[30], prep, text_prep);
+    printMetal("turboexl3_pf_prep_l", header_small, pin[31], prep, text_prep);
+    printMetal("turboexl3_pf_prep_l2", header_small, pin[32], prep, text_prep);
+    const prep_v = pin[33];
+    printMetal("turboexl3_pf_prep_v", header_small, pin[34], prep_v, text_prep_v);
+    const mid = pin[35];
+    printMetal("turboexl3_pf_mid", header_small, pin[36], mid, text_mid);
+    printMetal("turboexl3_pf_mid_l", header_small, pin[37], mid, text_mid);
+    printMetal("turboexl3_pf_mid_l2", header_small, pin[38], mid, text_mid);
+    const mid_v = pin[39];
+    printMetal("turboexl3_pf_mid_v", header_small, pin[40], mid_v, text_mid_v);
+    const fin = pin[41];
+    printMetal("turboexl3_pf_fin", header_small, pin[42], fin, text_finish);
+    const fin_v = pin[43];
+    printMetal("turboexl3_pf_fin_v", header_small, pin[44], fin_v, text_finish_v);
 }
 
 test "turboexl3 prefill 128-row tiles texts: both GEMMs' launches are the mixed chain's kernels; mid and finish change only where they read a row; the route is froute's count and scatter with the 128-row rule" {
+    const pin = comptime @import("test_support.zig").pins(@embedFile("kernels/test/pins/prefill_t128.metal"));
     const t = std.testing;
     const has = struct {
         fn f(h: []const u8, n: []const u8) bool {
@@ -2098,18 +1315,18 @@ test "turboexl3 prefill 128-row tiles texts: both GEMMs' launches are the mixed 
         }
     }.f;
     // nothing in the chain writes through an input binding: every launch writes only its own outputs
-    for ([_][]const u8{ text_froute_t128, text_mid_t128, text_finish_t128, gemm2m_text, gemm2_text, gemm1m_text, gemm1_text }) |x| try t.expect(!has(x, "const_cast"));
+    for ([_][]const u8{ text_froute_t128, text_mid_t128, text_finish_t128, gemm2m_text, gemm2_text, gemm1m_text, gemm1_text }) |x| try t.expect(!has(x, pin[0]));
     // mid: text_mid with the row choice after the expert and the two loads through it, nothing else
-    try t.expect(count(text_mid_t128, "const bool qt = int(p) < xbase[e];") == 1 and count(text_mid_t128, "const device half* zgs = qt ? zgt : zg;") == 1 and count(text_mid_t128, "const device half* zus = qt ? zut : zu;") == 1);
-    try t.expect(has(text_mid_t128, "g[j] = float(zgs[ulong(p) * IC + i]);") and has(text_mid_t128, "u[j] = float(zus[ulong(p) * IC + i]);") and !has(text_mid_t128, "float(zg[") and !has(text_mid_t128, "float(zu["));
+    try t.expect(count(text_mid_t128, pin[1]) == 1 and count(text_mid_t128, pin[2]) == 1 and count(text_mid_t128, pin[3]) == 1);
+    try t.expect(has(text_mid_t128, pin[4]) and has(text_mid_t128, pin[5]) and !has(text_mid_t128, pin[6]) and !has(text_mid_t128, pin[7]));
     {
-        const back = comptime replace(replace(replace(text_mid_t128, "    const bool qt = int(p) < xbase[e];\n    const device half* zgs = qt ? zgt : zg;\n    const device half* zus = qt ? zut : zu;\n", ""), "float(zgs[", "float(zg["), "float(zus[", "float(zu[");
+        const back = comptime replace(replace(replace(text_mid_t128, mid_t128_pick, ""), pin[8], pin[6]), pin[9], pin[7]);
         try t.expectEqualStrings(text_mid, back);
     }
     // finish: text_finish with the slot's row choice and its load through it
-    try t.expect(count(text_finish_t128, "const device half* zds = (int(p) < xbase[e]) ? zdt : zd;") == 1 and has(text_finish_t128, "v[j] = float(zds[ulong(p) * HC") and !has(text_finish_t128, "float(zd["));
+    try t.expect(count(text_finish_t128, pin[10]) == 1 and has(text_finish_t128, pin[11]) and !has(text_finish_t128, pin[12]));
     {
-        const back = comptime replace(replace(text_finish_t128, "        const device half* zds = (int(p) < xbase[e]) ? zdt : zd;\n", ""), "float(zds[", "float(zd[");
+        const back = comptime replace(replace(text_finish_t128, finish_t128_pick, ""), pin[13], pin[12]);
         try t.expectEqualStrings(text_finish, back);
     }
     // the choice reads the rows before an expert's first remainder position from the 128-row tiles' outputs
@@ -2120,13 +1337,13 @@ test "turboexl3 prefill 128-row tiles texts: both GEMMs' launches are the mixed 
     // the route: froute's count and scatter verbatim, the 128-row table's bound as t128TileRows computes it, the mixed rule,
     // each expert's first remainder position
     try t.expect(has(text_froute_t128, froute_count));
-    try t.expect(has(text_froute_t128, "const uint NPQ = min(EC, SC / (CU + 1u));") and has(text_froute_t128, "const uint TQ = (T128 != 0) ? max(1u, NPQ + (SC - (CU + 1u) * NPQ) / 128u) : 1u;"));
-    try t.expect(has(text_froute_t128, "constexpr uint PER = CU / BMC + ((CU % BMC > SR) ? 1u : 0u);") and has(text_froute_t128, "constexpr uint MINR = (BMC < SR + 1u) ? BMC : SR + 1u;"));
-    try t.expect(has(text_froute_t128, "const uint TBIG = (T128 != 0) ? max(1u, min(TBIG0, min(EC * PER, SC / MINR))) : TBIG0;"));
-    try t.expect(has(text_froute_t128, "constexpr uint CU = (uint(CUT) < 127u) ? uint(CUT) : 127u;"));
-    try t.expect(has(text_froute_t128, "if (T128 != 0 && cnt > CU) { nq += 1u; cnt = 0u; }"));
-    try t.expect(has(text_froute_t128, "if (r == 0u) nb = nfull;") and has(text_froute_t128, "else if (r > SR) nb = nfull + 1u;") and has(text_froute_t128, "else { nb = nfull; ns = (r + 31u) / 32u; }"));
-    try t.expect(has(text_froute_t128, "const uint base = lo + c0 - cnt;\n    if (tid < EC) xbase[tid] = int(base);"));
+    try t.expect(has(text_froute_t128, pin[14]) and has(text_froute_t128, pin[15]));
+    try t.expect(has(text_froute_t128, pin[16]) and has(text_froute_t128, pin[17]));
+    try t.expect(has(text_froute_t128, pin[18]));
+    try t.expect(has(text_froute_t128, pin[19]));
+    try t.expect(has(text_froute_t128, pin[20]));
+    try t.expect(has(text_froute_t128, pin[21]) and has(text_froute_t128, pin[22]) and has(text_froute_t128, pin[23]));
+    try t.expect(has(text_froute_t128, @embedFile("kernels/test/pins/prefill_t128_1.metal")));
     try t.expect(froute_t128_out.len == 4 and std.mem.eql(u8, std.mem.span(froute_t128_out[3]), "xbase"));
 }
 
@@ -2230,23 +1447,24 @@ test "turboexl3 prefill 128-row tiles options: t128 needs bm 64, the mixed table
 }
 
 test "turboexl3 prefill 128-row tiles metal sources: the route, both GEMMs' launches (both bodies), mid and finish as standalone translation units (TURBOEXL3_METAL_DUMP=1)" {
+    const pin = comptime @import("test_support.zig").pins(@embedFile("kernels/test/dump/prefill_t128.metal"));
     _ = std.c.getenv("TURBOEXL3_METAL_DUMP") orelse return error.SkipZigTest;
-    const frt = [_]MetalArg{ .{ .name = "inds", .ty = "uint", .shape = true }, .{ .name = "order", .ty = "uint", .out = true }, .{ .name = "tiles", .ty = "int", .out = true }, .{ .name = "tiles128", .ty = "int", .out = true }, .{ .name = "xbase", .ty = "int", .out = true } };
-    printMetal("turboexl3_pf_t128_route", header_small, "constant constexpr int EXP = 512; constant constexpr int BMT = 64; constant constexpr int SPL = 1; constant constexpr int CUT = 64; constant constexpr int T128 = 1;", &frt, text_froute_t128);
+    const frt = pin[0];
+    printMetal("turboexl3_pf_t128_route", header_small, pin[1], frt, text_froute_t128);
     // the served gate|up launch (bm 64, fragment order, A layout 2, the register path's integer-rate reader) and its bm-128
     // body; the served down launch (ncb 4) and its bm-128 body; the mixed chain's kernels' arguments
-    const gu = "constant constexpr int NHW = 80; constant constexpr int CODEBOOK = 0; constant constexpr int WBITS = 16; constant constexpr int NOPS = 2; constant constexpr int DBUF = 1; constant constexpr int PROBE = 0; constant constexpr int WSP = 0; constant constexpr int MFIRST = 0; constant constexpr int UNR = 1; constant constexpr int TMAXS = 512; constant constexpr int FRAGB = 1; constant constexpr int INTR = 1; constant constexpr int DEFER = 1; constant constexpr int NBX = 20; constant constexpr int KD = 2560; constant constexpr int ND = 640; constant constexpr int BKS = 64; constant constexpr int NCB = 1; constant constexpr int SINTR = 1; constant constexpr int ALAY = 2; constant constexpr int H16 = 0;";
-    const dn = "constant constexpr int NHW = 80; constant constexpr int CODEBOOK = 0; constant constexpr int WBITS = 16; constant constexpr int NOPS = 1; constant constexpr int DBUF = 1; constant constexpr int PROBE = 0; constant constexpr int WSP = 0; constant constexpr int MFIRST = 0; constant constexpr int UNR = 1; constant constexpr int TMAXS = 512; constant constexpr int FRAGB = 1; constant constexpr int INTR = 1; constant constexpr int DEFER = 1; constant constexpr int NBX = 5; constant constexpr int KD = 640; constant constexpr int ND = 2560; constant constexpr int BKS = 64; constant constexpr int NCB = 4; constant constexpr int SINTR = 1; constant constexpr int ALAY = 2; constant constexpr int H16 = 0;";
-    const m64 = " constant constexpr int BMR = 64; constant constexpr int SGT = 4;";
-    const m128 = " constant constexpr int BMR = 128; constant constexpr int SGT = 8;";
-    const g2 = [_]MetalArg{ .{ .name = "tiles", .ty = "int", .shape = true }, .{ .name = "x0", .ty = "half" }, .{ .name = "x1", .ty = "half" }, .{ .name = "w0", .ty = "uint16_t" }, .{ .name = "w1", .ty = "uint16_t" }, .{ .name = "xs0", .ty = "float" }, .{ .name = "xs1", .ty = "float" }, .{ .name = "z0", .ty = "half", .out = true }, .{ .name = "z1", .ty = "half", .out = true } };
-    const g1 = [_]MetalArg{ .{ .name = "tiles", .ty = "int", .shape = true }, .{ .name = "x0", .ty = "half" }, .{ .name = "w0", .ty = "uint16_t" }, .{ .name = "xs0", .ty = "float" }, .{ .name = "z0", .ty = "half", .out = true } };
-    printMetal("turboexl3_pf_t128_gum", header_nax, gu ++ m64, &g2, gemm2m_text);
-    printMetal("turboexl3_pf_t128_gut", header_nax, gu ++ m128, &g2, gemm2_text);
-    printMetal("turboexl3_pf_t128_dnm", header_nax, dn ++ m64, &g1, gemm1m_text);
-    printMetal("turboexl3_pf_t128_dnt", header_nax, dn ++ m128, &g1, gemm1_text);
-    const mid = [_]MetalArg{ .{ .name = "zg", .ty = "half" }, .{ .name = "zu", .ty = "half" }, .{ .name = "inds", .ty = "int" }, .{ .name = "order", .ty = "uint" }, .{ .name = "svh_g", .ty = "half" }, .{ .name = "svh_u", .ty = "half" }, .{ .name = "suh_d", .ty = "half" }, .{ .name = "zgt", .ty = "half" }, .{ .name = "zut", .ty = "half" }, .{ .name = "xbase", .ty = "int" }, .{ .name = "xd", .ty = "half", .out = true }, .{ .name = "xsd", .ty = "float", .out = true } };
-    printMetal("turboexl3_pf_t128_mid", header_small, "constant constexpr int INTER = 640; constant constexpr int BPT = 5; constant constexpr int ALAY = 2;", &mid, text_mid_t128);
-    const fin = [_]MetalArg{ .{ .name = "zd", .ty = "half" }, .{ .name = "inds", .ty = "int" }, .{ .name = "inv", .ty = "uint" }, .{ .name = "scores", .ty = "float" }, .{ .name = "svh_d", .ty = "half" }, .{ .name = "zdt", .ty = "half" }, .{ .name = "xbase", .ty = "int" }, .{ .name = "y", .ty = "bfloat", .out = true } };
-    printMetal("turboexl3_pf_t128_fin", header_small, "constant constexpr int HID = 2560; constant constexpr int TOPK = 10; constant constexpr int BPT = 5; typedef bfloat OUT_T;", &fin, text_finish_t128);
+    const gu = pin[2];
+    const dn = pin[3];
+    const m64 = pin[4];
+    const m128 = pin[5];
+    const g2 = pin[6];
+    const g1 = pin[7];
+    printMetal("turboexl3_pf_t128_gum", header_nax, gu ++ m64, g2, gemm2m_text);
+    printMetal("turboexl3_pf_t128_gut", header_nax, gu ++ m128, g2, gemm2_text);
+    printMetal("turboexl3_pf_t128_dnm", header_nax, dn ++ m64, g1, gemm1m_text);
+    printMetal("turboexl3_pf_t128_dnt", header_nax, dn ++ m128, g1, gemm1_text);
+    const mid = pin[8];
+    printMetal("turboexl3_pf_t128_mid", header_small, pin[9], mid, text_mid_t128);
+    const fin = pin[10];
+    printMetal("turboexl3_pf_t128_fin", header_small, pin[11], fin, text_finish_t128);
 }
