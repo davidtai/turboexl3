@@ -32,8 +32,10 @@ must set `nax` to false.
 
 ## The mlx-serve quant plugin (`plugin/`)
 
-The folder `plugin/` is turboexl3 as an outside quant plugin of mlx-serve, in the plugin layout of mlx-serve's
-`refactor/big-bang` branch (PR 978). mlx-serve's [plugin kit](docs/GLOSSARY.md#plugin-kit) builds it into one dylib,
+The folder `plugin/` is turboexl3 as an outside quant plugin of mlx-serve, in the plugin layout of mlx-serve's `main`
+(the rewrite of PR 978, merged on 2026-10-27). It builds against the kit of
+[ddalcu/mlx-serve#997](https://github.com/ddalcu/mlx-serve/pull/997), the pull request that adds the host side of an
+outside quant plugin. mlx-serve's [plugin kit](docs/GLOSSARY.md#plugin-kit) builds it into one dylib,
 `libturboexl3.dylib`. The server loads the dylib at startup and offers it the quantization blocks of each pack.
 
 | file | what it does |
@@ -98,9 +100,9 @@ The bill of a block is its stored size, because the plugin uses the arrays that 
 A refusal during a call returns a verdict that names the error.
 
 The fused paths of turboexl3 are optional members of the table, as `swiglu` is. The plugin fills all of them, so it
-builds only with a kit whose table has these members. The kit of PR 978 alone does not have them, and the build of the
-plugin fails against it. Each member refuses, by name, a call that it does not support, and the host then runs its own
-chain of operations:
+builds only with a kit whose table has these members. The kit of mlx-serve's `main` does not have them yet (#997 adds
+them), and the build of the plugin fails against it. Each member refuses, by name, a call that it does not support,
+and the host then runs its own chain of operations:
 
 - **`linear_split`, `linear_finish`, `linear_prepared`, `linear_pieces`, `linear_piece`**: the parts of `matmul`
   (the prepare of x, the inner product, the finish) as separate calls, so that the tail of a gated delta net (GDN)
