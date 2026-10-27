@@ -861,16 +861,25 @@ pub fn moe(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array,
     if (SlotStats.enabled()) SlotStats.record(inds, rows, @intCast(K)) catch {};
     const dgeo: decode.Geometry = .{ .hidden = @intCast(geo.hidden), .inter = @intCast(geo.width), .topk = @intCast(K), .rate = geo.gate_up, .dec = dec };
     // the operands the kernels take as the host holds them: x [rows, D] (bf16/f16/f32), slots [rows * K] (i32/u32), scores
-    // [rows * K] (bf16/f16/f32); the kernels convert in place and write y in x's dtype, so no cast launches per layer
+    // [rows * K] (bf16/f16/f32); the kernels convert in place and write y in x's dtype, so no cast launches per layer. At one
+    // row (`flatOperands`) the host's x [1, 1, D], inds and scores [1, 1, K] go as they are: every kernel indexes them flat
+    // and MLX hands a launch row-contiguous inputs whatever their shape (copying one that is not, as the reshape did), so
+    // three reshape ops fewer to evaluate per MoE layer of a serial step, the same bytes.
+    const flat = flatOperands(rows);
     var x2 = mlx.mlx_array_new();
     defer freeArr(x2);
-    try mlx.check(mlx.mlx_reshape(&x2, x, &[_]c_int{ rows_c, xsh[2] }, 2, s));
     var inds1 = mlx.mlx_array_new();
     defer freeArr(inds1);
-    try mlx.check(mlx.mlx_reshape(&inds1, inds, &[_]c_int{rows_c * K}, 1, s));
     var s1 = mlx.mlx_array_new();
     defer freeArr(s1);
-    try mlx.check(mlx.mlx_reshape(&s1, scores, &[_]c_int{rows_c * K}, 1, s));
+    if (!flat) {
+        try mlx.check(mlx.mlx_reshape(&x2, x, &[_]c_int{ rows_c, xsh[2] }, 2, s));
+        try mlx.check(mlx.mlx_reshape(&inds1, inds, &[_]c_int{rows_c * K}, 1, s));
+        try mlx.check(mlx.mlx_reshape(&s1, scores, &[_]c_int{rows_c * K}, 1, s));
+    }
+    const xk = if (flat) x else x2;
+    const ik = if (flat) inds else inds1;
+    const sk = if (flat) scores else s1;
     const kb: decode.Kernels.Bank = .{
         .gate_t = bank.gate.trellis,
         .gate_suh = bank.gate.suh,
@@ -888,14 +897,20 @@ pub fn moe(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array,
         std.debug.print("[turboexl3] decode engaged: form {d} (form 3's bytes in fewer dependent launches)\n", .{form});
     }
     const y0 = if (form == 5 or form == 6)
-        try (try kernels5For(dgeo, mlx.mlx_array_dtype(x))).moe(s, x2, inds1, s1, kb, rows, form == 6)
+        try (try kernels5For(dgeo, mlx.mlx_array_dtype(x))).moe(s, xk, ik, sk, kb, rows, form == 6)
     else
-        try (try kernelsFor(dgeo, mlx.mlx_array_dtype(x))).moeForm(s, x2, inds1, s1, kb, rows, form);
+        try (try kernelsFor(dgeo, mlx.mlx_array_dtype(x))).moeForm(s, xk, ik, sk, kb, rows, form);
     defer freeArr(y0);
     var y = mlx.mlx_array_new();
     errdefer freeArr(y);
     try mlx.check(mlx.mlx_reshape(&y, y0, xsh.ptr, 3, s));
     return y;
+}
+
+/// Whether `moe` hands the decode kernels the host's operands without reshaping them: one row, where x [1, 1, D] and the
+/// [1, 1, K] slots and scores are already the flat rows the kernels index.
+pub fn flatOperands(rows: usize) bool {
+    return rows == 1;
 }
 
 /// Prefill rows (> DECODE_ROWS_MAX) through the fused chain (`prefill.zig`): sorted by expert, the trellis decoded inside the

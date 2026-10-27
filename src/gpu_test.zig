@@ -263,6 +263,113 @@ fn rootMoeParity(g: *G, s: mlx.mlx_stream, a: std.mem.Allocator, c: Case, seed: 
     try testing.expectEqual(mlx.mlx_dtype.bfloat16, mlx.mlx_array_dtype(yw));
 }
 
+// One decode row through `root.moe` (`flatOperands`: the host's x [1, 1, D], u32 slots and bf16 scores [1, 1, K] handed to the
+// kernels as they are) against the same chain on the reshaped operands ([1, D], [K]: what `moe` passed before), form 9 and
+// form 5, bf16 as served: every output's bits equal over 16 draws of x and routing.
+test "turboexl3 gpu: root.moe at one decode row on the host's unreshaped operands gives the reshaped chain's bytes (TURBOEXL3_GPU=1)" {
+    _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    const s = mlx.mlx_default_gpu_stream_new();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    const a = std.heap.page_allocator;
+    var g = try G.init(a, s);
+    defer g.deinit();
+    const hidden: u32 = 2560;
+    const inter: u32 = 640;
+    const topk: u32 = 10;
+    const experts: u32 = 48;
+    const n: u32 = 80;
+    var prng = std.Random.DefaultPrng.init(0x1F1A7);
+    const rnd = prng.random();
+    const rate = format.Rate.fromN(n).?;
+    var bank = try ref.synthBank(a, rnd, experts, hidden, inter, rate);
+    defer bank.deinit(a);
+    const mark = g.mark();
+    defer g.resetTo(mark);
+    const ht = ci(hidden / 16);
+    const it = ci(inter / 16);
+    const kb: decode.Kernels.Bank = .{
+        .gate_t = try g.hostArray(std.mem.sliceAsBytes(bank.gate_t), &.{ ci(experts), ht, it, ci(n) }, .uint16),
+        .gate_suh = try g.hostArray(std.mem.sliceAsBytes(bank.gate_suh), &.{ ci(experts), ci(hidden) }, .float16),
+        .gate_svh = try g.hostArray(std.mem.sliceAsBytes(bank.gate_svh), &.{ ci(experts), ci(inter) }, .float16),
+        .up_t = try g.hostArray(std.mem.sliceAsBytes(bank.up_t), &.{ ci(experts), ht, it, ci(n) }, .uint16),
+        .up_suh = try g.hostArray(std.mem.sliceAsBytes(bank.up_suh), &.{ ci(experts), ci(hidden) }, .float16),
+        .up_svh = try g.hostArray(std.mem.sliceAsBytes(bank.up_svh), &.{ ci(experts), ci(inter) }, .float16),
+        .down_t = try g.hostArray(std.mem.sliceAsBytes(bank.down_t), &.{ ci(experts), it, ht, ci(n) }, .uint16),
+        .down_suh = try g.hostArray(std.mem.sliceAsBytes(bank.down_suh), &.{ ci(experts), ci(inter) }, .float16),
+        .down_svh = try g.hostArray(std.mem.sliceAsBytes(bank.down_svh), &.{ ci(experts), ci(hidden) }, .float16),
+    };
+    const rb: root.Bank = .{
+        .gate = .{ .trellis = kb.gate_t, .suh = kb.gate_suh, .svh = kb.gate_svh },
+        .up = .{ .trellis = kb.up_t, .suh = kb.up_suh, .svh = kb.up_svh },
+        .down = .{ .trellis = kb.down_t, .suh = kb.down_suh, .svh = kb.down_svh },
+    };
+    const geo: decode.Geometry = .{ .hidden = hidden, .inter = inter, .topk = topk, .rate = rate, .dec = .mul1 };
+    // the chain `moe` runs at one row, built as `kernelsFor` / `kernels5For` build theirs (their defaults: bt 1, 4 slices,
+    // groups of 2; form 5's bt 4 and gmax 4)
+    var k3 = try decode.Kernels3.initWith(geo, 1, 4, 2);
+    defer k3.deinit();
+    k3.out_dtype = .bfloat16;
+    var k5 = try decode.Kernels5.init(geo, 4, 4, 4);
+    defer k5.deinit();
+    k5.out_dtype = .bfloat16;
+    k5.defer_affine = k3.defer_affine;
+    defer root.decode_form_override = null;
+    const x = try a.alloc(f32, hidden);
+    defer a.free(x);
+    const slots = try a.alloc(u32, topk);
+    defer a.free(slots);
+    const scores = try a.alloc(f32, topk);
+    defer a.free(scores);
+    const draws = 16;
+    var checked: usize = 0;
+    var failed = false;
+    for (0..draws) |_| {
+        for (x) |*v| v.* = rnd.floatNorm(f32);
+        var k: usize = 0;
+        while (k < topk) {
+            const e: u32 = rnd.uintLessThan(u32, experts);
+            var dup = false;
+            for (slots[0..k]) |o| dup = dup or o == e;
+            if (dup) continue;
+            slots[k] = e;
+            k += 1;
+        }
+        var sum: f32 = 0;
+        for (scores) |*w| {
+            w.* = 0.2 + rnd.float(f32);
+            sum += w.*;
+        }
+        for (scores) |*w| w.* /= sum;
+        const x3 = try g.astype(try g.hostArray(std.mem.sliceAsBytes(x), &.{ 1, 1, ci(hidden) }, .float32), .bfloat16);
+        const ind3 = try g.hostArray(std.mem.sliceAsBytes(slots), &.{ 1, 1, ci(topk) }, .uint32);
+        const s3 = try g.astype(try g.hostArray(std.mem.sliceAsBytes(scores), &.{ 1, 1, ci(topk) }, .float32), .bfloat16);
+        const x2 = try g.reshape(x3, &.{ 1, ci(hidden) });
+        const ind1 = try g.reshape(ind3, &.{ci(topk)});
+        const s1 = try g.reshape(s3, &.{ci(topk)});
+        for ([_]u8{ 9, 5 }) |form| {
+            root.decode_form_override = form;
+            const y = try g.adopt(try root.moe(s, x3, rb, ind3, s3, .mul1, false));
+            try testing.expectEqualSlices(c_int, &.{ 1, 1, ci(hidden) }, mlx.getShape(y));
+            const yr = try g.adopt(if (form == 5) try k5.moe(s, x2, ind1, s1, kb, 1, false) else try k3.moeForm(s, x2, ind1, s1, kb, 1, form));
+            const got = try a.alloc(f32, hidden);
+            defer a.free(got);
+            const want = try a.alloc(f32, hidden);
+            defer a.free(want);
+            _ = try g.hostF32(try g.astype(y, .float32), got);
+            _ = try g.hostF32(try g.astype(yr, .float32), want);
+            var diff: usize = 0;
+            for (got, want) |p, q| diff += @intFromBool(@as(u32, @bitCast(p)) != @as(u32, @bitCast(q)));
+            if (diff != 0) {
+                failed = true;
+                std.debug.print("TURBOEXL3_ROOT1_BYTES form={d} differing={d}/{d} FAIL\n", .{ form, diff, hidden });
+            }
+            checked += hidden;
+        }
+    }
+    std.debug.print("TURBOEXL3_ROOT1_BYTES_DONE draws={d} forms=9,5 checked={d} {s}\n", .{ draws, checked, if (failed) "FAIL" else "PASS" });
+    try testing.expect(!failed);
+}
+
 // The dense linear (the full-EXL3 trunk's path): rows 1, 4 and 16 through the GEMV kernels, 40 through dequantize-and-matmul,
 // at K7 (the attention and GDN projections' rate), K6 (lm_head, MTP fc) and K5, both directions of a 2560 x 640 shape.
 test "turboexl3 gpu: dense.linear equals format.project per row at the trunk's rates, GEMV and prefill paths (TURBOEXL3_GPU=1)" {
