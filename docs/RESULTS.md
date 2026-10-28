@@ -57,6 +57,7 @@ Each metric at full width, every series: [prefill](charts/all_prefill.png), [dec
 - [turboexl3 against Sushi, percent difference](charts/turbo_vs_sushi.png)
 - [K5 against the standard setup](charts/vs_standard.png)
 - [Coding evals](charts/coding_evals.png)
+- [Kernels against Sushi](#kernels-against-sushi), one MoE layer call at a time: [decode](charts/kernel_decode.png), [prefill](charts/kernel_prefill.png)
 
 ## Across context lengths
 
@@ -149,3 +150,152 @@ standard pack are within one problem of each other on every suite. Their HumanEv
 identical) but fail mostly the same problems: 7 of the 9 HumanEval+ failures are shared.
 
 ![EvalPlus pass@1 on HumanEval, HumanEval+, MBPP and MBPP+ for the 2.05, 3.05, 4.05 and 5.05 packs and the standard iQ-MLX 4.7 bpw pack](charts/coding_evals.png)
+
+## Kernels against Sushi
+
+turboexl3's routed-expert kernels against [Sushi](GLOSSARY.md#sushi)'s, one MoE layer call at a time, at each
+[rate](GLOSSARY.md#rate) from K2 to K8, with no server. Sushi runs in the same test binary, on the same weights, inputs
+and routing. The binary is built from turboexl3 f1d82d8 (4a4ea95's library plus the commit that adds these timing arms)
+on mlx-serve's host, and its sha256 starts d5b06e858592. Measured on an Apple M5 Max (128 GB, macOS 27.0.1) on
+2026-10-28.
+
+![Decode kernels: turboexl3 against Sushi at each trellis rate](charts/kernel_decode.png)
+
+![Prefill kernels: turboexl3 against Sushi at each trellis rate](charts/kernel_prefill.png)
+
+### What each arm runs
+
+- **form 9** (`f9`): the served decode form: form 8's four launches at 1 row (the prepare inside the gate|up launch),
+  form 7's five launches from 2 rows, each with 2 output tiles per GEMV threadgroup.
+- **form 3** (`f3`; the log's `lib`): the plain five-launch chain. It is the reference for the bytes, and it is not
+  served.
+- **form 7** (`f7`): form 3 with the finishes' H128 transforms in registers. It is not served.
+- **Sushi, decode**: Sushi's decode arm (`sushi_exl3.moe` at decode rows).
+- **turboexl3, prefill**: the arm `m64dufiajn4ql2h`, `pfOptions` at the default configuration, called through
+  `Prefill.moeT128` as `moePrefill` serves it.
+- **Sushi, prefill**: Sushi's prefill arm.
+
+Every decode arm times the routed experts alone. At 2 to 4 rows, mlx-serve's served forward also runs the gated shared
+expert, with the router's top-k, inside form 9's launches; these timings leave that work out for both engines.
+
+Captured routing comes from mlx-serve serving the 5.05 pack on a 17,743-token coding prompt, the standard test cell,
+which prefills as two 8192-row chunks, then a 1328-row chunk. Each decode call takes consecutive tokens' experts from
+one MoE layer's routing over an 8192-row chunk; the prefill timings replay one MoE layer's routing over an 8192-row
+chunk, then over the 1328-row chunk. The 40 row-slots of a 4-row decode call hold 28.2 distinct experts on average.
+Synthetic routing: each row draws 10 distinct experts at random (38.8 distinct in 40 row-slots, on average). From 2 rows
+up, turboexl3 pairs the row-slots that chose the same expert under one threadgroup, which reads and decodes those
+weights once.
+
+### Method
+
+Qwen3.8-Flash-Next's MoE layer: hidden 2560, expert width 640, 512 experts, top-10, bf16 activations, MUL1 codebook,
+random trellis codes at each rate; one process per rate. Decode: each round runs a chain of 48 dependent calls per arm
+(each call's output is the next call's input, and each call routes to fresh experts, so every call reads its weights
+from DRAM) and divides by 48; 31 rounds after 2 warm-up rounds. Prefill: each round times 4 back-to-back calls per arm
+and divides by 4; 15 rounds after 2 warm-up rounds. The arms take turns in every round, with a rotated start. Before
+each decode timing, one call of each arm is compared: forms 7 and 9 gave form 3's bytes in every cell, and turboexl3's
+output differs from Sushi's by at most 2.7% of the RMS of Sushi's output (the two engines round in different orders).
+
+### Decode, captured routing
+
+Ratios are Sushi's time over the turboexl3 arm's: above 1, turboexl3 is faster. "median" divides the two arms' median
+rounds; "fastest" divides their fastest rounds (the log's own `*_vs_sushi`).
+
+| K | rows | form 9 µs, median | form 9 µs, fastest | Sushi µs, median | Sushi µs, fastest | form 9 ratio, median | form 9 ratio, fastest | form 7 ratio, median | form 3 ratio, median |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| K2 | 1 | 70.7 | 70.4 | 72.8 | 72.6 | 1.030 | 1.031 | 0.977 | 0.935 |
+| K2 | 2 | 113.0 | 112.6 | 119.1 | 119.0 | 1.054 | 1.057 | 0.973 | 0.951 |
+| K2 | 3 | 153.7 | 153.3 | 171.8 | 171.5 | 1.118 | 1.119 | 1.029 | 1.009 |
+| K2 | 4 | 189.9 | 189.5 | 220.0 | 219.7 | 1.159 | 1.159 | 1.031 | 1.016 |
+| K3 | 1 | 74.3 | 74.0 | 74.3 | 74.0 | 1.000 | 1.000 | 0.961 | 0.922 |
+| K3 | 2 | 118.3 | 117.9 | 122.0 | 121.6 | 1.031 | 1.031 | 0.970 | 0.951 |
+| K3 | 3 | 162.4 | 162.1 | 176.2 | 175.9 | 1.085 | 1.085 | 1.024 | 1.009 |
+| K3 | 4 | 199.3 | 199.0 | 225.6 | 225.4 | 1.132 | 1.133 | 1.034 | 1.025 |
+| K4 | 1 | 69.9 | 69.4 | 86.2 | 85.8 | 1.233 | 1.236 | 1.179 | 1.124 |
+| K4 | 2 | 112.0 | 111.4 | 152.6 | 152.3 | 1.363 | 1.367 | 1.260 | 1.235 |
+| K4 | 3 | 152.9 | 152.5 | 216.8 | 216.5 | 1.418 | 1.420 | 1.309 | 1.290 |
+| K4 | 4 | 188.0 | 187.5 | 280.6 | 280.3 | 1.493 | 1.495 | 1.336 | 1.324 |
+| K5 | 1 | 76.8 | 76.3 | 78.1 | 77.7 | 1.017 | 1.018 | 0.986 | 0.949 |
+| K5 | 2 | 123.9 | 123.6 | 129.6 | 129.4 | 1.046 | 1.047 | 0.997 | 0.978 |
+| K5 | 3 | 169.6 | 169.3 | 185.3 | 184.8 | 1.093 | 1.092 | 1.042 | 1.027 |
+| K5 | 4 | 207.0 | 206.7 | 235.0 | 234.6 | 1.135 | 1.135 | 1.040 | 1.032 |
+| K6 | 1 | 82.4 | 82.0 | 83.1 | 82.9 | 1.008 | 1.011 | 0.999 | 0.963 |
+| K6 | 2 | 138.1 | 137.8 | 138.8 | 138.5 | 1.005 | 1.005 | 0.986 | 0.971 |
+| K6 | 3 | 186.1 | 185.6 | 193.9 | 193.4 | 1.042 | 1.042 | 1.021 | 1.008 |
+| K6 | 4 | 231.4 | 224.1 | 252.8 | 241.8 | 1.092 | 1.079 | 1.026 | 1.017 |
+| K7 | 1 | 93.4 | 93.1 | 109.0 | 108.4 | 1.167 | 1.164 | 1.162 | 1.125 |
+| K7 | 2 | 159.6 | 159.2 | 183.3 | 182.9 | 1.148 | 1.149 | 1.122 | 1.110 |
+| K7 | 3 | 212.6 | 212.0 | 259.5 | 259.1 | 1.221 | 1.222 | 1.192 | 1.179 |
+| K7 | 4 | 269.9 | 258.9 | 350.6 | 333.7 | 1.299 | 1.289 | 1.213 | 1.208 |
+| K8 | 1 | 105.8 | 105.4 | 106.0 | 105.8 | 1.002 | 1.004 | 0.992 | 0.967 |
+| K8 | 2 | 178.4 | 178.1 | 173.2 | 172.8 | 0.971 | 0.970 | 0.964 | 0.952 |
+| K8 | 3 | 235.7 | 235.3 | 237.2 | 236.9 | 1.006 | 1.007 | 0.996 | 0.986 |
+| K8 | 4 | 282.8 | 282.2 | 291.9 | 291.3 | 1.032 | 1.032 | 0.999 | 0.991 |
+
+### Decode, synthetic routing
+
+| K | rows | form 9 µs, median | form 9 µs, fastest | Sushi µs, median | Sushi µs, fastest | form 9 ratio, median | form 9 ratio, fastest | form 7 ratio, median | form 3 ratio, median |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| K2 | 1 | 70.8 | 70.6 | 73.3 | 73.1 | 1.035 | 1.035 | 0.983 | 0.939 |
+| K2 | 2 | 120.4 | 119.9 | 119.6 | 119.4 | 0.993 | 0.996 | 0.905 | 0.883 |
+| K2 | 3 | 168.3 | 168.1 | 172.1 | 171.8 | 1.023 | 1.022 | 0.928 | 0.913 |
+| K2 | 4 | 217.0 | 216.8 | 221.3 | 221.1 | 1.020 | 1.020 | 0.911 | 0.901 |
+| K3 | 1 | 74.6 | 74.4 | 74.9 | 74.7 | 1.004 | 1.004 | 0.969 | 0.929 |
+| K3 | 2 | 125.8 | 125.6 | 122.8 | 122.6 | 0.976 | 0.976 | 0.903 | 0.884 |
+| K3 | 3 | 178.7 | 178.2 | 177.6 | 177.3 | 0.994 | 0.995 | 0.925 | 0.912 |
+| K3 | 4 | 228.5 | 228.2 | 227.5 | 227.1 | 0.996 | 0.995 | 0.913 | 0.905 |
+| K4 | 1 | 70.8 | 70.4 | 85.4 | 85.2 | 1.206 | 1.210 | 1.160 | 1.108 |
+| K4 | 2 | 120.8 | 120.0 | 151.6 | 151.4 | 1.255 | 1.262 | 1.154 | 1.131 |
+| K4 | 3 | 169.2 | 168.9 | 215.5 | 215.3 | 1.274 | 1.275 | 1.165 | 1.149 |
+| K4 | 4 | 215.0 | 214.6 | 279.0 | 278.7 | 1.298 | 1.299 | 1.176 | 1.166 |
+| K5 | 1 | 79.7 | 79.5 | 81.0 | 80.8 | 1.016 | 1.016 | 1.001 | 0.963 |
+| K5 | 2 | 139.5 | 139.2 | 137.9 | 137.6 | 0.989 | 0.989 | 0.948 | 0.933 |
+| K5 | 3 | 197.6 | 197.3 | 198.4 | 198.1 | 1.004 | 1.004 | 0.967 | 0.955 |
+| K5 | 4 | 248.9 | 248.4 | 251.7 | 251.3 | 1.011 | 1.012 | 0.951 | 0.943 |
+| K6 | 1 | 88.1 | 87.8 | 88.5 | 88.4 | 1.005 | 1.007 | 1.001 | 0.965 |
+| K6 | 2 | 158.0 | 157.7 | 152.9 | 152.6 | 0.968 | 0.968 | 0.956 | 0.943 |
+| K6 | 3 | 224.3 | 224.0 | 219.0 | 218.6 | 0.976 | 0.976 | 0.969 | 0.959 |
+| K6 | 4 | 285.8 | 285.2 | 278.9 | 278.5 | 0.976 | 0.977 | 0.953 | 0.946 |
+| K7 | 1 | 98.3 | 98.1 | 111.6 | 111.4 | 1.135 | 1.136 | 1.128 | 1.093 |
+| K7 | 2 | 181.6 | 181.3 | 193.7 | 193.4 | 1.067 | 1.067 | 1.060 | 1.051 |
+| K7 | 3 | 255.8 | 255.3 | 279.8 | 279.2 | 1.094 | 1.094 | 1.080 | 1.070 |
+| K7 | 4 | 326.3 | 325.9 | 358.2 | 357.8 | 1.098 | 1.098 | 1.062 | 1.055 |
+| K8 | 1 | 111.1 | 110.8 | 109.9 | 109.6 | 0.989 | 0.989 | 0.988 | 0.963 |
+| K8 | 2 | 202.6 | 202.2 | 194.9 | 194.5 | 0.962 | 0.962 | 0.954 | 0.943 |
+| K8 | 3 | 289.5 | 289.0 | 281.2 | 280.9 | 0.971 | 0.972 | 0.966 | 0.957 |
+| K8 | 4 | 370.2 | 369.8 | 364.0 | 363.2 | 0.983 | 0.982 | 0.968 | 0.963 |
+
+### Prefill, captured routing
+
+| K | rows | turboexl3 µs, median | turboexl3 µs, fastest | Sushi µs, median | Sushi µs, fastest | ratio, median | ratio, fastest | turboexl3 TFLOPS, median | Sushi TFLOPS, median |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| K2 | 8192 | 19682 | 19338 | 20008 | 19682 | 1.017 | 1.018 | 40.9 | 40.2 |
+| K3 | 8192 | 19935 | 19732 | 21159 | 20686 | 1.061 | 1.048 | 40.4 | 38.1 |
+| K4 | 8192 | 19799 | 19660 | 20634 | 20329 | 1.042 | 1.034 | 40.7 | 39.0 |
+| K5 | 8192 | 20067 | 19964 | 26244 | 25527 | 1.308 | 1.279 | 40.1 | 30.7 |
+| K6 | 8192 | 20168 | 19919 | 26692 | 26098 | 1.323 | 1.310 | 39.9 | 30.2 |
+| K7 | 8192 | 20773 | 20619 | 27084 | 26682 | 1.304 | 1.294 | 38.8 | 29.7 |
+| K8 | 8192 | 20662 | 20448 | 23971 | 23653 | 1.160 | 1.157 | 39.0 | 33.6 |
+| K2 | 1328 | 4524 | 4508 | 4859 | 4592 | 1.074 | 1.019 | 28.9 | 26.9 |
+| K3 | 1328 | 4729 | 4683 | 5467 | 5150 | 1.156 | 1.100 | 27.6 | 23.9 |
+| K4 | 1328 | 4507 | 4486 | 5269 | 4886 | 1.169 | 1.089 | 29.0 | 24.8 |
+| K5 | 1328 | 4808 | 4792 | 9450 | 8484 | 1.965 | 1.770 | 27.2 | 13.8 |
+| K6 | 1328 | 4987 | 4975 | 9874 | 9415 | 1.980 | 1.892 | 26.2 | 13.2 |
+| K7 | 1328 | 5436 | 5426 | 10298 | 9621 | 1.894 | 1.773 | 24.0 | 12.7 |
+| K8 | 1328 | 5702 | 5693 | 7390 | 7090 | 1.296 | 1.245 | 22.9 | 17.7 |
+
+### Timing the kernels again
+
+Build turboexl3's tests over a consumer's surface with `-Dtest-filter=timing` (see [the README's
+Tests](../README.md#tests)). Run the binary once for each rate, with n = 16 × K:
+
+```sh
+# decode: forms 3, 7 and 9, then Sushi; rows 1 to 4; synthetic routing, then the captured routing
+TURBOEXL3_GPU=1 TURBOEXL3_DEC_TIME=1 TURBOEXL3_DEC_NS=<n> TURBOEXL3_DEC_ROWS=1,2,3,4 TURBOEXL3_DEC_ROUNDS=31 \
+  TURBOEXL3_DEC_INDS=<routing of an 8192-row call> <test binary>
+# prefill: the served arm, then Sushi
+TURBOEXL3_GPU=1 TURBOEXL3_PF_TIME=1 TURBOEXL3_PF_N=<n> TURBOEXL3_PF_E=512 TURBOEXL3_PF_ARMS=m64dufiajn4ql2h,sushi \
+  TURBOEXL3_PF_ROUNDS=15 TURBOEXL3_PF_INDS=<routing of an 8192-row call>,<routing of a 1328-row call> <test binary>
+```
+
+A routing file holds the `u32 [rows, 10]` expert indices of one prefill call, as `Config.pf_capture_dir` writes them.
