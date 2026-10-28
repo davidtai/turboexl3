@@ -61,21 +61,14 @@ The plugin answers each block of a pack with a [claim](docs/GLOSSARY.md#claim):
   because each linear carries its own rate. No built-in format of mlx-serve runs a dense EXL3 linear.
 - **An `expert_quant` block** (the routed banks, with a rate `k`): `by_marker` only when all of these hold. Otherwise
   the claim is `no`, and the built-in Sushi format keeps the banks.
-  - The [numerics](docs/GLOSSARY.md#numerics) are reordered.
+  - The pack is a fully EXL3 Qwen3.8 pack: its config has a `trunk_quant` block, and its `model_type` is `qwen4_exp`
+    or `qwen4_exp_text`. Its [numerics](docs/GLOSSARY.md#numerics) are reordered. An expert-only pack stays Sushi's.
   - The machine passes the NAX gate.
   - The SwiGLU is not clamped: the model's config has no `swiglu_limit` above 0.
 - **Any other block**: `no`. This includes Sushi's STQ family and the other formats.
 
 `by_marker` ranks above Sushi's claim, `by_type`. So the plugin wins each block that it claims, unless another
-outside plugin also claims that block at `by_marker`.
-
-The plugin reads `MLX_SERVE_BIT_EXACT` itself, in the same way as the server:
-
-| value | numerics |
-|---|---|
-| `0` | reordered |
-| any other value, for example `1` | exact |
-| unset or empty | reordered on a Qwen3.8 pack (`model_type` `qwen4_exp` or `qwen4_exp_text`); exact on every other pack |
+outside plugin also claims that block at `by_marker`. No environment variable changes a claim.
 
 The validation refuses a block by the name of the reason:
 

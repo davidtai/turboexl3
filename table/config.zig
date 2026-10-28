@@ -1,9 +1,9 @@
 //! turboexl3's claim, validation and bill, MLX-free (the server's quant-block claims and its load preflight run them).
 //! It claims the EXL3 blocks it serves at `by_marker`, above the server's built-in Sushi table: a fully EXL3 pack's
-//! `trunk_quant` (the trunk's dense linears; no rate `k`, each linear carries its own) always, and an `expert_quant`
-//! (the routed banks, rate `k`) in the reordered numerics where MLX's NAX gate holds and the SwiGLU is unclamped. The
-//! numerics are the server's MLX_SERVE_BIT_EXACT, read here as the server reads it: `1` exact (the banks stay Sushi's),
-//! `0` reordered, unset reordered on a Qwen3.8 pack (`qwen4_exp`) only.
+//! `trunk_quant` (the trunk's dense linears; no rate `k`, each linear carries its own) always, and that pack's
+//! `expert_quant` (the routed banks, rate `k`) where MLX's NAX gate holds and the SwiGLU is unclamped: a fully EXL3
+//! Qwen3.8 pack, the configuration its reordered numerics were measured on. An expert-only pack's banks stay Sushi's.
+//! No environment variable changes a claim.
 
 const std = @import("std");
 const abi = @import("sdk").quant_abi;
@@ -46,19 +46,18 @@ pub fn parseBlock(a: std.mem.Allocator, json: []const u8) BlockError!Block {
 pub fn claims(block_json: abi.Str, config_json: abi.Str) callconv(.c) abi.Claim {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
-    const raw: ?[]const u8 = if (std.c.getenv("MLX_SERVE_BIT_EXACT")) |v| std.mem.span(v) else null;
-    return claimFor(arena.allocator(), block_json.slice(), config_json.slice(), raw, nax.available());
+    return claimFor(arena.allocator(), block_json.slice(), config_json.slice(), nax.available());
 }
 
-/// The claim on one block over MLX_SERVE_BIT_EXACT's value (`bit_exact`) and the NAX gate (`nax_on`).
-pub fn claimFor(a: std.mem.Allocator, block_json: []const u8, config_json: []const u8, bit_exact: ?[]const u8, nax_on: bool) abi.Claim {
+/// The claim on one block over the NAX gate (`nax_on`).
+pub fn claimFor(a: std.mem.Allocator, block_json: []const u8, config_json: []const u8, nax_on: bool) abi.Claim {
     const o = parseObject(a, block_json) orelse return .no;
     const kind = kindOf(o) orelse return .no;
     // A trunk block is turboexl3's alone (no built-in format runs a dense EXL3 linear); validation names what it lacks.
     if (kind == .trunk) return .by_marker;
     _ = parseBlock(a, block_json) catch return .no;
     const cfg = parseObject(a, config_json);
-    if (exactNumerics(bit_exact, cfg) or !nax_on or clamped(cfg)) return .no;
+    if (!profile(cfg) or !nax_on or clamped(cfg)) return .no;
     return .by_marker;
 }
 
@@ -102,15 +101,10 @@ fn rateOf(k: std.json.Value) ?u32 {
     return if (whole % 2 == 0) whole else null;
 }
 
-/// The server's numerics: `0` reordered, any other value exact; unset or empty, reordered on the profile only.
-fn exactNumerics(bit_exact: ?[]const u8, cfg: ?std.json.ObjectMap) bool {
-    const v = bit_exact orelse "";
-    if (v.len == 0) return !profile(cfg);
-    return v[0] != '0';
-}
-
-/// A Qwen3.8 pack, the configuration the reordered numerics were measured on.
+/// A fully EXL3 Qwen3.8 pack (`qwen4_exp` with a `trunk_quant`), the configuration the reordered numerics were measured
+/// on.
 fn profile(cfg: ?std.json.ObjectMap) bool {
+    if ((cfg orelse return false).get("trunk_quant") == null) return false;
     for ([_]?std.json.ObjectMap{ cfg, textOf(cfg) }) |o| {
         const mt = (o orelse continue).get("model_type") orelse continue;
         if (mt == .string and (std.mem.eql(u8, mt.string, "qwen4_exp") or std.mem.eql(u8, mt.string, "qwen4_exp_text"))) return true;
@@ -158,30 +152,27 @@ test {
 
 const trunk_block = "{\"format\":\"exl3\",\"codebook\":\"mul1\",\"window\":16}";
 const bank_block = "{\"format\":\"exl3\",\"k\":5,\"codebook\":\"mul1\"}";
-const qwen38 = "{\"model_type\":\"qwen4_exp\",\"text_config\":{\"num_experts_per_tok\":8}}";
+const qwen38 = "{\"model_type\":\"qwen4_exp\",\"trunk_quant\":" ++ trunk_block ++ ",\"text_config\":{\"num_experts_per_tok\":8}}";
+const qwen38_experts_only = "{\"model_type\":\"qwen4_exp\",\"text_config\":{\"num_experts_per_tok\":8}}";
 const glm = "{\"model_type\":\"glm5_next\",\"swiglu_limit\":7.0}";
 
-test "turboexl3 config: a trunk block is always claimed; a bank block in the reordered numerics with NAX and no clamp" {
+test "turboexl3 config: a trunk block is always claimed; a bank block on a fully EXL3 Qwen3.8 pack with NAX and no clamp" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    for ([_]?[]const u8{ null, "1", "0" }) |raw| for ([_]bool{ true, false }) |on| {
-        try testing.expectEqual(abi.Claim.by_marker, claimFor(a, trunk_block, "{}", raw, on));
-    };
-    try testing.expectEqual(abi.Claim.by_marker, claimFor(a, bank_block, qwen38, null, true));
-    try testing.expectEqual(abi.Claim.by_marker, claimFor(a, bank_block, qwen38, "0", true));
-    try testing.expectEqual(abi.Claim.no, claimFor(a, bank_block, qwen38, "1", true));
-    try testing.expectEqual(abi.Claim.no, claimFor(a, bank_block, qwen38, null, false));
-    // Outside the profile the reordered numerics take an explicit 0; GLM's clamp is never served.
-    try testing.expectEqual(abi.Claim.no, claimFor(a, bank_block, "{\"model_type\":\"mimo_v2\"}", null, true));
-    try testing.expectEqual(abi.Claim.by_marker, claimFor(a, bank_block, "{\"model_type\":\"mimo_v2\"}", "0", true));
-    try testing.expectEqual(abi.Claim.no, claimFor(a, bank_block, glm, "0", true));
+    for ([_]bool{ true, false }) |on| try testing.expectEqual(abi.Claim.by_marker, claimFor(a, trunk_block, "{}", on));
+    try testing.expectEqual(abi.Claim.by_marker, claimFor(a, bank_block, qwen38, true));
+    try testing.expectEqual(abi.Claim.no, claimFor(a, bank_block, qwen38, false));
+    // An expert-only pack's banks stay Sushi's, as do another model's; GLM's clamp is never served.
+    try testing.expectEqual(abi.Claim.no, claimFor(a, bank_block, qwen38_experts_only, true));
+    try testing.expectEqual(abi.Claim.no, claimFor(a, bank_block, "{\"model_type\":\"mimo_v2\",\"trunk_quant\":" ++ trunk_block ++ "}", true));
+    try testing.expectEqual(abi.Claim.no, claimFor(a, bank_block, glm, true));
     // Sushi's STQ family, another format, a broken block: not turboexl3's.
-    try testing.expectEqual(abi.Claim.no, claimFor(a, "{\"format\":\"stq\",\"k\":3,\"codebook\":\"std1\"}", qwen38, "0", true));
-    try testing.expectEqual(abi.Claim.no, claimFor(a, "{\"format\":\"exl3\",\"k\":3,\"codebook\":\"pair1\"}", qwen38, "0", true));
-    try testing.expectEqual(abi.Claim.no, claimFor(a, "{\"bits\":4,\"group_size\":64}", qwen38, "0", true));
-    try testing.expectEqual(abi.Claim.no, claimFor(a, "{}", "{}", "0", true));
-    try testing.expectEqual(abi.Claim.no, claimFor(a, "{", "{}", "0", true));
+    try testing.expectEqual(abi.Claim.no, claimFor(a, "{\"format\":\"stq\",\"k\":3,\"codebook\":\"std1\"}", qwen38, true));
+    try testing.expectEqual(abi.Claim.no, claimFor(a, "{\"format\":\"exl3\",\"k\":3,\"codebook\":\"pair1\"}", qwen38, true));
+    try testing.expectEqual(abi.Claim.no, claimFor(a, "{\"bits\":4,\"group_size\":64}", qwen38, true));
+    try testing.expectEqual(abi.Claim.no, claimFor(a, "{}", "{}", true));
+    try testing.expectEqual(abi.Claim.no, claimFor(a, "{", "{}", true));
 }
 
 test "turboexl3 config: validation names an unserved codebook, window, rate or top-k" {
