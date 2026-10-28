@@ -5,6 +5,21 @@ from the MLX repacks of [turboderp](GLOSSARY.md#turboderp)'s packs (the table in
 The same tables are in [ddalcu/mlx-serve#997](https://github.com/ddalcu/mlx-serve/pull/997), the pull request that
 serves these packs through turboexl3's [quant plugin](GLOSSARY.md#quant-plugin).
 
+## Charts
+
+Prefill, decode, peak memory and time to first token from 1K to 256K, for every pack and arm, with the standard mlx-serve
+setup (mixed 4/8-bit) as the reference line in each column. Each chart carries its method in its caption and is drawn from
+the tables below.
+
+![Prefill, decode, peak memory and time to first token by prompt length, K2 to K5](charts/overview.png)
+
+- [Wall time and answer length](charts/wall_time.png)
+- [MTP acceptance: per-draft hit rate and drafts accepted per round](charts/mtp_acceptance.png)
+- [K5 with MTP off](charts/mtp_off_k5.png)
+- [turboexl3 against Sushi, percent difference](charts/turbo_vs_sushi.png)
+- [K5 against the standard setup](charts/vs_standard.png)
+- [Coding evals](charts/coding_evals.png)
+
 ## Across context lengths
 
 One run per cell. Each prompt is the same fixed text (Python source with one coding task) for every pack and arm, sent as
