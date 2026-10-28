@@ -125,12 +125,22 @@ MTP off (`--no-mtp`), tok/s:
 ## Coding evals
 
 EvalPlus 0.3.1: HumanEval+ (164 problems) and MBPP+ (378), greedy pass@1, seed 1234, EvalPlus's chat prompt,
-`reasoning_effort: low` with `max_tokens` 16,384. Every answer finished on its own.
+`reasoning_effort: low` with `max_tokens` 16,384, and MTP with typical acceptance (`--mtp-typical 0.2`) on every setup.
+Every answer but one finished on its own: the 4.05 pack's answer to Mbpp/56 reached the 16,384-token cap, and the code
+in it still passes the base and the extra tests.
 
 | Setup | HumanEval | HumanEval+ | MBPP | MBPP+ |
 |---|---:|---:|---:|---:|
+| 2.05 pack, turboexl3 4a4ea95 as the quant plugin of #997's head, reordered numerics, MTP depth 4 | 0.970 (159) | 0.927 (152) | 0.958 (362) | 0.807 (305) |
+| 3.05 pack, turboexl3 4a4ea95 as the quant plugin of #997's head, reordered numerics, MTP depth 4 | 0.982 (161) | 0.939 (154) | 0.950 (359) | 0.820 (310) |
+| 4.05 pack, turboexl3 4a4ea95 as the quant plugin of #997's head, reordered numerics, MTP depth 4 | 0.988 (162) | 0.963 (158) | 0.958 (362) | 0.796 (301) |
 | 5.05 pack, turboexl3 4a4ea95 as the quant plugin of #997's head, reordered numerics, MTP depth 4 | 0.988 (162) | 0.945 (155) | 0.955 (361) | 0.812 (307) |
 | mixed 4/8-bit, upstream main + the two load switches, MTP auto | 0.988 (162) | 0.945 (155) | 0.952 (360) | 0.815 (308) |
 
-The two setups are within one problem of each other on every suite. Their HumanEval answers differ (74 of 164 solutions
+The four packs are within two points of the standard pack (mixed 4/8-bit) on every suite. The largest gap is the 4.05
+pack on MBPP+: 301 against 308 problems, 1.9 points. With one greedy run per setup, gaps of this size are within the
+noise: paired by problem against the standard pack, the smallest exact McNemar p-value is 0.17. The 5.05 pack and the
+standard pack are within one problem of each other on every suite. Their HumanEval answers differ (74 of 164 solutions
 identical) but fail nearly the same problems: 8 of the 9 HumanEval+ failures are shared.
+
+![EvalPlus pass@1 on HumanEval, HumanEval+, MBPP and MBPP+ for the 2.05, 3.05, 4.05 and 5.05 packs and the standard mixed 4/8-bit pack](charts/coding_evals.png)
