@@ -139,12 +139,13 @@ in it still passes the base and the extra tests.
 | 3.05 pack, turboexl3 4a4ea95 as the quant plugin of #997's head, reordered numerics, MTP depth 4 | 0.982 (161) | 0.939 (154) | 0.950 (359) | 0.820 (310) |
 | 4.05 pack, turboexl3 4a4ea95 as the quant plugin of #997's head, reordered numerics, MTP depth 4 | 0.988 (162) | 0.963 (158) | 0.958 (362) | 0.796 (301) |
 | 5.05 pack, turboexl3 4a4ea95 as the quant plugin of #997's head, reordered numerics, MTP depth 4 | 0.988 (162) | 0.945 (155) | 0.955 (361) | 0.812 (307) |
-| mixed 4/8-bit, upstream main + the two load switches, MTP auto | 0.988 (162) | 0.945 (155) | 0.952 (360) | 0.815 (308) |
+| iQ-MLX 4.7 bpw (the standard pack), upstream main + the two load switches, MTP auto | 0.988 (162) | 0.945 (155) | 0.958 (362) | 0.815 (308) |
+| uncalibrated mixed 4/8-bit, superseded by the iQ pack: upstream main + the two load switches, MTP auto | 0.988 (162) | 0.945 (155) | 0.952 (360) | 0.815 (308) |
 
-The four packs are within two points of the standard pack (mixed 4/8-bit) on every suite. The largest gap is the 4.05
+The four packs are within two points of the standard pack (iQ-MLX 4.7 bpw) on every suite. The largest gap is the 4.05
 pack on MBPP+: 301 against 308 problems, 1.9 points. With one greedy run per setup, gaps of this size are within the
-noise: paired by problem against the standard pack, the smallest exact McNemar p-value is 0.17. The 5.05 pack and the
-standard pack are within one problem of each other on every suite. Their HumanEval answers differ (74 of 164 solutions
-identical) but fail nearly the same problems: 8 of the 9 HumanEval+ failures are shared.
+noise: paired by problem against the standard pack, the smallest exact McNemar p-value is 0.14. The 5.05 pack and the
+standard pack are within one problem of each other on every suite. Their HumanEval answers differ (90 of 164 solutions
+identical) but fail mostly the same problems: 7 of the 9 HumanEval+ failures are shared.
 
-![EvalPlus pass@1 on HumanEval, HumanEval+, MBPP and MBPP+ for the 2.05, 3.05, 4.05 and 5.05 packs and the standard mixed 4/8-bit pack](charts/coding_evals.png)
+![EvalPlus pass@1 on HumanEval, HumanEval+, MBPP and MBPP+ for the 2.05, 3.05, 4.05 and 5.05 packs and the standard iQ-MLX 4.7 bpw pack](charts/coding_evals.png)

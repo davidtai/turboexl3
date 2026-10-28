@@ -79,11 +79,12 @@ EvalPlus 0.3.1 through mlx-serve on an M5 Max, the packs with turboexl3: greedy 
 | 3.05 bpw | 0.982 (161) | 0.939 (154) | 0.950 (359) | 0.820 (310) |
 | 4.05 bpw | 0.988 (162) | 0.963 (158) | 0.958 (362) | 0.796 (301) |
 | 5.05 bpw | 0.988 (162) | 0.945 (155) | 0.955 (361) | 0.812 (307) |
-| mixed 4/8-bit, standard mlx-serve (no EXL3) | 0.988 (162) | 0.945 (155) | 0.952 (360) | 0.815 (308) |
+| iQ-MLX 4.7 bpw, standard mlx-serve (no EXL3) | 0.988 (162) | 0.945 (155) | 0.958 (362) | 0.815 (308) |
+| uncalibrated mixed 4/8-bit, superseded by the iQ pack | 0.988 (162) | 0.945 (155) | 0.952 (360) | 0.815 (308) |
 
 Every pack is within two points of the standard pack on every suite.
 
-![EvalPlus pass@1 on HumanEval, HumanEval+, MBPP and MBPP+ for the four packs and the standard mixed 4/8-bit pack](docs/charts/coding_evals.png)
+![EvalPlus pass@1 on HumanEval, HumanEval+, MBPP and MBPP+ for the four packs and the standard iQ-MLX 4.7 bpw pack](docs/charts/coding_evals.png)
 
 The setups and the method in full: [docs/RESULTS.md](docs/RESULTS.md#coding-evals).
 
