@@ -27,8 +27,9 @@ comment there could change the kernel; its header may differ in comments too.
    for comments and whitespace (listed by name).
 3. Declarations. Every other top-level declaration (functions, launch code, structs, tests) is token for token the
    original, except: text consts (2), tests (4), printMetal (5), the splice helpers / piece consts the move removed
-   or added, the declarations a change removed (REMOVED) or added (ADDED), and a kernel free routed through the
-   consumer's kernel API (FREE: `_ = mlx.mlx_fast_metal_kernel_free(k)` became `freeKernel(k)`), each listed by name;
+   or added, the declarations a change removed (REMOVED), added (ADDED) or edited (CHANGED), the files it added
+   (ADDED_FILES: checked by 1, 2, 6, 7 and 8 like every file, their declarations new), and a kernel free routed through
+   the consumer's kernel API (FREE: `_ = mlx.mlx_fast_metal_kernel_free(k)` became `freeKernel(k)`), each listed by name;
    anything else fails.
 4. Tests. A test that searched the kernel texts for Metal now reads those strings from .metal files: its tokens are the
    original's except one inserted `const pin = ...pins(@embedFile(...));` and, where a string was, `pin[k]`, a piece
@@ -994,6 +995,13 @@ for _name in ('Kernels2', 'text_gu2', 'text_down2', 'text_reduce2', 'gu2_inputs'
     REMOVED[('decode.zig', f'const {_name}')] = 'decode form 2 (Kernels2), dead: nothing built it'
 # declarations a change added on purpose
 ADDED = {('decode.zig', 'fn freeKernel'): "the one kernel free, through the consumer's kernel API (README.md's Wiring)"}
+for _f in ('decb.zig', 'decode.zig', 'root.zig'):
+    ADDED[(_f, 'const sources')] = 'sources.zig, where the texts more than one kernel splices now live (same values: 2)'
+# files a change added on purpose, by name, with the reason
+ADDED_FILES = {'sources.zig': 'the texts more than one kernel splices (had128, the gate gemv and sum), MLX-free, for '
+                              'turboexl3\'s kernels and a consumer\'s Metal'}
+# other declarations a change edited on purpose, by file and key, with the reason
+CHANGED = {('tests.zig', 'comptime #0'): 'the test root lists the files the change added'}
 # kernels a change added on purpose, by file and kernel name, with the reason; their newKernel calls are listed in 1
 ADDED_KERNELS = {('dense.zig', 'turboexl3_dense_dgemv_lean'): 'the lean GEMV (Config.dense_lean): text_dgemv with its '
                                                               'codeword loop taken by input element',
@@ -1056,8 +1064,12 @@ def main():
 
     ounits, nunits = load(orig_dir), load(new_dir)
     oprog, nprog = Program(orig_dir, ounits), Program(new_dir, nunits)
+    added_files = []
     for f in sorted(set(ounits) ^ set(nunits)):
-        problems.append(f'{f}: only in {"ORIG" if f in ounits else "NEW"}')
+        if f in nunits and f in ADDED_FILES:
+            added_files.append(f)
+        else:
+            problems.append(f'{f}: only in {"ORIG" if f in ounits else "NEW"}')
 
     # 1. kernels
     print('1. kernels: every newKernel call\'s source and header, original vs new')
@@ -1228,6 +1240,8 @@ def main():
                                 ('text const, comments / whitespace (2)' if same_but_cw(otext[(f, name)], ntext[(f, name)]) else 'TEXT DIFFERS')))
             elif (f, key) in RECOMPOSED:
                 changed.append((f, key, RECOMPOSED[(f, key)]))
+            elif (f, key) in CHANGED:
+                changed.append((f, key, CHANGED[(f, key)]))
             elif key.startswith('test '):
                 changed.append((f, key, 'test (4, 5)' + (', renamed' if key in back.values() else '')))
             elif key == 'fn printMetal' and f == 'prefill.zig':
@@ -1247,6 +1261,8 @@ def main():
                 if kind is None:
                     problems.append(f'{f}: {key} added')
     print(f'   {n_same} identical; {len(changed)} changed, {len(removed)} removed, {len(added)} added:')
+    for f in added_files:
+        print(f'     added    {f:13s} file: {ADDED_FILES[f]}')
     for (f, key, why) in changed:
         if why != 'text const, same value' or verbose:
             print(f'     changed  {f:13s} {key[:90]:90s} {why}')

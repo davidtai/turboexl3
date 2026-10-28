@@ -22,6 +22,8 @@ pub const ref = @import("ref.zig");
 pub const unfused = @import("unfused.zig");
 pub const dense = @import("dense.zig");
 pub const prefill = @import("prefill.zig");
+/// The kernel texts a consumer may splice into its own Metal (MLX-free; `sources.zig`).
+pub const sources = @import("sources.zig");
 
 pub const Spec = spec.Spec;
 pub const parseExpertQuant = spec.parseExpertQuant;

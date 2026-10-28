@@ -23,6 +23,7 @@ const mlx = @import("sdk").mlx;
 const ks = @import("sdk").kernel_launch;
 const format = @import("format.zig");
 const lane = @import("lane.zig");
+const sources = @import("sources.zig");
 
 pub const Geometry = struct {
     hidden: u32,
@@ -1727,10 +1728,10 @@ const prep2_body = @embedFile("kernels/decode/prep2_2.metal");
 /// simdgroup gs of 8 and lane sum the columns (32 gs + lane) * 4 + 1024 i + tn in that order, the leftover block zero-filled
 /// past GK (load_safe), then fold a shuffle-down tree; this simdgroup plays the gemv's simdgroup gs = tid / 32 - 1. The host's
 /// router mode `softmax_gate_gemv` splices the same text (its test pins it to this one).
-pub const text_gate_gemv = @embedFile("kernels/decode/gate_gemv.metal");
+pub const text_gate_gemv = sources.gate_gemv;
 /// The gate's sum of the 8 partials as the gemv's simdgroup 0 lane 0 folds them (its own first, then 1..7 in order), and its
 /// bf16 store.
-pub const text_gate_sum = @embedFile("kernels/decode/gate_sum.metal");
+pub const text_gate_sum = sources.gate_sum;
 
 /// The router kernel and form 3's prepare (`text_prep2`) as one launch, one threadgroup per (128-wide hidden block b, row)
 /// of NSG = TG / 32 simdgroups (`Kernels3.routeSimdgroups`). The keys are staged as the router stages them; then phase

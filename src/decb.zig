@@ -26,6 +26,7 @@ const mlx = @import("sdk").mlx;
 const ks = @import("sdk").kernel_launch;
 const decode = @import("decode.zig");
 const dense = @import("dense.zig");
+const sources = @import("sources.zig");
 
 /// One linear of a merged call: the `Dense` `linear` uses for its shape (`denseFor`'s) and the host's arrays
 pub const Member = struct { d: *dense.Dense, trellis: mlx.mlx_array, suh: mlx.mlx_array, svh: mlx.mlx_array };
@@ -35,7 +36,7 @@ pub const Gate = struct { base: mlx.mlx_array, row_stride: u32, head_stride: u32
 
 /// dense.zig's 128-point Hadamard butterfly: the two statements every prep and finish there runs on v[4] (lane L holds
 /// element L + 32 j of the block), verbatim; a CPU test below pins them inside text_prep_s and dfinish_v
-const had128 = @embedFile("kernels/decb/had128.metal");
+const had128 = sources.had128;
 
 // ------------------------------------------------------------------------- o_proj over the gated output: the producers
 
