@@ -80,7 +80,9 @@ MLX_SERVE_GPU_CEILING_MB=114688 MLX_SERVE_CACHE_LIMIT=2147483648`. The rates com
   75.3 GB without the n-gram table. It ran at mlx-serve's default MTP depth (auto: it ran depth 6) with
   `--mtp-typical 0.2`, one arm, from a copy whose `generation_config.json` gained
   `default_chat_template_kwargs: {"enable_thinking": true}`, which the EXL3 repacks carry, so every column renders the
-  same prompt. It replaces ddalcu's uncalibrated mixed 4/8-bit pack, which he flagged as bad.
+  same prompt. It replaces ddalcu's uncalibrated mixed 4/8-bit pack, which he flagged as bad. It also ran at the EXL3
+  runs' fixed depths, `--mtp-max-depth 3` and `4`, on the same binary and prompts: see
+  [the standard setup at fixed MTP depths](#the-standard-setup-at-fixed-mtp-depths).
 - `*`: the answer reached the 1,024-token cap. `†`: a single run flagged as noisy (K2 8K, K4 1K and 2K), not re-run. With
   MTP, a decode rate also depends on how many drafts its answer accepts, and the arms give different answers.
 - MTP off was measured on K5 only.
@@ -126,6 +128,39 @@ MTP off (`--no-mtp`), tok/s:
 | 64K | 64,987 | 2,269.8 | 2,604.9 | 54.2 | 53.2 |
 | 128K | 129,949 | 2,203.3 | 2,503.1 | 53.1 | 52.0 |
 | 256K | 258,992 | 2,094.2 | 2,345.8 | 51.9 | 51.2 |
+
+### The standard setup at fixed MTP depths
+
+The iQ-MLX 4.7 bpw pack on the same binary and prompts, at `--mtp-max-depth 3` and `4` with `--mtp-typical 0.2`, beside
+its run at the default depth. It decodes 7 to 30% faster at depth 3 than at its default, so the decode columns above
+overstate the EXL3 lead at equal depth.
+
+Decode, tok/s (MTP on):
+
+| prompt | tokens | depth 3 | depth 4 | depth 6 (default) |
+|---|---:|---:|---:|---:|
+| 1K | 1,031 | 125.9 | 98.2 | 97.1 |
+| 2K | 2,013 | 118.4\* | 105.4\* | 92.4\* |
+| 4K | 4,025 | 120.9 | 100.3 | 100.1 |
+| 8K | 8,100 | 124.5 | 102.7 | 102.2 |
+| 16K | 16,275 | 117.5 | 111.9 | 101.7 |
+| 32K | 32,424 | 120.2 | 110.8 | 110.3 |
+| 64K | 64,987 | 109.7 | 99.3 | 96.6 |
+| 128K | 129,949 | 103.6 | 100.8 | 96.6 |
+| 256K | 258,992 | 95.6 | 94.7 | 87.4 |
+| per-draft acceptance, mean | | 86.1% | 84.9% | 81.5% |
+| tokens per round, mean | | 3.47 | 3.71 | 4.13 |
+
+At equal depth, the turboexl3 arms against the standard setup:
+
+- **Depth 3:** K2 is level, from 2.2% slower to 4.4% faster. K3 is 4.0 to 12.6% faster, and K4 5.2 to 17.1% faster. K5's
+  depth-3 run (build PR17B, the pack's earlier MTP mixer: 129.5, 124.6, 129.5, 123.6, 119.6, 119.4, 110.8, 105.8 and
+  95.9 tok/s from 1K to 256K) is level, from 0.7% slower to 7.1% faster.
+- **Depth 4:** K5 on S21 is 0.5 to 37.8% faster than the standard setup, but depth 4 is a slower setting for the standard
+  setup than depth 3 at every length.
+
+The Sushi arms, at depth 3: K2 is 10.6% slower to 1.0% faster, K3 2.1% slower to 7.7% faster, K4 3.6 to 9.6% slower, and
+K5's depth-3 run 6.8% slower to 0.3% faster. These ranges leave out the runs marked `†`.
 
 ## Coding evals
 
