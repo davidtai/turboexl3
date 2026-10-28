@@ -2,8 +2,9 @@
 
 Measured with mlx-serve on one Apple M5 Max (128 GB, macOS 27.0.1), serving [Qwen3.8-Flash-Next](GLOSSARY.md#qwen38)
 from the MLX repacks of [turboderp](GLOSSARY.md#turboderp)'s packs (the table in [the README](../README.md#the-packs)).
-The same tables are in [ddalcu/mlx-serve#997](https://github.com/ddalcu/mlx-serve/pull/997), the pull request that
-serves these packs through turboexl3's [quant plugin](GLOSSARY.md#quant-plugin).
+The same tables were in the description of [ddalcu/mlx-serve#997](https://github.com/ddalcu/mlx-serve/pull/997). The
+code that served them is the branch [`qwen38-exl3-full`](https://github.com/davidtai/mlx-serve/tree/qwen38-exl3-full) of
+davidtai/mlx-serve, which serves these packs through turboexl3's [quant plugin](GLOSSARY.md#quant-plugin).
 
 ## Quality: KL divergence and perplexity (turboderp's)
 
