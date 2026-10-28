@@ -1,8 +1,8 @@
 # Glossary
 
 This page defines the terms that the turboexl3 documents use: the [README](../README.md),
-[KERNELS.md](KERNELS.md) and [CONSUMING.md](../CONSUMING.md). Each entry gives the plain meaning first, then the
-precise one.
+[KERNELS.md](KERNELS.md), [RESULTS.md](RESULTS.md) and [CONSUMING.md](../CONSUMING.md). Each entry gives the plain
+meaning first, then the precise one.
 
 ## The weight format
 
@@ -171,8 +171,9 @@ precise one.
   arithmetic takes most of the time. So a GEMM on the NAX that decodes each weight tile once per tile of rows is
   fastest.
 - <a id="mtp"></a>**MTP, verify rows**: MTP (multi-token prediction) is a small extra head that drafts the next tokens.
-  The main model then checks all drafted tokens in one call, one row per token: these are verify rows. The served verify
-  call has 4 rows, and the head's draft steps have 1. The number of verify rows changes from call to call. So turboexl3
+  The main model then checks all drafted tokens in one call, one row per token: these are verify rows. At the served MTP
+  depth of 4 a verify call has up to 5 rows, and the head's draft steps have 1. The number of verify rows changes from
+  call to call. So turboexl3
   keeps the bytes of a row the same at every row count, where this README and KERNELS.md say so.
 - <a id="trunk"></a>**trunk**: Every projection that is not a routed expert: attention, GDN, shared expert, `lm_head`
   and MTP. A fully EXL3 model has about a dozen trunk shapes.

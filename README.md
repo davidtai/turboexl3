@@ -24,18 +24,36 @@ kernel is in one of two classes:
 - A kernel that sums in its own order stays **within a stated tolerance** of `format.project`.
 
 turboexl3 was written as the EXL3 engine of [mlx-stream](https://github.com/davidtai/mlx-stream), a plugin for
-[mlx-serve](https://github.com/ddalcu/mlx-serve), to serve Qwen3.8-Flash-Next from turboderp's 5.05 bpw pack. Now it
-reaches mlx-serve as an outside quant plugin. The folder [`plugin/`](plugin/build.zig) builds that plugin with
-mlx-serve's plugin kit.
+[mlx-serve](https://github.com/ddalcu/mlx-serve), to serve [Qwen3.8-Flash-Next](docs/GLOSSARY.md#qwen38) from
+[turboderp](docs/GLOSSARY.md#turboderp)'s EXL3 packs,
+[turboderp/Qwen3.8-Flash-Next-exl3](https://huggingface.co/turboderp/Qwen3.8-Flash-Next-exl3). Now it reaches mlx-serve
+as an outside quant plugin. The folder [`plugin/`](plugin/build.zig) builds that plugin with mlx-serve's plugin kit.
 
 The documents:
 
 | document | what it holds |
 |---|---|
-| this README | the weight formats, the API, the source layout, the wiring, the configuration and the tests |
+| this README | the packs, the weight formats, the API, the source layout, the wiring, the configuration and the tests |
+| [docs/RESULTS.md](docs/RESULTS.md) | the measured speed from 1K to 256K tokens and the coding scores, with mlx-serve |
 | [docs/GLOSSARY.md](docs/GLOSSARY.md) | the definition of every term |
 | [docs/KERNELS.md](docs/KERNELS.md) | every kernel, the chain of launches it replaces and how its output bits relate to that chain |
 | [CONSUMING.md](CONSUMING.md) | what a consumer supplies, and how to build, check and install the quant plugin |
+
+## The packs
+
+turboexl3 is designed to work with the MLX versions of turboderp's packs. These are his EXL3 files, repacked into the
+file layout that mlx-serve loads; nothing is quantized again. The repacks are made with
+[qwen38-exl3-mlx-serve-converter](https://github.com/OpenSourceWTF/qwen38-exl3-mlx-serve-converter):
+
+| bpw | turboderp's branch | MLX repack | download |
+|---|---|---|---:|
+| 2.05 | [2.05bpw_h4_ng4](https://huggingface.co/turboderp/Qwen3.8-Flash-Next-exl3/tree/2.05bpw_h4_ng4) | [OpensourceWTF/Qwen3.8-Flash-Next-EXL3-2.05-mlx-serve](https://huggingface.co/OpensourceWTF/Qwen3.8-Flash-Next-EXL3-2.05-mlx-serve) | 63.1 GB |
+| 3.05 | [3.05bpw_h5_ng5](https://huggingface.co/turboderp/Qwen3.8-Flash-Next-exl3/tree/3.05bpw_h5_ng5) | [OpensourceWTF/Qwen3.8-Flash-Next-EXL3-3.05-mlx-serve](https://huggingface.co/OpensourceWTF/Qwen3.8-Flash-Next-EXL3-3.05-mlx-serve) | 85.4 GB |
+| 4.05 | [4.05bpw_h6_ng6](https://huggingface.co/turboderp/Qwen3.8-Flash-Next-exl3/tree/4.05bpw_h6_ng6) | [OpensourceWTF/Qwen3.8-Flash-Next-EXL3-4.05-mlx-serve](https://huggingface.co/OpensourceWTF/Qwen3.8-Flash-Next-EXL3-4.05-mlx-serve) | 107.6 GB |
+| 5.05 | [5.05bpw_h6_ng6](https://huggingface.co/turboderp/Qwen3.8-Flash-Next-exl3/tree/5.05bpw_h6_ng6) | [OpensourceWTF/Qwen3.8-Flash-Next-EXL3-5.05-mlx-serve](https://huggingface.co/OpensourceWTF/Qwen3.8-Flash-Next-EXL3-5.05-mlx-serve) | 123.4 GB |
+
+Each download includes the pack's n-gram table. turboderp's model card gives each branch's KLD and perplexity against
+BF16. The measured speed and coding scores with mlx-serve are in [docs/RESULTS.md](docs/RESULTS.md).
 
 ## Formats
 
