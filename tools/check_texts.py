@@ -997,9 +997,13 @@ for _name in ('Kernels2', 'text_gu2', 'text_down2', 'text_reduce2', 'gu2_inputs'
 ADDED = {('decode.zig', 'fn freeKernel'): "the one kernel free, through the consumer's kernel API (README.md's Wiring)"}
 for _f in ('decb.zig', 'decode.zig', 'root.zig'):
     ADDED[(_f, 'const sources')] = 'sources.zig, where the texts more than one kernel splices now live (same values: 2)'
+ADDED[('root.zig', 'const gdn_out')] = 'gdn_out.zig, the GDN tail in one launch'
+ADDED[('root.zig', 'fn gdnOutPrep')] = 'the GDN tail\'s API: z\'s finish, the gated norm and out_proj\'s prepare in one launch'
 # files a change added on purpose, by name, with the reason
 ADDED_FILES = {'sources.zig': 'the texts more than one kernel splices (had128, the gate gemv and sum), MLX-free, for '
-                              'turboexl3\'s kernels and a consumer\'s Metal'}
+                              'turboexl3\'s kernels and a consumer\'s Metal',
+               'gdn_out.zig': 'the GDN tail\'s kernel (turboexl3_gdn_out_prep: its pieces around sources.had128) and launch',
+               'gdn_out_test.zig': 'the GDN tail\'s GPU tests against linearFinish, MLX\'s gated norm and linearPrep'}
 # other declarations a change edited on purpose, by file and key, with the reason
 CHANGED = {('tests.zig', 'comptime #0'): 'the test root lists the files the change added'}
 # kernels a change added on purpose, by file and kernel name, with the reason; their newKernel calls are listed in 1

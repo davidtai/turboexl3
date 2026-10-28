@@ -24,6 +24,8 @@ pub const dense = @import("dense.zig");
 pub const prefill = @import("prefill.zig");
 /// The kernel texts a consumer may splice into its own Metal (MLX-free; `sources.zig`).
 pub const sources = @import("sources.zig");
+/// The GDN layer's tail in one launch (`gdnOutPrep`).
+pub const gdn_out = @import("gdn_out.zig");
 
 pub const Spec = spec.Spec;
 pub const parseExpertQuant = spec.parseExpertQuant;
@@ -662,12 +664,11 @@ pub fn linearGatedStd(s: mlx.mlx_stream, attn: mlx.mlx_array, gate: attn_io.Gate
     return y;
 }
 
-// ── `linear` in two pieces around the host's fused GDN norm-gate ──
-// in_proj_z stops at its inner product (`linearInnerSplit`), the host's kernel runs z's finish, the norm-gate and out_proj's
+// ── `linear` in two pieces around the fused GDN tail ──
+// in_proj_z stops at its inner product (`linearInnerSplit`), `gdnOutPrep` runs z's finish, the gated norm and out_proj's
 // prepare in one launch, and out_proj continues from those prepared rows (`linearPrepared`). Each piece is `linear`'s own
 // launches with `linear`'s configs on `linear`'s `Dense`; `linearFinish` and `linearPrep` are the launches left out, for the
-// host's byte tests. Rows the GEMV or the fused-GEMM option take are refused (error.Exl3EngineNotImplemented) before any
-// launch.
+// byte tests. Rows the GEMV or the fused-GEMM option take are refused (error.Exl3EngineNotImplemented) before any launch.
 
 /// `linearSplit` without its finish: the inner product F16 [rows, out] of x [..., in] (bf16, f16 or f32), the
 /// prepare on `s` and the dequantize + matmul on `rs` (the register path's GEMM on `s`): the bytes `linear`'s finish reads.
@@ -723,6 +724,37 @@ pub fn linearPrep(s: mlx.mlx_stream, x: mlx.mlx_array, p: Proj, dec: format.Deco
     const path = d.pathFor(v.rows);
     if (path != .small and path != .matmul) return error.Exl3EngineNotImplemented;
     return d.prepare(s, v.x2, p.suh, v.rows);
+}
+
+/// The GDN layer's tail at prefill rows (`gdn_out.zig`). It returns out_proj's prepared rows xp F16 [rows, hv 128] (natural
+/// order, as `linearPrepared` and `linearPiecePrepared` take them). The inputs are the recurrence's output y
+/// [B, S, hv, 128] (bf16 or f16) and in_proj_z's inner product zq F16 [B S, hv 128] (`linearInnerSplit`'s), with
+/// rows = B S. One launch runs three steps of the chain:
+/// - z's finish (`linearFinish` with z's `svh`);
+/// - the gated norm: MLX's rms_norm over each 128-wide head with `norm.w` and `norm.eps`, times MLX's sigmoid of z by
+///   `norm.sigtab`, in y's dtype;
+/// - out_proj's prepare (`linearPrep` with o's `suh`).
+/// Every element is the chain's bytes. It refuses with error.Exl3EngineNotImplemented, before any launch, at decode rows
+/// (<= `kernels.DECODE_ROWS_MAX`, where `linear` takes the GEMV), for another head width and off the GPU.
+pub fn gdnOutPrep(s: mlx.mlx_stream, y: mlx.mlx_array, zq: mlx.mlx_array, z: Proj, norm: gdn_out.Norm, o: Proj) !mlx.mlx_array {
+    const ysh = mlx.getShape(y);
+    if (ysh.len != 4 or ysh[0] < 1 or ysh[1] < 1 or ysh[2] < 1) return error.BadExl3Shape;
+    const dt = mlx.mlx_array_dtype(y);
+    if (dt != .bfloat16 and dt != .float16) return error.BadExl3Dtype;
+    const rows: usize = @intCast(ysh[0] * ysh[1]);
+    if (ysh[3] != gdn_out.head_dim or rows <= kernels.DECODE_ROWS_MAX or !mlx.streamIsGpu(s)) return error.Exl3EngineNotImplemented;
+    const hv: u32 = @intCast(ysh[2]);
+    const vd: c_int = @intCast(hv * gdn_out.head_dim);
+    const zsh = mlx.getShape(zq);
+    if (zsh.len != 2 or zsh[0] != ysh[0] * ysh[1] or zsh[1] != vd or mlx.mlx_array_dtype(zq) != .float16) return error.BadExl3Shape;
+    for ([_]mlx.mlx_array{ z.svh, o.suh }) |vec| {
+        const sh = mlx.getShape(vec);
+        if (sh.len != 1 or sh[0] != vd or mlx.mlx_array_dtype(vec) != .float16) return error.BadExl3Shape;
+    }
+    if (mlx.mlx_array_dtype(norm.w) != dt or mlx.mlx_array_size(norm.w) != gdn_out.head_dim) return error.BadExl3Dtype;
+    if (mlx.mlx_array_dtype(norm.sigtab) != dt or mlx.mlx_array_size(norm.sigtab) != 65536) return error.BadExl3Dtype;
+    if (mlx.mlx_array_dtype(norm.eps) != .float32 or mlx.mlx_array_ndim(norm.eps) != 0) return error.BadExl3Dtype;
+    return gdn_out.prepare(s, y, zq, z.svh, norm, o.suh, hv, rows);
 }
 
 // ── `linear` of one call split into row pieces ──
