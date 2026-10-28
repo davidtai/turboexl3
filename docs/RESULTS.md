@@ -153,14 +153,11 @@ Decode, tok/s (MTP on):
 
 At equal depth, the turboexl3 arms against the standard setup:
 
-- **Depth 3:** K2 is level, from 2.2% slower to 4.4% faster. K3 is 4.0 to 12.6% faster, and K4 5.2 to 17.1% faster. K5's
-  depth-3 run (build PR17B, the pack's earlier MTP mixer: 129.5, 124.6, 129.5, 123.6, 119.6, 119.4, 110.8, 105.8 and
-  95.9 tok/s from 1K to 256K) is level, from 0.7% slower to 7.1% faster.
-- **Depth 4:** K5 on S21 is 0.5 to 37.8% faster than the standard setup, but depth 4 is a slower setting for the standard
-  setup than depth 3 at every length.
+- **Depth 3:** K2 is level, from 2.2% slower to 4.4% faster. K3 is 4.0 to 12.6% faster, and K4 5.2 to 17.1% faster.
+- **Depth 4:** K5 is 0.5 to 37.8% faster than the standard setup.
 
-The Sushi arms, at depth 3: K2 is 10.6% slower to 1.0% faster, K3 2.1% slower to 7.7% faster, K4 3.6 to 9.6% slower, and
-K5's depth-3 run 6.8% slower to 0.3% faster. These ranges leave out the runs marked `†`.
+The Sushi arms at the same depth: K2 is 10.6% slower to 1.0% faster, K3 2.1% slower to 7.7% faster and K4 3.6 to 9.6%
+slower at depth 3, and K5 2.5% slower to 29.1% faster at depth 4. These ranges leave out the runs marked `†`.
 
 ## Coding evals
 
