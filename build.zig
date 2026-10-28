@@ -19,6 +19,11 @@
 //!     tkit.addImport("mlx_serve", kit_root);
 //!     sdk.addImport("turboexl3_kit", tkit); // sdk.zig: `pub const kernel_launch = @import("turboexl3_kit").kernel_launch;`
 //!
+//! A third module, `turboexl3_table` (table/table.zig), is turboexl3 as an mlx-serve quant table: the quant plugin in
+//! plugin/ is its dylib, and a model plugin can run it in process behind its own format seam. It imports `sdk` (its
+//! `mlx`, `kernel_launch` and `quant_abi`, the quant ABI the table type comes from), `mlx_serve` (the kit's root),
+//! `turboexl3` and `turboexl3_kit`.
+//!
 //! The tests (src/tests.zig) need a Metal device, MLX and the consumer's launcher linked, so the consumer builds them over
 //! its own surface with `testModule` (they also import `mlx_host`, whose `sushi_exl3`, where present, is a second
 //! reference).
@@ -35,6 +40,12 @@ pub fn build(b: *std.Build) void {
     });
     _ = b.addModule("turboexl3_kit", .{
         .root_source_file = b.path("kit/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    _ = b.addModule("turboexl3_table", .{
+        .root_source_file = b.path("table/table.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,

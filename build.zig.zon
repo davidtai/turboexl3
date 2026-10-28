@@ -5,7 +5,7 @@
     .fingerprint = 0xaadded286f3c91b5,
     .minimum_zig_version = "0.17.0",
     // what a fetched package carries: the module (src, its .metal files included), the plugin-kit module (kit/:
-    // `turboexl3_kit`), the license and notices, the docs README.md and CONSUMING.md link (docs/), the contributor rules
+    // `turboexl3_kit`), the quant table (table/: `turboexl3_table`), the license and notices, the docs README.md and CONSUMING.md link (docs/), the contributor rules
     // (AGENTS.md, CLAUDE.md) and the check they name (tools/check_texts.py; nothing builds it). plugin/ is built from a
     // checkout, never fetched.
     .paths = .{
@@ -13,6 +13,7 @@
         "build.zig.zon",
         "src",
         "kit",
+        "table",
         "LICENSE",
         "NOTICE",
         "README.md",
