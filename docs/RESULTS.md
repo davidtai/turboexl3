@@ -7,18 +7,23 @@ serves these packs through turboexl3's [quant plugin](GLOSSARY.md#quant-plugin).
 
 ## Charts
 
-Prefill, decode, peak memory and time to first token from 1K to 256K, every pack and arm in one panel per metric, with
-the standard mlx-serve setup (mixed 4/8-bit) among them. Each chart carries its method in its caption and is drawn from
+Prefill, decode, peak memory and time to first token from 1K to 256K, every pack and arm in one row per metric, with
+the standard mlx-serve setup (mixed 4/8-bit) among them; time to first token is drawn as each series' % difference from
+that setup. Each chart carries its method in its caption and is drawn from
 the tables below.
 
-![Every series in one panel per metric: prefill, decode, peak memory and time to first token](charts/overview_all_series.png)
+![Every series in one row per metric: prefill, decode, peak memory and time to first token](charts/overview_all_series.png)
+
+Every series as its difference from the standard setup at each length (0 = standard mlx-serve):
+
+![Every series against the standard mlx-serve setup](charts/overview_vs_standard_all.png)
 
 The same data with one column per pack, the standard setup as the reference line in each:
 
 ![Prefill, decode, peak memory and time to first token by prompt length, K2 to K5](charts/overview.png)
 
 Each metric at full width, every series: [prefill](charts/all_prefill.png), [decode](charts/all_decode.png),
-[peak memory](charts/all_peak_memory.png), [time to first token](charts/all_ttft.png).
+[peak memory](charts/all_peak_memory.png), [time to first token, in seconds at each length](charts/all_ttft.png).
 
 - [Wall time and answer length](charts/wall_time.png)
 - [MTP acceptance: per-draft hit rate and drafts accepted per round](charts/mtp_acceptance.png)
