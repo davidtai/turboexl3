@@ -274,8 +274,9 @@ fn envF64(name: [*:0]const u8, default: f64) f64 {
 
 /// A benchmark arm: Sushi's prefill arm, or the fused chain at one option set ("b<rows>[d]": M tile rows, d = double-buffered;
 /// "m<rows>": the mixed launch; the other suffixes are `Options` fields, e.g. k = bk128, n<c> = ncb, j = sintr (needs i),
-/// l = alay 1 (l2 = alay 2), e = half_rows (both need f); "r32[s<sgt>][j][q][l|l2][e]": the all-register path, j = its
-/// integer-rate reader).
+/// l = alay 1 (l2 = alay 2), e = half_rows (both need f), h = t128 (the 128-row tiles beside the mixed launch, timed through
+/// `Prefill.moeT128` as root.zig's `moePrefill` serves them; needs m64 and q); "r32[s<sgt>][j][q][l|l2][e]": the all-register
+/// path, j = its integer-rate reader).
 const Arm = union(enum) {
     sushi,
     lib: prefill.Options,
@@ -320,6 +321,7 @@ const Arm = union(enum) {
                 i = j - 1;
             },
             'e' => o.half_rows = true,
+            'h' => o.t128 = true,
             'o' => o.aux_lane_sums = true,
             'v' => {
                 var j = i + 1;
@@ -379,6 +381,7 @@ const Arm = union(enum) {
                 if (o.froute) w += (std.fmt.bufPrint(buf[w..], "q", .{}) catch break :blk "?").len;
                 if (o.alay != 0) w += (std.fmt.bufPrint(buf[w..], "{s}", .{if (o.alay == 1) "l" else "l2"}) catch break :blk "?").len;
                 if (o.half_rows) w += (std.fmt.bufPrint(buf[w..], "e", .{}) catch break :blk "?").len;
+                if (o.t128) w += (std.fmt.bufPrint(buf[w..], "h", .{}) catch break :blk "?").len;
                 if (o.aux != 0) w += (std.fmt.bufPrint(buf[w..], "v{d}", .{o.aux}) catch break :blk "?").len;
                 if (o.aux_lane_sums) w += (std.fmt.bufPrint(buf[w..], "o", .{}) catch break :blk "?").len;
                 if (o.split != 1) w += (std.fmt.bufPrint(buf[w..], "t{d}", .{o.split}) catch break :blk "?").len;
@@ -430,6 +433,27 @@ test "turboexl3 prefill arms: the A-layout and first-fragment-row suffixes parse
     try testing.expect(Arm.parse("m64dufiav8e") != null);
 }
 
+test "turboexl3 prefill timing arms: h (t128, the 128-row tiles) parses and prints back; the served arm is root.zig's pfOptions" {
+    for ([_][]const u8{ "m64dufiajn4ql2h", "m64dufiajn4qh" }) |tok| {
+        const arm = Arm.parse(tok) orelse return error.ArmRefused;
+        var buf: [32]u8 = undefined;
+        try testing.expectEqualStrings(tok, arm.name(&buf));
+    }
+    // root.zig's pfOptions at the default Config (pf_alay 2, pf_t128), as prefillFor keeps it at every rate n % 16 == 0 (bm 64
+    // mixed, dbuf, unroll, fragb, intr, defer, sintr, ncb 4, froute, alay 2, t128)
+    const served: prefill.Options = .{ .bm = 64, .small = .mixed, .dbuf = true, .unroll = true, .fragb = true, .intr = true, .defer_affine = true, .ncb = 4, .sintr = true, .froute = true, .alay = 2, .t128 = true };
+    try testing.expect(std.meta.eql(served, Arm.parse("m64dufiajn4ql2h").?.lib));
+    try testing.expect(Arm.parse("m64dufiajn4l2h") == null); // the 128-row tiles need froute's route
+    try testing.expect(Arm.parse("m128dufiajn4ql2h") == null); // and bm 64
+    try testing.expect(Arm.parse("b64dfh") == null); // and the mixed launch
+}
+
+/// A library arm's call as root.zig's `moePrefill` makes it: `moeT128` with the 128-row tiles (t128), else `moe`.
+fn pfCall(pf: *prefill.Prefill, s: mlx.mlx_stream, c: *const Case, rows: u32) !mlx.mlx_array {
+    if (pf.opts.t128) return pf.moeT128(s, c.x_bf, c.inds1, c.sc1, c.ops, rows, .bfloat16);
+    return pf.moe(s, c.x_bf, c.inds1, c.sc1, c.ops, rows, .bfloat16);
+}
+
 fn timeIt(g: *G, comptime F: type, f: F, rounds: u32, calls: u32) !f64 {
     var best: f64 = std.math.inf(f64);
     for (0..rounds + 2) |round| {
@@ -450,7 +474,8 @@ fn timeIt(g: *G, comptime F: type, f: F, rounds: u32, calls: u32) !f64 {
 // TURBOEXL3_PF_ROWS (default 4096,1359: production's 4096-token chunk and the standard cell's tail), TURBOEXL3_PF_SKEW (lognormal
 // sigma of expert popularity, 0 = uniform), TURBOEXL3_PF_STAGES=1 adds each library stage timed alone. TURBOEXL3_PF_INDS (comma
 // list of u32 [rows, 10] routing files, `Config.pf_capture_dir`'s output) replays served routing instead of
-// TURBOEXL3_PF_ROWS: one case per file, rows from the file's size, experts must cover its largest index.
+// TURBOEXL3_PF_ROWS: one case per file, rows from the file's size, experts must cover its largest index. An arm with the
+// 128-row tiles (h) runs `Prefill.moeT128` (`pfCall`), as root.zig's `moePrefill` serves it; TURBOEXL3_PF_STAGES skips it.
 test "turboexl3 gpu prefill timing: the fused chain vs Sushi's prefill arm (TURBOEXL3_PF_TIME=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
     _ = std.c.getenv("TURBOEXL3_PF_TIME") orelse return error.SkipZigTest;
@@ -549,7 +574,7 @@ test "turboexl3 gpu prefill timing: the fused chain vs Sushi's prefill arm (TURB
         };
         for (arms, 0..) |arm, i| if (arm == .lib) {
             const t0 = nowNs();
-            const y = try g.adopt(try pfs[i].?.moe(s, c.x_bf, c.inds1, c.sc1, c.ops, rows, .bfloat16));
+            const y = try g.adopt(try pfCall(&pfs[i].?, s, &c, rows));
             var ys = [_]mlx.mlx_array{y};
             try g.evalAll(&ys);
             std.debug.print("TURBOEXL3_PF_FIRSTCALL rows={d} arm={d} engine=turboexl3 us={d:.0}\n", .{ rows, i, @as(f64, @floatFromInt(nowNs() - t0)) / 1000.0 });
@@ -569,7 +594,7 @@ test "turboexl3 gpu prefill timing: the fused chain vs Sushi's prefill arm (TURB
                 const nc = @min(calls, ys.len);
                 for (ys[0..nc]) |*y| {
                     y.* = switch (arms[i]) {
-                        .lib => try pfs[i].?.moe(s, c.x_bf, c.inds1, c.sc1, c.ops, rows, .bfloat16),
+                        .lib => try pfCall(&pfs[i].?, s, &c, rows),
                         .sushi => try sushi.moe(s, c.x3, sushiBank(&c), c.inds3, c.sc3, sushiDec(), false),
                     };
                 }
@@ -633,7 +658,8 @@ test "turboexl3 gpu prefill timing: the fused chain vs Sushi's prefill arm (TURB
             const f_dn = 2.0 * @as(f64, @floatFromInt(S)) * @as(f64, @floatFromInt(inter)) * @as(f64, @floatFromInt(hidden));
             std.debug.print("TURBOEXL3_PF_REF rows={d} mlx_dense_gemm_gu_us={d:.0} ({d:.2} TFLOPS) mlx_dense_gemm_down_us={d:.0} ({d:.2} TFLOPS)\n", .{ rows, t_gu, f_gu / (t_gu * 1e6), t_dn, f_dn / (t_dn * 1e6) });
         }
-        for (arms, 0..) |arm, i| if (arm == .lib) {
+        // the mixed chain's stages (a t128 arm's moeT128 stages are not these: skipped)
+        for (arms, 0..) |arm, i| if (arm == .lib and !arm.lib.t128) {
             const pf = &pfs[i].?;
             const S: u32 = rows * topk;
             const r = try pf.route(s, c.inds1, S);
@@ -708,11 +734,14 @@ test "turboexl3 gpu prefill timing: the fused chain vs Sushi's prefill arm (TURB
 }
 
 // Decode timing (TURBOEXL3_GPU=1 TURBOEXL3_DEC_TIME=1): turboexl3's decode chain (`root.moe` at <= 16 rows) against Sushi's decode
-// arm on the same 512-expert bank, inputs and routing, as the served decode runs it: a chain of TURBOEXL3_DEC_LAYERS (48) MoE
-// calls where each call's output is the next call's input (serialized like layers) and each call routes to fresh experts
-// (a layer's experts come from DRAM, not the cache). Rows TURBOEXL3_DEC_ROWS (default 1,2,3,4: the MTP verify widths);
-// routing synthetic (each row 10 distinct uniform experts) or TURBOEXL3_DEC_INDS (a captured u32 [rows, 10] prefill call:
-// call k reads consecutive rows of it, i.e. consecutive tokens' experts). Min / median us per call over interleaved rounds.
+// arm on the same 512-expert bank, inputs and routing, as the served decode runs it, at each trellis rate of TURBOEXL3_DEC_NS
+// (default 80 = K5; e.g. 32,48,64,80,96,112,128 = K2..K8; one bank per rate): a chain of TURBOEXL3_DEC_LAYERS (48) MoE calls
+// where each call's output is the next call's input (serialized like layers) and each call routes to fresh experts (a layer's
+// experts come from DRAM, not the cache). Rows TURBOEXL3_DEC_ROWS (default 1,2,3,4: the MTP verify widths); routing synthetic
+// (each row 10 distinct uniform experts), then with TURBOEXL3_DEC_INDS (a captured u32 [rows, 10] prefill call: call k reads
+// consecutive rows of it, i.e. consecutive tokens' experts) captured. Arms, interleaved with a rotated start: turboexl3 forms 3,
+// 7 and 9 (root.zig's served form) and Sushi. Min / median us per call over TURBOEXL3_DEC_ROUNDS (at most 62) rounds, and
+// TURBOEXL3_DEC_SAMPLES lines with every round's us per call per arm (for paired stats).
 test "turboexl3 gpu decode timing: the decode chain vs Sushi's decode arm (TURBOEXL3_DEC_TIME=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
     _ = std.c.getenv("TURBOEXL3_DEC_TIME") orelse return error.SkipZigTest;
@@ -726,6 +755,7 @@ test "turboexl3 gpu decode timing: the decode chain vs Sushi's decode arm (TURBO
     const experts = envU32("TURBOEXL3_DEC_E", 512);
     const layers = envU32("TURBOEXL3_DEC_LAYERS", 48);
     const rounds = envU32("TURBOEXL3_DEC_ROUNDS", 9);
+    if (rounds > 62) return error.TooManyRounds;
     var rows_list: [8]u32 = undefined;
     var nrows: usize = 0;
     {
@@ -735,6 +765,19 @@ test "turboexl3 gpu decode timing: the decode chain vs Sushi's decode arm (TURBO
             if (nrows == rows_list.len) break;
             rows_list[nrows] = std.fmt.parseInt(u32, tok, 10) catch continue;
             nrows += 1;
+        }
+    }
+    var n_list: [8]u32 = undefined;
+    var nn: usize = 0;
+    {
+        const raw = if (std.c.getenv("TURBOEXL3_DEC_NS")) |v| std.mem.span(v) else "80";
+        var it = std.mem.splitScalar(u8, raw, ',');
+        while (it.next()) |tok| {
+            if (nn == n_list.len) break;
+            const v = std.fmt.parseInt(u32, tok, 10) catch continue;
+            if (format.Rate.fromN(v) == null) continue;
+            n_list[nn] = v;
+            nn += 1;
         }
     }
     var real: ?[]u32 = null;
@@ -749,121 +792,133 @@ test "turboexl3 gpu decode timing: the decode chain vs Sushi's decode arm (TURBO
     }
     var prng = std.Random.DefaultPrng.init(0xDEC0DE ^ experts);
     const rnd = prng.random();
-    var c = try makeCase(a, &g, rnd, 16, experts, 80, 0, null);
-    defer c.deinit(a);
-    const rbank: root.Bank = .{
-        .gate = .{ .trellis = c.ops.gate_t, .suh = c.ops.gate_suh, .svh = c.ops.gate_svh },
-        .up = .{ .trellis = c.ops.up_t, .suh = c.ops.up_suh, .svh = c.ops.up_svh },
-        .down = .{ .trellis = c.ops.down_t, .suh = c.ops.down_suh, .svh = c.ops.down_svh },
-    };
-    std.debug.print("TURBOEXL3_DEC_START experts={d} layers={d} rounds={d} captured={}\n", .{ experts, layers, rounds, real != null });
+    std.debug.print("TURBOEXL3_DEC_START experts={d} layers={d} rounds={d} captured={} rates={d}\n", .{ experts, layers, rounds, real != null, nn });
     const captured_all = real;
-    for (0..@as(usize, if (captured_all != null) 2 else 1)) |src_i| for (rows_list[0..nrows]) |rows| {
-        real = if (src_i == 1) captured_all else null;
-        const src_name: []const u8 = if (src_i == 1) "captured" else "synthetic";
-        const mark = g.mark();
-        defer g.resetTo(mark);
-        // per layer: rows x topk slots (u32) and bf16 scores
-        const S = rows * topk;
-        var inds: [64]mlx.mlx_array = undefined;
-        var scs: [64]mlx.mlx_array = undefined;
-        const L = @min(layers, inds.len);
-        const slots = try a.alloc(u32, S);
-        defer a.free(slots);
-        const sc = try a.alloc(f32, S);
-        defer a.free(sc);
-        for (0..L) |k| {
-            for (0..rows) |r| {
-                if (real) |rs| {
-                    const nrow = rs.len / topk;
-                    const base = (k * 97 + r) % nrow;
-                    for (0..topk) |j| slots[r * topk + j] = rs[base * topk + j] % experts;
-                } else {
-                    var j: usize = 0;
-                    while (j < topk) {
-                        const e: u32 = rnd.uintLessThan(u32, experts);
-                        var dup = false;
-                        for (slots[r * topk ..][0..j]) |q| dup = dup or q == e;
-                        if (dup) continue;
-                        slots[r * topk + j] = e;
-                        j += 1;
+    for (n_list[0..nn]) |n| {
+        const bank_mark = g.mark();
+        defer g.resetTo(bank_mark);
+        var c = try makeCase(a, &g, rnd, 16, experts, n, 0, null);
+        defer c.deinit(a);
+        const rbank: root.Bank = .{
+            .gate = .{ .trellis = c.ops.gate_t, .suh = c.ops.gate_suh, .svh = c.ops.gate_svh },
+            .up = .{ .trellis = c.ops.up_t, .suh = c.ops.up_suh, .svh = c.ops.up_svh },
+            .down = .{ .trellis = c.ops.down_t, .suh = c.ops.down_suh, .svh = c.ops.down_svh },
+        };
+        for (0..@as(usize, if (captured_all != null) 2 else 1)) |src_i| for (rows_list[0..nrows]) |rows| {
+            real = if (src_i == 1) captured_all else null;
+            const src_name: []const u8 = if (src_i == 1) "captured" else "synthetic";
+            const mark = g.mark();
+            defer g.resetTo(mark);
+            // per layer: rows x topk slots (u32) and bf16 scores
+            const S = rows * topk;
+            var inds: [64]mlx.mlx_array = undefined;
+            var scs: [64]mlx.mlx_array = undefined;
+            const L = @min(layers, inds.len);
+            const slots = try a.alloc(u32, S);
+            defer a.free(slots);
+            const sc = try a.alloc(f32, S);
+            defer a.free(sc);
+            for (0..L) |k| {
+                for (0..rows) |r| {
+                    if (real) |rs| {
+                        const nrow = rs.len / topk;
+                        const base = (k * 97 + r) % nrow;
+                        for (0..topk) |j| slots[r * topk + j] = rs[base * topk + j] % experts;
+                    } else {
+                        var j: usize = 0;
+                        while (j < topk) {
+                            const e: u32 = rnd.uintLessThan(u32, experts);
+                            var dup = false;
+                            for (slots[r * topk ..][0..j]) |q| dup = dup or q == e;
+                            if (dup) continue;
+                            slots[r * topk + j] = e;
+                            j += 1;
+                        }
                     }
+                    var sum: f32 = 0;
+                    for (sc[r * topk ..][0..topk]) |*w| {
+                        w.* = 0.05 + rnd.float(f32);
+                        sum += w.*;
+                    }
+                    for (sc[r * topk ..][0..topk]) |*w| w.* /= sum;
                 }
-                var sum: f32 = 0;
-                for (sc[r * topk ..][0..topk]) |*w| {
-                    w.* = 0.05 + rnd.float(f32);
-                    sum += w.*;
+                inds[k] = try g.hostArray(std.mem.sliceAsBytes(slots), &.{ 1, ci(rows), ci(topk) }, .uint32);
+                scs[k] = try g.astype(try g.hostArray(std.mem.sliceAsBytes(sc), &.{ 1, ci(rows), ci(topk) }, .float32), .bfloat16);
+            }
+            const x0 = try g.slice(c.x3, &.{ 0, 0, 0 }, &.{ 1, ci(rows), ci(hidden) }, &.{ 1, 1, 1 });
+            try g.evalAll(inds[0..L]);
+            try g.evalAll(scs[0..L]);
+            try g.evalAll(&.{x0});
+            // one layer, every engine: the decode chains agree to the bf16 tolerance (turboexl3 and Sushi round in different
+            // orders); turboexl3's forms 3, 7 and 9 agree byte for byte
+            defer root.decode_form_override = null;
+            {
+                root.decode_form_override = 3;
+                const yl = try g.adopt(try root.moe(s, x0, rbank, inds[0], scs[0], .mul1, false));
+                root.decode_form_override = 7;
+                const y7 = try g.adopt(try root.moe(s, x0, rbank, inds[0], scs[0], .mul1, false));
+                root.decode_form_override = 9;
+                const y9 = try g.adopt(try root.moe(s, x0, rbank, inds[0], scs[0], .mul1, false));
+                const ys = try g.adopt(try sushi.moe(s, x0, sushiBank(&c), inds[0], scs[0], sushiDec(), false));
+                const gl = try readF32(a, &g, yl);
+                defer a.free(gl);
+                const g7 = try readF32(a, &g, y7);
+                defer a.free(g7);
+                const g9 = try readF32(a, &g, y9);
+                defer a.free(g9);
+                const gs = try readF32(a, &g, ys);
+                defer a.free(gs);
+                var diff7: usize = 0;
+                var diff9: usize = 0;
+                for (g7, g9, gl) |p7, p9, q| {
+                    if (@as(u32, @bitCast(p7)) != @as(u32, @bitCast(q))) diff7 += 1;
+                    if (@as(u32, @bitCast(p9)) != @as(u32, @bitCast(q))) diff9 += 1;
                 }
-                for (sc[r * topk ..][0..topk]) |*w| w.* /= sum;
+                std.debug.print("TURBOEXL3_DEC_PARITY src={s} n={d} k={d} rows={d} lib_vs_sushi_ratio={e:.3} form7_vs_form3_differing={d}/{d} form9_vs_form3_differing={d}/{d}\n", .{ src_name, n, n / 16, rows, ref.compare(gl, gs).max_ratio, diff7, gl.len, diff9, gl.len });
             }
-            inds[k] = try g.hostArray(std.mem.sliceAsBytes(slots), &.{ 1, ci(rows), ci(topk) }, .uint32);
-            scs[k] = try g.astype(try g.hostArray(std.mem.sliceAsBytes(sc), &.{ 1, ci(rows), ci(topk) }, .float32), .bfloat16);
-        }
-        const x0 = try g.slice(c.x3, &.{ 0, 0, 0 }, &.{ 1, ci(rows), ci(hidden) }, &.{ 1, 1, 1 });
-        try g.evalAll(inds[0..L]);
-        try g.evalAll(scs[0..L]);
-        try g.evalAll(&.{x0});
-        // one layer, every engine: the decode chains agree to the bf16 tolerance (turboexl3 and Sushi round in different
-        // orders); turboexl3's forms 3 and 5 agree byte for byte
-        defer root.decode_form_override = null;
-        {
-            root.decode_form_override = 3;
-            const yl = try g.adopt(try root.moe(s, x0, rbank, inds[0], scs[0], .mul1, false));
-            root.decode_form_override = 5;
-            const y5 = try g.adopt(try root.moe(s, x0, rbank, inds[0], scs[0], .mul1, false));
-            root.decode_form_override = 6;
-            const y6 = try g.adopt(try root.moe(s, x0, rbank, inds[0], scs[0], .mul1, false));
-            const ys = try g.adopt(try sushi.moe(s, x0, sushiBank(&c), inds[0], scs[0], sushiDec(), false));
-            const gl = try readF32(a, &g, yl);
-            defer a.free(gl);
-            const g5 = try readF32(a, &g, y5);
-            defer a.free(g5);
-            const g6 = try readF32(a, &g, y6);
-            defer a.free(g6);
-            const gs = try readF32(a, &g, ys);
-            defer a.free(gs);
-            var diff5: usize = 0;
-            var diff6: usize = 0;
-            for (g5, g6, gl) |p, p6, q| {
-                if (@as(u32, @bitCast(p)) != @as(u32, @bitCast(q))) diff5 += 1;
-                if (@as(u32, @bitCast(p6)) != @as(u32, @bitCast(q))) diff6 += 1;
-            }
-            std.debug.print("TURBOEXL3_DEC_PARITY src={s} rows={d} lib_vs_sushi_ratio={e:.3} form5_vs_form3_differing={d}/{d} form6_vs_form3_differing={d}/{d}\n", .{ src_name, rows, ref.compare(gl, gs).max_ratio, diff5, gl.len, diff6, gl.len });
-        }
-        var samples: [4][64]f64 = undefined;
-        for (0..rounds + 2) |round| {
-            for (0..4) |ai| {
-                const arm = (ai + round) % 4; // 0 turboexl3 form 3, 1 Sushi, 2 turboexl3 form 5, 3 turboexl3 form 6
-                root.decode_form_override = if (arm == 2) 5 else if (arm == 3) 6 else 3;
-                var x = x0;
-                var held: [64]mlx.mlx_array = undefined;
-                for (0..L) |k| {
-                    const y = if (arm != 1) try root.moe(s, x, rbank, inds[k], scs[k], .mul1, false) else try sushi.moe(s, x, sushiBank(&c), inds[k], scs[k], sushiDec(), false);
-                    held[k] = y;
-                    x = y;
+            var samples: [4][64]f64 = undefined;
+            for (0..rounds + 2) |round| {
+                for (0..4) |ai| {
+                    const arm = (ai + round) % 4; // 0 turboexl3 form 3, 1 Sushi, 2 turboexl3 form 7, 3 turboexl3 form 9
+                    root.decode_form_override = if (arm == 2) 7 else if (arm == 3) 9 else 3;
+                    var x = x0;
+                    var held: [64]mlx.mlx_array = undefined;
+                    for (0..L) |k| {
+                        const y = if (arm != 1) try root.moe(s, x, rbank, inds[k], scs[k], .mul1, false) else try sushi.moe(s, x, sushiBank(&c), inds[k], scs[k], sushiDec(), false);
+                        held[k] = y;
+                        x = y;
+                    }
+                    const t0 = nowNs();
+                    try g.evalAll(held[L - 1 .. L]);
+                    const dt = nowNs() - t0;
+                    for (held[0..L]) |y| _ = mlx.mlx_array_free(y);
+                    if (round >= 2) samples[arm][round - 2] = @as(f64, @floatFromInt(dt)) / 1000.0 / @as(f64, @floatFromInt(L));
                 }
-                const t0 = nowNs();
-                try g.evalAll(held[L - 1 .. L]);
-                const dt = nowNs() - t0;
-                for (held[0..L]) |y| _ = mlx.mlx_array_free(y);
-                if (round >= 2) samples[arm][round - 2] = @as(f64, @floatFromInt(dt)) / 1000.0 / @as(f64, @floatFromInt(L));
             }
-        }
-        var mins: [4]f64 = undefined;
-        var meds: [4]f64 = undefined;
-        for (0..4) |arm| {
-            const sm = samples[arm][0..rounds];
-            std.mem.sort(f64, sm, {}, std.sort.asc(f64));
-            mins[arm] = sm[0];
-            meds[arm] = sm[rounds / 2];
-        }
-        const bytes_per_expert: f64 = 3.0 * @as(f64, @floatFromInt(hidden * inter)) * 80.0 / 16.0 / 8.0;
-        std.debug.print("TURBOEXL3_DEC_TIME src={s} rows={d} experts={d} lib_us_min={d:.1} lib_us_med={d:.1} sushi_us_min={d:.1} sushi_us_med={d:.1} lib_vs_sushi={d:.3}x lib_expert_gbps={d:.0} form5_us_min={d:.1} form5_us_med={d:.1} form5_vs_sushi={d:.3}x form5_vs_form3={d:.3}x form6_us_min={d:.1} form6_us_med={d:.1} form6_vs_sushi={d:.3}x\n", .{
-            src_name,                                                                            rows,     experts,  mins[0], meds[0], mins[1], meds[1], mins[1] / mins[0],
-            @as(f64, @floatFromInt(S)) * bytes_per_expert / (mins[0] * 1000.0), mins[2], meds[2], mins[1] / mins[2], mins[0] / mins[2],
-            mins[3],                                                                meds[3], mins[1] / mins[3],
-        });
-    };
+            // every round's us per call per arm, in round order (rounds interleave the arms, so a round is a paired sample);
+            // printed before the sort below reorders them
+            std.debug.print("TURBOEXL3_DEC_SAMPLES src={s} n={d} rows={d}", .{ src_name, n, rows });
+            for ([_][]const u8{ "f3", "sushi", "f7", "f9" }, 0..) |an, arm| {
+                std.debug.print(" {s}=", .{an});
+                for (samples[arm][0..rounds], 0..) |v, i| std.debug.print("{s}{d:.2}", .{ if (i == 0) "" else ",", v });
+            }
+            std.debug.print("\n", .{});
+            var mins: [4]f64 = undefined;
+            var meds: [4]f64 = undefined;
+            for (0..4) |arm| {
+                const sm = samples[arm][0..rounds];
+                std.mem.sort(f64, sm, {}, std.sort.asc(f64));
+                mins[arm] = sm[0];
+                meds[arm] = sm[rounds / 2];
+            }
+            const bytes_per_expert: f64 = 3.0 * @as(f64, @floatFromInt(hidden * inter)) * @as(f64, @floatFromInt(n)) / 16.0 / 8.0;
+            std.debug.print("TURBOEXL3_DEC_TIME src={s} n={d} rows={d} experts={d} lib_us_min={d:.1} lib_us_med={d:.1} sushi_us_min={d:.1} sushi_us_med={d:.1} lib_vs_sushi={d:.3}x lib_expert_gbps={d:.0} form7_us_min={d:.1} form7_us_med={d:.1} form7_vs_sushi={d:.3}x form7_vs_form3={d:.3}x form9_us_min={d:.1} form9_us_med={d:.1} form9_vs_sushi={d:.3}x form9_vs_form3={d:.3}x\n", .{
+                src_name,                                                                            n,       rows,    experts, mins[0], meds[0], mins[1], meds[1], mins[1] / mins[0],
+                @as(f64, @floatFromInt(S)) * bytes_per_expert / (mins[0] * 1000.0), mins[2], meds[2], mins[1] / mins[2], mins[0] / mins[2],
+                mins[3],                                                                meds[3], mins[1] / mins[3], mins[0] / mins[3],
+            });
+        };
+    }
     real = captured_all;
 }
 
