@@ -2,6 +2,7 @@
 //! every other launch shape is a constant of the file that reads it. A kernel cache keeps what it built, so a change
 //! after the first launch reaches only the geometries built after it.
 const std = @import("std");
+const Global = @import("global.zig").Global;
 
 pub const Config = struct {
     /// The routed decode chain's form: 3, 5, 6, 7, 8 or 9, each with form 3's bytes (the GPU tests hold forms 5 and 6, and
@@ -46,17 +47,17 @@ pub const Config = struct {
     }
 };
 
-var current: Config = .{};
+const current = Global(Config, "config_current", .{});
 
 /// Sets the process's configuration; refused (nothing changed) when a field holds a value the library does not serve.
 pub fn configure(c: Config) error{InvalidTurboexl3Config}!void {
     if (!c.valid()) return error.InvalidTurboexl3Config;
-    current = c;
+    current.get().* = c;
 }
 
 /// The configuration in force.
 pub fn get() *const Config {
-    return &current;
+    return &current.get().*;
 }
 
 test "turboexl3 config: the defaults are valid and served; an unserved form, slice count or layout is refused" {
@@ -71,11 +72,14 @@ test "turboexl3 config: the defaults are valid and served; an unserved form, sli
     try t.expect(!(Config{ .pf_alay = 3 }).valid());
     try t.expect(d.dense_lean);
     try t.expect(d.fused_fin_fold);
-    const saved = current;
-    defer current = saved;
+    const saved = current.get().*;
+    defer current.get().* = saved;
     try t.expectError(error.InvalidTurboexl3Config, configure(.{ .decode_form = 4 }));
     try t.expectEqual(saved.decode_form, get().decode_form);
     try configure(.{ .decode_form = 3, .dec_one = false });
     try t.expectEqual(@as(u8, 3), get().decode_form);
     try t.expect(!get().dec_one);
 }
+
+/// This file's module state (`Global`): what a host that shares its units' state registers.
+pub const shared_state = .{current};

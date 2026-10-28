@@ -14,6 +14,7 @@
 //!   HAD_SCALE, f16.
 //! The two butterflies are `sources.had128`. The swish gate and the formula sigmoid are not served.
 const std = @import("std");
+const Global = @import("global.zig").Global;
 const mlx = @import("sdk").mlx;
 const ks = @import("sdk").kernel_launch;
 const decode = @import("decode.zig");
@@ -55,16 +56,16 @@ pub fn headsPerGroup(hv: u32) u32 {
     return if (hv % 4 == 0) 4 else if (hv % 2 == 0) 2 else 1;
 }
 
-var kernel_lock: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
-var kernel: ?mlx.mlx_fast_metal_kernel = null;
+const kernel_lock = Global(std.atomic.Value(u32), "gdn_out_kernel_lock", std.atomic.Value(u32).init(0));
+const kernel = Global(?mlx.mlx_fast_metal_kernel, "gdn_out_kernel", null);
 
 /// The tail's kernel, made at its first call (a process that never takes it never builds it).
 fn kernelGet() !mlx.mlx_fast_metal_kernel {
-    while (kernel_lock.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
-    defer kernel_lock.store(0, .release);
-    if (kernel) |k| return k;
+    while (kernel_lock.get().*.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
+    defer kernel_lock.get().*.store(0, .release);
+    if (kernel.get().*) |k| return k;
     const k = ks.newKernel("turboexl3_gdn_out_prep", &prep_in, &prep_out, text_prep, decode.header, true) orelse return error.KernelCreateFailed;
-    kernel = k;
+    kernel.get().* = k;
     return k;
 }
 
@@ -90,6 +91,9 @@ pub fn prepare(s: mlx.mlx_stream, y: mlx.mlx_array, zq: mlx.mlx_array, svh: mlx.
     try ks.applyConfig(k, cfg, &.{ y, zq, svh, norm.w, norm.eps, norm.sigtab, suh }, &xp, s);
     return xp[0];
 }
+
+/// This file's module state (`Global`): what a host that shares its units' state registers.
+pub const shared_state = .{ kernel_lock, kernel };
 
 // ── tests ──
 

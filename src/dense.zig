@@ -21,6 +21,7 @@
 //! admitted trellis's linear out of the Hadamard basis instead (`unrotCols` / `unrotRows`, `residentInstall`), and prefill
 //! rows past `unrot_min_rows` are one MLX matmul of x against it in x's dtype (`residentPlain`).
 const std = @import("std");
+const Global = @import("global.zig").Global;
 const mlx = @import("sdk").mlx;
 const ks = @import("sdk").kernel_launch;
 const format = @import("format.zig");
@@ -155,7 +156,7 @@ const finishp_in = [_][*:0]const u8{ "zp0", "zp1", "zp2", "zp3", "svh", "R1", "R
 
 pub const Shape = struct { in: u32, out: u32, rate: format.Rate, dec: format.Decode, out_dtype: mlx.mlx_dtype };
 
-var dec_said = false;
+const dec_said = Global(bool, "dense_dec_said", false);
 
 /// The kernels of one dense linear shape; configs per row count (decode) plus the prefill set.
 pub const Dense = struct {
@@ -404,8 +405,8 @@ pub const Dense = struct {
     /// DEC-ONE: y [rows, out] in `shape.out_dtype`, the three-launch chain's bytes
     fn decLinear(self: *Dense, s: mlx.mlx_stream, x: mlx.mlx_array, trellis: mlx.mlx_array, suh: mlx.mlx_array, svh: mlx.mlx_array, rows: usize) !mlx.mlx_array {
         const c = try self.decCfgs(rows);
-        if (!dec_said) {
-            dec_said = true;
+        if (!dec_said.get().*) {
+            dec_said.get().* = true;
             std.debug.print("[turboexl3] DEC-ONE engaged: one GEMV launch per dense linear at decode rows <= {d}\n", .{self.dec_rows});
         }
         if (c.prep_in) {
@@ -510,7 +511,7 @@ pub const Dense = struct {
     /// for an admitted trellis, a new reference to the table's kept W_hat (`residentTake`): this launch's bytes, decoded
     /// once.
     pub fn dequantize(self: *Dense, s: mlx.mlx_stream, trellis: mlx.mlx_array) !mlx.mlx_array {
-        if (Resident.armed.load(.acquire) and !resident_bypass) if (try residentTake(self, s, trellis)) |w| return w;
+        if (Resident.armed.get().*.load(.acquire) and !resident_bypass.get().*) if (try residentTake(self, s, trellis)) |w| return w;
         return self.decodeTrellis(s, trellis);
     }
 
@@ -877,7 +878,7 @@ pub const Dense = struct {
 // (`residentPending`) in its GPU ceiling; `residentRelease` (its unload) drops every kept array.
 
 /// Test seam (the resident-trunk tests' reference arm): the per-call path while the table stays armed.
-pub var resident_bypass: bool = false;
+pub const resident_bypass = Global(bool, "dense_resident_bypass", false);
 
 /// One trunk linear's f16 W_hat bytes from its trellis shape [in/16, out/16, n]; 0 for any other shape.
 pub fn residentBytesOf(shape: []const c_int) u64 {
@@ -971,21 +972,21 @@ const Resident = struct {
         }
     };
 
-    var lock: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
-    var armed: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
+    const lock = Global(std.atomic.Value(u32), "dense_Resident_lock", std.atomic.Value(u32).init(0));
+    const armed = Global(std.atomic.Value(bool), "dense_Resident_armed", std.atomic.Value(bool).init(false));
     /// some slot holds a W_std (`residentPlain` asks the table only then)
-    var unrot_any: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
-    var table: Table = .{};
-    var failed_said = false;
-    var miss_said = false;
-    var dtype_said = false;
+    const unrot_any = Global(std.atomic.Value(bool), "dense_Resident_unrot_any", std.atomic.Value(bool).init(false));
+    const table = Global(Table, "dense_Resident_table", .{});
+    const failed_said = Global(bool, "dense_Resident_failed_said", false);
+    const miss_said = Global(bool, "dense_Resident_miss_said", false);
+    const dtype_said = Global(bool, "dense_Resident_dtype_said", false);
 
     fn acquire() void {
-        while (lock.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
+        while (lock.get().*.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
     }
 
     fn unlock() void {
-        lock.store(0, .release);
+        lock.get().*.store(0, .release);
     }
 };
 
@@ -999,23 +1000,23 @@ pub fn residentArm(trellises: []const mlx.mlx_array, bytes: []const u64) !void {
     residentRelease();
     Resident.acquire();
     defer Resident.unlock();
-    errdefer Resident.table = .{};
+    errdefer Resident.table.get().* = .{};
     for (trellises, bytes) |t, b| {
         const p = t.ctx orelse return error.BadExl3Shape;
         if (residentBytesOf(mlx.getShape(t)) != b) return error.BadExl3Shape;
-        try Resident.table.admit(@intFromPtr(p), b);
+        try Resident.table.get().*.admit(@intFromPtr(p), b);
     }
-    Resident.armed.store(Resident.table.modules > 0, .release);
+    Resident.armed.get().*.store(Resident.table.get().*.modules > 0, .release);
 }
 
 /// Every kept W_hat (and W_std) dropped and the table disarmed (the host's unload; idempotent). A graph that already holds
 /// a kept array keeps it alive until it is done with it.
 pub fn residentRelease() void {
-    Resident.armed.store(false, .release);
-    Resident.unrot_any.store(false, .release);
+    Resident.armed.get().*.store(false, .release);
+    Resident.unrot_any.get().*.store(false, .release);
     Resident.acquire();
     defer Resident.unlock();
-    for (&Resident.table.slots) |*sl| switch (sl.state) {
+    for (&Resident.table.get().*.slots) |*sl| switch (sl.state) {
         .kept => _ = mlx.mlx_array_free(sl.w),
         // an un-rotated member's W_std and its reference to the group's joined W_std
         .unrot => {
@@ -1024,16 +1025,16 @@ pub fn residentRelease() void {
         },
         else => {},
     };
-    Resident.table = .{};
+    Resident.table.get().* = .{};
 }
 
 /// The W_hat bytes admitted but not kept yet, which the host bills in its GPU ceiling ahead of the allocation (0 when
 /// disarmed).
 pub fn residentPending() u64 {
-    if (!Resident.armed.load(.acquire)) return 0;
+    if (!Resident.armed.get().*.load(.acquire)) return 0;
     Resident.acquire();
     defer Resident.unlock();
-    return Resident.table.pending();
+    return Resident.table.get().*.pending();
 }
 
 /// The resident table's counts (its tests and logs): trellises admitted and kept, their W_hat bytes, calls a kept W_hat
@@ -1044,7 +1045,7 @@ pub const ResidentStats = struct { modules: u32, kept: u32, planned: u64, held: 
 pub fn residentStats() ResidentStats {
     Resident.acquire();
     defer Resident.unlock();
-    const t = &Resident.table;
+    const t = &Resident.table.get().*;
     return .{ .modules = t.modules, .kept = t.kept, .planned = t.planned, .held = t.held, .reuses = t.reuses, .unrot = t.unrot, .groups = t.groups, .joined = t.joined, .plain = t.plain, .misses = t.misses };
 }
 
@@ -1053,7 +1054,7 @@ pub fn residentKeeps(trellis: mlx.mlx_array) bool {
     const p = trellis.ctx orelse return false;
     Resident.acquire();
     defer Resident.unlock();
-    const sl = Resident.table.find(@intFromPtr(p)) orelse return false;
+    const sl = Resident.table.get().*.find(@intFromPtr(p)) orelse return false;
     return sl.state == .kept;
 }
 
@@ -1066,13 +1067,13 @@ fn residentTake(d: *Dense, s: mlx.mlx_stream, trellis: mlx.mlx_array) !?mlx.mlx_
     const bytes = claim: {
         Resident.acquire();
         defer Resident.unlock();
-        const sl = Resident.table.find(key) orelse return null;
+        const sl = Resident.table.get().*.find(key) orelse return null;
         switch (sl.state) {
             .kept => {
                 var w = mlx.mlx_array_new();
                 errdefer _ = mlx.mlx_array_free(w);
                 try mlx.check(mlx.mlx_array_set(&w, sl.w));
-                Resident.table.reuses += 1;
+                Resident.table.get().*.reuses += 1;
                 return w;
             },
             .admitted => {
@@ -1080,9 +1081,9 @@ fn residentTake(d: *Dense, s: mlx.mlx_stream, trellis: mlx.mlx_array) !?mlx.mlx_
                 break :claim sl.bytes;
             },
             .unrot => {
-                Resident.table.misses += 1;
-                if (!Resident.miss_said) {
-                    Resident.miss_said = true;
+                Resident.table.get().*.misses += 1;
+                if (!Resident.miss_said.get().*) {
+                    Resident.miss_said.get().* = true;
                     std.debug.print("[turboexl3] un-rotated trunk: a rotated-basis call on a {d} x {d} linear decodes its W_hat per call\n", .{ d.shape.in, d.shape.out });
                 }
                 return null;
@@ -1103,15 +1104,15 @@ fn residentTake(d: *Dense, s: mlx.mlx_stream, trellis: mlx.mlx_array) !?mlx.mlx_
     Resident.acquire();
     defer Resident.unlock();
     // released (or re-armed) meanwhile: this call's own W_hat, as the per-call path hands it out
-    const sl = Resident.table.find(key) orelse return w;
+    const sl = Resident.table.get().*.find(key) orelse return w;
     if (sl.state != .busy) return w;
     var out = mlx.mlx_array_new();
     if (mlx.mlx_array_set(&out, w) != 0) {
         _ = mlx.mlx_array_free(out);
-        Resident.table.fail(sl);
+        Resident.table.get().*.fail(sl);
         return w;
     }
-    Resident.table.keep(sl, w);
+    Resident.table.get().*.keep(sl, w);
     return out;
 }
 
@@ -1119,9 +1120,9 @@ fn residentTake(d: *Dense, s: mlx.mlx_stream, trellis: mlx.mlx_array) !?mlx.mlx_
 fn residentFail(key: usize, err: anyerror) void {
     Resident.acquire();
     defer Resident.unlock();
-    if (Resident.table.find(key)) |sl| if (sl.state == .busy) Resident.table.fail(sl);
-    if (Resident.failed_said) return;
-    Resident.failed_said = true;
+    if (Resident.table.get().*.find(key)) |sl| if (sl.state == .busy) Resident.table.get().*.fail(sl);
+    if (Resident.failed_said.get().*) return;
+    Resident.failed_said.get().* = true;
     std.debug.print("[turboexl3] resident trunk: a W_hat could not be kept ({s}); its linear dequantizes per call\n", .{@errorName(err)});
 }
 
@@ -1170,18 +1171,18 @@ const unrot_rows_in = [_][*:0]const u8{ "r", "suh", "svh" };
 const unrot_rows_out = [_][*:0]const u8{"W"};
 
 /// The two un-rotation kernels, made at their first use (a process with the switch off never builds them).
-var unrot_kernels_lock: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
-var unrot_kernels: ?[2]mlx.mlx_fast_metal_kernel = null;
+const unrot_kernels_lock = Global(std.atomic.Value(u32), "dense_unrot_kernels_lock", std.atomic.Value(u32).init(0));
+const unrot_kernels = Global(?[2]mlx.mlx_fast_metal_kernel, "dense_unrot_kernels", null);
 
 fn unrotKernels() ![2]mlx.mlx_fast_metal_kernel {
-    while (unrot_kernels_lock.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
-    defer unrot_kernels_lock.store(0, .release);
-    if (unrot_kernels) |k| return k;
+    while (unrot_kernels_lock.get().*.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
+    defer unrot_kernels_lock.get().*.store(0, .release);
+    if (unrot_kernels.get().*) |k| return k;
     const cols = ks.newKernel("turboexl3_unrot_cols", &unrot_cols_in, &unrot_cols_out, text_unrot_cols, decode.header, true) orelse return error.KernelCreateFailed;
     errdefer decode.freeKernel(cols);
     const rows = ks.newKernel("turboexl3_unrot_rows", &unrot_rows_in, &unrot_rows_out, text_unrot_rows, decode.header, true) orelse return error.KernelCreateFailed;
-    unrot_kernels = .{ cols, rows };
-    return unrot_kernels.?;
+    unrot_kernels.get().* = .{ cols, rows };
+    return unrot_kernels.get().*.?;
 }
 
 /// Un-rotation pass 1 (lazy): r f32 [in, out] of an f16 W_hat [in, out] (`Dense.decodeTrellis`'s), in and out multiples
@@ -1233,7 +1234,7 @@ pub fn residentUnrotAdmits(trellis: mlx.mlx_array) bool {
     const p = trellis.ctx orelse return false;
     Resident.acquire();
     defer Resident.unlock();
-    const sl = Resident.table.find(@intFromPtr(p)) orelse return false;
+    const sl = Resident.table.get().*.find(@intFromPtr(p)) orelse return false;
     return sl.state == .admitted or sl.state == .kept;
 }
 
@@ -1248,7 +1249,7 @@ pub fn residentInstall(trellises: []const mlx.mlx_array, ws: []const mlx.mlx_arr
     defer Resident.unlock();
     var slots: [max_join]*Resident.Slot = undefined;
     for (trellises, ws, 0..) |t, w, i| {
-        const sl = Resident.table.find(@intFromPtr(t.ctx orelse return error.BadExl3Shape)) orelse return error.Exl3ResidentNotAdmitted;
+        const sl = Resident.table.get().*.find(@intFromPtr(t.ctx orelse return error.BadExl3Shape)) orelse return error.Exl3ResidentNotAdmitted;
         if (sl.state != .admitted and sl.state != .kept) return error.Exl3ResidentNotAdmitted;
         // two bytes a weight, the W_hat's: the bill and the memory stay the table's
         if (mlx.mlx_array_itemsize(w) != 2 or @as(u64, mlx.mlx_array_size(w)) * 2 != sl.bytes) return error.BadExl3Shape;
@@ -1265,21 +1266,21 @@ pub fn residentInstall(trellises: []const mlx.mlx_array, ws: []const mlx.mlx_arr
             return error.MlxError;
         }
     };
-    Resident.table.groups += 1;
-    if (n > 1) Resident.table.joined += 1;
-    for (slots[0..n], ws, cols, jrefs[0..n]) |sl, w, c, r| Resident.table.unrotate(sl, w, r, c, Resident.table.groups);
+    Resident.table.get().*.groups += 1;
+    if (n > 1) Resident.table.get().*.joined += 1;
+    for (slots[0..n], ws, cols, jrefs[0..n]) |sl, w, c, r| Resident.table.get().*.unrotate(sl, w, r, c, Resident.table.get().*.groups);
     // the caller's handle on the joined W_std is the table's now too: drop it, the members' references keep the buffer
     if (jw) |j| _ = mlx.mlx_array_free(j);
-    Resident.unrot_any.store(true, .release);
+    Resident.unrot_any.get().*.store(true, .release);
 }
 
 /// Whether the table holds `trellis`'s W_std.
 pub fn residentUnrot(trellis: mlx.mlx_array) bool {
-    if (!Resident.unrot_any.load(.acquire)) return false;
+    if (!Resident.unrot_any.get().*.load(.acquire)) return false;
     const p = trellis.ctx orelse return false;
     Resident.acquire();
     defer Resident.unlock();
-    const sl = Resident.table.find(@intFromPtr(p)) orelse return false;
+    const sl = Resident.table.get().*.find(@intFromPtr(p)) orelse return false;
     return sl.state == .unrot;
 }
 
@@ -1289,18 +1290,18 @@ pub fn residentStd(trellis: mlx.mlx_array) ?mlx.mlx_array {
 }
 
 fn stdTake(trellis: mlx.mlx_array, plain: bool) ?mlx.mlx_array {
-    if (!Resident.unrot_any.load(.acquire)) return null;
+    if (!Resident.unrot_any.get().*.load(.acquire)) return null;
     const p = trellis.ctx orelse return null;
     Resident.acquire();
     defer Resident.unlock();
-    const sl = Resident.table.find(@intFromPtr(p)) orelse return null;
+    const sl = Resident.table.get().*.find(@intFromPtr(p)) orelse return null;
     if (sl.state != .unrot) return null;
     var w = mlx.mlx_array_new();
     if (mlx.mlx_array_set(&w, sl.w) != 0) {
         _ = mlx.mlx_array_free(w);
         return null;
     }
-    if (plain) Resident.table.plain += 1;
+    if (plain) Resident.table.get().*.plain += 1;
     return w;
 }
 
@@ -1309,11 +1310,11 @@ fn stdTake(trellis: mlx.mlx_array, plain: bool) ?mlx.mlx_array {
 pub const StdJoined = struct { w: mlx.mlx_array, col: u32, width: u32, group: u32 };
 
 pub fn residentJoined(trellis: mlx.mlx_array) ?StdJoined {
-    if (!Resident.unrot_any.load(.acquire)) return null;
+    if (!Resident.unrot_any.get().*.load(.acquire)) return null;
     const p = trellis.ctx orelse return null;
     Resident.acquire();
     defer Resident.unlock();
-    const sl = Resident.table.find(@intFromPtr(p)) orelse return null;
+    const sl = Resident.table.get().*.find(@intFromPtr(p)) orelse return null;
     if (sl.state != .unrot) return null;
     const wsh = mlx.getShape(sl.w);
     if (wsh.len != 2) return null;
@@ -1332,8 +1333,8 @@ fn residentPlain(s: mlx.mlx_stream, x: mlx.mlx_array, trellis: mlx.mlx_array) !?
     const w = stdTake(trellis, true) orelse return null;
     defer _ = mlx.mlx_array_free(w);
     if (mlx.mlx_array_dtype(x) != mlx.mlx_array_dtype(w)) {
-        if (!Resident.dtype_said) {
-            Resident.dtype_said = true;
+        if (!Resident.dtype_said.get().*) {
+            Resident.dtype_said.get().* = true;
             std.debug.print("[turboexl3] un-rotated trunk: x is {s}, its W_std {s}; the rotated chain serves the call\n", .{ @tagName(mlx.mlx_array_dtype(x)), @tagName(mlx.mlx_array_dtype(w)) });
         }
         return null;
@@ -1896,3 +1897,18 @@ test "turboexl3 dense lean GEMV text: text_dgemv but its input loads and codewor
     }
     try t.expectEqual(@as(usize, 12), nl);
 }
+
+/// This file's module state (`Global`): what a host that shares its units' state registers.
+pub const shared_state = .{
+    dec_said,
+    resident_bypass,
+    Resident.lock,
+    Resident.armed,
+    Resident.unrot_any,
+    Resident.table,
+    Resident.failed_said,
+    Resident.miss_said,
+    Resident.dtype_said,
+    unrot_kernels_lock,
+    unrot_kernels,
+};

@@ -313,7 +313,7 @@ test "turboexl3 gpu: root.moe at one decode row on the host's unreshaped operand
     defer k5.deinit();
     k5.out_dtype = .bfloat16;
     k5.defer_affine = k3.defer_affine;
-    defer root.decode_form_override = null;
+    defer root.decode_form_override.get().* = null;
     const x = try a.alloc(f32, hidden);
     defer a.free(x);
     const slots = try a.alloc(u32, topk);
@@ -347,7 +347,7 @@ test "turboexl3 gpu: root.moe at one decode row on the host's unreshaped operand
         const ind1 = try g.reshape(ind3, &.{ci(topk)});
         const s1 = try g.reshape(s3, &.{ci(topk)});
         for ([_]u8{ 9, 5 }) |form| {
-            root.decode_form_override = form;
+            root.decode_form_override.get().* = form;
             const y = try g.adopt(try root.moe(s, x3, rb, ind3, s3, .mul1, false));
             try testing.expectEqualSlices(c_int, &.{ 1, 1, ci(hidden) }, mlx.getShape(y));
             const yr = try g.adopt(if (form == 5) try k5.moe(s, x2, ind1, s1, kb, 1, false) else try k3.moeForm(s, x2, ind1, s1, kb, 1, form));
@@ -2125,7 +2125,7 @@ test "turboexl3 gpu resident trunk: a resident W_hat gives the per-call dequanti
     defer g.deinit();
     const dense = @import("dense.zig");
     defer dense.residentRelease();
-    defer dense.resident_bypass = false;
+    defer dense.resident_bypass.get().* = false;
     var dev = mlx.mlx_device{ .ctx = null };
     try testing.expectEqual(@as(c_int, 0), mlx.mlx_stream_get_device(&dev, s));
     defer _ = mlx.mlx_device_free(dev);
@@ -2150,10 +2150,10 @@ test "turboexl3 gpu resident trunk: a resident W_hat gives the per-call dequanti
             const m = g.mark();
             defer g.resetTo(m);
             const x = try trunkresX(&g, xbuf, rows, k.in);
-            dense.resident_bypass = true;
+            dense.resident_bypass.get().* = true;
             const want = try g.adopt(try root.linear(s, x, p.trellis, p.suh, p.svh, .mul1));
             try g.evalAll(&.{want});
-            dense.resident_bypass = false;
+            dense.resident_bypass.get().* = false;
             const got = try g.adopt(try root.linear(s, x, p.trellis, p.suh, p.svh, .mul1));
             const d = try trunkresDiff(&g, s, want, got);
             const st = dense.residentStats();
@@ -2168,10 +2168,10 @@ test "turboexl3 gpu resident trunk: a resident W_hat gives the per-call dequanti
             const m = g.mark();
             defer g.resetTo(m);
             const x = try trunkresX(&g, xbuf, rows, k.in);
-            dense.resident_bypass = true;
+            dense.resident_bypass.get().* = true;
             const want = try g.adopt(try root.linear(s, x, p.trellis, p.suh, p.svh, .mul1));
             try g.evalAll(&.{want});
-            dense.resident_bypass = false;
+            dense.resident_bypass.get().* = false;
             const got1 = try g.adopt(try root.linear(s, x, p.trellis, p.suh, p.svh, .mul1));
             const got2 = try g.adopt(try root.linear(s, x, p.trellis, p.suh, p.svh, .mul1));
             const d1 = try trunkresDiff(&g, s, want, got1);
@@ -2208,7 +2208,7 @@ test "turboexl3 gpu resident trunk: ATTN-IN and ATTN-OUT over resident W_hat giv
     defer g.deinit();
     const dense = @import("dense.zig");
     defer dense.residentRelease();
-    defer dense.resident_bypass = false;
+    defer dense.resident_bypass.get().* = false;
     const top = g.mark();
     defer g.resetTo(top);
     var prng = std.Random.DefaultPrng.init(0x7E5_A77E);
@@ -2249,11 +2249,11 @@ test "turboexl3 gpu resident trunk: ATTN-IN and ATTN-OUT over resident W_hat giv
         const angles = try g.hostArray(std.mem.sliceAsBytes(ang), &.{ci(rows * 64)}, .float32);
         const ep: root.attn_io.Epilogue = .{ .heads = hq, .kv_heads = hk, .rope_dims = 64, .q_norm = qw, .k_norm = kw, .eps = eps, .angles = angles };
         // ATTN-IN: q|gate, k, v (one prepare, the three inner products, one finish)
-        dense.resident_bypass = true;
+        dense.resident_bypass.get().* = true;
         var want = try root.attnIn(s, x, q, k, v, ep, .mul1);
         defer want.deinit();
         try g.evalAll(&.{ want.q, want.gate, want.k, want.v });
-        dense.resident_bypass = false;
+        dense.resident_bypass.get().* = false;
         for (0..2) |rep| {
             var got = try root.attnIn(s, x, q, k, v, ep, .mul1);
             defer got.deinit();
@@ -2268,10 +2268,10 @@ test "turboexl3 gpu resident trunk: ATTN-IN and ATTN-OUT over resident W_hat giv
         // ATTN-OUT: o_proj over the gated prepare, the gate read in place from ATTN-IN's
         const attn = try trunkresRand(a, &g, rnd, &.{ 1, ci(hq), ci(rows), ci(hd) }, 0.0, 1.0, false);
         const gate: root.attn_io.Gate = .{ .base = want.gate, .row_stride = hq * hd, .head_stride = hd, .off = 0 };
-        dense.resident_bypass = true;
+        dense.resident_bypass.get().* = true;
         const yo_want = try g.adopt(try root.linearGated(s, attn, gate, sigtab, o, .mul1));
         try g.evalAll(&.{yo_want});
-        dense.resident_bypass = false;
+        dense.resident_bypass.get().* = false;
         for (0..2) |rep| {
             const d = try trunkresDiff(&g, s, yo_want, try g.adopt(try root.linearGated(s, attn, gate, sigtab, o, .mul1)));
             std.debug.print("TURBOEXL3_TRUNKRES what=attn_out rows={d} call={d} y={d}/{d} {s}\n", .{ rows, rep, d, rows * hidden, if (d == 0) "PASS" else "FAIL" });

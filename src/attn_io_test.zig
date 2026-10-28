@@ -343,7 +343,7 @@ test "turboexl3 gpu attn_io: the four-member prepare writes each member's own pr
             defer g.resetTo(mark);
             const x = try randBf16(a, &g, rnd, &.{ 1, ci(c.rows), ci(HIDDEN) }, 0.0, 1.0, false);
             const x2 = try g.reshape(x, &.{ ci(c.rows), ci(HIDDEN) });
-            const before = root.attn_io.prep4_calls;
+            const before = root.attn_io.prep4_calls.get().*;
             const xp = try root.attnPrep4(s, x, q, k, v, ix, .mul1);
             for (xp) |arr| _ = try g.adopt(arr);
             var dp: [4]usize = undefined;
@@ -361,7 +361,7 @@ test "turboexl3 gpu attn_io: the four-member prepare writes each member's own pr
             var got = try root.attnIn(s, x, q, k, v, ep, .mul1);
             defer got.deinit();
             const d = [4]usize{ try bitsDiff(a, &g, want.q, got.q), try bitsDiff(a, &g, want.gate, got.gate), try bitsDiff(a, &g, want.k, got.k), try bitsDiff(a, &g, want.v, got.v) };
-            const ran = root.attn_io.prep4_calls == before + 1;
+            const ran = root.attn_io.prep4_calls.get().* == before + 1;
             const ok_prep = dp[0] == 0 and dp[1] == 0 and dp[2] == 0 and dp[3] == 0 and ran;
             const ok_qk = dqk == 0;
             const ok_in = d[0] == 0 and d[1] == 0 and d[2] == 0 and d[3] == 0;
@@ -385,10 +385,10 @@ test "turboexl3 gpu attn_io: the four-member prepare writes each member's own pr
         const ix_narrow = try synthProj(a, &g, rnd, 2048, IDX_OUT, 80);
         const x16 = try randBf16(a, &g, rnd, &.{ 1, 16, ci(HIDDEN) }, 0.0, 1.0, false);
         const x64 = try randBf16(a, &g, rnd, &.{ 1, 64, ci(HIDDEN) }, 0.0, 1.0, false);
-        const before = root.attn_io.prep4_calls;
+        const before = root.attn_io.prep4_calls.get().*;
         try testing.expectError(error.Exl3EngineNotImplemented, root.attnPrep4(s, x16, q, k, v, ix, .mul1));
         try testing.expectError(error.BadExl3Shape, root.attnPrep4(s, x64, q, k, v, ix_narrow, .mul1));
-        try testing.expectEqual(before, root.attn_io.prep4_calls);
+        try testing.expectEqual(before, root.attn_io.prep4_calls.get().*);
         std.debug.print("TURBOEXL3_IDXPREP_REFUSALS PASS\n", .{});
     }
     try testing.expect(!failed);

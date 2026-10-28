@@ -5,19 +5,20 @@
 //! compute wrong, so they stay off (`Config.nax`).
 
 const std = @import("std");
+const Global = @import("global.zig").Global;
 const builtin = @import("builtin");
 
 extern "c" fn sysctlbyname(name: [*:0]const u8, oldp: ?*anyopaque, oldlenp: ?*usize, newp: ?*const anyopaque, newlen: usize) c_int;
 
-var cached: ?bool = null;
+const cached = Global(?bool, "kit_nax_cached", null);
 
 /// The gate on this machine, probed once.
 pub fn available() bool {
-    if (cached) |v| return v;
+    if (cached.get().*) |v| return v;
     var brand: [128]u8 = undefined;
     var os: [64]u8 = undefined;
     const v = from(forcedOff(), sysctl("machdep.cpu.brand_string", &brand), sysctl("kern.osproductversion", &os));
-    cached = v;
+    cached.get().* = v;
     return v;
 }
 
@@ -58,6 +59,9 @@ fn sysctl(name: [*:0]const u8, buf: []u8) []const u8 {
     while (n > 0 and buf[n - 1] == 0) n -= 1;
     return buf[0..n];
 }
+
+/// This file's module state (`Global`): what a host that shares its units' state registers.
+pub const shared_state = .{cached};
 
 // ── tests ──
 

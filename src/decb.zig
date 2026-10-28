@@ -22,6 +22,7 @@
 //!
 //! The value-setting statements are dense's / the host's, spliced or copied verbatim; the CPU tests below pin them.
 const std = @import("std");
+const Global = @import("global.zig").Global;
 const mlx = @import("sdk").mlx;
 const ks = @import("sdk").kernel_launch;
 const decode = @import("decode.zig");
@@ -157,20 +158,20 @@ const Kernels = struct {
     dfin_idx: mlx.mlx_fast_metal_kernel,
 };
 
-var kernels_lock: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
-var kernels: ?Kernels = null;
+const kernels_lock = Global(std.atomic.Value(u32), "decb_kernels_lock", std.atomic.Value(u32).init(0));
+const kernels = Global(?Kernels, "decb_kernels", null);
 
 fn lock() void {
-    while (kernels_lock.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
+    while (kernels_lock.get().*.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
 }
 fn unlock() void {
-    kernels_lock.store(0, .release);
+    kernels_lock.get().*.store(0, .release);
 }
 
 fn kernelsGet() !*const Kernels {
     lock();
     defer unlock();
-    if (kernels) |*k| return k;
+    if (kernels.get().*) |*k| return k;
     // the DEC-ONE variants take DEC-ONE's header (header5: the coherent partial-plane pointers), the others dense's
     const pg = ks.newKernel("turboexl3_decb_prep_gate", &prep_gate_sc_in, &prep_sc_out, text_prep_gate_sc, decode.header, true) orelse return error.KernelCreateFailed;
     const mg = ks.newKernel("turboexl3_decb_merge_gate", &merge_gate_in, &prep_sc_out, text_merge_gate_sc, decode.header, true) orelse return error.KernelCreateFailed;
@@ -180,8 +181,8 @@ fn kernelsGet() !*const Kernels {
     const d0i = ks.newKernel("turboexl3_decb_dec0_idx", &dec0_idx_in, &dec0_idx_out, text_dec0_idx, decode.header5, true) orelse return error.KernelCreateFailed;
     const d1i = ks.newKernel("turboexl3_decb_dec1_idx", &dec1_idx_in, &dec1_idx_out, text_dec1_idx, decode.header5, true) orelse return error.KernelCreateFailed;
     const dfi = ks.newKernel("turboexl3_decb_dfinish_idx", &dfin_idx_in, &dfin_idx_out, text_dfinish_idx, decode.header, true) orelse return error.KernelCreateFailed;
-    kernels = .{ .prep_gate = pg, .merge_gate = mg, .dec0_planes = d0p, .dec1_planes = d1p, .dfin_planes = dfp, .dec0_idx = d0i, .dec1_idx = d1i, .dfin_idx = dfi };
-    return &kernels.?;
+    kernels.get().* = .{ .prep_gate = pg, .merge_gate = mg, .dec0_planes = d0p, .dec1_planes = d1p, .dfin_planes = dfp, .dec0_idx = d0i, .dec1_idx = d1i, .dfin_idx = dfi };
+    return &kernels.get().*.?;
 }
 
 /// What a cached launch config serves: the Dense's geometry and template knobs (`denseTag`: a config bakes them in, and a
@@ -200,12 +201,12 @@ const CfgKey = struct {
     inside: bool = false,
 };
 const CfgSlot = struct { key: CfgKey, cfg: mlx.mlx_fast_metal_kernel_config };
-var cfg_cache: [512]?CfgSlot = @splat(null);
+const cfg_cache = Global([512]?CfgSlot, "decb_cfg_cache", @splat(null));
 
 fn cfgFind(key: CfgKey) ?mlx.mlx_fast_metal_kernel_config {
     lock();
     defer unlock();
-    for (cfg_cache) |slot| if (slot) |sl| {
+    for (cfg_cache.get().*) |slot| if (slot) |sl| {
         if (std.meta.eql(sl.key, key)) return sl.cfg;
     };
     return null;
@@ -215,7 +216,7 @@ fn cfgFind(key: CfgKey) ?mlx.mlx_fast_metal_kernel_config {
 fn cfgPut(key: CfgKey, cfg: mlx.mlx_fast_metal_kernel_config) bool {
     lock();
     defer unlock();
-    for (&cfg_cache) |*slot| if (slot.* == null) {
+    for (&cfg_cache.get().*) |*slot| if (slot.* == null) {
         slot.* = .{ .key = key, .cfg = cfg };
         return true;
     };
@@ -256,18 +257,18 @@ fn denseTag(d: *const dense.Dense) u64 {
 /// DEC-ONE's row tiling for `rows` (Dense.decCfgs's arithmetic): rows per chunk, output tiles per threadgroup, chunks.
 /// Cached per row count.
 const Tiling = struct { rb: u32, bt: u32, chunks: u32 };
-var tiling_cache: [decode.Kernels.max_rows + 1]?Tiling = @splat(null);
+const tiling_cache = Global([decode.Kernels.max_rows + 1]?Tiling, "decb_tiling_cache", @splat(null));
 fn tiling(rows: usize) !Tiling {
     if (rows < 1 or rows > decode.Kernels.max_rows) return error.BadExl3Shape;
     lock();
     defer unlock();
-    if (tiling_cache[rows]) |t| return t;
+    if (tiling_cache.get().*[rows]) |t| return t;
     const rows_u: u32 = @intCast(rows);
     const rb: u32 = dense.Dense.rbFor(rows_u);
     const bt = dense.Dense.btFor(rb);
     if (8 % bt != 0) return error.BadExl3Shape;
     const t: Tiling = .{ .rb = rb, .bt = bt, .chunks = (rows_u + rb - 1) / rb };
-    tiling_cache[rows] = t;
+    tiling_cache.get().*[rows] = t;
     return t;
 }
 
@@ -590,16 +591,16 @@ pub const IdxOut = struct {
 };
 
 /// An f32 [8] array (MLX binds an input under 8 elements in the constant address space): the angle input when !qepi
-var dummy_f32: ?mlx.mlx_array = null;
+const dummy_f32 = Global(?mlx.mlx_array, "decb_dummy_f32", null);
 fn dummyF32() !mlx.mlx_array {
     lock();
     defer unlock();
-    if (dummy_f32) |a| return a;
+    if (dummy_f32.get().*) |a| return a;
     const zeros: [8]f32 = @splat(0);
     const a = mlx.mlx_array_new_data(&zeros, &[_]c_int{8}, 1, .float32);
     if (a.ctx == null) return error.MlxError;
     try mlx.check(mlx.mlx_array_eval(a));
-    dummy_f32 = a;
+    dummy_f32.get().* = a;
     return a;
 }
 
@@ -961,3 +962,6 @@ test "turboexl3 decode merges: the gated prepares zero exactly DEC-ONE's counter
         for (blocks) |n| try testing.expectEqual(@as(u8, 1), n);
     }
 }
+
+/// This file's module state (`Global`): what a host that shares its units' state registers.
+pub const shared_state = .{ kernels_lock, kernels, cfg_cache, tiling_cache, dummy_f32 };

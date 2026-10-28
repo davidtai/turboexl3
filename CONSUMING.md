@@ -13,7 +13,7 @@ Apart from these files, they import only three modules:
 | module | who supplies it | what it holds |
 |---|---|---|
 | `std` | Zig | the standard library |
-| `sdk` | the consumer | `sdk.mlx`: mlx-c's bindings, plus `check`, `getShape` and `streamIsGpu`; `sdk.kernel_launch`: `newKernel`, `Launch`, `TemplateArg`, `buildConfig` and `applyConfig`, and optionally `mlx_fast_metal_kernel_free`; optionally `sdk.steel`, the steel headers of the consumer's MLX ([Wiring](README.md#wiring) gives the full surface) |
+| `sdk` | the consumer | `sdk.mlx`: mlx-c's bindings, plus `check`, `getShape` and `streamIsGpu`; `sdk.kernel_launch`: `newKernel`, `Launch`, `TemplateArg`, `buildConfig` and `applyConfig`, and optionally `mlx_fast_metal_kernel_free`; optionally `sdk.steel`, the steel headers of the consumer's MLX; optionally `sdk.shared`, a host's `Shared` (mlx-serve's `sdk/util/shared.zig`), which makes each of turboexl3's module globals the host's one copy: the host then registers `turboexl3.shared_state` and `turboexl3_table.shared_state` ([Wiring](README.md#wiring) gives the full surface) |
 | `mlx_host` | the consumer, for the tests only | the [host surface](docs/GLOSSARY.md#host-surface); the tests use only its `sushi_exl3`, where it exists, as a second reference |
 
 The `build.zig` of the package gives a consumer two things:

@@ -805,13 +805,13 @@ test "turboexl3 gpu decode timing: the decode chain vs Sushi's decode arm (TURBO
         try g.evalAll(&.{x0});
         // one layer, every engine: the decode chains agree to the bf16 tolerance (turboexl3 and Sushi round in different
         // orders); turboexl3's forms 3 and 5 agree byte for byte
-        defer root.decode_form_override = null;
+        defer root.decode_form_override.get().* = null;
         {
-            root.decode_form_override = 3;
+            root.decode_form_override.get().* = 3;
             const yl = try g.adopt(try root.moe(s, x0, rbank, inds[0], scs[0], .mul1, false));
-            root.decode_form_override = 5;
+            root.decode_form_override.get().* = 5;
             const y5 = try g.adopt(try root.moe(s, x0, rbank, inds[0], scs[0], .mul1, false));
-            root.decode_form_override = 6;
+            root.decode_form_override.get().* = 6;
             const y6 = try g.adopt(try root.moe(s, x0, rbank, inds[0], scs[0], .mul1, false));
             const ys = try g.adopt(try sushi.moe(s, x0, sushiBank(&c), inds[0], scs[0], sushiDec(), false));
             const gl = try readF32(a, &g, yl);
@@ -834,7 +834,7 @@ test "turboexl3 gpu decode timing: the decode chain vs Sushi's decode arm (TURBO
         for (0..rounds + 2) |round| {
             for (0..4) |ai| {
                 const arm = (ai + round) % 4; // 0 turboexl3 form 3, 1 Sushi, 2 turboexl3 form 5, 3 turboexl3 form 6
-                root.decode_form_override = if (arm == 2) 5 else if (arm == 3) 6 else 3;
+                root.decode_form_override.get().* = if (arm == 2) 5 else if (arm == 3) 6 else 3;
                 var x = x0;
                 var held: [64]mlx.mlx_array = undefined;
                 for (0..L) |k| {

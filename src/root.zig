@@ -10,6 +10,8 @@
 //! (`prefill.zig`). The clamped (GLM) form still refuses `error.Exl3EngineNotImplemented`. A consumer's choices are one
 //! `Config` (`configure`); the library reads no environment.
 const std = @import("std");
+/// A module global, the host's `Shared` where the consumer's `sdk` brings one (`global.zig`).
+pub const Global = @import("global.zig").Global;
 const mlx = @import("sdk").mlx;
 pub const config = @import("config.zig");
 pub const Config = config.Config;
@@ -101,14 +103,14 @@ fn validateCall(x: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array, scores: mlx.m
 
 /// The compiled kernels of every geometry this process has served (a handful per model).
 /// a spinlock: the cache fills once per geometry and is read thereafter
-var cache_lock: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
-var cache: [16]?decode.Kernels3 = @splat(null);
+const cache_lock = Global(std.atomic.Value(u32), "root_cache_lock", std.atomic.Value(u32).init(0));
+const cache = Global([16]?decode.Kernels3, "root_cache", @splat(null));
 
 fn kernelsFor(geo: decode.Geometry, out_dtype: mlx.mlx_dtype) !*decode.Kernels3 {
-    while (cache_lock.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
-    defer cache_lock.store(0, .release);
+    while (cache_lock.get().*.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
+    defer cache_lock.get().*.store(0, .release);
     var free_slot: ?usize = null;
-    for (&cache, 0..) |*slot, i| {
+    for (&cache.get().*, 0..) |*slot, i| {
         if (slot.*) |*k| {
             const g = k.geo;
             if (g.hidden == geo.hidden and g.inter == geo.inter and g.topk == geo.topk and g.rate.n == geo.rate.n and
@@ -124,8 +126,8 @@ fn kernelsFor(geo: decode.Geometry, out_dtype: mlx.mlx_dtype) !*decode.Kernels3 
     // the shared expert's gate|up K slices per GEMV threadgroup in `moeFusedShared` (of its 20; a value that does not divide
     // them runs 1). Launch shape only: the planes, so the bytes, stay.
     k3.sspt = config.get().shared_spt;
-    cache[i] = k3;
-    return &cache[i].?;
+    cache.get().*[i] = k3;
+    return &cache.get().*[i].?;
 }
 
 /// `Config.slot_stats`: a diagnostic that reads every decode call's routing back to the host (a sync per layer, so never on in
@@ -133,11 +135,11 @@ fn kernelsFor(geo: decode.Geometry, out_dtype: mlx.mlx_dtype) !*decode.Kernels3 
 /// sizes the grouping (GROUP 2 covers pairs; 3 and 4 would want wider groups) and the decode work a perfect grouping would
 /// save.
 const SlotStats = struct {
-    var calls: u64 = 0;
-    var calls_rows: [17]u64 = @splat(0);
-    var slots_total: [17]u64 = @splat(0);
-    var distinct_total: [17]u64 = @splat(0);
-    var mult: [17][6]u64 = @splat(@splat(0)); // [rows][multiplicity 1..4, 5+]
+    const calls = Global(u64, "root_SlotStats_calls", 0);
+    const calls_rows = Global([17]u64, "root_SlotStats_calls_rows", @splat(0));
+    const slots_total = Global([17]u64, "root_SlotStats_slots_total", @splat(0));
+    const distinct_total = Global([17]u64, "root_SlotStats_distinct_total", @splat(0));
+    const mult = Global([17][6]u64, "root_SlotStats_mult", @splat(@splat(0))); // [rows][multiplicity 1..4, 5+]
 
     fn enabled() bool {
         return config.get().slot_stats;
@@ -169,33 +171,33 @@ const SlotStats = struct {
             for (0..n) |j| if (buf[j] == e) {
                 m += 1;
             };
-            mult[rows][@min(m, 5)] += 1;
+            mult.get().*[rows][@min(m, 5)] += 1;
         }
-        slots_total[rows] += n;
-        distinct_total[rows] += distinct;
-        calls_rows[rows] += 1;
-        calls += 1;
-        if (calls % 480 == 0) print();
+        slots_total.get().*[rows] += n;
+        distinct_total.get().*[rows] += distinct;
+        calls_rows.get().*[rows] += 1;
+        calls.get().* += 1;
+        if (calls.get().* % 480 == 0) print();
     }
 
     fn print() void {
-        for (1..17) |r| if (calls_rows[r] > 0) {
-            const saved = 100.0 * (1.0 - @as(f64, @floatFromInt(distinct_total[r])) / @as(f64, @floatFromInt(slots_total[r])));
+        for (1..17) |r| if (calls_rows.get().*[r] > 0) {
+            const saved = 100.0 * (1.0 - @as(f64, @floatFromInt(distinct_total.get().*[r])) / @as(f64, @floatFromInt(slots_total.get().*[r])));
             std.debug.print("[turboexl3 slot-stats] rows={d} calls={d} slots={d} distinct={d} perfect_grouping_saves={d:.1}% experts_by_multiplicity 1={d} 2={d} 3={d} 4={d} 5+={d}\n", .{
-                r, calls_rows[r], slots_total[r], distinct_total[r], saved, mult[r][1], mult[r][2], mult[r][3], mult[r][4], mult[r][5],
+                r, calls_rows.get().*[r], slots_total.get().*[r], distinct_total.get().*[r], saved, mult.get().*[r][1], mult.get().*[r][2], mult.get().*[r][3], mult.get().*[r][4], mult.get().*[r][5],
             });
         };
     }
 };
 
 /// Form 5's kernels per geometry, as `cache` holds form 3's.
-var cache5: [16]?decode.Kernels5 = @splat(null);
+const cache5 = Global([16]?decode.Kernels5, "root_cache5", @splat(null));
 
 fn kernels5For(geo: decode.Geometry, out_dtype: mlx.mlx_dtype) !*decode.Kernels5 {
-    while (cache_lock.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
-    defer cache_lock.store(0, .release);
+    while (cache_lock.get().*.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
+    defer cache_lock.get().*.store(0, .release);
     var free_slot: ?usize = null;
-    for (&cache5, 0..) |*slot, i| {
+    for (&cache5.get().*, 0..) |*slot, i| {
         if (slot.*) |*k| {
             const g = k.geo;
             if (g.hidden == geo.hidden and g.inter == geo.inter and g.topk == geo.topk and g.rate.n == geo.rate.n and
@@ -207,34 +209,34 @@ fn kernels5For(geo: decode.Geometry, out_dtype: mlx.mlx_dtype) !*decode.Kernels5
     // expert group
     var k5 = try decode.Kernels5.init(geo, 4, 4, 4);
     k5.out_dtype = out_dtype;
-    cache5[i] = k5;
-    if (!decode_form_logged) {
-        decode_form_logged = true;
+    cache5.get().*[i] = k5;
+    if (!decode_form_logged.get().*) {
+        decode_form_logged.get().* = true;
         std.debug.print("[turboexl3] decode engaged: form {d} ({s}, expert groups of up to {d} row-slots, bt={d}, intr={})\n", .{ decodeForm(), if (decodeForm() == 6) "2 launches: the slot reduce by arrival" else "3 launches", k5.gmax, k5.bt, k5.intr });
     }
-    return &cache5[i].?;
+    return &cache5.get().*[i].?;
 }
-var decode_form_logged = false;
+const decode_form_logged = Global(bool, "root_decode_form_logged", false);
 
 /// The decode form (3, 5, 6 = form 5 with the slot reduce in the down launch, 7 = form 3 with fin / dfin's H128s in registers,
 /// 8 = form 7 with the prepare inside the gate|up launch, 9 = form 8 at one row and form 7 from two; 7, 8 and 9 keep form 3's
 /// bytes): `decode_form_override` (tests), else `Config.decode_form`.
-pub var decode_form_override: ?u8 = null;
+pub const decode_form_override = Global(?u8, "root_decode_form_override", null);
 
 fn decodeForm() u8 {
-    return decode_form_override orelse config.get().decode_form;
+    return decode_form_override.get().* orelse config.get().decode_form;
 }
 
 /// The dense-linear kernels of every (in, out, rate, decode, dtype) this process has served: the trunk of a fully EXL3 model
 /// has a dozen shapes (attention q/k/v/o, indexer, GDN qkv/z/out, shared gate/up/down, lm_head, MTP fc).
-var dense_lock: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
-var dense_cache: [32]?dense.Dense = @splat(null);
+const dense_lock = Global(std.atomic.Value(u32), "root_dense_lock", std.atomic.Value(u32).init(0));
+const dense_cache = Global([32]?dense.Dense, "root_dense_cache", @splat(null));
 
 fn denseFor(shape: dense.Shape) !*dense.Dense {
-    while (dense_lock.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
-    defer dense_lock.store(0, .release);
+    while (dense_lock.get().*.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
+    defer dense_lock.get().*.store(0, .release);
     var free_slot: ?usize = null;
-    for (&dense_cache, 0..) |*slot, i| {
+    for (&dense_cache.get().*, 0..) |*slot, i| {
         if (slot.*) |*d| {
             const g = d.shape;
             if (g.in == shape.in and g.out == shape.out and g.rate.n == shape.rate.n and g.dec.codebook == shape.dec.codebook and
@@ -242,8 +244,8 @@ fn denseFor(shape: dense.Shape) !*dense.Dense {
         } else if (free_slot == null) free_slot = i;
     }
     const i = free_slot orelse return error.Exl3EngineCacheFull;
-    dense_cache[i] = try dense.Dense.init(shape);
-    return &dense_cache[i].?;
+    dense_cache.get().*[i] = try dense.Dense.init(shape);
+    return &dense_cache.get().*[i].?;
 }
 
 /// A dense EXL3 linear: y [..., out] in x's dtype for x [..., in], trellis U16/I16 [in/16, out/16, n], suh F16 [in], svh F16
@@ -323,8 +325,8 @@ pub fn trunkUnrot(s: mlx.mlx_stream, members: []const Proj, sizes: []const u8, d
         _ = mlx.mlx_clear_cache();
         unrotGroup(s, grp, dec, act) catch |e| {
             st.failed += 1;
-            if (!unrot_failed_said) {
-                unrot_failed_said = true;
+            if (!unrot_failed_said.get().*) {
+                unrot_failed_said.get().* = true;
                 std.debug.print("[turboexl3] un-rotated trunk: a group of {d} kept its W_hat path ({s})\n", .{ n, @errorName(e) });
             }
             continue;
@@ -338,7 +340,7 @@ pub fn trunkUnrot(s: mlx.mlx_stream, members: []const Proj, sizes: []const u8, d
     if (at != members.len) return error.BadExl3Shape;
     return st;
 }
-var unrot_failed_said = false;
+const unrot_failed_said = Global(bool, "root_unrot_failed_said", false);
 
 fn unrotGroup(s: mlx.mlx_stream, grp: []const Proj, dec: format.Decode, act: mlx.mlx_dtype) !void {
     var ws: [dense.max_join]mlx.mlx_array = @splat(.{ .ctx = null });
@@ -814,9 +816,9 @@ pub fn linearPiecesFinish(s: mlx.mlx_stream, inners: []const mlx.mlx_array, p: P
 }
 
 /// The prefill kernels of every geometry this process has served (one per expert bank shape).
-var pf_lock: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
-var pf_cache: [8]?prefill.Prefill = @splat(null);
-var pf_logged: bool = false;
+const pf_lock = Global(std.atomic.Value(u32), "root_pf_lock", std.atomic.Value(u32).init(0));
+const pf_cache = Global([8]?prefill.Prefill, "root_pf_cache", @splat(null));
+const pf_logged = Global(bool, "root_pf_logged", false);
 
 /// The served prefill variant: 64-row tiles (bm 64) with the register path for <= 32-row remainders in one launch (mixed),
 /// the double-buffered weight stage, unrolled MMA sub-steps, the stage in NAX fragment order and the integer-rate reader
@@ -836,10 +838,10 @@ fn pfOptions() prefill.Options {
 }
 
 fn prefillFor(geo: prefill.Geometry) !*prefill.Prefill {
-    while (pf_lock.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
-    defer pf_lock.store(0, .release);
+    while (pf_lock.get().*.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
+    defer pf_lock.get().*.store(0, .release);
     var free_slot: ?usize = null;
-    for (&pf_cache, 0..) |*slot, i| {
+    for (&pf_cache.get().*, 0..) |*slot, i| {
         if (slot.*) |*p| {
             const g = p.geo;
             if (g.hidden == geo.hidden and g.inter == geo.inter and g.topk == geo.topk and g.experts == geo.experts and
@@ -864,12 +866,12 @@ fn prefillFor(geo: prefill.Geometry) !*prefill.Prefill {
     // the 128-row tiles: their remainder tiles ride the mixed launch (froute's route at split 1, the strided mid and finish),
     // the 128-row tiles the bm-128 body beside bm 64's
     if (o.small != .mixed or o.split != 1 or !o.froute or o.aux != 0 or o.bm != 64) o.t128 = false;
-    pf_cache[i] = try prefill.Prefill.init(geo, o);
-    if (!pf_logged) {
-        pf_logged = true;
+    pf_cache.get().*[i] = try prefill.Prefill.init(geo, o);
+    if (!pf_logged.get().*) {
+        pf_logged.get().* = true;
         std.debug.print("[turboexl3] prefill engaged: fused EXL3 GEMM chain (bm={d} dbuf={} unroll={} fragb={} intr={} sintr={} defer={} split={d} small={s} down_bk={d} down_ncb={d} froute={} aux={d} alay={d} t128={})\n", .{ o.bm, o.dbuf, o.unroll, o.fragb, o.intr, o.sintr, o.defer_affine, o.split, @tagName(o.small), o.downStage(), o.ncb, o.froute, o.aux, o.alay, o.t128 });
     }
-    return &pf_cache[i].?;
+    return &pf_cache.get().*[i].?;
 }
 
 fn freeArr(a: mlx.mlx_array) void {
@@ -926,8 +928,8 @@ pub fn moe(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array,
         .down_svh = bank.down.svh,
     };
     const form = decodeForm();
-    if (form >= 7 and !decode_form_logged) {
-        decode_form_logged = true;
+    if (form >= 7 and !decode_form_logged.get().*) {
+        decode_form_logged.get().* = true;
         std.debug.print("[turboexl3] decode engaged: form {d} (form 3's bytes in fewer dependent launches)\n", .{form});
     }
     const y0 = if (form == 5 or form == 6)
@@ -953,19 +955,19 @@ pub fn flatOperands(rows: usize) bool {
 /// <dir>/pf-<call>-r<rows>.u32 for the first 512 calls, so the prefill timing test can replay real routing
 /// (TURBOEXL3_PF_INDS). The eval syncs every call: a capture run, never a timed one.
 const PfCapture = struct {
-    var calls: u32 = 0;
+    const calls = Global(u32, "root_PfCapture_calls", 0);
     extern "c" fn fopen(path: [*:0]const u8, mode: [*:0]const u8) ?*anyopaque;
     extern "c" fn fwrite(ptr: *const anyopaque, size: usize, n: usize, f: *anyopaque) usize;
     extern "c" fn fclose(f: *anyopaque) c_int;
 
     fn record(inds1: mlx.mlx_array, rows: usize) !void {
         const dir = config.get().pf_capture_dir orelse return;
-        if (calls >= 512) return;
-        defer calls += 1;
+        if (calls.get().* >= 512) return;
+        defer calls.get().* += 1;
         try mlx.check(mlx.mlx_array_eval(inds1));
         const n = mlx.mlx_array_size(inds1);
         var path_buf: [512]u8 = undefined;
-        const path = try std.fmt.bufPrintSentinel(&path_buf, "{s}/pf-{d:0>4}-r{d}.u32", .{ dir, calls, rows }, 0);
+        const path = try std.fmt.bufPrintSentinel(&path_buf, "{s}/pf-{d:0>4}-r{d}.u32", .{ dir, calls.get().*, rows }, 0);
         const f = fopen(path, "wb") orelse return error.CaptureOpen;
         defer _ = fclose(f);
         const ptr: *const anyopaque = switch (mlx.mlx_array_dtype(inds1)) {
@@ -1090,8 +1092,8 @@ pub fn moeFusedShared(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx
     };
     const y0 = try k3.moeShared(s, x2, inds1, s1, kb, rows, sbr);
     defer freeArr(y0);
-    if (!fused_shared_logged) {
-        fused_shared_logged = true;
+    if (!fused_shared_logged.get().*) {
+        fused_shared_logged.get().* = true;
         std.debug.print("[turboexl3] shared expert fused into the routed decode launches (gate|up K{d} split {d}, down K{d} split {d})\n", .{ sb.n_gu / 16, sb.ks_gu, sb.n_dn / 16, sb.ks_dn });
     }
     var y = mlx.mlx_array_new();
@@ -1099,7 +1101,7 @@ pub fn moeFusedShared(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx
     try mlx.check(mlx.mlx_reshape(&y, y0, xsh.ptr, 3, s));
     return y;
 }
-var fused_shared_logged = false;
+const fused_shared_logged = Global(bool, "root_fused_shared_logged", false);
 
 /// `moeFusedShared` with the routing folded into form 9's routed prepare launch (`decode.Kernels3.moeSharedRouted`).
 /// `logits` [.., rows, E] is the router
@@ -1187,8 +1189,8 @@ pub fn moeFusedSharedRouted(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, log
     };
     const y0 = try k3.moeSharedRouted(s, x2, l2, kb, rows, sbr, gate_vec);
     defer freeArr(y0);
-    if (!routed_logged[@intFromBool(gate_vec != null)]) {
-        routed_logged[@intFromBool(gate_vec != null)] = true;
+    if (!routed_logged.get().*[@intFromBool(gate_vec != null)]) {
+        routed_logged.get().*[@intFromBool(gate_vec != null)] = true;
         std.debug.print("[turboexl3] router folded into form 9's prepare launch ({d} rows, {d} experts, top-{d}){s}\n", .{ rows, lsh[2], k, if (gate_vec != null) ", the shared gate's logit with it" else "" });
     }
     var y = mlx.mlx_array_new();
@@ -1196,7 +1198,7 @@ pub fn moeFusedSharedRouted(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, log
     try mlx.check(mlx.mlx_reshape(&y, y0, xsh.ptr, 3, s));
     return y;
 }
-var routed_logged = [2]bool{ false, false };
+const routed_logged = Global([2]bool, "root_routed_logged", .{ false, false });
 
 /// GLM's gate is upper-clamped and its up branch symmetrically clamped before SwiGLU and the down projection.
 pub fn moeClamped(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array, scores: mlx.mlx_array, dec: format.Decode, limit: c_int) !mlx.mlx_array {
@@ -1236,7 +1238,36 @@ test "turboexl3 root: the served prefill options follow the config, and the deco
     const p = pfOptions();
     try t.expect(p.alay == 0 and !p.t128);
     try t.expectEqual(@as(u8, 5), decodeForm());
-    decode_form_override = 3;
-    defer decode_form_override = null;
+    decode_form_override.get().* = 3;
+    defer decode_form_override.get().* = null;
     try t.expectEqual(@as(u8, 3), decodeForm());
 }
+
+/// turboexl3's module state (`Global`): what a host that shares its objects' state registers (mlx-serve:
+/// `src/shared_all.zig`).
+pub const shared_state = .{
+    cache_lock,
+    cache,
+    SlotStats.calls,
+    SlotStats.calls_rows,
+    SlotStats.slots_total,
+    SlotStats.distinct_total,
+    SlotStats.mult,
+    cache5,
+    decode_form_logged,
+    decode_form_override,
+    dense_lock,
+    dense_cache,
+    unrot_failed_said,
+    pf_lock,
+    pf_cache,
+    pf_logged,
+    PfCapture.calls,
+    fused_shared_logged,
+    routed_logged,
+    attn_io.shared_state,
+    config.shared_state,
+    decode_merge.shared_state,
+    dense.shared_state,
+    gdn_out.shared_state,
+};

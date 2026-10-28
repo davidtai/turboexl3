@@ -9,17 +9,18 @@
 //! declares them), and `mlx_serve`, the plugin kit's root (`abi.host`, `host.digest`).
 
 const std = @import("std");
+const Global = @import("global.zig").Global;
 const kit = @import("mlx_serve");
 const mlx = @import("sdk").mlx;
 const host_abi = kit.abi.host;
 const Str = kit.abi.common.Str;
 
 /// The server's host table, bound at load before any kernel is made and never unbound; null: mlx-c's own kernels.
-var host: ?*const host_abi.Host = null;
+const host = Global(?*const host_abi.Host, "kit_kernel_launch_host", null);
 
 /// Binds the server's host table, the one every model load is handed (`LoadCtx.host`). Call it before the first kernel.
 pub fn bind(h: *const host_abi.Host) void {
-    host = h;
+    host.get().* = h;
 }
 
 pub const TemplateValue = union(enum) { int: i32, dtype: mlx.mlx_dtype };
@@ -41,7 +42,7 @@ const max_names = 32;
 /// or mlx-c's own when no host table is bound; null when MLX refuses it.
 pub fn newKernel(name: [*:0]const u8, inputs: []const [*:0]const u8, outputs: []const [*:0]const u8, source: [*:0]const u8, header: [*:0]const u8, ensure_row_contiguous: bool) ?mlx.mlx_fast_metal_kernel {
     if (inputs.len > max_names or outputs.len > max_names) return null;
-    const h = host orelse return ownKernel(name, inputs, outputs, source, header, ensure_row_contiguous);
+    const h = host.get().* orelse return ownKernel(name, inputs, outputs, source, header, ensure_row_contiguous);
     var ins: [max_names]Str = undefined;
     var outs: [max_names]Str = undefined;
     for (inputs, ins[0..inputs.len]) |n, *o| o.* = .of(std.mem.span(n));
@@ -91,7 +92,7 @@ pub fn applyConfig(kernel: mlx.mlx_fast_metal_kernel, config: mlx.mlx_fast_metal
     defer _ = mlx.mlx_vector_array_free(vin);
     var vout = mlx.mlx_vector_array_new();
     defer _ = mlx.mlx_vector_array_free(vout);
-    if (host) |h| {
+    if (host.get().*) |h| {
         const v = h.gpu.launch(h.gpu.ctx, @ptrCast(&vout), kernel.ctx, .{ .ctx = vin.ctx }, .{ .ctx = config.ctx }, .{ .ctx = stream.ctx });
         if (!v.isOk()) return error.MlxError;
     } else try mlx.check(mlx.mlx_fast_metal_kernel_apply(&vout, kernel, vin, config, stream));
@@ -104,6 +105,9 @@ pub fn applyConfig(kernel: mlx.mlx_fast_metal_kernel, config: mlx.mlx_fast_metal
 /// Drops a kernel `newKernel` made (turboexl3's `decode.freeKernel`): the server's kernels stay in its cache for the
 /// process, and mlx-c's own are freed.
 pub fn mlx_fast_metal_kernel_free(k: mlx.mlx_fast_metal_kernel) c_int {
-    if (host != null) return 0;
+    if (host.get().* != null) return 0;
     return mlx.mlx_fast_metal_kernel_free(k);
 }
+
+/// This file's module state (`Global`): what a host that shares its units' state registers.
+pub const shared_state = .{host};

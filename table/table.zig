@@ -12,6 +12,7 @@
 //! by name what it does not carry: the host then runs its chain.
 
 const std = @import("std");
+const Global = @import("turboexl3").Global;
 const kit = @import("mlx_serve");
 const abi = sdk.quant_abi;
 const sdk = @import("sdk");
@@ -101,11 +102,11 @@ fn close(ctx: *abi.LoadCtx) callconv(.c) void {
 }
 
 /// turboexl3's configuration, once per process: the served defaults and this machine's NAX gate.
-var configured = false;
+const configured = Global(bool, "table_table_configured", false);
 
 fn configureOnce(h: kit.host.Host) void {
-    if (configured) return;
-    configured = true;
+    if (configured.get().*) return;
+    configured.get().* = true;
     const on = nax.available();
     t3.configure(.{ .nax = on }) catch {};
     if (!on) h.log(.info, "[turboexl3] MLX's NAX gate is off here (an M5-class GPU and macOS 26.2+): dense prefill rows dequantize + run MLX's matmul, and the routed banks stay the built-in table's\n", .{});
@@ -580,3 +581,6 @@ fn arr(a: abi.Array) mlx.mlx_array {
 fn failed(e: anyerror) Verdict {
     return Verdict.named(if (e == error.MissingWeight) .failed else .unsupported, @errorName(e));
 }
+
+/// The table's module state (`Global`) and the kit's: what a host that shares its objects' state registers.
+pub const shared_state = .{ configured, tkit.shared_state };

@@ -16,6 +16,8 @@
 pub const kernel_launch = @import("kernel_launch.zig");
 pub const nax = @import("nax.zig");
 pub const bind = kernel_launch.bind;
+/// The kit's module state (`global.zig`), for the host to register.
+pub const shared_state = .{ kernel_launch.shared_state, nax.shared_state };
 
 test {
     _ = nax;
