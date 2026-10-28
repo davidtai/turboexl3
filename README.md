@@ -59,6 +59,15 @@ exllamav3 on his files. On that trace BF16 has a perplexity of 1.38474, and the 
 hold the same files, but these numbers were not measured through mlx-serve. The measured speed and coding scores with
 mlx-serve are in [docs/RESULTS.md](docs/RESULTS.md).
 
+turboderp's charts, linked from [his model card](https://huggingface.co/turboderp/Qwen3.8-Flash-Next-exl3) (the EXL3 series is his plain quants; the packs above are its
+2.05, 3.05, 4.05 and 5.05 points; EXL3-SC are his self-calibrated quants, the others are other formats he measured):
+
+![Mean KL divergence against bits per weight, by turboderp](https://cdn-uploads.huggingface.co/production/uploads/6383dc174c48969dcf1b4fce/e3PezJzzDxLGuTs6Am4rg.png)
+
+![Perplexity against bits per weight, by turboderp](https://cdn-uploads.huggingface.co/production/uploads/6383dc174c48969dcf1b4fce/gz1lo7P1z9YCURBcogBQZ.png)
+
+![Per-token KL divergence histogram, by turboderp](https://cdn-uploads.huggingface.co/production/uploads/6383dc174c48969dcf1b4fce/Ut4S8nt-ceHFbBnnfPBPp.png)
+
 ## Formats
 
 - **Rates**: Every even n from 16 to 128, so K = n / 16 bits per weight from 1 to 8. Fractional rates are valid, for

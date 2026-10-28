@@ -5,6 +5,31 @@ from the MLX repacks of [turboderp](GLOSSARY.md#turboderp)'s packs (the table in
 The same tables are in [ddalcu/mlx-serve#997](https://github.com/ddalcu/mlx-serve/pull/997), the pull request that
 serves these packs through turboexl3's [quant plugin](GLOSSARY.md#quant-plugin).
 
+## Quality: KL divergence and perplexity (turboderp's)
+
+The quality of the weights themselves, as turboderp measured it with exllamav3 on his files, before the MLX repack (the
+repacks hold the same files; these numbers were not measured through mlx-serve). Mean KL divergence D_KL(p_BF16 ‖ p_quant)
+and perplexity over a self-generated in-domain trace (14,496 input and 45,588 output tokens); BF16 has a perplexity of
+1.38474 on it, and the KLD noise floor is 0.00262. From [his model card](https://huggingface.co/turboderp/Qwen3.8-Flash-Next-exl3):
+
+| pack | turboderp's branch | KLD vs BF16 | perplexity |
+|---|---|---:|---:|
+| K2 | 2.05bpw_h4_ng4 | 0.0681 | 1.4871 |
+| K3 | 3.05bpw_h5_ng5 | 0.0174 | 1.4074 |
+| K4 | 4.05bpw_h6_ng6 | 0.0066 | 1.3897 |
+| K5 | 5.05bpw_h6_ng6 | 0.0040 | 1.3848 |
+
+His charts (the EXL3 series is his plain quants, whose 2.05 to 5.05 points are K2 to K5; EXL3-SC are his self-calibrated
+quants; GGUF, GSQ-RCO and NVFP4 are other formats on the same trace):
+
+![Mean KL divergence against bits per weight, by turboderp](https://cdn-uploads.huggingface.co/production/uploads/6383dc174c48969dcf1b4fce/e3PezJzzDxLGuTs6Am4rg.png)
+
+![Perplexity against bits per weight, by turboderp](https://cdn-uploads.huggingface.co/production/uploads/6383dc174c48969dcf1b4fce/gz1lo7P1z9YCURBcogBQZ.png)
+
+![Per-token KL divergence histogram, by turboderp](https://cdn-uploads.huggingface.co/production/uploads/6383dc174c48969dcf1b4fce/Ut4S8nt-ceHFbBnnfPBPp.png)
+
+The end-to-end check through mlx-serve is the [coding evals](#coding-evals) below.
+
 ## Charts
 
 Prefill, decode, peak memory and time to first token from 1K to 256K, every pack and arm in one row per metric, with
