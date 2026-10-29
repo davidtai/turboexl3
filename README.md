@@ -43,7 +43,7 @@ The documents:
 | [docs/GLOSSARY.md](docs/GLOSSARY.md) | the definition of every term |
 | [docs/KERNELS.md](docs/KERNELS.md) | every kernel, the chain of launches it replaces and how its output bits relate to that chain |
 | [CONSUMING.md](CONSUMING.md) | what a consumer supplies, and how to build, check and install the quant plugin |
-| [docs/media-kit](docs/media-kit/README.md) | the TurboEXL3 logo for light and dark grounds (SVG, animated SVG, PNG, GIF, social images), its colours and its use |
+| [docs/media-kit](docs/media-kit/README.md) | the TurboEXL3 logo for light and dark grounds (SVG, animated SVG, PNG, GIF, social images), its colours and its use; the results as a 60 s animated infographic (MP4 and GIF) |
 
 ## The packs
 

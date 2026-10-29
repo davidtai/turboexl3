@@ -11,7 +11,7 @@ The TurboEXL3 logo and the files to use it. The mark is the 4x4 Sylvester Hadama
 Hadamard transforms before the trellis codes them): its +1 cells are ink, its -1 cells are faint, and the +1 cell at the
 bottom right is blue. The wordmark reads TurboEXL3.
 
-Every file comes in two versions: `light` for light grounds (dark ink) and `dark` for dark grounds (light ink).
+Every logo file comes in two versions: `light` for light grounds (dark ink) and `dark` for dark grounds (light ink).
 
 ## Files
 
@@ -27,6 +27,18 @@ Every file comes in two versions: `light` for light grounds (dark ink) and `dark
 | `gif/turboexl3-build-{light,dark}.gif` | The build from nothing, once. 960 x 300 px. |
 | `social/turboexl3-x-header-{light,dark}.png` | 2000 x 800 (5:2): an X Article header. |
 | `social/turboexl3-social-preview-{light,dark}.png` | 1280 x 640: GitHub's social preview (the repository's Settings, Social preview). |
+| `video/turboexl3-infographic.mp4` | The results as a 60 s animated infographic: 1920 x 1080, 30 fps, H.264 (BT.709). See Video below. |
+| `video/turboexl3-infographic-{1280,960}.gif` | The same video as GIFs, 1280 x 720 and 960 x 540 at 15 fps, looping: for places that play GIFs inline but not video. |
+| `video/turboexl3-infographic-poster.png` | Its first frame, 1920 x 1080: a poster image for a video player. |
+
+## Video
+
+The infographic opens on the logo, whole in its first frame, then the tile folds into one cell and rebuilds. It then
+walks through the results: accuracy per bit (turboderp's KL divergence against bits per weight); prefill at 16K tokens
+and the time to first token, first with Sushi's exact EXL3 kernels and then with turboexl3's; decode by prompt length at
+the same MTP depth as the standard setup; coding accuracy against size on disk, with peak memory; and the K4 and K3
+trades. It was measured on an Apple M5 Max (128 GB) with mlx-serve and Qwen3.8-Flash-Next; the numbers and the method are
+in [RESULTS.md](../RESULTS.md).
 
 ## Colours
 
