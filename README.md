@@ -1,4 +1,9 @@
-# turboexl3
+<h1 align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/media-kit/turboexl3-lockup-animated-dark.svg">
+    <img alt="TurboEXL3" src="docs/media-kit/turboexl3-lockup-animated-light.svg" width="440">
+  </picture>
+</h1>
 
 turboexl3 runs the projections of an EXL3-quantized LLM on Apple GPUs. It is a Zig library of Metal kernels that MLX
 launches. The [glossary](docs/GLOSSARY.md) defines every term that these documents use.
@@ -38,6 +43,7 @@ The documents:
 | [docs/GLOSSARY.md](docs/GLOSSARY.md) | the definition of every term |
 | [docs/KERNELS.md](docs/KERNELS.md) | every kernel, the chain of launches it replaces and how its output bits relate to that chain |
 | [CONSUMING.md](CONSUMING.md) | what a consumer supplies, and how to build, check and install the quant plugin |
+| [docs/media-kit](docs/media-kit/README.md) | the TurboEXL3 logo for light and dark grounds (SVG, animated SVG, PNG, GIF, social images), its colours and its use |
 
 ## The packs
 
