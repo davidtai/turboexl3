@@ -28,8 +28,9 @@ pub fn Global(comptime T: type, comptime name: []const u8, comptime init: T) typ
 
 /// A plain global: its own storage, initialised to `init`.
 fn Plain(comptime T: type, comptime name: []const u8, comptime init: T) type {
-    _ = name;
     return struct {
+        // Named, so the type is this global's own: a body that captures only T and init is one type per T and init.
+        const global_name = name;
         var storage: T = init;
 
         pub inline fn get() *T {
