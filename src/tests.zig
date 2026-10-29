@@ -3,6 +3,7 @@
 //! standalone build compiles it as a test root over `sdk` and `mlx_host` (README.md).
 comptime {
     _ = @import("config.zig");
+    _ = @import("global.zig");
     _ = @import("sources.zig");
     _ = @import("steel.zig");
     _ = @import("format.zig");

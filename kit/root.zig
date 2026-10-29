@@ -21,4 +21,5 @@ pub const shared_state = .{ kernel_launch.shared_state, nax.shared_state };
 
 test {
     _ = nax;
+    _ = @import("global.zig");
 }

@@ -3,6 +3,7 @@
 //! several objects (`-Dunits`) keeps one copy, the host's, and every object reads and writes it. Elsewhere it is a
 //! plain global.
 
+const std = @import("std");
 const sdk = @import("sdk");
 
 /// `get()` is the storage, initialised to `init`; `name` is unique within turboexl3.
@@ -22,6 +23,12 @@ pub fn Global(comptime T: type, comptime name: []const u8, comptime init: T) typ
             return &S.get().v;
         }
     };
+    return Plain(T, name, init);
+}
+
+/// A plain global: its own storage, initialised to `init`.
+fn Plain(comptime T: type, comptime name: []const u8, comptime init: T) type {
+    _ = name;
     return struct {
         var storage: T = init;
 
@@ -29,4 +36,13 @@ pub fn Global(comptime T: type, comptime name: []const u8, comptime init: T) typ
             return &storage;
         }
     };
+}
+
+test "two plain globals of one type and value, named apart, keep their own storage" {
+    const a = Plain(u32, "test_a", 7);
+    const b = Plain(u32, "test_b", 7);
+    a.get().* = 1;
+    b.get().* = 2;
+    try std.testing.expectEqual(@as(u32, 1), a.get().*);
+    try std.testing.expectEqual(@as(u32, 2), b.get().*);
 }
