@@ -13,7 +13,7 @@ Apart from these files, they import only three modules:
 | module | who supplies it | what it holds |
 |---|---|---|
 | `std` | Zig | the standard library |
-| `sdk` | the consumer | `sdk.mlx`: mlx-c's bindings, plus `check`, `getShape` and `streamIsGpu`; `sdk.kernel_launch`: `newKernel`, `Launch`, `TemplateArg`, `buildConfig` and `applyConfig`, and optionally `mlx_fast_metal_kernel_free`; optionally `sdk.steel`, the steel headers of the consumer's MLX ([Wiring](README.md#wiring) gives the full surface) |
+| `sdk` | the consumer | `sdk.mlx`: mlx-c's bindings, plus `check`, `getShape` and `streamIsGpu`; `sdk.kernel_launch`: `newKernel`, `Launch`, `TemplateArg`, `buildConfig` and `applyConfig`, and optionally `mlx_fast_metal_kernel_free`; optionally `sdk.steel`, the steel headers of the consumer's MLX; optionally `sdk.shared`, a host's `Shared` (mlx-serve's `sdk/util/shared.zig`), which makes each of turboexl3's module globals the host's one copy: the host then registers `turboexl3.shared_state` and `turboexl3_table.shared_state` ([Wiring](README.md#wiring) gives the full surface) |
 | `mlx_host` | the consumer, for the tests only | the [host surface](docs/GLOSSARY.md#host-surface); the tests use only its `sushi_exl3`, where it exists, as a second reference |
 
 The `build.zig` of the package gives a consumer two things:
@@ -42,13 +42,16 @@ the `qwen38_exl3` model plugin, which is to replace this quant plugin. mlx-serve
 
 | file | what it does |
 |---|---|
-| `build.zig` | calls the builder `plugin()` of the kit, then adds the imports `sdk` and `turboexl3` |
+| `build.zig` | calls the builder `plugin()` of the kit, then adds the imports `sdk`, `turboexl3` and `turboexl3_table` |
 | `build.zig.zon` | names the staged kit (the path `kit`) and this package (the path `..`) as its dependencies |
-| `config.zig` | the claim, the validation and the bill, with no MLX |
-| `plugin.zig` | the quant table: `matmul` runs turboexl3's `linear`, `swiglu` runs its `moe`, and the optional members run its fused paths ([What it runs](#what-it-runs)) |
-| `nax.zig` | the test of the NAX gate, from `sysctl`, with no MLX |
-| `sdk.zig` | turboexl3's `sdk`, over the kernel cache and the launcher of the server |
+| `plugin.zig` | the dylib's root: the table and the claims are turboexl3_table's |
+| `config.zig` | the file the kit's `test` step builds; the claims and their tests are in `table/config.zig` |
+| `sdk.zig` | turboexl3's `sdk`: the bindings, turboexl3_kit's launcher over the kernel cache and the launcher of the server, and the kit's quant ABI |
 | `mlx.zig` | the mlx-c functions that turboexl3 calls, declared with Zig types |
+
+In the package itself, `table/table.zig` is the quant table (`matmul` runs turboexl3's `linear`, `swiglu` runs its
+`moe`, and the optional members run its fused paths: [What it runs](#what-it-runs)), `table/config.zig` the claim, the
+validation and the bill with no MLX, and `kit/nax.zig` the test of the NAX gate, from `sysctl`, with no MLX.
 
 ### What it claims
 
@@ -58,21 +61,14 @@ The plugin answers each block of a pack with a [claim](docs/GLOSSARY.md#claim):
   because each linear carries its own rate. No built-in format of mlx-serve runs a dense EXL3 linear.
 - **An `expert_quant` block** (the routed banks, with a rate `k`): `by_marker` only when all of these hold. Otherwise
   the claim is `no`, and the built-in Sushi format keeps the banks.
-  - The [numerics](docs/GLOSSARY.md#numerics) are reordered.
+  - The pack is a fully EXL3 Qwen3.8 pack: its config has a `trunk_quant` block, and its `model_type` is `qwen4_exp`
+    or `qwen4_exp_text`. Its [numerics](docs/GLOSSARY.md#numerics) are reordered. An expert-only pack stays Sushi's.
   - The machine passes the NAX gate.
   - The SwiGLU is not clamped: the model's config has no `swiglu_limit` above 0.
 - **Any other block**: `no`. This includes Sushi's STQ family and the other formats.
 
 `by_marker` ranks above Sushi's claim, `by_type`. So the plugin wins each block that it claims, unless another
-outside plugin also claims that block at `by_marker`.
-
-The plugin reads `MLX_SERVE_BIT_EXACT` itself, in the same way as the server:
-
-| value | numerics |
-|---|---|
-| `0` | reordered |
-| any other value, for example `1` | exact |
-| unset or empty | reordered on a Qwen3.8 pack (`model_type` `qwen4_exp` or `qwen4_exp_text`); exact on every other pack |
+outside plugin also claims that block at `by_marker`. No environment variable changes a claim.
 
 The validation refuses a block by the name of the reason:
 
@@ -89,7 +85,7 @@ The bill of a block is its stored size, because the plugin uses the arrays that 
 ### What it runs
 
 - **`open`** binds the host table of the server to `sdk`. Once per process, it also configures turboexl3: the
-  defaults, with `nax` from `plugin/nax.zig`. Below the gate, it logs that dense prefill rows take dequantize + MLX's
+  defaults, with `nax` from `kit/nax.zig` (turboexl3_kit). Below the gate, it logs that dense prefill rows take dequantize + MLX's
   matmul and that the banks stay with the built-in format.
 - **`load_tensor`** (trunk blocks) takes `<base>.weight` (the trellis, `U16` or `I16`), `<base>.scales` (`suh`) and
   `<base>.biases` (`svh`). These are the names of the affine format. It checks the shapes and the dtypes.
@@ -150,7 +146,7 @@ plugin unloaded. The list `"disabled"` in `plugins.json` turns off plugins by na
 | gap | what the plugin does instead | what would close the gap |
 |---|---|---|
 | MLX's steel headers: the kit stages only mlx-c's headers | turboexl3 uses its inlined copy, `src/kernels/steel_nax.metal` (MLX 0.32.2) | the kit stages the four steel headers of the server's MLX, for `sdk.steel` |
-| the NAX gate of the server | `plugin/nax.zig` finds it again from `sysctl`: an Apple M5 or later, macOS 26.2 or later, and no `FORCE_GPU_FAMILY_FALLBACK=1` | a member of the host table that gives the server's answer |
+| the NAX gate of the server | `kit/nax.zig` (turboexl3_kit) finds it again from `sysctl`: an Apple M5 or later, macOS 26.2 or later, and no `FORCE_GPU_FAMILY_FALLBACK=1` | a member of the host table that gives the server's answer |
 | mlx-c bindings with Zig types: the kit's `mlx_c` comes from translate-C, with integer enums and `[*c]` pointers | `plugin/mlx.zig` declares the functions that turboexl3 calls, as mlx-serve's own bindings declare them | bindings with Zig types in the kit |
 | extra imports in `plugin()`: the builder takes only a name | `build.zig` adds `sdk` and `turboexl3` to the root module through `import_table.get("plugin")` | an option of `plugin()` for imports |
 | GPU tests: the kit runs only MLX-free tests | none | turboexl3's GPU tests still need a consumer surface of their own (see [Tests](README.md#tests)) |

@@ -355,7 +355,7 @@ Every other launch shape is a constant of the file that reads it (`root.zig`, `d
 includes the prefill tiles, the GEMV tiles and K splits, the deferred MUL1 map and the dense paths. The tests also
 build other values of these constants, as variants.
 
-The plugin sets one field: `nax`, from its own test of the NAX gate (`plugin/nax.zig`).
+The plugin sets one field: `nax`, from turboexl3_kit's test of the NAX gate (`kit/nax.zig`).
 
 ## Tests
 

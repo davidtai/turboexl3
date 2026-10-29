@@ -11,5 +11,5 @@
         // the turboexl3 package this folder sits in
         .turboexl3 = .{ .path = ".." },
     },
-    .paths = .{ "build.zig", "build.zig.zon", "plugin.zig", "config.zig", "nax.zig", "sdk.zig", "mlx.zig" },
+    .paths = .{ "build.zig", "build.zig.zon", "plugin.zig", "config.zig", "sdk.zig", "mlx.zig" },
 }

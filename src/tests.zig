@@ -3,6 +3,8 @@
 //! standalone build compiles it as a test root over `sdk` and `mlx_host` (README.md).
 comptime {
     _ = @import("config.zig");
+    _ = @import("global.zig");
+    _ = @import("sources.zig");
     _ = @import("steel.zig");
     _ = @import("format.zig");
     _ = @import("spec.zig");
@@ -14,11 +16,13 @@ comptime {
     _ = @import("prefill.zig");
     _ = @import("decb.zig");
     _ = @import("attn_io.zig");
+    _ = @import("gdn_out.zig");
     _ = @import("root.zig");
     _ = @import("test_support.zig");
     _ = @import("gpu_test.zig");
     _ = @import("prefill_test.zig");
     _ = @import("decb_test.zig");
     _ = @import("attn_io_test.zig");
+    _ = @import("gdn_out_test.zig");
     _ = @import("bench.zig");
 }

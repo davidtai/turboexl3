@@ -219,10 +219,10 @@ meaning first, then the precise one.
   mlx-c's headers, and the builder makes the module `mlx_c` from them.
 - <a id="claim"></a>**claim**: A format's answer to one block of a pack: `no`, `by_type` or `by_marker`, in rank order.
   An outside format wins a block only when its claim ranks above every built-in claim. A built-in format wins a tie.
-- <a id="numerics"></a>**exact and reordered numerics**: mlx-serve's two numerics modes for EXL3, set by
-  `MLX_SERVE_BIT_EXACT`. Exact (`1`) allows no path that reorders a sum, so the routed experts stay with Sushi.
-  Reordered (`0`) allows such paths. When the variable is unset, a Qwen3.8 EXL3 pack is reordered and every other pack
-  is exact.
+- <a id="numerics"></a>**exact and reordered numerics**: mlx-serve's two numerics modes for EXL3. Exact allows no
+  path that reorders a sum, so the routed experts stay with Sushi. Reordered allows such paths. A fully EXL3 Qwen3.8
+  pack is reordered and every other pack is exact. The earlier runs set the mode with `MLX_SERVE_BIT_EXACT` (`1` exact,
+  `0` reordered).
 - <a id="mlx-stream"></a>**mlx-stream**: David Tai's plugin for mlx-serve (github.com/davidtai/mlx-stream). turboexl3
   was written as its EXL3 engine, and then moved out of it into this package.
 - <a id="sushi"></a>**Sushi**: Another EXL3 engine for MLX (MIT license), and mlx-serve's built-in EXL3 format.

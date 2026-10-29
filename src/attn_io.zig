@@ -35,6 +35,7 @@
 //! and `attnIn` takes the other three as given (`Epilogue.prep`) instead of launching its prepare: the bytes of the
 //! indexer's `linear` and ATTN-IN's own prepare.
 const std = @import("std");
+const Global = @import("global.zig").Global;
 const mlx = @import("sdk").mlx;
 const ks = @import("sdk").kernel_launch;
 const decode = @import("decode.zig");
@@ -122,46 +123,46 @@ const Kernels = struct {
     prep_gate: mlx.mlx_fast_metal_kernel,
 };
 
-var kernels_lock: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
-var kernels: ?Kernels = null;
+const kernels_lock = Global(std.atomic.Value(u32), "attn_io_kernels_lock", std.atomic.Value(u32).init(0));
+const kernels = Global(?Kernels, "attn_io_kernels", null);
 
 fn kernelsGet() !*const Kernels {
-    while (kernels_lock.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
-    defer kernels_lock.store(0, .release);
-    if (kernels) |*k| return k;
+    while (kernels_lock.get().*.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
+    defer kernels_lock.get().*.store(0, .release);
+    if (kernels.get().*) |*k| return k;
     const prep3 = ks.newKernel("turboexl3_attn_prep3", &prep3_in, &prep3_out, text_prep3, decode.header, true) orelse return error.KernelCreateFailed;
     errdefer decode.freeKernel(prep3);
     const fin = ks.newKernel("turboexl3_attn_finish", &fin_in, &fin_out, text_finish_attn, decode.header, true) orelse return error.KernelCreateFailed;
     errdefer decode.freeKernel(fin);
     const pg = ks.newKernel("turboexl3_attn_prep_gate", &prep_gate_in, &prep_gate_out, text_prep_gate, decode.header, true) orelse return error.KernelCreateFailed;
-    kernels = .{ .prep3 = prep3, .fin = fin, .prep_gate = pg };
-    return &kernels.?;
+    kernels.get().* = .{ .prep3 = prep3, .fin = fin, .prep_gate = pg };
+    return &kernels.get().*.?;
 }
 
 /// The four-member prepare's kernel, made at its first call (a process that never takes it never builds it).
-var prep4_kernel: ?mlx.mlx_fast_metal_kernel = null;
+const prep4_kernel = Global(?mlx.mlx_fast_metal_kernel, "attn_io_prep4_kernel", null);
 
 fn prep4KernelGet() !mlx.mlx_fast_metal_kernel {
-    while (kernels_lock.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
-    defer kernels_lock.store(0, .release);
-    if (prep4_kernel) |k| return k;
+    while (kernels_lock.get().*.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
+    defer kernels_lock.get().*.store(0, .release);
+    if (prep4_kernel.get().*) |k| return k;
     const k = ks.newKernel("turboexl3_attn_prep4", &prep4_in, &prep4_out, text_prep4, decode.header, true) orelse return error.KernelCreateFailed;
-    prep4_kernel = k;
+    prep4_kernel.get().* = k;
     return k;
 }
 
 /// The standard-basis kernels, made at their first call (a process without the un-rotated trunk never builds them).
-var std_kernels: ?[2]mlx.mlx_fast_metal_kernel = null;
+const std_kernels = Global(?[2]mlx.mlx_fast_metal_kernel, "attn_io_std_kernels", null);
 
 fn stdKernelsGet() ![2]mlx.mlx_fast_metal_kernel {
-    while (kernels_lock.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
-    defer kernels_lock.store(0, .release);
-    if (std_kernels) |k| return k;
+    while (kernels_lock.get().*.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
+    defer kernels_lock.get().*.store(0, .release);
+    if (std_kernels.get().*) |k| return k;
     const epi = ks.newKernel("turboexl3_attn_epi_std", &epi_in, &fin_out, text_epi_attn, decode.header, true) orelse return error.KernelCreateFailed;
     errdefer decode.freeKernel(epi);
     const gate = ks.newKernel("turboexl3_attn_gate_std", &gate_plain_in, &gate_plain_out, text_gate_plain, decode.header, true) orelse return error.KernelCreateFailed;
-    std_kernels = .{ epi, gate };
-    return std_kernels.?;
+    std_kernels.get().* = .{ epi, gate };
+    return std_kernels.get().*.?;
 }
 
 /// One projection of a fused call: its kernels (the `Dense` `linear` uses for its shape) and the host's arrays.
@@ -320,7 +321,7 @@ pub fn preparedServes(d: *const dense.Dense, rows: usize) bool {
 }
 
 /// `prepare4`'s calls (the tests' proof that it ran).
-pub var prep4_calls: u64 = 0;
+pub const prep4_calls = Global(u64, "attn_io_prep4_calls", 0);
 
 /// Step 1's prepare with the indexer projection `ix` as a fourth member, one launch over x2 [rows, in]: xp[0..3]
 /// q's, k's and v's copies (`Epilogue.prep`), xp[3] the indexer's (`linearPrepared`), each f16 [rows, in], the caller's.
@@ -337,7 +338,7 @@ pub fn prepare4(s: mlx.mlx_stream, x2: mlx.mlx_array, rows: usize, q: Member, k:
     defer _ = mlx.mlx_fast_metal_kernel_config_free(pcfg);
     var xp: [4]mlx.mlx_array = undefined;
     try ks.applyConfig(kern, pcfg, &.{ x2, q.suh, k.suh, v.suh, ix.suh }, &xp, s);
-    prep4_calls +%= 1;
+    prep4_calls.get().* +%= 1;
     return xp;
 }
 
@@ -671,3 +672,6 @@ test "turboexl3 attn_io un-rotated trunk texts: the standard-basis epilogue is A
         for ([_][]const u8{ "_shape", "_strides", "_ndim" }) |suf| try testing.expect(!has(sg.txt, std.fmt.bufPrint(&buf, "{s}{s}", .{ name, suf }) catch unreachable));
     };
 }
+
+/// This file's module state (`Global`): what a host that shares its units' state registers.
+pub const shared_state = .{ kernels_lock, kernels, prep4_kernel, std_kernels, prep4_calls };
