@@ -11,12 +11,14 @@ pub const groups = [_]Group{
     .{ .source = "test/lane.hip", .name = "test_lane" },
     .{ .source = "dense/dense.hip", .name = "dense" },
     .{ .source = "decode/decode.hip", .name = "decode" },
+    .{ .source = "prefill/prefill.hip", .name = "prefill" },
 };
 
 /// Every header the groups include (under src/kernels/hip/), so an edit rebuilds them.
 pub const headers = [_][]const u8{
     "lane.hpp",
     "common.hpp",
+    "routed.hpp",
 };
 
 /// The chips the tests run on; the build refuses any other -Dhip-arch.
