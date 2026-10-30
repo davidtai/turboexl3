@@ -22,15 +22,6 @@ const Api = struct {
     hipMemcpyDtoH: *const fn ([*]u8, Ptr, usize) callconv(.c) Result,
     hipMemsetD8: *const fn (Ptr, u8, usize) callconv(.c) Result,
     hipDeviceSynchronize: *const fn () callconv(.c) Result,
-    hipStreamCreate: *const fn (*Ptr) callconv(.c) Result,
-    hipStreamDestroy: *const fn (Ptr) callconv(.c) Result,
-    hipStreamSynchronize: *const fn (Ptr) callconv(.c) Result,
-    hipStreamBeginCapture: *const fn (Ptr, c_int) callconv(.c) Result,
-    hipStreamEndCapture: *const fn (Ptr, *Ptr) callconv(.c) Result,
-    hipGraphInstantiate: *const fn (*Ptr, Ptr, ?*anyopaque, ?[*]u8, usize) callconv(.c) Result,
-    hipGraphLaunch: *const fn (Ptr, Ptr) callconv(.c) Result,
-    hipGraphExecDestroy: *const fn (Ptr) callconv(.c) Result,
-    hipGraphDestroy: *const fn (Ptr) callconv(.c) Result,
 };
 
 pub const Hip = struct {
@@ -78,12 +69,6 @@ pub const Hip = struct {
         return b;
     }
 
-    pub fn stream(h: *const Hip) Error!Stream {
-        var s: Ptr = null;
-        try h.check(h.api.hipStreamCreate(&s));
-        return .{ .h = h, .handle = s };
-    }
-
     pub fn load(h: *const Hip, image: []const u8) Error!Module {
         var m: Ptr = null;
         try h.check(h.api.hipModuleLoadData(&m, image.ptr));
@@ -118,48 +103,6 @@ pub const Buffer = struct {
 };
 
 pub const Dim = struct { x: u32, y: u32 = 1, z: u32 = 1 };
-
-/// A stream, and capture of its launches into a graph that replays them.
-pub const Stream = struct {
-    h: *const Hip,
-    handle: Ptr,
-
-    pub fn destroy(s: *Stream) void {
-        _ = s.h.api.hipStreamDestroy(s.handle);
-    }
-
-    pub fn sync(s: Stream) Error!void {
-        try s.h.check(s.h.api.hipStreamSynchronize(s.handle));
-    }
-
-    /// Launches on the stream are recorded, not run, until `endCapture` (thread-local capture mode).
-    pub fn beginCapture(s: Stream) Error!void {
-        try s.h.check(s.h.api.hipStreamBeginCapture(s.handle, 1));
-    }
-
-    pub fn endCapture(s: Stream) Error!Graph {
-        var g: Ptr = null;
-        try s.h.check(s.h.api.hipStreamEndCapture(s.handle, &g));
-        var exec: Ptr = null;
-        try s.h.check(s.h.api.hipGraphInstantiate(&exec, g, null, null, 0));
-        return .{ .h = s.h, .graph = g, .exec = exec };
-    }
-};
-
-pub const Graph = struct {
-    h: *const Hip,
-    graph: Ptr,
-    exec: Ptr,
-
-    pub fn launch(g: Graph, s: Stream) Error!void {
-        try g.h.check(g.h.api.hipGraphLaunch(g.exec, s.handle));
-    }
-
-    pub fn destroy(g: *Graph) void {
-        _ = g.h.api.hipGraphExecDestroy(g.exec);
-        _ = g.h.api.hipGraphDestroy(g.graph);
-    }
-};
 
 pub const Module = struct {
     h: *const Hip,
@@ -207,12 +150,6 @@ pub const Function = struct {
 
     /// One launch on the null stream.
     pub fn launch(f: Function, grid: Dim, block: Dim, shared: u32, args: *Args) Error!void {
-        try f.launchOn(null, grid, block, shared, args);
-    }
-
-    /// One launch on `stream` (null: the null stream).
-    pub fn launchOn(f: Function, stream: ?Stream, grid: Dim, block: Dim, shared: u32, args: *Args) Error!void {
-        const s: Ptr = if (stream) |x| x.handle else null;
-        try f.h.check(f.h.api.hipModuleLaunchKernel(f.handle, grid.x, grid.y, grid.z, block.x, block.y, block.z, shared, s, args.pointers(), null));
+        try f.h.check(f.h.api.hipModuleLaunchKernel(f.handle, grid.x, grid.y, grid.z, block.x, block.y, block.z, shared, null, args.pointers(), null));
     }
 };

@@ -42,8 +42,6 @@ pub const Role = enum {
     inv,
     items,
     counts,
-    // DEC-ONE's arrival counters
-    cnt,
 };
 
 pub const Arg = union(enum) { buf: Role, u: u32, i: i32, f: f32 };
@@ -508,44 +506,4 @@ pub fn denseItems(rows: u32, out: []i32) void {
         out[3 * t + 1] = @intCast(first);
         out[3 * t + 2] = @intCast(@min(gemm_bm, rows - first));
     }
-}
-
-// ---- DEC-ONE (dense rows 1-16): the GEMV and the finish in one launch ----------------------------------------------
-
-/// DEC-ONE's rows a chunk (Dense.rbFor: the dgemv text's max_rb cap at every row count).
-pub fn decOneRb(rows: u32) u32 {
-    return rbCap(rows, max_rb);
-}
-
-/// The counters DEC-ONE's GEMV takes: one a (128-output block, row chunk).
-pub fn decOneCounters(d: Dense) u32 {
-    const rb = decOneRb(d.rows);
-    return (d.out / 128) * ((d.rows + rb - 1) / rb);
-}
-
-/// prep_sc (prep_s, and the counters zeroed) -> dec0 (the GEMV; the last threadgroup at each block and chunk finishes
-/// it). The bytes of denseChain with the same chunks.
-pub fn denseDecOne(d: Dense) error{BadExl3Shape}![2]Launch {
-    try d.check();
-    const rb = decOneRb(d.rows);
-    const chunks = (d.rows + rb - 1) / rb;
-    var prep: Launch = .{ .symbol = switch (d.dtype) {
-        .f32 => "t3_dense_prep_sc_f32",
-        .f16 => "t3_dense_prep_sc_f16",
-        .bf16 => "t3_dense_prep_sc_bf16",
-    }, .group = "dense", .grid = .{ d.in / 128, d.rows, 1 }, .block = 32 };
-    for ([_]Role{ .x, .suh, .xp, .xs }) |r| prep.add(.{ .buf = r });
-    prep.add(.{ .u = d.in });
-    prep.add(.{ .buf = .cnt });
-    prep.add(.{ .u = decOneCounters(d) });
-    const names = [3][5][:0]const u8{
-        .{ "t3_dense_dec0_mcg_1", "t3_dense_dec0_mcg_2", "t3_dense_dec0_mcg_3", "t3_dense_dec0_mcg_4", "t3_dense_dec0_mcg_5" },
-        .{ "t3_dense_dec0_mul1_1", "t3_dense_dec0_mul1_2", "t3_dense_dec0_mul1_3", "t3_dense_dec0_mul1_4", "t3_dense_dec0_mul1_5" },
-        .{ "t3_dense_dec0_mul1d_1", "t3_dense_dec0_mul1d_2", "t3_dense_dec0_mul1d_3", "t3_dense_dec0_mul1d_4", "t3_dense_dec0_mul1d_5" },
-    };
-    var gemv: Launch = .{ .symbol = names[cbIndex(d.dec, d.defer_map)][rb - 1], .group = "dense", .grid = .{ d.out / 16 / btFor(rb), chunks, d.ks() }, .block = 128 };
-    for ([_]Role{ .trellis, .xp, .z, .xs, .svh, .y, .cnt }) |r| gemv.add(.{ .buf = r });
-    for ([_]u32{ d.in, d.out, d.rows, d.rate.n, d.dec.window.mask() }) |v| gemv.add(.{ .u = v });
-    gemv.add(.{ .i = @backingInt(d.dtype) });
-    return .{ prep, gemv };
 }
