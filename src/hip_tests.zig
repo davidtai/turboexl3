@@ -1031,6 +1031,16 @@ test "HIP DEC-ONE: the bytes of the dense chain at rows 1-9, 11 and 16; a captur
                         std.debug.print("  {s}: {d} of {d} bytes differ (first at byte {d})\n", .{ nm, nd2, ob.len, f2 });
                     }
                 }
+                // the first differing row alone through the chain (its own chunk): which call has the row's bytes?
+                {
+                    const fr = first / (c.out * xsize);
+                    var d1 = d;
+                    d1.rows = 1;
+                    const alone = try denseRun(&h, &g, &p, x, fr, d1);
+                    defer gpa.free(alone);
+                    const seg = c.out * xsize;
+                    std.debug.print("  row {d} alone: equals DEC-ONE {}, equals the chain {}\n", .{ fr, std.mem.eql(u8, alone, got[fr * seg ..][0..seg]), std.mem.eql(u8, alone, chain[fr * seg ..][0..seg]) });
+                }
                 // the chain again: is it the same each run?
                 const chain2 = try denseRun(&h, &g, &p, x, 0, d);
                 defer gpa.free(chain2);
