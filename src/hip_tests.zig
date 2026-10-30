@@ -993,6 +993,42 @@ test "HIP DEC-ONE: the bytes of the dense chain at rows 1-9, 11 and 16; a captur
                 try runLaunches(&g, &launches, bind);
                 try y.read(again);
                 std.debug.print("DEC-ONE {d}x{d} {s} rows {d}: {d} of {d} bytes differ from the chain (first at byte {d}, row {d}); a second run {s} the first\n", .{ c.in, c.out, @tagName(c.dec.codebook), rows, nd, got.len, first, first / (c.out * xsize), if (std.mem.eql(u8, again, got)) "equals" else "differs from" });
+                // the chain's launches into their own xs, z and y: which of DEC-ONE's buffers differs?
+                {
+                    const cl = try plan.denseChain(d);
+                    var xs2 = try h.alloc(d.xsBytes());
+                    defer xs2.free();
+                    var z2 = try h.alloc(d.zBytes());
+                    defer z2.free();
+                    var xp2 = try h.alloc(d.xpBytes());
+                    defer xp2.free();
+                    var y2 = try h.alloc(y.len);
+                    defer y2.free();
+                    var b2 = bind;
+                    b2.set(.xs, xs2.addr());
+                    b2.set(.z, z2.addr());
+                    b2.set(.xp, xp2.addr());
+                    b2.set(.y, y2.addr());
+                    try runLaunches(&g, &cl, b2);
+                    const names = [_][]const u8{ "xp", "xs", "z" };
+                    const ours = [_]rt.Buffer{ xp, xs, z };
+                    const theirs = [_]rt.Buffer{ xp2, xs2, z2 };
+                    for (names, ours, theirs) |nm, o_, t_| {
+                        const ob = try gpa.alloc(u8, o_.len);
+                        defer gpa.free(ob);
+                        const tb = try gpa.alloc(u8, t_.len);
+                        defer gpa.free(tb);
+                        try o_.read(ob);
+                        try t_.read(tb);
+                        var nd2: usize = 0;
+                        var f2: usize = 0;
+                        for (ob, tb, 0..) |a_, b_, i| if (a_ != b_) {
+                            if (nd2 == 0) f2 = i;
+                            nd2 += 1;
+                        };
+                        std.debug.print("  {s}: {d} of {d} bytes differ (first at byte {d})\n", .{ nm, nd2, ob.len, f2 });
+                    }
+                }
                 // the chain again: is it the same each run?
                 const chain2 = try denseRun(&h, &g, &p, x, 0, d);
                 defer gpa.free(chain2);
