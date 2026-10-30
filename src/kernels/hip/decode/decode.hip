@@ -19,15 +19,21 @@ namespace {
 using namespace t3;
 
 // Grid (hidden / 128, RK), 32 threads: each routed slot's gate and up inputs, xg / xu f16 [RK][hidden] in lane order,
-// and each 128-block's sums sg / su (the deferred map).
+// and each 128-block's sums sg / su (the deferred map). With `shared` (every routed expert's gate suh the same, and
+// every up suh: a checkpoint's shared input), grid (hidden / 128, rows): each row's inputs once, with expert 0's suh,
+// xg / xu [rows][hidden]; the readers take row rk / topk (their `xdiv`).
 template <int DT, int PROF>
 __device__ void prep2(const void* x, const int* slots, const uint16_t* gate_suh, const uint16_t* up_suh, uint16_t* xg,
-                      uint16_t* xu, float* sg, float* su, uint32_t hidden, uint32_t topk, uint32_t experts) {
-    const uint32_t b = blockIdx.x, rk = blockIdx.y, lane = threadIdx.x;
-    const int es = slots[rk];
-    if (es < 0 || static_cast<uint32_t>(es) >= experts) return;
-    const size_t e = static_cast<size_t>(es);
-    const uint32_t row = rk / topk;
+                      uint16_t* xu, float* sg, float* su, uint32_t hidden, uint32_t topk, uint32_t experts, int shared) {
+    const uint32_t b = blockIdx.x, rk = blockIdx.y, lane = threadIdx.x;  // rk: a row-slot, or a row (shared)
+    size_t e = 0;
+    uint32_t row = rk;
+    if (!shared) {
+        const int es = slots[rk];
+        if (es < 0 || static_cast<uint32_t>(es) >= experts) return;
+        e = static_cast<size_t>(es);
+        row = rk / topk;
+    }
     float vg[4], vu[4];
 #pragma unroll
     for (uint32_t j = 0; j < 4u; ++j) {
@@ -65,11 +71,11 @@ __device__ void prep2(const void* x, const int* slots, const uint16_t* gate_suh,
 constexpr uint32_t kBT = 4;  // output tiles a GEMV threadgroup
 
 // Grid (inter / 16 / BT, RK, KS), 128 threads: waves 0, 1 the gate's two halves of slice ks, 2, 3 the up's.
-// zg / zu f32 [KS][RK][inter].
+// zg / zu f32 [KS][RK][inter]. The input of slot rk: xg / xu row rk (xdiv 0), or rk / xdiv (prep2's `shared`).
 template <int CB, int DEFER>
 __device__ void gu3(const uint16_t* xg, const uint16_t* xu, const int* slots, const uint64_t* gate_t,
                     const uint64_t* up_t, float* zg, float* zu, uint32_t hidden, uint32_t inter, uint32_t rk_count,
-                    uint32_t experts, uint32_t n, uint32_t mask) {
+                    uint32_t experts, uint32_t n, uint32_t mask, uint32_t xdiv) {
     __shared__ float red[4][16u * kBT];
     const uint32_t blk = blockIdx.x, rk = blockIdx.y, kz = blockIdx.z, ks = gridDim.z;
     const uint32_t sg = threadIdx.x >> 5, lane = threadIdx.x & 31u, tid = threadIdx.x;
@@ -78,7 +84,8 @@ __device__ void gu3(const uint16_t* xg, const uint16_t* xu, const int* slots, co
     const uint32_t proj = sg >> 1, khalf = sg & 1u;
     const uint32_t in_tiles = hidden / 16u, out_tiles = inter / 16u;
     const uint32_t* wbase = expert_trellis(proj == 0u ? gate_t : up_t, static_cast<size_t>(es));
-    const uint16_t* xrow = (proj == 0u ? xg : xu) + 4u * (lane & 3u) + static_cast<size_t>(rk) * hidden;
+    const size_t xi = xdiv ? rk / xdiv : rk;
+    const uint16_t* xrow = (proj == 0u ? xg : xu) + 4u * (lane & 3u) + xi * hidden;
     const uint32_t per = in_tiles / (ks * 2u);
     const uint32_t tk0 = (kz * 2u + khalf) * per;
     float a[kBT][2];
@@ -94,21 +101,23 @@ __device__ void gu3(const uint16_t* xg, const uint16_t* xu, const int* slots, co
 
 // Grid (inter / 128, RK), 128 threads (one output each): the planes in slice order, the deferred map, the gate and up
 // finishes, SwiGLU (the profile's), then the down's prepare into hd f16 [RK][inter] (lane order) and its block sums hs.
+// The input's block sums xsg / xsu: row rk (xdiv 0), or rk / xdiv (prep2's `shared`).
 template <int PROF>
 __device__ void fin3(const float* zg, const float* zu, const int* slots, const uint16_t* gate_svh,
                      const uint16_t* up_svh, const uint16_t* down_suh, const float* xsg, const float* xsu, uint16_t* hd,
                      float* hs, uint32_t hidden, uint32_t inter, uint32_t rk_count, uint32_t ks, uint32_t experts,
-                     int defer, float limit) {
+                     int defer, float limit, uint32_t xdiv) {
     __shared__ float xch[128];
     const uint32_t blk = blockIdx.x, rk = blockIdx.y, tid = threadIdx.x;
     const int es = slots[rk];
     if (es < 0 || static_cast<uint32_t>(es) >= experts) return;
     const uint32_t nb = hidden / 128u;
+    const size_t xr = xdiv ? rk / xdiv : rk;
     float sgx = 0.0f, sux = 0.0f;
     if (defer)
         for (uint32_t q = 0; q < nb; ++q) {
-            sgx += xsg[static_cast<size_t>(rk) * nb + q];
-            sux += xsu[static_cast<size_t>(rk) * nb + q];
+            sgx += xsg[xr * nb + q];
+            sux += xsu[xr * nb + q];
         }
     finish_gate_up<PROF>(zg, zu, rk, rk_count, ks, static_cast<size_t>(es), gate_svh, up_svh, down_suh, sgx, sux, hd, hs,
                          rk, inter, blk, defer, limit, true, xch, tid);
@@ -171,17 +180,18 @@ template <int PROF>
 __device__ void fin7(const float* zg, const float* zu, const int* slots, const uint16_t* gate_svh,
                      const uint16_t* up_svh, const uint16_t* down_suh, const float* xsg, const float* xsu, uint16_t* hd,
                      float* hs, uint32_t hidden, uint32_t inter, uint32_t rk_count, uint32_t ks, uint32_t experts,
-                     int defer, float limit) {
+                     int defer, float limit, uint32_t xdiv) {
     const uint32_t blk = blockIdx.x, rk = blockIdx.y, lane = threadIdx.x;
     const int es = slots[rk];
     if (es < 0 || static_cast<uint32_t>(es) >= experts) return;
     const size_t e = static_cast<size_t>(es);
     const uint32_t nb = hidden / 128u;
+    const size_t xr = xdiv ? rk / xdiv : rk;
     float sgx = 0.0f, sux = 0.0f;
     if (defer)
         for (uint32_t q = 0; q < nb; ++q) {
-            sgx += xsg[static_cast<size_t>(rk) * nb + q];
-            sux += xsu[static_cast<size_t>(rk) * nb + q];
+            sgx += xsg[xr * nb + q];
+            sux += xsu[xr * nb + q];
         }
     float g[4], u[4];
 #pragma unroll
@@ -357,8 +367,8 @@ __device__ void gu8(const void* x, const int* slots, const uint16_t* gate_suh, c
 #define T3_PREP2(PNAME, PROF, DNAME, DT)                                                                             \
     extern "C" __global__ void __launch_bounds__(32) t3_dec_prep2_##PNAME##_##DNAME(                                \
         const void* x, const int* slots, const uint16_t* gate_suh, const uint16_t* up_suh, uint16_t* xg,             \
-        uint16_t* xu, float* sg, float* su, uint32_t hidden, uint32_t topk, uint32_t experts) {                     \
-        prep2<DT, PROF>(x, slots, gate_suh, up_suh, xg, xu, sg, su, hidden, topk, experts);                         \
+        uint16_t* xu, float* sg, float* su, uint32_t hidden, uint32_t topk, uint32_t experts, int shared) {          \
+        prep2<DT, PROF>(x, slots, gate_suh, up_suh, xg, xu, sg, su, hidden, topk, experts, shared);                  \
     }
 T3_PREP2(exl3, 0, f32, kF32)
 T3_PREP2(exl3, 0, f16, kF16)
@@ -370,8 +380,8 @@ T3_PREP2(glm, 1, bf16, kBf16)
     extern "C" __global__ void __launch_bounds__(128) t3_dec_gu3_##NAME(                                            \
         const uint16_t* xg, const uint16_t* xu, const int* slots, const uint64_t* gate_t, const uint64_t* up_t,      \
         float* zg, float* zu, uint32_t hidden, uint32_t inter, uint32_t rk_count, uint32_t experts, uint32_t n,      \
-        uint32_t mask) {                                                                                             \
-        gu3<CB, DEFER>(xg, xu, slots, gate_t, up_t, zg, zu, hidden, inter, rk_count, experts, n, mask);              \
+        uint32_t mask, uint32_t xdiv) {                                                                              \
+        gu3<CB, DEFER>(xg, xu, slots, gate_t, up_t, zg, zu, hidden, inter, rk_count, experts, n, mask, xdiv);        \
     }
 T3_GU3(mcg, kMcg, 0)
 T3_GU3(mul1, kMul1, 0)
@@ -382,9 +392,9 @@ T3_GU3(mul1d, kMul1, 1)
     extern "C" __global__ void __launch_bounds__(128) t3_dec_fin3_##PNAME(                                          \
         const float* zg, const float* zu, const int* slots, const uint16_t* gate_svh, const uint16_t* up_svh,        \
         const uint16_t* down_suh, const float* xsg, const float* xsu, uint16_t* hd, float* hs, uint32_t hidden,      \
-        uint32_t inter, uint32_t rk_count, uint32_t ks, uint32_t experts, int defer, float limit) {                   \
+        uint32_t inter, uint32_t rk_count, uint32_t ks, uint32_t experts, int defer, float limit, uint32_t xdiv) {   \
         fin3<PROF>(zg, zu, slots, gate_svh, up_svh, down_suh, xsg, xsu, hd, hs, hidden, inter, rk_count, ks,         \
-                   experts, defer, limit);                                                                           \
+                   experts, defer, limit, xdiv);                                                                     \
     }
 T3_FIN3(exl3, 0)
 T3_FIN3(glm, 1)
@@ -418,9 +428,9 @@ T3_DFIN3(glm, 1, f32, kF32)
     extern "C" __global__ void __launch_bounds__(32) t3_dec_fin7_##PNAME(                                           \
         const float* zg, const float* zu, const int* slots, const uint16_t* gate_svh, const uint16_t* up_svh,        \
         const uint16_t* down_suh, const float* xsg, const float* xsu, uint16_t* hd, float* hs, uint32_t hidden,      \
-        uint32_t inter, uint32_t rk_count, uint32_t ks, uint32_t experts, int defer, float limit) {                   \
+        uint32_t inter, uint32_t rk_count, uint32_t ks, uint32_t experts, int defer, float limit, uint32_t xdiv) {   \
         fin7<PROF>(zg, zu, slots, gate_svh, up_svh, down_suh, xsg, xsu, hd, hs, hidden, inter, rk_count, ks,         \
-                   experts, defer, limit);                                                                           \
+                   experts, defer, limit, xdiv);                                                                     \
     }
 T3_FIN7(exl3, 0)
 T3_FIN7(glm, 1)
