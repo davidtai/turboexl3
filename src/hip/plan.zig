@@ -326,6 +326,43 @@ pub fn decodeForm3(d: Decode) error{BadExl3Shape}![5]Launch {
     return .{ prep, gu, fin, down, dfin };
 }
 
+/// gu8 takes one row when its threadgroup's K span (both halves of a gate/up slice) is whole 128-blocks.
+pub fn gu8Admitted(d: Decode) bool {
+    const per = (d.hidden / 16) / (d.ksGu() * 2);
+    const span = 2 * per * 16;
+    return d.rows == 1 and span % 128 == 0 and 4 * span <= 48 * 1024;
+}
+
+/// Form 9 (served): one row gu8 -> fin7 -> down3 -> dfin7 where gu8 is admitted; else prep2 -> gu3 -> fin7 -> down3
+/// -> dfin7. The bytes of form 3.
+pub fn decodeForm9(d: Decode) error{BadExl3Shape}!struct { launches: [5]Launch, len: usize } {
+    const f3 = try decodeForm3(d);
+    const glm = d.profile == .glm;
+    var fin7 = f3[2];
+    fin7.symbol = if (glm) "t3_dec_fin7_glm" else "t3_dec_fin7_exl3";
+    fin7.block = 32;
+    var dfin7 = f3[4];
+    dfin7.symbol = if (glm) "t3_dec_dfin7_glm_f32" else switch (d.dtype) {
+        .f32 => "t3_dec_dfin7_exl3_f32",
+        .f16 => "t3_dec_dfin7_exl3_f16",
+        .bf16 => "t3_dec_dfin7_exl3_bf16",
+    };
+    dfin7.block = 32 * d.topk;
+    if (!gu8Admitted(d)) return .{ .launches = .{ f3[0], f3[1], fin7, f3[3], dfin7 }, .len = 5 };
+    const names = [4][3][:0]const u8{
+        .{ "t3_dec_gu8_exl3_f32_mcg", "t3_dec_gu8_exl3_f32_mul1", "t3_dec_gu8_exl3_f32_mul1d" },
+        .{ "t3_dec_gu8_exl3_f16_mcg", "t3_dec_gu8_exl3_f16_mul1", "t3_dec_gu8_exl3_f16_mul1d" },
+        .{ "t3_dec_gu8_exl3_bf16_mcg", "t3_dec_gu8_exl3_bf16_mul1", "t3_dec_gu8_exl3_bf16_mul1d" },
+        .{ "t3_dec_gu8_glm_bf16_mcg", "t3_dec_gu8_glm_bf16_mul1", "t3_dec_gu8_glm_bf16_mul1d" },
+    };
+    const row: usize = if (glm) 3 else @backingInt(d.dtype);
+    const per = (d.hidden / 16) / (d.ksGu() * 2);
+    var gu8: Launch = .{ .symbol = names[row][cbIndex(d.dec, d.defer_map)], .group = "decode", .grid = f3[1].grid, .block = 128, .shared = 4 * (2 * per * 16) };
+    for ([_]Role{ .x, .slots, .gate_suh, .up_suh, .gate_t, .up_t, .zg, .zu, .sg, .su }) |r| gu8.add(.{ .buf = r });
+    for ([_]u32{ d.hidden, d.inter, d.topk, d.experts, d.rate.n, d.dec.window.mask() }) |v| gu8.add(.{ .u = v });
+    return .{ .launches = .{ gu8, fin7, f3[3], dfin7, undefined }, .len = 4 };
+}
+
 test "the decode plan's partitions: decode.zig's KS and KS2 at the served ks_max 4" {
     const base: Decode = .{ .hidden = 2560, .inter = 640, .topk = 10, .rows = 1, .experts = 512, .rate = format.Rate.fromK(4), .dec = .mcg, .dtype = .bf16, .defer_map = false };
     // KERNELS.md: at 2560 x 640, KS is 4 (20 input tiles a part) and KS2 is 2 (5 tiles a part)
