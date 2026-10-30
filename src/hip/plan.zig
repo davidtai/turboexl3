@@ -220,6 +220,11 @@ test "the dense plan's partition: dense.zig's K split, tiles and chunks" {
 /// outputs with no score; slots >= experts skipped).
 pub const Profile = enum { exl3, glm };
 
+/// How the host holds the routed bank's trellises (gate_t, up_t, down_t). `contiguous`: one buffer [E][K/16][N/16][n/2
+/// words] a projection. `pointers`: the role binds a u64 [E] table of each expert's own trellis address (a loader that
+/// keeps each expert's tensor apart). The bytes are the same.
+pub const Bank = enum { contiguous, pointers };
+
 pub const Decode = struct {
     hidden: u32,
     inter: u32,
@@ -236,6 +241,7 @@ pub const Decode = struct {
     limit: f32 = 0,
     /// the partitions' first K split (decode.zig Kernels3.init's ks_max; served 4)
     ks_max: u32 = 4,
+    bank: Bank = .contiguous,
 
     pub fn check(d: Decode) error{BadExl3Shape}!void {
         if (d.hidden == 0 or d.inter == 0 or d.hidden % 128 != 0 or d.inter % 128 != 0) return error.BadExl3Shape;
@@ -307,6 +313,7 @@ pub fn decodeForm3(d: Decode) error{BadExl3Shape}![5]Launch {
     var gu: Launch = .{ .symbol = gemvName("gu3", d.dec, d.defer_map), .group = "decode", .grid = .{ d.inter / 16 / kBT, rkn, d.ksGu() }, .block = 128 };
     for ([_]Role{ .xg, .xu, .slots, .gate_t, .up_t, .zg, .zu }) |r| gu.add(.{ .buf = r });
     for ([_]u32{ d.hidden, d.inter, rkn, d.experts, d.rate.n, d.dec.window.mask() }) |v| gu.add(.{ .u = v });
+    gu.add(.{ .i = @intFromBool(d.bank == .pointers) });
     var fin: Launch = .{ .symbol = if (glm) "t3_dec_fin3_glm" else "t3_dec_fin3_exl3", .group = "decode", .grid = .{ d.inter / 128, rkn, 1 }, .block = 128 };
     for ([_]Role{ .zg, .zu, .slots, .gate_svh, .up_svh, .down_suh, .sg, .su, .hd, .hs }) |r| fin.add(.{ .buf = r });
     for ([_]u32{ d.hidden, d.inter, rkn, d.ksGu(), d.experts }) |v| fin.add(.{ .u = v });
@@ -315,6 +322,7 @@ pub fn decodeForm3(d: Decode) error{BadExl3Shape}![5]Launch {
     var down: Launch = .{ .symbol = gemvName("down3", d.dec, d.defer_map), .group = "decode", .grid = .{ d.hidden / 16 / kBT, rkn, d.ksDn() }, .block = 128 };
     for ([_]Role{ .hd, .slots, .down_t, .zd }) |r| down.add(.{ .buf = r });
     for ([_]u32{ d.hidden, d.inter, rkn, d.experts, d.rate.n, d.dec.window.mask() }) |v| down.add(.{ .u = v });
+    down.add(.{ .i = @intFromBool(d.bank == .pointers) });
     var dfin: Launch = .{ .symbol = if (glm) "t3_dec_dfin3_glm_f32" else switch (d.dtype) {
         .f32 => "t3_dec_dfin3_exl3_f32",
         .f16 => "t3_dec_dfin3_exl3_f16",
@@ -360,6 +368,7 @@ pub fn decodeForm9(d: Decode) error{BadExl3Shape}!struct { launches: [5]Launch, 
     var gu8: Launch = .{ .symbol = names[row][cbIndex(d.dec, d.defer_map)], .group = "decode", .grid = f3[1].grid, .block = 128, .shared = 4 * (2 * per * 16) };
     for ([_]Role{ .x, .slots, .gate_suh, .up_suh, .gate_t, .up_t, .zg, .zu, .sg, .su }) |r| gu8.add(.{ .buf = r });
     for ([_]u32{ d.hidden, d.inter, d.topk, d.experts, d.rate.n, d.dec.window.mask() }) |v| gu8.add(.{ .u = v });
+    gu8.add(.{ .i = @intFromBool(d.bank == .pointers) });
     return .{ .launches = .{ gu8, fin7, f3[3], dfin7, undefined }, .len = 4 };
 }
 
@@ -395,6 +404,7 @@ pub const Prefill = struct {
     defer_map: bool,
     profile: Profile = .exl3,
     limit: f32 = 0,
+    bank: Bank = .contiguous,
 
     pub fn check(d: Prefill) error{BadExl3Shape}!void {
         if (d.hidden == 0 or d.inter == 0 or d.hidden % 128 != 0 or d.inter % 128 != 0) return error.BadExl3Shape;
@@ -456,6 +466,7 @@ pub fn prefillChain(d: Prefill) error{BadExl3Shape}![6]Launch {
     var gu: Launch = .{ .symbol = gemmName(d.dec, d.defer_map), .group = "prefill", .grid = .{ d.inter / 128, d.cap(), 2 }, .block = 256 };
     for ([_]Role{ .xg, .xu, .gate_t, .up_t, .items, .zg }) |r| gu.add(.{ .buf = r });
     for ([_]u32{ d.hidden, d.inter, p, d.rate.n, d.dec.window.mask() }) |v| gu.add(.{ .u = v });
+    gu.add(.{ .i = @intFromBool(d.bank == .pointers) });
     var mid: Launch = .{ .symbol = if (glm) "t3_pf_mid_glm" else "t3_pf_mid_exl3", .group = "prefill", .grid = .{ d.inter / 128, p, 1 }, .block = 128 };
     for ([_]Role{ .zg, .order, .slots, .counts, .gate_svh, .up_svh, .down_suh, .sg, .su, .hd, .hs }) |r| mid.add(.{ .buf = r });
     for ([_]u32{ d.hidden, d.inter, p }) |v| mid.add(.{ .u = v });
@@ -464,6 +475,7 @@ pub fn prefillChain(d: Prefill) error{BadExl3Shape}![6]Launch {
     var down: Launch = .{ .symbol = gemmName(d.dec, d.defer_map), .group = "prefill", .grid = .{ d.hidden / 128, d.cap(), 1 }, .block = 256 };
     for ([_]Role{ .hd, .hd, .down_t, .down_t, .items, .zd }) |r| down.add(.{ .buf = r });
     for ([_]u32{ d.inter, d.hidden, p, d.rate.n, d.dec.window.mask() }) |v| down.add(.{ .u = v });
+    down.add(.{ .i = @intFromBool(d.bank == .pointers) });
     var fin: Launch = .{ .symbol = if (glm) "t3_pf_fin_glm_f32" else switch (d.dtype) {
         .f32 => "t3_pf_fin_exl3_f32",
         .f16 => "t3_pf_fin_exl3_f16",
@@ -487,6 +499,7 @@ pub fn denseGemm(d: Dense) error{BadExl3Shape}![3]Launch {
     var gemm: Launch = .{ .symbol = gemmName(d.dec, d.defer_map), .group = "prefill", .grid = .{ d.out / 128, denseTiles(d.rows), 1 }, .block = 256 };
     for ([_]Role{ .xp, .xp, .trellis, .trellis, .items, .z }) |r| gemm.add(.{ .buf = r });
     for ([_]u32{ d.in, d.out, d.rows, d.rate.n, d.dec.window.mask() }) |v| gemm.add(.{ .u = v });
+    gemm.add(.{ .i = 0 }); // the one matrix: no table
     var fin = chain[2];
     fin.grid = .{ d.out / 128, d.rows, 1 };
     fin.args[5] = .{ .u = d.rows };

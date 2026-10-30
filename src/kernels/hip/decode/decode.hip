@@ -69,7 +69,7 @@ constexpr uint32_t kBT = 4;  // output tiles a GEMV threadgroup
 template <int CB, int DEFER>
 __device__ void gu3(const uint16_t* xg, const uint16_t* xu, const int* slots, const uint32_t* gate_t,
                     const uint32_t* up_t, float* zg, float* zu, uint32_t hidden, uint32_t inter, uint32_t rk_count,
-                    uint32_t experts, uint32_t n, uint32_t mask) {
+                    uint32_t experts, uint32_t n, uint32_t mask, int ptrs) {
     __shared__ float red[4][16u * kBT];
     const uint32_t blk = blockIdx.x, rk = blockIdx.y, kz = blockIdx.z, ks = gridDim.z;
     const uint32_t sg = threadIdx.x >> 5, lane = threadIdx.x & 31u, tid = threadIdx.x;
@@ -77,7 +77,7 @@ __device__ void gu3(const uint16_t* xg, const uint16_t* xu, const int* slots, co
     if (es < 0 || static_cast<uint32_t>(es) >= experts) return;
     const uint32_t proj = sg >> 1, khalf = sg & 1u;
     const uint32_t in_tiles = hidden / 16u, out_tiles = inter / 16u;
-    const uint32_t* wbase = (proj == 0u ? gate_t : up_t) + static_cast<size_t>(es) * in_tiles * out_tiles * (n / 2u);
+    const uint32_t* wbase = expert_trellis(proj == 0u ? gate_t : up_t, static_cast<size_t>(es), static_cast<size_t>(in_tiles) * out_tiles * (n / 2u), ptrs);
     const uint16_t* xrow = (proj == 0u ? xg : xu) + 4u * (lane & 3u) + static_cast<size_t>(rk) * hidden;
     const uint32_t per = in_tiles / (ks * 2u);
     const uint32_t tk0 = (kz * 2u + khalf) * per;
@@ -117,14 +117,14 @@ __device__ void fin3(const float* zg, const float* zu, const int* slots, const u
 // Grid (hidden / 16 / BT, RK, KS2), 128 threads: wave sg takes part sg of slice ks; zd f32 [KS2][RK][hidden].
 template <int CB, int DEFER>
 __device__ void down3(const uint16_t* hd, const int* slots, const uint32_t* down_t, float* zd, uint32_t hidden,
-                      uint32_t inter, uint32_t rk_count, uint32_t experts, uint32_t n, uint32_t mask) {
+                      uint32_t inter, uint32_t rk_count, uint32_t experts, uint32_t n, uint32_t mask, int ptrs) {
     __shared__ float red[4][16u * kBT];
     const uint32_t blk = blockIdx.x, rk = blockIdx.y, kz = blockIdx.z, ks = gridDim.z;
     const uint32_t sg = threadIdx.x >> 5, lane = threadIdx.x & 31u, tid = threadIdx.x;
     const int es = slots[rk];
     if (es < 0 || static_cast<uint32_t>(es) >= experts) return;
     const uint32_t in_tiles = inter / 16u, out_tiles = hidden / 16u;
-    const uint32_t* wbase = down_t + static_cast<size_t>(es) * in_tiles * out_tiles * (n / 2u);
+    const uint32_t* wbase = expert_trellis(down_t, static_cast<size_t>(es), static_cast<size_t>(in_tiles) * out_tiles * (n / 2u), ptrs);
     const uint16_t* xrow = hd + 4u * (lane & 3u) + static_cast<size_t>(rk) * inter;
     const uint32_t per = in_tiles / (ks * 4u);
     const uint32_t tk0 = (kz * 4u + sg) * per;
@@ -296,7 +296,7 @@ __device__ void dfin7(const float* zd, const int* slots, const float* scores, co
 template <int DT, int PROF, int CB, int DEFER>
 __device__ void gu8(const void* x, const int* slots, const uint16_t* gate_suh, const uint16_t* up_suh,
                     const uint32_t* gate_t, const uint32_t* up_t, float* zg, float* zu, float* sg, float* su,
-                    uint32_t hidden, uint32_t inter, uint32_t topk, uint32_t experts, uint32_t n, uint32_t mask) {
+                    uint32_t hidden, uint32_t inter, uint32_t topk, uint32_t experts, uint32_t n, uint32_t mask, int ptrs) {
     extern __shared__ __attribute__((aligned(16))) unsigned char smem[];
     __shared__ float red[4][16u * kBT];
     const uint32_t blk = blockIdx.x, rk = blockIdx.y, kz = blockIdx.z, ks = gridDim.z;
@@ -335,7 +335,7 @@ __device__ void gu8(const void* x, const int* slots, const uint16_t* gate_suh, c
     }
     __syncthreads();
     const uint32_t proj = sg_ >> 1, khalf = sg_ & 1u;
-    const uint32_t* wbase = (proj == 0u ? gate_t : up_t) + e * in_tiles * out_tiles * (n / 2u);
+    const uint32_t* wbase = expert_trellis(proj == 0u ? gate_t : up_t, e, static_cast<size_t>(in_tiles) * out_tiles * (n / 2u), ptrs);
     // the GEMV reads x at tile tk of the full row: shift the LDS row so tile tk0's elements sit at its offset
     const uint16_t* xrow = xs + proj * span + 4u * (lane & 3u) - static_cast<size_t>(k0);
     const uint32_t tk0 = (kz * 2u + khalf) * per;
@@ -370,8 +370,8 @@ T3_PREP2(glm, 1, bf16, kBf16)
     extern "C" __global__ void __launch_bounds__(128) t3_dec_gu3_##NAME(                                            \
         const uint16_t* xg, const uint16_t* xu, const int* slots, const uint32_t* gate_t, const uint32_t* up_t,      \
         float* zg, float* zu, uint32_t hidden, uint32_t inter, uint32_t rk_count, uint32_t experts, uint32_t n,      \
-        uint32_t mask) {                                                                                             \
-        gu3<CB, DEFER>(xg, xu, slots, gate_t, up_t, zg, zu, hidden, inter, rk_count, experts, n, mask);              \
+        uint32_t mask, int ptrs) {                                                                                   \
+        gu3<CB, DEFER>(xg, xu, slots, gate_t, up_t, zg, zu, hidden, inter, rk_count, experts, n, mask, ptrs);        \
     }
 T3_GU3(mcg, kMcg, 0)
 T3_GU3(mul1, kMul1, 0)
@@ -393,8 +393,8 @@ T3_FIN3(glm, 1)
 #define T3_DOWN3(NAME, CB, DEFER)                                                                                    \
     extern "C" __global__ void __launch_bounds__(128) t3_dec_down3_##NAME(                                          \
         const uint16_t* hd, const int* slots, const uint32_t* down_t, float* zd, uint32_t hidden, uint32_t inter,    \
-        uint32_t rk_count, uint32_t experts, uint32_t n, uint32_t mask) {                                            \
-        down3<CB, DEFER>(hd, slots, down_t, zd, hidden, inter, rk_count, experts, n, mask);                          \
+        uint32_t rk_count, uint32_t experts, uint32_t n, uint32_t mask, int ptrs) {                                  \
+        down3<CB, DEFER>(hd, slots, down_t, zd, hidden, inter, rk_count, experts, n, mask, ptrs);                    \
     }
 T3_DOWN3(mcg, kMcg, 0)
 T3_DOWN3(mul1, kMul1, 0)
@@ -444,9 +444,9 @@ T3_DFIN7(glm, 1, f32, kF32)
     extern "C" __global__ void __launch_bounds__(128) t3_dec_gu8_##PNAME##_##DNAME##_##CNAME(                       \
         const void* x, const int* slots, const uint16_t* gate_suh, const uint16_t* up_suh, const uint32_t* gate_t,   \
         const uint32_t* up_t, float* zg, float* zu, float* sg, float* su, uint32_t hidden, uint32_t inter,           \
-        uint32_t topk, uint32_t experts, uint32_t n, uint32_t mask) {                                                \
+        uint32_t topk, uint32_t experts, uint32_t n, uint32_t mask, int ptrs) {                                      \
         gu8<DT, PROF, CB, DEFER>(x, slots, gate_suh, up_suh, gate_t, up_t, zg, zu, sg, su, hidden, inter, topk,      \
-                                 experts, n, mask);                                                                  \
+                                 experts, n, mask, ptrs);                                                            \
     }
 #define T3_GU8_CB(PNAME, PROF, DNAME, DT) \
     T3_GU8(PNAME, PROF, DNAME, DT, mcg, kMcg, 0) \
