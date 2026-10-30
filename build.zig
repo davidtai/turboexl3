@@ -85,7 +85,7 @@ fn hipSteps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.built
     const tests = b.addTest(.{ .name = "turboexl3-hip-test", .root_module = b.createModule(.{
         .root_source_file = b.path("src/hip_tests.zig"),
         .target = target,
-        .optimize = if (optimize == .Debug) .ReleaseSafe else optimize,
+        .optimize = if (optimize == .debug) .safe else optimize,
         .link_libc = true,
         .imports = &.{.{ .name = "turboexl3_hip_objects", .module = objects }},
     }) });
