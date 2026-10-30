@@ -45,6 +45,11 @@ comment there could change the kernel; its header may differ in comments too.
 8. Kernel frees. No `mlx.mlx_fast_metal_kernel_free` call in src/*.zig: every kernel turboexl3 drops goes through
    `decode.freeKernel`, the consumer's kernel API (mlx-c's own free would skip mlx-stream's launch-cache eviction, and
    the plugin's server owns its kernels).
+9. HIP. The AMD kernels live only in src/kernels/hip/**.hip and .hpp: every such file is a group source or a header
+   that src/hip/flags.zig lists (and every listed file exists); no string literal in any .zig under src/ (src/hip/
+   included) holds HIP device code (HIP_TOKENS); and each HIP file is listed as the original (byte for byte, or equal but
+   for comments and whitespace), changed or added, with the entry points (`extern "C"` kernels and their macros) of
+   every added or changed file.
 
 Exit status 0 when everything holds.
 """
@@ -1003,7 +1008,8 @@ ADDED[('root.zig', 'fn gdnOutPrep')] = 'the GDN tail\'s API: z\'s finish, the ga
 ADDED_FILES = {'sources.zig': 'the texts more than one kernel splices (had128, the gate gemv and sum), MLX-free, for '
                               'turboexl3\'s kernels and a consumer\'s Metal',
                'gdn_out.zig': 'the GDN tail\'s kernel (turboexl3_gdn_out_prep: its pieces around sources.had128) and launch',
-               'gdn_out_test.zig': 'the GDN tail\'s GPU tests against linearFinish, MLX\'s gated norm and linearPrep'}
+               'gdn_out_test.zig': 'the GDN tail\'s GPU tests against linearFinish, MLX\'s gated norm and linearPrep',
+               'hip_tests.zig': 'the AMD (HIP) kernels\' GPU tests against format.zig (zig build hip-test -Dhip=true); no Metal'}
 # other declarations a change edited on purpose, by file and key, with the reason
 CHANGED = {('tests.zig', 'comptime #0'): 'the test root lists the files the change added'}
 # kernels a change added on purpose, by file and kernel name, with the reason; their newKernel calls are listed in 1
@@ -1045,6 +1051,68 @@ def metal_strings(fn, toks, corpus):
 
 def sha(s):
     return hashlib.sha256(s.encode('utf-8')).hexdigest()[:12]
+
+
+# what marks HIP device code in a string (a Zig string never needs these)
+HIP_TOKENS = ('__global__', '__device__', '__shared__', '__launch_bounds__', 'threadIdx', 'blockIdx', '__shfl',
+              '__syncthreads', '__builtin_amdgcn', 'hip_runtime')
+
+
+def hip_files(src):
+    root = os.path.join(src, 'kernels', 'hip')
+    out = {}
+    if not os.path.isdir(root):
+        return out
+    for d, _, fs in os.walk(root):
+        for f in fs:
+            if f.endswith('.hip') or f.endswith('.hpp'):
+                rel = os.path.relpath(os.path.join(d, f), root)
+                out[rel] = read_bytes(os.path.join(d, f))
+    return out
+
+
+def hip_entries(text):
+    t = text.decode('utf-8', 'replace')
+    return sorted(set(re.findall(r'\bt3_[A-Za-z0-9_]+(?=\s*\()', t)) | set(re.findall(r'^\s*(T3_[A-Z0-9_]+)\(', t, re.M)))
+
+
+def hip_report(orig_dir, new_dir, problems):
+    new = hip_files(new_dir)
+    old = hip_files(orig_dir)
+    flags_path = os.path.join(new_dir, 'hip', 'flags.zig')
+    listed = set()
+    if os.path.exists(flags_path):
+        with open(flags_path, encoding='utf-8') as fh:
+            listed = set(re.findall(r'"([^"]+\.(?:hip|hpp))"', fh.read()))
+    for f in sorted(set(new) - listed):
+        problems.append(f'src/kernels/hip/{f}: not a group source or header in src/hip/flags.zig')
+    for f in sorted(listed - set(new)):
+        problems.append(f'src/hip/flags.zig: lists {f}, which src/kernels/hip does not hold')
+    same = cw = 0
+    for f in sorted(new):
+        if f in old and old[f] == new[f]:
+            same += 1
+        elif f in old and same_but_cw(old[f].decode('utf-8', 'replace'), new[f].decode('utf-8', 'replace'), comments=True):
+            cw += 1
+            print(f'   equal but for comments and whitespace: {f}')
+        else:
+            print(f'   {"changed" if f in old else "added"}: {f}: {", ".join(hip_entries(new[f])) or "(helpers)"}')
+    for f in sorted(set(old) - set(new)):
+        print(f'   removed: {f}: {", ".join(hip_entries(old[f])) or "(helpers)"}')
+    zig_hits = 0
+    for d, _, fs in os.walk(new_dir):
+        for f in fs:
+            if not f.endswith('.zig'):
+                continue
+            path = os.path.join(d, f)
+            with open(path, encoding='utf-8', newline='') as fh:
+                toks = tokenize(fh.read(), f)
+            for tk in toks:
+                if tk.kind in ('str', 'mlstr') and any(h in (tk.value or '') for h in HIP_TOKENS):
+                    zig_hits += 1
+                    problems.append(f'{os.path.relpath(path, new_dir)}:{tk.line}: a string holds HIP device code: {(tk.value or "")[:60]!r}')
+    print(f'   {len(new)} HIP files ({same} the original, {cw} equal but for comments and whitespace); '
+          f'{len(listed)} listed in flags.zig; {zig_hits} Zig strings holding HIP\n')
 
 
 def main():
@@ -1414,6 +1482,10 @@ def main():
                                 'call decode.freeKernel')
     n_calls = sum(1 for u in nunits.values() for k in range(len(u.t) - 1) if u.t[k].text == 'freeKernel' and u.t[k + 1].text == '(')
     print(f'   {n_calls} freeKernel calls; {len(raw)} mlx.mlx_fast_metal_kernel_free calls\n')
+
+    # 9. HIP
+    print('9. HIP: the AMD kernels only in src/kernels/hip, listed in src/hip/flags.zig, no HIP text in Zig')
+    hip_report(orig_dir, new_dir, problems)
 
     if problems:
         print('FAIL')
