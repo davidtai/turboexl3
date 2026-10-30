@@ -974,6 +974,8 @@ test "HIP DEC-ONE: the bytes of the dense chain at rows 1-9, 11 and 16; a captur
             defer cnt.free();
             try cnt.fill(0x5a); // prep_sc zeroes them
             try y.fill(0x7f); // an element nothing writes reads as a NaN pattern, never as a reused buffer's bytes
+            try z.fill(0x7f); // a plane read before its store reads as a NaN pattern
+            try xs.fill(0x7f);
             var bind = std.EnumArray(plan.Role, u64).initFill(0);
             for ([_]plan.Role{ .x, .suh, .svh, .trellis, .xp, .xs, .z, .y, .cnt }, [_]u64{ xb.addr(), p.dsuh.addr(), p.dsvh.addr(), p.dt.addr(), xp.addr(), xs.addr(), z.addr(), y.addr(), cnt.addr() }) |r, a| bind.set(r, a);
             try runLaunches(&g, &launches, bind);
