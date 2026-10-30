@@ -19,7 +19,7 @@ constexpr uint32_t kRouteThreads = 1024;
 // in pair order within an expert (a stable counting sort). order[p] = the pair at sorted position p; inv[rk] = the
 // position of pair rk (-1 for a skipped slot); items[3 i] = (expert, first position, count) of at most `bm` positions,
 // an expert's tiles in order, `cap` item slots (dead ones count 0); counts[0] = live items, counts[1] = positions.
-__global__ void __launch_bounds__(kRouteThreads) route_kernel(const int* slots, uint32_t rk_count, uint32_t experts,
+__device__ void route_kernel(const int* slots, uint32_t rk_count, uint32_t experts,
                                                               uint32_t bm, int* order, int* inv, int* items,
                                                               uint32_t cap, int* counts) {
     __shared__ uint32_t scan_c[kRouteThreads];
