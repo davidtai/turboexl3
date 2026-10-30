@@ -10,6 +10,7 @@ pub const Group = struct { source: []const u8, name: []const u8 };
 pub const groups = [_]Group{
     .{ .source = "test/lane.hip", .name = "test_lane" },
     .{ .source = "dense/dense.hip", .name = "dense" },
+    .{ .source = "decode/decode.hip", .name = "decode" },
 };
 
 /// Every header the groups include (under src/kernels/hip/), so an edit rebuilds them.

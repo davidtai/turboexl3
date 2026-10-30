@@ -166,17 +166,23 @@ const Proj = struct {
 /// The kernels' groups, loaded once a test.
 const Groups = struct {
     dense: rt.Module,
+    decode: rt.Module,
 
     fn load(h: *const rt.Hip) !Groups {
-        return .{ .dense = try h.load(&objects.dense) };
+        var g: Groups = .{ .dense = try h.load(&objects.dense), .decode = undefined };
+        errdefer g.dense.unload();
+        g.decode = try h.load(&objects.decode);
+        return g;
     }
 
     fn unload(g: *Groups) void {
         g.dense.unload();
+        g.decode.unload();
     }
 
     fn module(g: *const Groups, name: []const u8) !rt.Module {
         if (std.mem.eql(u8, name, "dense")) return g.dense;
+        if (std.mem.eql(u8, name, "decode")) return g.decode;
         return error.UnknownGroup;
     }
 };
@@ -190,6 +196,7 @@ fn runLaunches(g: *const Groups, launches: []const plan.Launch, bind: std.EnumAr
             .buf => |r| try a.add(bind.get(r)),
             .u => |v| try a.add(v),
             .i => |v| try a.add(v),
+            .f => |v| try a.add(v),
         };
         try f.launch(.{ .x = l.grid[0], .y = l.grid[1], .z = l.grid[2] }, .{ .x = l.block }, l.shared, &a);
     }
@@ -335,4 +342,301 @@ test "HIP dense chain: rows 1-16 within format.project's bar per row, each row a
         }
     }
     std.debug.print("RESULT HIP dense chain: rows 1-16 within {e:.3} (f32, bar 5e-3) and {e:.3} (bf16, bar 2.5e-2) of format.project, rows alone and lean on/off byte-equal\n", .{ worst_f32, worst_bf16 });
+}
+
+// ---- routed experts at decode rows ------------------------------------------------------------------------------
+
+/// A bank (ref.synthBank's layout: [E, in/16, out/16, n], suh [E, in], svh [E, out]) on the device.
+const DevBank = struct {
+    bufs: [9]rt.Buffer,
+
+    fn init(h: *const rt.Hip, b: *const ref.Bank) !DevBank {
+        var d: DevBank = undefined;
+        const host = [9][]const u16{ b.gate_t, b.up_t, b.down_t, b.gate_suh, b.up_suh, b.gate_svh, b.up_svh, b.down_suh, b.down_svh };
+        var made: usize = 0;
+        errdefer for (d.bufs[0..made]) |*x| x.free();
+        for (host, 0..) |arr, i| {
+            d.bufs[i] = try h.upload(std.mem.sliceAsBytes(arr));
+            made += 1;
+        }
+        return d;
+    }
+
+    fn deinit(d: *DevBank) void {
+        for (&d.bufs) |*x| x.free();
+    }
+
+    fn bindTo(d: *const DevBank, bind: *std.EnumArray(plan.Role, u64)) void {
+        const roles = [9]plan.Role{ .gate_t, .up_t, .down_t, .gate_suh, .up_suh, .gate_svh, .up_svh, .down_suh, .down_svh };
+        for (roles, 0..) |r, i| bind.set(r, d.bufs[i].addr());
+    }
+};
+
+/// Form 3 over `d.rows` rows of x from row `first` (slots and scores from row `first` too): y's bytes (fill 0xff first).
+fn decodeRun(h: *const rt.Hip, g: *const Groups, bank: *const DevBank, x: Input, slots: []const i32, scores: []const f32, first: usize, d: plan.Decode) ![]u8 {
+    const launches = try plan.decodeForm3(d);
+    const xsize: usize = if (d.dtype == .f32) 4 else 2;
+    var xb = try h.upload(x.bytes[first * d.hidden * xsize ..][0 .. d.rows * d.hidden * xsize]);
+    defer xb.free();
+    var sb = try h.upload(std.mem.sliceAsBytes(slots[first * d.topk ..][0 .. d.rows * d.topk]));
+    defer sb.free();
+    var cb = try h.upload(std.mem.sliceAsBytes(scores[first * d.topk ..][0 .. d.rows * d.topk]));
+    defer cb.free();
+    var bind = std.EnumArray(plan.Role, u64).initFill(0);
+    bank.bindTo(&bind);
+    bind.set(.x, xb.addr());
+    bind.set(.slots, sb.addr());
+    bind.set(.scores, cb.addr());
+    const scratch = [_]plan.Role{ .xg, .xu, .sg, .su, .zg, .zu, .hd, .hs, .zd, .y };
+    var bufs: [scratch.len]rt.Buffer = undefined;
+    var made: usize = 0;
+    defer for (bufs[0..made]) |*b| b.free();
+    for (scratch, 0..) |r, i| {
+        bufs[i] = try h.alloc(d.bytes(r));
+        made += 1;
+        bind.set(r, bufs[i].addr());
+    }
+    try bufs[scratch.len - 1].fill(0xff);
+    try runLaunches(g, &launches, bind);
+    const out = try gpa.alloc(u8, d.bytes(.y));
+    errdefer gpa.free(out);
+    try bufs[scratch.len - 1].read(out);
+    return out;
+}
+
+/// Each row's `topk` distinct slots below `experts` (then, with `shared`, the id `experts` last) and softmax-like scores.
+fn routing(rnd: std.Random, rows: usize, topk: usize, experts: usize, shared: bool) !struct { slots: []i32, scores: []f32 } {
+    const k = topk + @intFromBool(shared);
+    const slots = try gpa.alloc(i32, rows * k);
+    errdefer gpa.free(slots);
+    const scores = try gpa.alloc(f32, rows * k);
+    for (0..rows) |r| {
+        var seen: [512]bool = @splat(false);
+        for (0..topk) |j| {
+            var e = rnd.uintLessThan(usize, experts);
+            while (seen[e]) e = rnd.uintLessThan(usize, experts);
+            seen[e] = true;
+            slots[r * k + j] = @intCast(e);
+            scores[r * k + j] = 0.05 + rnd.float(f32) * 0.2;
+        }
+        if (shared) {
+            slots[r * k + topk] = @intCast(experts);
+            scores[r * k + topk] = 1.0;
+        }
+    }
+    return .{ .slots = slots, .scores = scores };
+}
+
+const DecodeCase = struct { hidden: u32, inter: u32, experts: u32, topk: u32, n: u32, dec: format.Decode, dtype: plan.Dtype, defer_map: bool };
+
+test "HIP routed decode, form 3: rows 1-16 within format.project's bar per row (ref.moeRowDec), each row alone" {
+    var h = try rt.Hip.open();
+    defer h.close();
+    var g = try Groups.load(&h);
+    defer g.unload();
+    var prng = std.Random.DefaultPrng.init(0xF03);
+    const rnd = prng.random();
+    const cases = [_]DecodeCase{
+        .{ .hidden = 512, .inter = 256, .experts = 12, .topk = 4, .n = 64, .dec = .mcg, .dtype = .f32, .defer_map = false },
+        .{ .hidden = 512, .inter = 256, .experts = 12, .topk = 4, .n = 64, .dec = .mul1, .dtype = .f32, .defer_map = true },
+        .{ .hidden = 512, .inter = 256, .experts = 12, .topk = 4, .n = 64, .dec = .mul1, .dtype = .f32, .defer_map = false },
+        .{ .hidden = 512, .inter = 256, .experts = 12, .topk = 8, .n = 36, .dec = .mcg, .dtype = .f32, .defer_map = false },
+        .{ .hidden = 512, .inter = 384, .experts = 12, .topk = 4, .n = 128, .dec = .{ .codebook = .mul1, .window = .w12 }, .dtype = .f32, .defer_map = true },
+        .{ .hidden = 2560, .inter = 640, .experts = 16, .topk = 10, .n = 48, .dec = .mul1, .dtype = .bf16, .defer_map = true },
+    };
+    var worst_f32: f64 = 0;
+    var worst_bf16: f64 = 0;
+    for (cases) |c| {
+        const rate = format.Rate.fromN(c.n).?;
+        var bank = try ref.synthBank(gpa, rnd, c.experts, c.hidden, c.inter, rate);
+        defer bank.deinit(gpa);
+        var dbank = try DevBank.init(&h, &bank);
+        defer dbank.deinit();
+        const max_rows = 16;
+        var x = try Input.init(rnd, max_rows * c.hidden, c.dtype);
+        defer x.deinit();
+        const rt_ = try routing(rnd, max_rows, c.topk, c.experts, false);
+        defer gpa.free(rt_.slots);
+        defer gpa.free(rt_.scores);
+        const yref = try gpa.alloc(f32, max_rows * c.hidden);
+        defer gpa.free(yref);
+        for (0..max_rows) |r| {
+            var sl: [32]u32 = undefined;
+            for (0..c.topk) |j| sl[j] = @intCast(rt_.slots[r * c.topk + j]);
+            try ref.moeRowDec(gpa, &bank, c.dec, x.values[r * c.hidden ..][0..c.hidden], sl[0..c.topk], rt_.scores[r * c.topk ..][0..c.topk], yref[r * c.hidden ..][0..c.hidden]);
+        }
+        const got = try gpa.alloc(f32, max_rows * c.hidden);
+        defer gpa.free(got);
+        const ysize: usize = if (c.dtype == .f32) 4 else 2;
+        const bar: f64 = if (c.dtype == .f32) 5e-3 else 1.5e-2;
+        for ([_]u32{ 1, 2, 3, 4, 5, 8, 16 }) |rows| {
+            const d: plan.Decode = .{ .hidden = c.hidden, .inter = c.inter, .topk = c.topk, .rows = rows, .experts = c.experts, .rate = rate, .dec = c.dec, .dtype = c.dtype, .defer_map = c.defer_map };
+            const y = try decodeRun(&h, &g, &dbank, x, rt_.slots, rt_.scores, 0, d);
+            defer gpa.free(y);
+            toF32(y, c.dtype, got[0 .. rows * c.hidden]);
+            for (0..rows) |r| {
+                const e = ref.compare(got[r * c.hidden ..][0..c.hidden], yref[r * c.hidden ..][0..c.hidden]);
+                try expect(e.max_ratio <= bar, "decode {d}x{d} n {d} {s} rows {d} row {d}: {e:.3} over the bar {e}", .{ c.hidden, c.inter, c.n, @tagName(c.dec.codebook), rows, r, e.max_ratio, bar });
+                if (c.dtype == .f32) worst_f32 = @max(worst_f32, e.max_ratio) else worst_bf16 = @max(worst_bf16, e.max_ratio);
+            }
+            if (rows > 1) for ([_]usize{ 0, rows - 1 }) |r| {
+                var d1 = d;
+                d1.rows = 1;
+                const alone = try decodeRun(&h, &g, &dbank, x, rt_.slots, rt_.scores, r, d1);
+                defer gpa.free(alone);
+                try expect(std.mem.eql(u8, alone, y[r * c.hidden * ysize ..][0 .. c.hidden * ysize]), "decode {d}x{d} rows {d}: row {d} differs from the row alone", .{ c.hidden, c.inter, rows, r });
+            };
+        }
+    }
+    std.debug.print("RESULT HIP routed decode form 3 (format.project's profile): within {e:.3} (f32, bar 5e-3) and {e:.3} (bf16, bar 1.5e-2), rows alone byte-equal\n", .{ worst_f32, worst_bf16 });
+}
+
+// ---- the GLM profile against float64 --------------------------------------------------------------------------
+
+/// The 128-blocks of a row-major [rows][cols] f64 matrix along `axis` through H / sqrt(128), a butterfly in f64.
+fn rotate64(x: []f64, rows: usize, cols: usize, axis: usize) void {
+    const inv = 1.0 / @sqrt(128.0);
+    if (axis == 0) {
+        var b: usize = 0;
+        while (b < rows) : (b += 128) {
+            var hh: usize = 1;
+            while (hh < 128) : (hh *= 2) {
+                var i: usize = 0;
+                while (i < 128) : (i += 2 * hh) for (i..i + hh) |r| {
+                    const p = x[(b + r) * cols ..][0..cols];
+                    const q = x[(b + r + hh) * cols ..][0..cols];
+                    for (p, q) |*u, *v| {
+                        const t = u.*;
+                        u.* = t + v.*;
+                        v.* = t - v.*;
+                    }
+                };
+            }
+        }
+    } else for (0..rows) |r| {
+        var b: usize = 0;
+        while (b < cols) : (b += 128) {
+            const v = x[r * cols + b ..][0..128];
+            var hh: usize = 1;
+            while (hh < 128) : (hh *= 2) {
+                var i: usize = 0;
+                while (i < 128) : (i += 2 * hh) for (i..i + hh) |j| {
+                    const t = v[j];
+                    v[j] = t + v[j + hh];
+                    v[j + hh] = t - v[j + hh];
+                };
+            }
+        }
+    }
+    for (x) |*v| v.* *= inv;
+}
+
+/// W = diag(suh) H W_q H diag(svh) [in][out] in f64 (W_q from format.reconstructInner; f16 scratch `wq`).
+fn dequant64(trellis: []const u16, suh: []const u16, svh: []const u16, in: usize, out: usize, rate: format.Rate, dec: format.Decode, w: []f64, wq: []u16) void {
+    format.reconstructInner(trellis, in, out, rate, dec, wq[0 .. in * out]);
+    for (w[0 .. in * out], wq[0 .. in * out]) |*d, b| d.* = format.f16BitsToF32(b);
+    rotate64(w[0 .. in * out], in, out, 0);
+    for (w[0 .. in * out], 0..) |*v, i| v.* *= format.f16BitsToF32(suh[i / out]);
+    rotate64(w[0 .. in * out], in, out, 1);
+    for (w[0 .. in * out], 0..) |*v, i| v.* *= format.f16BitsToF32(svh[i % out]);
+}
+
+fn bf16Round(v: f64) f64 {
+    const f: f32 = @floatCast(v);
+    if (std.math.isNan(f)) return f;
+    const u: u32 = @bitCast(f);
+    return @as(f32, @bitCast((u +% 0x7fff +% ((u >> 16) & 1)) & 0xffff0000));
+}
+
+/// GLM's SwiGLU: gate and up rounded to bf16 and limited, silu rounded to bf16, the product rounded to bf16.
+fn glmAct(gv: f64, uv: f64, limit: f64) f64 {
+    var gg = bf16Round(gv);
+    var uu = bf16Round(uv);
+    if (limit > 0) {
+        gg = @min(gg, limit);
+        uu = @max(@min(uu, limit), -limit);
+    }
+    return bf16Round(bf16Round(gg / (1 + @exp(-gg))) * uu);
+}
+
+test "HIP routed decode, GLM profile: each routed slot's f32 output within the CUDA test's float64 tolerance" {
+    var h = try rt.Hip.open();
+    defer h.close();
+    var g = try Groups.load(&h);
+    defer g.unload();
+    var prng = std.Random.DefaultPrng.init(0x61A);
+    const rnd = prng.random();
+    const limit: f32 = 7.0;
+    const Shape = struct { hidden: u32, inter: u32, experts: u32 };
+    var worst: f64 = 0;
+    for ([_]Shape{ .{ .hidden = 512, .inter = 256, .experts = 12 }, .{ .hidden = 4096, .inter = 2048, .experts = 9 } }) |sh| {
+        const rate = format.Rate.fromK(4);
+        var bank = try ref.synthBank(gpa, rnd, sh.experts, sh.hidden, sh.inter, rate);
+        defer bank.deinit(gpa);
+        var dbank = try DevBank.init(&h, &bank);
+        defer dbank.deinit();
+        const topk = 8;
+        const k = topk + 1; // the shared slot last, skipped
+        const max_rows = 8;
+        var x = try Input.init(rnd, max_rows * sh.hidden, .bf16);
+        defer x.deinit();
+        const rt_ = try routing(rnd, max_rows, topk, sh.experts, true);
+        defer gpa.free(rt_.slots);
+        defer gpa.free(rt_.scores);
+        const D = sh.hidden;
+        const N = sh.inter;
+        for ([_]u32{ 1, 4, 8 }) |rows| {
+            const d: plan.Decode = .{ .hidden = D, .inter = N, .topk = k, .rows = rows, .experts = sh.experts, .rate = rate, .dec = .mcg, .dtype = .bf16, .defer_map = false, .profile = .glm, .limit = limit };
+            const yb = try decodeRun(&h, &g, &dbank, x, rt_.slots, rt_.scores, 0, d);
+            defer gpa.free(yb);
+            const y: []const f32 = @alignCast(std.mem.bytesAsSlice(f32, yb));
+            // the shared slot untouched (the fill's bytes)
+            for (0..rows) |r| for (y[(r * k + topk) * D ..][0..D]) |v| try expect(@as(u32, @bitCast(v)) == 0xffffffff, "GLM decode: the shared slot left alone", .{});
+            // float64, an expert at a time
+            var w: [3][]f64 = undefined;
+            for (&w) |*m| m.* = try gpa.alloc(f64, D * N);
+            defer for (w) |m| gpa.free(m);
+            const wq = try gpa.alloc(u16, D * N);
+            defer gpa.free(wq);
+            const gu = try gpa.alloc(f64, 2 * N);
+            defer gpa.free(gu);
+            const yy = try gpa.alloc(f64, 2 * D);
+            defer gpa.free(yy);
+            const stride = bank.guStride();
+            for (0..sh.experts) |e| {
+                var used = false;
+                for (0..rows) |r| for (0..topk) |j| {
+                    used = used or rt_.slots[r * k + j] == @as(i32, @intCast(e));
+                };
+                if (!used) continue;
+                dequant64(bank.gate_t[e * stride ..][0..stride], bank.gate_suh[e * D ..][0..D], bank.gate_svh[e * N ..][0..N], D, N, rate, .mcg, w[0], wq);
+                dequant64(bank.up_t[e * stride ..][0..stride], bank.up_suh[e * D ..][0..D], bank.up_svh[e * N ..][0..N], D, N, rate, .mcg, w[1], wq);
+                dequant64(bank.down_t[e * stride ..][0..stride], bank.down_suh[e * N ..][0..N], bank.down_svh[e * D ..][0..D], N, D, rate, .mcg, w[2], wq);
+                for (0..rows) |r| for (0..topk) |j| {
+                    if (rt_.slots[r * k + j] != @as(i32, @intCast(e))) continue;
+                    @memset(gu, 0);
+                    for (0..D) |kk| {
+                        const xv: f64 = x.values[r * D + kk];
+                        for (gu[0..N], gu[N..], w[0][kk * N ..][0..N], w[1][kk * N ..][0..N]) |*a, *b, w0, w1| {
+                            a.* += xv * w0;
+                            b.* += xv * w1;
+                        }
+                    }
+                    for (0..N) |nn| gu[nn] = glmAct(gu[nn], gu[N + nn], limit);
+                    @memset(yy, 0);
+                    for (0..N) |kk| for (yy[0..D], yy[D..], w[2][kk * D ..][0..D]) |*o, *mag, wd| {
+                        o.* += gu[kk] * wd;
+                        mag.* += @abs(gu[kk] * wd);
+                    };
+                    for (0..D) |cc| {
+                        const tol = yy[D + cc] / 64.0 + 1e-6;
+                        const q = @abs(@as(f64, y[(r * k + j) * D + cc]) - yy[cc]) / tol;
+                        try expect(q <= 1, "GLM decode {d}x{d} rows {d} row {d} slot {d} column {d}: {d:.3} of its tolerance", .{ D, N, rows, r, j, cc, q });
+                        worst = @max(worst, q);
+                    }
+                };
+            }
+        }
+    }
+    std.debug.print("RESULT HIP routed decode form 3 (GLM profile): every routed slot within {d:.3} of the float64 tolerance, the shared slot untouched\n", .{worst});
 }
