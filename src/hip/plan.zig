@@ -6,11 +6,42 @@ const std = @import("std");
 const format = @import("../format.zig");
 
 /// A buffer a launch reads or writes, bound by the host.
-pub const Role = enum { x, suh, svh, trellis, xp, xs, z, y };
+pub const Role = enum {
+    x,
+    suh,
+    svh,
+    trellis,
+    xp,
+    xs,
+    z,
+    y,
+    // the routed experts: the routing and the bank
+    slots,
+    scores,
+    gate_t,
+    up_t,
+    down_t,
+    gate_suh,
+    up_suh,
+    gate_svh,
+    up_svh,
+    down_suh,
+    down_svh,
+    // the decode chain's scratch
+    xg,
+    xu,
+    sg,
+    su,
+    zg,
+    zu,
+    hd,
+    hs,
+    zd,
+};
 
-pub const Arg = union(enum) { buf: Role, u: u32, i: i32 };
+pub const Arg = union(enum) { buf: Role, u: u32, i: i32, f: f32 };
 
-pub const max_args = 12;
+pub const max_args = 20;
 
 pub const Launch = struct {
     /// the kernel's name in its group's code object
@@ -176,4 +207,123 @@ test "the dense plan's partition: dense.zig's K split, tiles and chunks" {
     try std.testing.expectEqual(@as(u32, 1), btFor(5));
     // 2560 x 640: KS divides 40 and 10 groups of 4 output tiles take KS 20 to reach 160 threadgroups (dense.zig's 20)
     try std.testing.expectEqual(@as(u32, 20), ksFor(2560, 640));
+}
+
+// ---- routed experts at decode rows (docs/KERNELS.md section 1) ------------------------------------------------------
+
+/// The rounding profile (decode.hip PROF): format.project's, or GLM's (f32 z, GLM's bf16 SwiGLU and clamp, per-slot f32
+/// outputs with no score; slots >= experts skipped).
+pub const Profile = enum { exl3, glm };
+
+pub const Decode = struct {
+    hidden: u32,
+    inter: u32,
+    topk: u32,
+    rows: u32,
+    /// routed experts; a slot id >= experts (GLM's shared slot) is skipped under the GLM profile
+    experts: u32,
+    rate: format.Rate,
+    dec: format.Decode,
+    dtype: Dtype,
+    defer_map: bool,
+    profile: Profile = .exl3,
+    /// the SwiGLU clamp (GLM profile; 0 none)
+    limit: f32 = 0,
+    /// the partitions' first K split (decode.zig Kernels3.init's ks_max; served 4)
+    ks_max: u32 = 4,
+
+    pub fn check(d: Decode) error{BadExl3Shape}!void {
+        if (d.hidden == 0 or d.inter == 0 or d.hidden % 128 != 0 or d.inter % 128 != 0) return error.BadExl3Shape;
+        if (d.rows == 0 or d.rows > 16 or d.topk == 0 or d.topk > 32 or d.experts == 0) return error.BadExl3Shape;
+        if (d.defer_map and d.dec.codebook != .mul1) return error.BadExl3Shape;
+        if (d.profile == .glm and d.dtype != .bf16) return error.BadExl3Shape;
+        if (d.ks_max != 1 and d.ks_max != 2 and d.ks_max != 4 and d.ks_max != 8) return error.BadExl3Shape;
+    }
+
+    /// gate/up: hidden / 16 tiles in KS x 2 parts (decode.zig Kernels3.initWith)
+    pub fn ksGu(d: Decode) u32 {
+        var k = d.ks_max;
+        while (k > 1 and (d.hidden / 16) % (k * 2) != 0) k /= 2;
+        return k;
+    }
+
+    /// down: inter / 16 tiles in KS2 x 4 parts of at least 2 tiles
+    pub fn ksDn(d: Decode) u32 {
+        var k = d.ks_max;
+        while (k > 1 and ((d.inter / 16) % (k * 4) != 0 or (d.inter / 16) / (k * 4) < 2)) k /= 2;
+        return k;
+    }
+
+    pub fn rk(d: Decode) u32 {
+        return d.rows * d.topk;
+    }
+
+    /// The bytes of each scratch role.
+    pub fn bytes(d: Decode, r: Role) usize {
+        const rkn: usize = d.rk();
+        return switch (r) {
+            .xg, .xu => rkn * d.hidden * 2,
+            .sg, .su => rkn * (d.hidden / 128) * 4,
+            .zg, .zu => @as(usize, d.ksGu()) * rkn * d.inter * 4,
+            .hd => rkn * d.inter * 2,
+            .hs => rkn * (d.inter / 128) * 4,
+            .zd => @as(usize, d.ksDn()) * rkn * d.hidden * 4,
+            // y: [rows][hidden] in the dtype; the GLM profile: f32 [RK][hidden]
+            .y => if (d.profile == .glm) rkn * d.hidden * 4 else @as(usize, d.rows) * d.hidden * @as(usize, if (d.dtype == .f32) 4 else 2),
+            else => 0,
+        };
+    }
+};
+
+const kBT = 4; // decode.hip kBT
+
+fn gemvName(comptime kind: []const u8, dec: format.Decode, defer_map: bool) [:0]const u8 {
+    return switch (cbIndex(dec, defer_map)) {
+        0 => "t3_dec_" ++ kind ++ "_mcg",
+        1 => "t3_dec_" ++ kind ++ "_mul1",
+        else => "t3_dec_" ++ kind ++ "_mul1d",
+    };
+}
+
+/// Form 3: prep2 -> gu3 -> fin3 -> down3 -> dfin3.
+pub fn decodeForm3(d: Decode) error{BadExl3Shape}![5]Launch {
+    try d.check();
+    const rkn = d.rk();
+    const glm = d.profile == .glm;
+    var prep: Launch = .{ .symbol = if (glm) "t3_dec_prep2_glm_bf16" else switch (d.dtype) {
+        .f32 => "t3_dec_prep2_exl3_f32",
+        .f16 => "t3_dec_prep2_exl3_f16",
+        .bf16 => "t3_dec_prep2_exl3_bf16",
+    }, .group = "decode", .grid = .{ d.hidden / 128, rkn, 1 }, .block = 32 };
+    for ([_]Role{ .x, .slots, .gate_suh, .up_suh, .xg, .xu, .sg, .su }) |r| prep.add(.{ .buf = r });
+    prep.add(.{ .u = d.hidden });
+    prep.add(.{ .u = d.topk });
+    prep.add(.{ .u = d.experts });
+    var gu: Launch = .{ .symbol = gemvName("gu3", d.dec, d.defer_map), .group = "decode", .grid = .{ d.inter / 16 / kBT, rkn, d.ksGu() }, .block = 128 };
+    for ([_]Role{ .xg, .xu, .slots, .gate_t, .up_t, .zg, .zu }) |r| gu.add(.{ .buf = r });
+    for ([_]u32{ d.hidden, d.inter, rkn, d.experts, d.rate.n, d.dec.window.mask() }) |v| gu.add(.{ .u = v });
+    var fin: Launch = .{ .symbol = if (glm) "t3_dec_fin3_glm" else "t3_dec_fin3_exl3", .group = "decode", .grid = .{ d.inter / 128, rkn, 1 }, .block = 128 };
+    for ([_]Role{ .zg, .zu, .slots, .gate_svh, .up_svh, .down_suh, .sg, .su, .hd, .hs }) |r| fin.add(.{ .buf = r });
+    for ([_]u32{ d.hidden, d.inter, rkn, d.ksGu(), d.experts }) |v| fin.add(.{ .u = v });
+    fin.add(.{ .i = @intFromBool(d.defer_map) });
+    fin.add(.{ .f = d.limit });
+    var down: Launch = .{ .symbol = gemvName("down3", d.dec, d.defer_map), .group = "decode", .grid = .{ d.hidden / 16 / kBT, rkn, d.ksDn() }, .block = 128 };
+    for ([_]Role{ .hd, .slots, .down_t, .zd }) |r| down.add(.{ .buf = r });
+    for ([_]u32{ d.hidden, d.inter, rkn, d.experts, d.rate.n, d.dec.window.mask() }) |v| down.add(.{ .u = v });
+    var dfin: Launch = .{ .symbol = if (glm) "t3_dec_dfin3_glm_f32" else switch (d.dtype) {
+        .f32 => "t3_dec_dfin3_exl3_f32",
+        .f16 => "t3_dec_dfin3_exl3_f16",
+        .bf16 => "t3_dec_dfin3_exl3_bf16",
+    }, .group = "decode", .grid = .{ d.hidden / 128, d.rows, 1 }, .block = 128 };
+    for ([_]Role{ .zd, .slots, .scores, .down_svh, .hs, .y }) |r| dfin.add(.{ .buf = r });
+    for ([_]u32{ d.hidden, d.inter, d.topk, rkn, d.ksDn(), d.experts }) |v| dfin.add(.{ .u = v });
+    dfin.add(.{ .i = @intFromBool(d.defer_map) });
+    return .{ prep, gu, fin, down, dfin };
+}
+
+test "the decode plan's partitions: decode.zig's KS and KS2 at the served ks_max 4" {
+    const base: Decode = .{ .hidden = 2560, .inter = 640, .topk = 10, .rows = 1, .experts = 512, .rate = format.Rate.fromK(4), .dec = .mcg, .dtype = .bf16, .defer_map = false };
+    // KERNELS.md: at 2560 x 640, KS is 4 (20 input tiles a part) and KS2 is 2 (5 tiles a part)
+    try std.testing.expectEqual(@as(u32, 4), base.ksGu());
+    try std.testing.expectEqual(@as(u32, 2), base.ksDn());
 }
