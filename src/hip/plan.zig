@@ -149,7 +149,7 @@ pub const Dense = struct {
 
 const dgemv_names = blk: {
     var t: [3][lean_rb][:0]const u8 = undefined;
-    for (.{ "mcg", "mul1", "mul1d" }, 0..) |cb, i| {
+    for ([_][]const u8{ "mcg", "mul1", "mul1d" }, 0..) |cb, i| {
         for (0..lean_rb) |r| t[i][r] = std.fmt.comptimePrint("t3_dense_dgemv_{s}_{d}", .{ cb, r + 1 });
     }
     break :blk t;
