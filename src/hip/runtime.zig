@@ -42,8 +42,9 @@ pub const Hip = struct {
         var lib = std.DynLib.open("libamdhip64.so") catch return error.HipUnavailable;
         errdefer lib.close();
         var api: Api = undefined;
-        inline for (@typeInfo(Api).@"struct".fields) |f| {
-            @field(api, f.name) = lib.lookup(f.type, f.name ++ "") orelse return error.MissingSymbol;
+        const info = @typeInfo(Api).@"struct";
+        inline for (info.field_names, info.field_types) |name, T| {
+            @field(api, name) = lib.lookup(T, name) orelse return error.MissingSymbol;
         }
         var h: Hip = .{ .lib = lib, .api = api };
         try h.check(api.hipInit(0));
