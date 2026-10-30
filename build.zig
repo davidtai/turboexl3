@@ -50,6 +50,49 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
+    // the AMD (HIP) kernels: only with -Dhip=true, so the Metal path builds as before
+    if (b.option(bool, "hip", "Build the AMD (HIP) kernels and their GPU tests: Linux, hipcc") orelse false) hipSteps(b, target, optimize);
+}
+
+/// hip-build (the code objects and the test binary, no GPU work) and hip-test (the kernels on the GPU against
+/// format.zig). Options: -Dhipcc (default hipcc), -Dhip-arch (default gfx1151; src/hip/flags.zig lists the admitted
+/// chips), -Dhip-device-lib (default <rocm>/lib/llvm/amdgcn/bitcode, <rocm> two levels above hipcc).
+fn hipSteps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {
+    const flags = @import("src/hip/flags.zig");
+    const hipcc = b.option([]const u8, "hipcc", "HIP compiler") orelse "hipcc";
+    const arch = b.option([]const u8, "hip-arch", "Exact GPU architecture of the code objects") orelse "gfx1151";
+    if (!flags.admitted(arch)) std.debug.panic("-Dhip-arch {s} is not in src/hip/flags.zig's arches", .{arch});
+    const resolved = b.findProgram(.{ .names = &.{hipcc} }) orelse hipcc;
+    const rocm = std.fs.path.dirname(std.fs.path.dirname(resolved) orelse ".") orelse ".";
+    const device_lib = b.option([]const u8, "hip-device-lib", "ROCm device bitcode directory") orelse b.fmt("{s}/lib/llvm/amdgcn/bitcode", .{rocm});
+    const files = b.addWriteFiles();
+    var decls: []const u8 = b.fmt("pub const arch = \"{s}\";\n", .{arch});
+    for (flags.groups) |g| {
+        const run = b.addSystemCommand(&.{hipcc});
+        run.addArgs(&flags.flags);
+        run.addArg(b.fmt("--offload-arch={s}", .{arch}));
+        run.addArg(b.fmt("--rocm-path={s}", .{rocm}));
+        run.addArg(b.fmt("--rocm-device-lib-path={s}", .{device_lib}));
+        run.addPrefixedDirectoryArg("-I", b.path("src/kernels/hip"));
+        for (flags.headers) |hd| run.addFileInput(b.path(b.fmt("src/kernels/hip/{s}", .{hd})));
+        run.addArg("-o");
+        const object = run.addOutputFileArg(b.fmt("{s}.hsaco", .{g.name}));
+        run.addFileArg(b.path(b.fmt("src/kernels/hip/{s}", .{g.source})));
+        _ = files.addCopyFile(object, b.fmt("{s}.hsaco", .{g.name}));
+        decls = b.fmt("{s}pub const {s} align(8) = @embedFile(\"{s}.hsaco\").*;\n", .{ decls, g.name, g.name });
+    }
+    const objects = b.createModule(.{ .root_source_file = files.add("objects.zig", decls) });
+    const tests = b.addTest(.{ .name = "turboexl3-hip-test", .root_module = b.createModule(.{
+        .root_source_file = b.path("src/hip_tests.zig"),
+        .target = target,
+        .optimize = if (optimize == .Debug) .ReleaseSafe else optimize,
+        .link_libc = true,
+        .imports = &.{.{ .name = "turboexl3_hip_objects", .module = objects }},
+    }) });
+    b.step("hip-build", "Build the HIP code objects and the GPU test binary (no GPU work)").dependOn(&b.addInstallArtifact(tests, .{}).step);
+    const run_tests = b.addRunArtifact(tests);
+    run_tests.has_side_effects = true; // the GPU is not a cached input
+    b.step("hip-test", "The HIP kernels on the GPU against format.zig").dependOn(&run_tests.step);
 }
 
 /// The test root module over the consumer's `sdk` and `mlx_host`, for a consumer's build.zig:
