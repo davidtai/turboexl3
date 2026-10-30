@@ -194,6 +194,10 @@ const Groups = struct {
 
 /// Runs a plan's launches with each role bound to `bind`'s address.
 fn runLaunches(g: *const Groups, launches: []const plan.Launch, bind: std.EnumArray(plan.Role, u64)) !void {
+    try runLaunchesOn(g, null, launches, bind);
+}
+
+fn runLaunchesOn(g: *const Groups, stream: ?rt.Stream, launches: []const plan.Launch, bind: std.EnumArray(plan.Role, u64)) !void {
     for (launches) |*l| {
         const f = try (try g.module(l.group)).function(l.symbol);
         var a: rt.Args = .{};
@@ -203,7 +207,7 @@ fn runLaunches(g: *const Groups, launches: []const plan.Launch, bind: std.EnumAr
             .i => |v| try a.add(v),
             .f => |v| try a.add(v),
         };
-        try f.launch(.{ .x = l.grid[0], .y = l.grid[1], .z = l.grid[2] }, .{ .x = l.block }, l.shared, &a);
+        try f.launchOn(stream, .{ .x = l.grid[0], .y = l.grid[1], .z = l.grid[2] }, .{ .x = l.block }, l.shared, &a);
     }
 }
 
@@ -925,4 +929,78 @@ test "HIP routed decode, form 9: the bytes of form 3 at rows 1-5, 8 and 16, both
         }
     }
     std.debug.print("RESULT HIP routed decode form 9: {d} calls byte-identical to form 3 ({d} of them through gu8)\n", .{ compared, with_gu8 });
+}
+
+// ---- DEC-ONE ------------------------------------------------------------------------------------------------------
+
+test "HIP DEC-ONE: the bytes of the dense chain at rows 1-9, 11 and 16; a captured graph replayed twice gives them again" {
+    var h = try rt.Hip.open();
+    defer h.close();
+    var g = try Groups.load(&h);
+    defer g.unload();
+    var prng = std.Random.DefaultPrng.init(0xDEC1);
+    const rnd = prng.random();
+    const cases = [_]DenseCase{
+        .{ .in = 512, .out = 256, .n = 64, .dec = .mcg, .dtype = .f32, .defer_map = false },
+        .{ .in = 512, .out = 256, .n = 64, .dec = .mul1, .dtype = .f32, .defer_map = true },
+        .{ .in = 512, .out = 384, .n = 36, .dec = .mul1, .dtype = .bf16, .defer_map = false },
+        .{ .in = 2560, .out = 640, .n = 80, .dec = .mul1, .dtype = .bf16, .defer_map = true },
+        .{ .in = 4096, .out = 2048, .n = 64, .dec = .{ .codebook = .mcg, .window = .w12 }, .dtype = .bf16, .defer_map = false },
+    };
+    var compared: usize = 0;
+    for (cases) |c| {
+        const rate = format.Rate.fromN(c.n).?;
+        var p = try Proj.init(&h, rnd, c.in, c.out, rate);
+        defer p.deinit();
+        var x = try Input.init(rnd, 16 * c.in, c.dtype);
+        defer x.deinit();
+        const xsize: usize = if (c.dtype == .f32) 4 else 2;
+        for ([_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 16 }) |rows| {
+            const d: plan.Dense = .{ .in = c.in, .out = c.out, .rows = rows, .rate = rate, .dec = c.dec, .dtype = c.dtype, .defer_map = c.defer_map, .lean = false };
+            const chain = try denseRun(&h, &g, &p, x, 0, d);
+            defer gpa.free(chain);
+            const launches = try plan.denseDecOne(d);
+            var xb = try h.upload(x.bytes[0 .. rows * c.in * xsize]);
+            defer xb.free();
+            var xp = try h.alloc(d.xpBytes());
+            defer xp.free();
+            var xs = try h.alloc(d.xsBytes());
+            defer xs.free();
+            var z = try h.alloc(d.zBytes());
+            defer z.free();
+            var y = try h.alloc(rows * c.out * xsize);
+            defer y.free();
+            var cnt = try h.alloc(@as(usize, plan.decOneCounters(d)) * 4);
+            defer cnt.free();
+            try cnt.fill(0x5a); // prep_sc zeroes them
+            var bind = std.EnumArray(plan.Role, u64).initFill(0);
+            for ([_]plan.Role{ .x, .suh, .svh, .trellis, .xp, .xs, .z, .y, .cnt }, [_]u64{ xb.addr(), p.dsuh.addr(), p.dsvh.addr(), p.dt.addr(), xp.addr(), xs.addr(), z.addr(), y.addr(), cnt.addr() }) |r, a| bind.set(r, a);
+            try runLaunches(&g, &launches, bind);
+            const got = try gpa.alloc(u8, y.len);
+            defer gpa.free(got);
+            try y.read(got);
+            try expect(std.mem.eql(u8, got, chain), "DEC-ONE {d}x{d} {s} rows {d}: bytes differ from the chain", .{ c.in, c.out, @tagName(c.dec.codebook), rows });
+            compared += 1;
+            // a captured graph, replayed twice: the counters start at 0 each time (prep_sc), so the same bytes
+            if (rows == 1 or rows == 9) {
+                var s = try h.stream();
+                defer s.destroy();
+                try s.beginCapture();
+                runLaunchesOn(&g, s, &launches, bind) catch |err| {
+                    _ = s.endCapture() catch {};
+                    return err;
+                };
+                var graph = try s.endCapture();
+                defer graph.destroy();
+                for (0..2) |_| {
+                    try y.fill(0);
+                    try graph.launch(s);
+                    try s.sync();
+                    try y.read(got);
+                    try expect(std.mem.eql(u8, got, chain), "DEC-ONE {d}x{d} rows {d}: a graph replay differs from the chain", .{ c.in, c.out, rows });
+                }
+            }
+        }
+    }
+    std.debug.print("RESULT HIP DEC-ONE: {d} calls byte-identical to the dense chain; graph replays (twice) byte-identical\n", .{compared});
 }

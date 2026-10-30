@@ -118,12 +118,12 @@ __device__ void dgemv(const uint32_t* w, const uint16_t* xp, float* z, uint32_t 
     }
 }
 
-// Grid (OUT / 128, rows), 32 threads: the planes summed in slice order, the deferred map (A acc + C sum x), f16, the
-// output H128, svh, f16, then y in its dtype.
-template <int DT>
-__device__ void dfinish(const float* z, const float* xs, const uint16_t* svh, void* y, uint32_t out, uint32_t rows,
-                        uint32_t ks, uint32_t inblk, int defer) {
-    const uint32_t b = blockIdx.x, row = blockIdx.y, lane = threadIdx.x;
+// One (128-output block b, row) of the finish, one wave: the planes summed in slice order, the deferred map
+// (A acc + C sum x), f16, the output H128, svh, f16, then y in its dtype (dt: Dtype). `nt`: z read past the L1 (the
+// last arriver of DEC-ONE reads the planes other threadgroups wrote).
+__device__ __forceinline__ void finish_row(const float* z, const float* xs, const uint16_t* svh, void* y, uint32_t out,
+                                           uint32_t rows, uint32_t ks, uint32_t inblk, int defer, int dt, uint32_t b,
+                                           uint32_t row, uint32_t lane, bool nt) {
     float xsum = 0.0f;
     if (defer)
         for (uint32_t q = 0; q < inblk; ++q) xsum += xs[static_cast<size_t>(row) * inblk + q];
@@ -131,8 +131,12 @@ __device__ void dfinish(const float* z, const float* xs, const uint16_t* svh, vo
 #pragma unroll
     for (uint32_t j = 0; j < 4u; ++j) {
         const uint32_t o = b * 128u + lane + 32u * j;
-        float acc = z[static_cast<size_t>(row) * out + o];
-        for (uint32_t k = 1u; k < ks; ++k) acc += z[(static_cast<size_t>(k) * rows + row) * out + o];
+        float acc = 0.0f;
+        for (uint32_t k = 0; k < ks; ++k) {
+            const float* p = z + (static_cast<size_t>(k) * rows + row) * out + o;
+            const float zv = nt ? __builtin_nontemporal_load(p) : *p;
+            acc = k == 0 ? zv : acc + zv;
+        }
         if (defer) acc = __builtin_fmaf(acc, mul1_a(), mul1_c() * xsum);
         v[j] = round_half(acc);
     }
@@ -140,7 +144,53 @@ __device__ void dfinish(const float* z, const float* xs, const uint16_t* svh, vo
 #pragma unroll
     for (uint32_t j = 0; j < 4u; ++j) {
         const uint32_t o = b * 128u + lane + 32u * j;
-        store_act<DT>(y, static_cast<size_t>(row) * out + o, round_half(v[j] * kHadScale * half_value(svh[o])));
+        const float yv = round_half(v[j] * kHadScale * half_value(svh[o]));
+        const size_t at = static_cast<size_t>(row) * out + o;
+        if (dt == kF32) store_act<kF32>(y, at, yv);
+        else if (dt == kF16) store_act<kF16>(y, at, yv);
+        else store_act<kBf16>(y, at, yv);
+    }
+}
+
+// Grid (OUT / 128, rows), 32 threads: finish_row.
+template <int DT>
+__device__ void dfinish(const float* z, const float* xs, const uint16_t* svh, void* y, uint32_t out, uint32_t rows,
+                        uint32_t ks, uint32_t inblk, int defer) {
+    finish_row(z, xs, svh, y, out, rows, ks, inblk, defer, DT, blockIdx.x, blockIdx.y, threadIdx.x, false);
+}
+
+// ---- DEC-ONE: the GEMV and the finish in one launch (the bytes of the chain) ---------------------------------------
+
+// Grid (IN / 128, rows), 32 threads: prep_s, and the GEMV launch's arrival counters zeroed (one a (128-output block,
+// row chunk)), so every call (and every replay of a captured graph) starts them at 0.
+template <int DT>
+__device__ void prep_sc(const void* x, const uint16_t* suh, uint16_t* xp, float* xs, uint32_t in, uint32_t* cnt,
+                        uint32_t ncnt) {
+    prep_s<DT>(x, suh, xp, xs, in, 1);
+    for (uint32_t gi = (blockIdx.y * gridDim.x + blockIdx.x) * 32u + threadIdx.x; gi < ncnt; gi += gridDim.x * gridDim.y * 32u)
+        cnt[gi] = 0u;
+}
+
+// dgemv's grid and statements, then the threadgroup that arrives last at its (128-output block, row chunk) runs the
+// finish of that block for the chunk's rows (an integer counter; no float atomics): the bytes of dgemv -> dfinish.
+template <int CB, int DEFER, uint32_t RB>
+__device__ void dec0(const uint32_t* w, const uint16_t* xp, float* z, const float* xs, const uint16_t* svh, void* y,
+                     uint32_t* cnt, uint32_t in, uint32_t out, uint32_t rows, uint32_t n, uint32_t mask, int dt) {
+    dgemv<CB, DEFER, RB, 0>(w, xp, z, in, out, rows, n, mask);
+    constexpr uint32_t BT = bt_for<RB>();
+    __shared__ uint32_t last;
+    const uint32_t b128 = blockIdx.x * (16u * BT) / 128u;   // the 128-output block of this threadgroup's tiles
+    const uint32_t per_block = 128u / (16u * BT) * gridDim.z;  // its threadgroups: tiles across, K slices
+    __threadfence();
+    __syncthreads();
+    if (threadIdx.x == 0) last = atomicAdd(&cnt[blockIdx.y * (out / 128u) + b128], 1u) == per_block - 1u;
+    __syncthreads();
+    if (!last) return;
+    __threadfence();
+    const uint32_t sg = threadIdx.x >> 5, lane = threadIdx.x & 31u;
+    for (uint32_t r = sg; r < RB; r += 4u) {
+        const uint32_t row = blockIdx.y * RB + r;
+        if (row < rows) finish_row(z, xs, svh, y, out, rows, gridDim.z, in / 128u, DEFER, dt, b128, row, lane, true);
     }
 }
 
@@ -202,3 +252,32 @@ T3_DFINISH(f32, kF32)
 T3_DFINISH(f16, kF16)
 T3_DFINISH(bf16, kBf16)
 #undef T3_DFINISH
+
+#define T3_PREP_SC(NAME, DT)                                                                                         \
+    extern "C" __global__ void __launch_bounds__(32) t3_dense_prep_sc_##NAME(                                       \
+        const void* x, const uint16_t* suh, uint16_t* xp, float* xs, uint32_t in, uint32_t* cnt, uint32_t ncnt) {    \
+        prep_sc<DT>(x, suh, xp, xs, in, cnt, ncnt);                                                                  \
+    }
+T3_PREP_SC(f32, kF32)
+T3_PREP_SC(f16, kF16)
+T3_PREP_SC(bf16, kBf16)
+#undef T3_PREP_SC
+
+// t3_dense_dec0_<codebook>_<rows>: DEC-ONE's chunks of 1-5 rows (Dense.rbFor)
+#define T3_DEC0(NAME, CB, DEFER, RB)                                                                                 \
+    extern "C" __global__ void __launch_bounds__(128) t3_dense_dec0_##NAME##_##RB(                                  \
+        const uint32_t* w, const uint16_t* xp, float* z, const float* xs, const uint16_t* svh, void* y,              \
+        uint32_t* cnt, uint32_t in, uint32_t out, uint32_t rows, uint32_t n, uint32_t mask, int dt) {                \
+        dec0<CB, DEFER, RB>(w, xp, z, xs, svh, y, cnt, in, out, rows, n, mask, dt);                                  \
+    }
+#define T3_DEC0_ROWS(NAME, CB, DEFER) \
+    T3_DEC0(NAME, CB, DEFER, 1)       \
+    T3_DEC0(NAME, CB, DEFER, 2)       \
+    T3_DEC0(NAME, CB, DEFER, 3)       \
+    T3_DEC0(NAME, CB, DEFER, 4)       \
+    T3_DEC0(NAME, CB, DEFER, 5)
+T3_DEC0_ROWS(mcg, kMcg, 0)
+T3_DEC0_ROWS(mul1, kMul1, 0)
+T3_DEC0_ROWS(mul1d, kMul1, 1)
+#undef T3_DEC0_ROWS
+#undef T3_DEC0
