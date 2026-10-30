@@ -121,3 +121,218 @@ test "HIP lane reader: every lane's codewords and decoded values equal format.un
     }
     std.debug.print("RESULT HIP lane reader: {d} tiles over every even n in [16, 128] and every window 8-16 equal format.unpackTile, MCG and MUL1 values equal format.zig\n", .{checked});
 }
+
+// ---- dense projections ------------------------------------------------------------------------------------------
+
+const plan = @import("hip/plan.zig");
+const ref = @import("ref.zig");
+
+/// One projection's weights on the host and the device.
+const Proj = struct {
+    in: u32,
+    out: u32,
+    rate: format.Rate,
+    trellis: []u16,
+    suh: []u16,
+    svh: []u16,
+    dt: rt.Buffer,
+    dsuh: rt.Buffer,
+    dsvh: rt.Buffer,
+
+    fn init(h: *const rt.Hip, rnd: std.Random, in: u32, out: u32, rate: format.Rate) !Proj {
+        const trellis = try gpa.alloc(u16, (in / 16) * (out / 16) * rate.n);
+        errdefer gpa.free(trellis);
+        for (trellis) |*w| w.* = rnd.int(u16);
+        const suh = try gpa.alloc(u16, in);
+        errdefer gpa.free(suh);
+        for (suh) |*s| s.* = format.f32ToF16Bits(0.5 + rnd.float(f32));
+        const svh = try gpa.alloc(u16, out);
+        errdefer gpa.free(svh);
+        const scale: f32 = 1.0 / @sqrt(@as(f32, @floatFromInt(in)));
+        for (svh) |*s| s.* = format.f32ToF16Bits((0.5 + rnd.float(f32)) * scale);
+        return .{ .in = in, .out = out, .rate = rate, .trellis = trellis, .suh = suh, .svh = svh, .dt = try h.upload(std.mem.sliceAsBytes(trellis)), .dsuh = try h.upload(std.mem.sliceAsBytes(suh)), .dsvh = try h.upload(std.mem.sliceAsBytes(svh)) };
+    }
+
+    fn deinit(p: *Proj) void {
+        p.dt.free();
+        p.dsuh.free();
+        p.dsvh.free();
+        gpa.free(p.trellis);
+        gpa.free(p.suh);
+        gpa.free(p.svh);
+    }
+};
+
+/// The kernels' groups, loaded once a test.
+const Groups = struct {
+    dense: rt.Module,
+
+    fn load(h: *const rt.Hip) !Groups {
+        return .{ .dense = try h.load(&objects.dense) };
+    }
+
+    fn unload(g: *Groups) void {
+        g.dense.unload();
+    }
+
+    fn module(g: *const Groups, name: []const u8) !rt.Module {
+        if (std.mem.eql(u8, name, "dense")) return g.dense;
+        return error.UnknownGroup;
+    }
+};
+
+/// Runs a plan's launches with each role bound to `bind`'s address.
+fn runLaunches(g: *const Groups, launches: []const plan.Launch, bind: std.EnumArray(plan.Role, u64)) !void {
+    for (launches) |*l| {
+        const f = try (try g.module(l.group)).function(l.symbol);
+        var a: rt.Args = .{};
+        for (l.argList()) |arg| switch (arg) {
+            .buf => |r| try a.add(bind.get(r)),
+            .u => |v| try a.add(v),
+            .i => |v| try a.add(v),
+        };
+        try f.launch(.{ .x = l.grid[0], .y = l.grid[1], .z = l.grid[2] }, .{ .x = l.block }, l.shared, &a);
+    }
+}
+
+/// x [rows][in] in `dtype` (bytes) and its values as f32.
+const Input = struct {
+    bytes: []u8,
+    values: []f32,
+
+    fn init(rnd: std.Random, n: usize, dtype: plan.Dtype) !Input {
+        const values = try gpa.alloc(f32, n);
+        errdefer gpa.free(values);
+        const bytes = try gpa.alloc(u8, n * @as(usize, if (dtype == .f32) 4 else 2));
+        for (values, 0..) |*v, i| {
+            const f = rnd.floatNorm(f32);
+            switch (dtype) {
+                .f32 => {
+                    v.* = f;
+                    std.mem.writeInt(u32, bytes[i * 4 ..][0..4], @bitCast(f), .little);
+                },
+                .f16 => {
+                    const b = format.f32ToF16Bits(f);
+                    v.* = format.f16BitsToF32(b);
+                    std.mem.writeInt(u16, bytes[i * 2 ..][0..2], b, .little);
+                },
+                .bf16 => {
+                    const b: u16 = @intCast(@as(u32, @bitCast(f)) >> 16);
+                    v.* = @bitCast(@as(u32, b) << 16);
+                    std.mem.writeInt(u16, bytes[i * 2 ..][0..2], b, .little);
+                },
+            }
+        }
+        return .{ .bytes = bytes, .values = values };
+    }
+
+    fn deinit(x: *Input) void {
+        gpa.free(x.bytes);
+        gpa.free(x.values);
+    }
+};
+
+fn toF32(bytes: []const u8, dtype: plan.Dtype, out: []f32) void {
+    for (out, 0..) |*v, i| v.* = switch (dtype) {
+        .f32 => @bitCast(std.mem.readInt(u32, bytes[i * 4 ..][0..4], .little)),
+        .f16 => format.f16BitsToF32(std.mem.readInt(u16, bytes[i * 2 ..][0..2], .little)),
+        .bf16 => @bitCast(@as(u32, std.mem.readInt(u16, bytes[i * 2 ..][0..2], .little)) << 16),
+    };
+}
+
+/// The chain over `rows` rows of x (from row `first`): y's bytes. The caller frees.
+fn denseRun(h: *const rt.Hip, g: *const Groups, p: *const Proj, x: Input, first: usize, d: plan.Dense) ![]u8 {
+    const launches = try plan.denseChain(d);
+    const xsize: usize = if (d.dtype == .f32) 4 else 2;
+    var xb = try h.upload(x.bytes[first * p.in * xsize ..][0 .. d.rows * p.in * xsize]);
+    defer xb.free();
+    var xp = try h.alloc(d.xpBytes());
+    defer xp.free();
+    var xs = try h.alloc(d.xsBytes());
+    defer xs.free();
+    var z = try h.alloc(d.zBytes());
+    defer z.free();
+    var y = try h.alloc(@as(usize, d.rows) * p.out * xsize);
+    defer y.free();
+    var bind = std.EnumArray(plan.Role, u64).initFill(0);
+    bind.set(.x, xb.addr());
+    bind.set(.suh, p.dsuh.addr());
+    bind.set(.svh, p.dsvh.addr());
+    bind.set(.trellis, p.dt.addr());
+    bind.set(.xp, xp.addr());
+    bind.set(.xs, xs.addr());
+    bind.set(.z, z.addr());
+    bind.set(.y, y.addr());
+    try runLaunches(g, &launches, bind);
+    const out = try gpa.alloc(u8, y.len);
+    errdefer gpa.free(out);
+    try y.read(out);
+    return out;
+}
+
+const DenseCase = struct { in: u32, out: u32, n: u32, dec: format.Decode, dtype: plan.Dtype, defer_map: bool };
+
+test "HIP dense chain: rows 1-16 within format.project's bar per row, each row alone, the lean text's bytes" {
+    var h = try rt.Hip.open();
+    defer h.close();
+    var g = try Groups.load(&h);
+    defer g.unload();
+    var prng = std.Random.DefaultPrng.init(0xDE45);
+    const rnd = prng.random();
+    const cases = [_]DenseCase{
+        .{ .in = 512, .out = 256, .n = 64, .dec = .mcg, .dtype = .f32, .defer_map = false },
+        .{ .in = 512, .out = 256, .n = 64, .dec = .mul1, .dtype = .f32, .defer_map = true },
+        .{ .in = 512, .out = 256, .n = 64, .dec = .mul1, .dtype = .f32, .defer_map = false },
+        .{ .in = 512, .out = 384, .n = 32, .dec = .mcg, .dtype = .f32, .defer_map = false },
+        .{ .in = 512, .out = 256, .n = 48, .dec = .mul1, .dtype = .f32, .defer_map = true },
+        .{ .in = 512, .out = 256, .n = 36, .dec = .mcg, .dtype = .f32, .defer_map = false },
+        .{ .in = 512, .out = 256, .n = 128, .dec = .{ .codebook = .mcg, .window = .w12 }, .dtype = .f32, .defer_map = false },
+        .{ .in = 2560, .out = 640, .n = 80, .dec = .mul1, .dtype = .bf16, .defer_map = true },
+        .{ .in = 4096, .out = 2048, .n = 64, .dec = .mcg, .dtype = .bf16, .defer_map = false },
+    };
+    var worst_f32: f64 = 0;
+    var worst_bf16: f64 = 0;
+    for (cases) |c| {
+        const rate = format.Rate.fromN(c.n).?;
+        var p = try Proj.init(&h, rnd, c.in, c.out, rate);
+        defer p.deinit();
+        const max_rows = 16;
+        var x = try Input.init(rnd, max_rows * c.in, c.dtype);
+        defer x.deinit();
+        const yref = try gpa.alloc(f32, max_rows * c.out);
+        defer gpa.free(yref);
+        {
+            const tr = try gpa.alloc(f32, c.in);
+            defer gpa.free(tr);
+            const inner = try gpa.alloc(f32, c.out);
+            defer gpa.free(inner);
+            for (0..max_rows) |r| format.project(x.values[r * c.in ..][0..c.in], p.trellis, p.suh, p.svh, c.in, c.out, rate, c.dec, tr, inner, yref[r * c.out ..][0..c.out]);
+        }
+        const got = try gpa.alloc(f32, max_rows * c.out);
+        defer gpa.free(got);
+        const ysize: usize = if (c.dtype == .f32) 4 else 2;
+        const bar: f64 = if (c.dtype == .f32) 5e-3 else 2.5e-2;
+        for ([_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 16 }) |rows| {
+            for ([_]bool{ true, false }) |lean| {
+                const d: plan.Dense = .{ .in = c.in, .out = c.out, .rows = rows, .rate = rate, .dec = c.dec, .dtype = c.dtype, .defer_map = c.defer_map, .lean = lean };
+                const y = try denseRun(&h, &g, &p, x, 0, d);
+                defer gpa.free(y);
+                toF32(y, c.dtype, got[0 .. rows * c.out]);
+                for (0..rows) |r| {
+                    const e = ref.compare(got[r * c.out ..][0..c.out], yref[r * c.out ..][0..c.out]);
+                    try expect(e.max_ratio <= bar, "dense {d}x{d} n {d} {s} rows {d} row {d}: {e:.3} of rms over the bar {e}", .{ c.in, c.out, c.n, @tagName(c.dec.codebook), rows, r, e.max_ratio, bar });
+                    if (c.dtype == .f32) worst_f32 = @max(worst_f32, e.max_ratio) else worst_bf16 = @max(worst_bf16, e.max_ratio);
+                }
+                // each row alone (one-row chain) gives the row's bytes, whatever its chunk and text
+                if (rows > 1 and (rows == 16 or rows == 7)) for ([_]usize{ 0, rows / 2, rows - 1 }) |r| {
+                    var d1 = d;
+                    d1.rows = 1;
+                    const alone = try denseRun(&h, &g, &p, x, r, d1);
+                    defer gpa.free(alone);
+                    try expect(std.mem.eql(u8, alone, y[r * c.out * ysize ..][0 .. c.out * ysize]), "dense {d}x{d} rows {d} lean {}: row {d} differs from the row alone", .{ c.in, c.out, rows, lean, r });
+                };
+            }
+        }
+    }
+    std.debug.print("RESULT HIP dense chain: rows 1-16 within {e:.3} (f32, bar 5e-3) and {e:.3} (bf16, bar 2.5e-2) of format.project, rows alone and lean on/off byte-equal\n", .{ worst_f32, worst_bf16 });
+}

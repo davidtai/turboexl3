@@ -9,11 +9,13 @@ pub const Group = struct { source: []const u8, name: []const u8 };
 /// Every group, in the order the objects module embeds them.
 pub const groups = [_]Group{
     .{ .source = "test/lane.hip", .name = "test_lane" },
+    .{ .source = "dense/dense.hip", .name = "dense" },
 };
 
 /// Every header the groups include (under src/kernels/hip/), so an edit rebuilds them.
 pub const headers = [_][]const u8{
     "lane.hpp",
+    "common.hpp",
 };
 
 /// The chips the tests run on; the build refuses any other -Dhip-arch.
