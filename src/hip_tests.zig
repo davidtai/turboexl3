@@ -1111,3 +1111,135 @@ test "HIP routed experts, shared input (one rotation a row): the bytes of a rota
     }
     std.debug.print("RESULT HIP routed experts, shared input: {d} calls (decode forms 3 and 9, prefill; both profiles) byte-identical to a rotation a slot\n", .{compared});
 }
+
+/// The bf16 nearest an f32 (round to nearest even).
+fn bf16Rne(f: f32) u16 {
+    const u: u32 = @bitCast(f);
+    return @intCast((u +% 0x7fff +% ((u >> 16) & 1)) >> 16);
+}
+
+/// The bf16 nearest a double in one rounding (round to odd onto f32, then nearest even).
+fn bf16Of64(v: f64) u16 {
+    var f: f32 = @floatCast(v);
+    if (@as(f64, f) != v) {
+        var u: u32 = @bitCast(f);
+        if (@abs(@as(f64, f)) > @abs(v)) u -= 1;
+        f = @bitCast(u | 1);
+    }
+    return bf16Rne(f);
+}
+
+fn ulp32(v: f64) f64 {
+    const f: f32 = @floatCast(@abs(v));
+    if (f == 0) return std.math.pow(f64, 2, -149);
+    return @as(f64, std.math.nextAfter(f32, f, std.math.inf(f32))) - f;
+}
+
+/// One matrix's item (expert 0, first, count) through the routed GEMM (`symbol`): z f32 [m][n] (0xff where unwritten).
+fn foldGemm(h: *const rt.Hip, g: *const Groups, symbol: [:0]const u8, xb: *const rt.Buffer, tb: *const rt.Buffer, zb: *rt.Buffer, m: u32, k: u32, n: u32, rate: format.Rate, first: u32, count: u32) ![]f32 {
+    const it = [3]i32{ 0, @intCast(first), @intCast(count) };
+    var hb = try h.upload(std.mem.asBytes(&it));
+    defer hb.free();
+    try zb.fill(0xff);
+    const f = try g.prefill.function(symbol);
+    var a: rt.Args = .{};
+    for ([_]u64{ xb.addr(), xb.addr(), tb.addr(), tb.addr(), hb.addr(), zb.addr() }) |p| try a.add(p);
+    for ([_]u32{ k, n, m, rate.n, format.Decode.mcg.window.mask() }) |v| try a.add(v);
+    try a.add(@as(u64, 0)); // order: unread at xdiv 0
+    try a.add(@as(u32, 0));
+    try f.launch(.{ .x = n / 128, .y = 1, .z = 1 }, .{ .x = 256 }, 0, &a);
+    const out = try gpa.alloc(f32, @as(usize, m) * n);
+    errdefer gpa.free(out);
+    try zb.read(std.mem.sliceAsBytes(out));
+    return out;
+}
+
+test "HIP prefill GEMM, 64-k groups folded (F-K6): within float64's fp32 bound at GLM's gate/up and down shapes, rows as alone; bf16 flips against one chain (facts)" {
+    var h = try rt.Hip.open();
+    defer h.close();
+    var g = try Groups.load(&h);
+    defer g.unload();
+    var prng = std.Random.DefaultPrng.init(0xF0D6);
+    const rnd = prng.random();
+    const rate = format.Rate.fromK(4);
+    const m: u32 = 128; // two passes of 64 rows
+    for ([_][2]u32{ .{ 4096, 2048 }, .{ 2048, 4096 } }) |kn| {
+        const k = kn[0];
+        const n = kn[1];
+        const hx = try gpa.alloc(u16, @as(usize, m) * k);
+        defer gpa.free(hx);
+        for (hx) |*v| v.* = format.f32ToF16Bits(rnd.floatNorm(f32));
+        const trellis = try gpa.alloc(u16, (k / 16) * (n / 16) * rate.n);
+        defer gpa.free(trellis);
+        for (trellis) |*w| w.* = rnd.int(u16);
+        const wq = try gpa.alloc(u16, @as(usize, k) * n);
+        defer gpa.free(wq);
+        format.reconstructInner(trellis, k, n, rate, .mcg, wq);
+        var xb = try h.upload(std.mem.sliceAsBytes(hx));
+        defer xb.free();
+        var trb = try h.upload(std.mem.sliceAsBytes(trellis));
+        defer trb.free();
+        const table = [1]u64{trb.addr()};
+        var tb = try h.upload(std.mem.asBytes(&table));
+        defer tb.free();
+        var zb = try h.alloc(@as(usize, m) * n * 4);
+        defer zb.free();
+        // float64: z = X W_q, and fp32's bound (K + 8) 2^-24 of sum |x w| a value
+        const want = try gpa.alloc(f64, @as(usize, m) * n);
+        defer gpa.free(want);
+        const tol = try gpa.alloc(f64, @as(usize, m) * n);
+        defer gpa.free(tol);
+        const wd = try gpa.alloc(f64, @as(usize, k) * n);
+        defer gpa.free(wd);
+        for (wd, wq) |*d, b| d.* = format.f16BitsToF32(b);
+        const bound = @as(f64, @floatFromInt(k + 8)) * std.math.pow(f64, 2, -24);
+        const row = try gpa.alloc(f64, n);
+        defer gpa.free(row);
+        const mag = try gpa.alloc(f64, n);
+        defer gpa.free(mag);
+        for (0..m) |r| {
+            @memset(row, 0);
+            @memset(mag, 0);
+            for (0..k) |kk| {
+                const xv: f64 = format.f16BitsToF32(hx[r * k + kk]);
+                for (row, mag, wd[kk * n ..][0..n]) |*s, *a, w| {
+                    s.* += xv * w;
+                    a.* += @abs(xv * w);
+                }
+            }
+            for (0..n) |j| {
+                want[r * n + j] = row[j];
+                tol[r * n + j] = mag[j] * bound + 1e-30;
+            }
+        }
+        var flips: [2]usize = .{ 0, 0 };
+        var ulps: [2]f64 = .{ 0, 0 };
+        var worst: [2]f64 = .{ 0, 0 };
+        const full = try foldGemm(&h, &g, "t3_pf_gemm_mcg", &xb, &tb, &zb, m, k, n, rate, 0, m);
+        defer gpa.free(full);
+        const chain = try foldGemm(&h, &g, "t3_pf_gemm_chain_mcg", &xb, &tb, &zb, m, k, n, rate, 0, m);
+        defer gpa.free(chain);
+        for ([2][]const f32{ full, chain }, 0..) |got, which| {
+            for (got, want, tol) |v, w, t| {
+                const ratio = @abs(@as(f64, v) - w) / t;
+                worst[which] = @max(worst[which], ratio);
+                if (bf16Rne(v) != bf16Of64(w)) flips[which] += 1;
+                ulps[which] += @abs(@as(f64, v) - w) / ulp32(w);
+            }
+        }
+        try expect(worst[0] <= 1.0, "fold GEMM K {d}, N {d}: {d:.3} of fp32's float64 bound", .{ k, n, worst[0] });
+        try expect(worst[1] <= 1.0, "one-chain GEMM K {d}, N {d}: {d:.3} of fp32's float64 bound", .{ k, n, worst[1] });
+        const total: f64 = @floatFromInt(@as(usize, m) * n);
+        std.debug.print("FACT HIP prefill GEMM K {d}, N {d}, {d} rows: bf16 flips against float64: fold G64 {d:.3} % ({d:.2} ulp, {d:.3} of the bound), one chain {d:.3} % ({d:.2} ulp, {d:.3} of the bound)\n", .{ k, n, m, 100.0 * @as(f64, @floatFromInt(flips[0])) / total, ulps[0] / total, worst[0], 100.0 * @as(f64, @floatFromInt(flips[1])) / total, ulps[1] / total, worst[1] });
+        // a row's bits as alone, and cuts that move rows across the 64-row passes
+        for ([_][2]u32{ .{ 0, 1 }, .{ 63, 1 }, .{ 64, 1 }, .{ 127, 1 }, .{ 10, 50 }, .{ 37, 91 } }) |cut| {
+            const got = try foldGemm(&h, &g, "t3_pf_gemm_mcg", &xb, &tb, &zb, m, k, n, rate, cut[0], cut[1]);
+            defer gpa.free(got);
+            for (cut[0]..cut[0] + cut[1]) |r| {
+                const same = std.mem.eql(u32, @ptrCast(got[r * n ..][0..n]), @ptrCast(full[r * n ..][0..n]));
+                try expect(same, "fold GEMM K {d}: row {d} of the cut ({d}, {d}) differs from the {d}-row call", .{ k, r, cut[0], cut[1], m });
+            }
+        }
+        std.debug.print("RESULT HIP prefill GEMM fold K {d}: within fp32's float64 bound; 6 cuts (single rows, across the 64-row passes) bit-equal to the full call\n", .{k});
+    }
+}

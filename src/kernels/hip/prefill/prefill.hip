@@ -2,8 +2,9 @@
 // (section 4): route -> prep -> GEMM (gate + up) -> mid -> GEMM (down) -> fin. The chain of src/kernels/prefill/
 // (pf_froute, pf_prep, pf_gemm2 / pf_gemm1, pf_mid, pf_fin) with the matrix product on gfx11's
 // v_wmma_f32_16x16x16_f16 in place of NAX: each 32-deep K step decodes its 2 x 8 trellis tiles into LDS as f16
-// (the shared-decode body), then two WMMA a 16 x 16 accumulator, K ascending. A pair's sums do not depend on where its
-// slot lands in the sorted order, the tile it shares, or the pass of 64 rows it falls in.
+// (the shared-decode body), then two WMMA a 16 x 16 accumulator, K ascending: 64-k chains from zero, folded into the
+// accumulator on the VALU (F-K6). A pair's sums do not depend on where its slot lands in the sorted order, the tile it
+// shares, or the pass of 64 rows it falls in.
 //
 // The rounding profiles are decode.hip's (PROF 0 format.project's, PROF 1 GLM's); the finishes are routed.hpp's.
 
@@ -129,7 +130,11 @@ typedef float f8v __attribute__((ext_vector_type(8)));
 // positions p (f32; MUL1's t under the deferred map). Weights: TABLE 1 (the routed bank), W0 and W1 are u64 [E] tables
 // of each expert's trellis address (routed.hpp expert_trellis); TABLE 0 (a dense matrix, item expert 0), the trellis.
 // X's row of position p: p (xdiv 0), or order[p] / xdiv (prep's `shared`).
-template <int CB, int DEFER, int TABLE>
+// The sum over K: FOLD > 0, each group of FOLD K steps (FOLD x 32 k) is one WMMA chain from zero, and the groups add
+// into the accumulator on the VALU (IEEE fp32), in K order. gfx11's WMMA fp32 adds are not IEEE (they truncate), so
+// one chain over K drifts with K; 64-k groups (FOLD 2) keep each chain short. FOLD 0: one chain over K (the reference
+// the tests measure the fold against). Either way, one order for every row: a row's bits do not depend on its pass.
+template <int CB, int DEFER, int TABLE, int FOLD>
 __device__ void gemm(const uint16_t* X0, const uint16_t* X1, const void* W0, const void* W1, const int* items,
                      float* z, uint32_t k, uint32_t n_out, uint32_t positions, uint32_t n, uint32_t mask,
                      const int* order, uint32_t xdiv) {
@@ -183,11 +188,13 @@ __device__ void gemm(const uint16_t* X0, const uint16_t* X1, const void* W0, con
                 }
             }
         };
+        const f8v zero = f8v{0, 0, 0, 0, 0, 0, 0, 0};
         f8v acc[2][2];
+        f8v d[2][2];  // FOLD: the group's WMMA chain
 #pragma unroll
         for (uint32_t i = 0; i < 2u; ++i)
 #pragma unroll
-            for (uint32_t j = 0; j < 2u; ++j) acc[i][j] = f8v{0, 0, 0, 0, 0, 0, 0, 0};
+            for (uint32_t j = 0; j < 2u; ++j) acc[i][j] = d[i][j] = zero;
         gload(0);
         sstore(0);
         __syncthreads();
@@ -204,7 +211,24 @@ __device__ void gemm(const uint16_t* X0, const uint16_t* X1, const void* W0, con
 #pragma unroll
                 for (uint32_t i = 0; i < 2u; ++i)
 #pragma unroll
-                    for (uint32_t j = 0; j < 2u; ++j) acc[i][j] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(af[i], bf[j], acc[i][j]);
+                    for (uint32_t j = 0; j < 2u; ++j) {
+                        if constexpr (FOLD > 0) {
+                            const bool start = kk == 0u && s % FOLD == 0u;
+                            d[i][j] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(af[i], bf[j], start ? zero : d[i][j]);
+                        } else {
+                            acc[i][j] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(af[i], bf[j], acc[i][j]);
+                        }
+                    }
+            }
+            if constexpr (FOLD > 0) {
+                if ((s + 1u) % FOLD == 0u || s + 1u == iters) {
+#pragma unroll
+                    for (uint32_t i = 0; i < 2u; ++i)
+#pragma unroll
+                        for (uint32_t j = 0; j < 2u; ++j)
+#pragma unroll
+                            for (uint32_t q = 0; q < 8u; ++q) acc[i][j][q] = acc[i][j][q] + d[i][j][q];
+                }
             }
             if (s + 1u < iters) sstore(buf ^ 1u);
             __syncthreads();
@@ -299,19 +323,21 @@ T3_PF_PREP(exl3, 0, bf16, kBf16)
 T3_PF_PREP(glm, 1, bf16, kBf16)
 #undef T3_PF_PREP
 
-// t3_pf_gemm_*: the routed bank (u64 trellis tables); t3_pf_dgemm_*: one dense matrix (its trellis)
-#define T3_PF_GEMM(KIND, TABLE, WT, NAME, CB, DEFER)                                                                 \
+// t3_pf_gemm_*: the routed bank (u64 trellis tables); t3_pf_dgemm_*: one dense matrix (its trellis). Both fold 64-k
+// groups (FOLD 2); t3_pf_gemm_chain_mcg is the one-chain form, for the tests' before / after.
+#define T3_PF_GEMM(KIND, TABLE, WT, FOLD, NAME, CB, DEFER)                                                           \
     extern "C" __global__ void __launch_bounds__(256) t3_pf_##KIND##_##NAME(                                         \
         const uint16_t* X0, const uint16_t* X1, const WT* W0, const WT* W1, const int* items, float* z, uint32_t k,  \
         uint32_t n_out, uint32_t positions, uint32_t n, uint32_t mask, const int* order, uint32_t xdiv) {            \
-        gemm<CB, DEFER, TABLE>(X0, X1, W0, W1, items, z, k, n_out, positions, n, mask, order, xdiv);                 \
+        gemm<CB, DEFER, TABLE, FOLD>(X0, X1, W0, W1, items, z, k, n_out, positions, n, mask, order, xdiv);           \
     }
-T3_PF_GEMM(gemm, 1, uint64_t, mcg, kMcg, 0)
-T3_PF_GEMM(gemm, 1, uint64_t, mul1, kMul1, 0)
-T3_PF_GEMM(gemm, 1, uint64_t, mul1d, kMul1, 1)
-T3_PF_GEMM(dgemm, 0, uint32_t, mcg, kMcg, 0)
-T3_PF_GEMM(dgemm, 0, uint32_t, mul1, kMul1, 0)
-T3_PF_GEMM(dgemm, 0, uint32_t, mul1d, kMul1, 1)
+T3_PF_GEMM(gemm, 1, uint64_t, 2, mcg, kMcg, 0)
+T3_PF_GEMM(gemm, 1, uint64_t, 2, mul1, kMul1, 0)
+T3_PF_GEMM(gemm, 1, uint64_t, 2, mul1d, kMul1, 1)
+T3_PF_GEMM(dgemm, 0, uint32_t, 2, mcg, kMcg, 0)
+T3_PF_GEMM(dgemm, 0, uint32_t, 2, mul1, kMul1, 0)
+T3_PF_GEMM(dgemm, 0, uint32_t, 2, mul1d, kMul1, 1)
+T3_PF_GEMM(gemm_chain, 1, uint64_t, 0, mcg, kMcg, 0)
 #undef T3_PF_GEMM
 
 #define T3_PF_MID(PNAME, PROF)                                                                                       \
