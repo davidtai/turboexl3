@@ -973,6 +973,7 @@ test "HIP DEC-ONE: the bytes of the dense chain at rows 1-9, 11 and 16; a captur
             var cnt = try h.alloc(@as(usize, plan.decOneCounters(d)) * 4);
             defer cnt.free();
             try cnt.fill(0x5a); // prep_sc zeroes them
+            try y.fill(0x7f); // an element nothing writes reads as a NaN pattern, never as a reused buffer's bytes
             var bind = std.EnumArray(plan.Role, u64).initFill(0);
             for ([_]plan.Role{ .x, .suh, .svh, .trellis, .xp, .xs, .z, .y, .cnt }, [_]u64{ xb.addr(), p.dsuh.addr(), p.dsvh.addr(), p.dt.addr(), xp.addr(), xs.addr(), z.addr(), y.addr(), cnt.addr() }) |r, a| bind.set(r, a);
             try runLaunches(&g, &launches, bind);
@@ -992,6 +993,19 @@ test "HIP DEC-ONE: the bytes of the dense chain at rows 1-9, 11 and 16; a captur
                 try runLaunches(&g, &launches, bind);
                 try y.read(again);
                 std.debug.print("DEC-ONE {d}x{d} {s} rows {d}: {d} of {d} bytes differ from the chain (first at byte {d}, row {d}); a second run {s} the first\n", .{ c.in, c.out, @tagName(c.dec.codebook), rows, nd, got.len, first, first / (c.out * xsize), if (std.mem.eql(u8, again, got)) "equals" else "differs from" });
+                // the chain again: is it the same each run?
+                const chain2 = try denseRun(&h, &g, &p, x, 0, d);
+                defer gpa.free(chain2);
+                std.debug.print("  the chain run again {s} the first chain run\n", .{if (std.mem.eql(u8, chain2, chain)) "equals" else "differs from"});
+                if (c.dtype == .f32) {
+                    const gf: []const f32 = @alignCast(std.mem.bytesAsSlice(f32, got));
+                    const cf: []const f32 = @alignCast(std.mem.bytesAsSlice(f32, chain));
+                    var shown: usize = 0;
+                    for (gf, cf, 0..) |a_, b_, i| if (@as(u32, @bitCast(a_)) != @as(u32, @bitCast(b_)) and shown < 8) {
+                        std.debug.print("  row {d} column {d}: DEC-ONE {e} ({x}), chain {e} ({x})\n", .{ i / c.out, i % c.out, a_, @as(u32, @bitCast(a_)), b_, @as(u32, @bitCast(b_)) });
+                        shown += 1;
+                    };
+                }
                 return error.TestUnexpectedResult;
             }
             compared += 1;
