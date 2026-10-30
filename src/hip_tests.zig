@@ -379,7 +379,14 @@ const DevBank = struct {
 
 /// Form 3 over `d.rows` rows of x from row `first` (slots and scores from row `first` too): y's bytes (fill 0xff first).
 fn decodeRun(h: *const rt.Hip, g: *const Groups, bank: *const DevBank, x: Input, slots: []const i32, scores: []const f32, first: usize, d: plan.Decode) ![]u8 {
-    const launches = try plan.decodeForm3(d);
+    return decodeRunForm(h, g, bank, x, slots, scores, first, d, 3);
+}
+
+/// `decodeRun` on form 3 or form 9.
+fn decodeRunForm(h: *const rt.Hip, g: *const Groups, bank: *const DevBank, x: Input, slots: []const i32, scores: []const f32, first: usize, d: plan.Decode, form: u8) ![]u8 {
+    const f3 = try plan.decodeForm3(d);
+    const f9 = try plan.decodeForm9(d);
+    const launches: []const plan.Launch = if (form == 9) f9.launches[0..f9.len] else &f3;
     const xsize: usize = if (d.dtype == .f32) 4 else 2;
     var xb = try h.upload(x.bytes[first * d.hidden * xsize ..][0 .. d.rows * d.hidden * xsize]);
     defer xb.free();
@@ -402,7 +409,7 @@ fn decodeRun(h: *const rt.Hip, g: *const Groups, bank: *const DevBank, x: Input,
         bind.set(r, bufs[i].addr());
     }
     try bufs[scratch.len - 1].fill(0xff);
-    try runLaunches(g, &launches, bind);
+    try runLaunches(g, launches, bind);
     const out = try gpa.alloc(u8, d.bytes(.y));
     errdefer gpa.free(out);
     try bufs[scratch.len - 1].read(out);
@@ -873,4 +880,49 @@ test "HIP dense GEMM, rows above 16: within format.project's bar per row; a row'
         }
     }
     std.debug.print("RESULT HIP dense GEMM (17-200 rows): sampled rows within {e:.3} (f32, bar 5e-3) and {e:.3} (bf16, bar 2.5e-2) of format.project; rows 0-16 byte-equal\n", .{ worst_f32, worst_bf16 });
+}
+
+test "HIP routed decode, form 9: the bytes of form 3 at rows 1-5, 8 and 16, both profiles, every codebook form" {
+    var h = try rt.Hip.open();
+    defer h.close();
+    var g = try Groups.load(&h);
+    defer g.unload();
+    var prng = std.Random.DefaultPrng.init(0xF09);
+    const rnd = prng.random();
+    const Case = struct { c: DecodeCase, profile: plan.Profile };
+    const cases = [_]Case{
+        .{ .c = .{ .hidden = 512, .inter = 256, .experts = 12, .topk = 4, .n = 64, .dec = .mcg, .dtype = .f32, .defer_map = false }, .profile = .exl3 },
+        .{ .c = .{ .hidden = 512, .inter = 256, .experts = 12, .topk = 4, .n = 64, .dec = .mul1, .dtype = .f32, .defer_map = true }, .profile = .exl3 },
+        .{ .c = .{ .hidden = 512, .inter = 256, .experts = 12, .topk = 4, .n = 36, .dec = .mul1, .dtype = .bf16, .defer_map = false }, .profile = .exl3 },
+        .{ .c = .{ .hidden = 2560, .inter = 640, .experts = 16, .topk = 10, .n = 48, .dec = .mul1, .dtype = .bf16, .defer_map = true }, .profile = .exl3 },
+        .{ .c = .{ .hidden = 4096, .inter = 2048, .experts = 9, .topk = 9, .n = 64, .dec = .mcg, .dtype = .bf16, .defer_map = false }, .profile = .glm },
+    };
+    var compared: usize = 0;
+    var with_gu8: usize = 0;
+    for (cases) |cs| {
+        const c = cs.c;
+        const rate = format.Rate.fromN(c.n).?;
+        var bank = try ref.synthBank(gpa, rnd, c.experts, c.hidden, c.inter, rate);
+        defer bank.deinit(gpa);
+        var dbank = try DevBank.init(&h, &bank);
+        defer dbank.deinit();
+        const max_rows = 16;
+        var x = try Input.init(rnd, max_rows * c.hidden, c.dtype);
+        defer x.deinit();
+        const glm = cs.profile == .glm;
+        const rt_ = try routing(rnd, max_rows, if (glm) c.topk - 1 else c.topk, c.experts, glm);
+        defer gpa.free(rt_.slots);
+        defer gpa.free(rt_.scores);
+        for ([_]u32{ 1, 2, 3, 4, 5, 8, 16 }) |rows| {
+            const d: plan.Decode = .{ .hidden = c.hidden, .inter = c.inter, .topk = c.topk, .rows = rows, .experts = c.experts, .rate = rate, .dec = c.dec, .dtype = c.dtype, .defer_map = c.defer_map, .profile = cs.profile, .limit = if (glm) 7.0 else 0 };
+            const y3 = try decodeRunForm(&h, &g, &dbank, x, rt_.slots, rt_.scores, 0, d, 3);
+            defer gpa.free(y3);
+            const y9 = try decodeRunForm(&h, &g, &dbank, x, rt_.slots, rt_.scores, 0, d, 9);
+            defer gpa.free(y9);
+            try expect(std.mem.eql(u8, y3, y9), "form 9 {d}x{d} {s} {s} rows {d}: bytes differ from form 3", .{ c.hidden, c.inter, @tagName(cs.profile), @tagName(c.dec.codebook), rows });
+            compared += 1;
+            if (plan.gu8Admitted(d)) with_gu8 += 1;
+        }
+    }
+    std.debug.print("RESULT HIP routed decode form 9: {d} calls byte-identical to form 3 ({d} of them through gu8)\n", .{ compared, with_gu8 });
 }
