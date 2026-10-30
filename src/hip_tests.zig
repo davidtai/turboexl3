@@ -979,7 +979,21 @@ test "HIP DEC-ONE: the bytes of the dense chain at rows 1-9, 11 and 16; a captur
             const got = try gpa.alloc(u8, y.len);
             defer gpa.free(got);
             try y.read(got);
-            try expect(std.mem.eql(u8, got, chain), "DEC-ONE {d}x{d} {s} rows {d}: bytes differ from the chain", .{ c.in, c.out, @tagName(c.dec.codebook), rows });
+            if (!std.mem.eql(u8, got, chain)) {
+                var nd: usize = 0;
+                var first: usize = 0;
+                for (got, chain, 0..) |a_, b_, i| if (a_ != b_) {
+                    if (nd == 0) first = i;
+                    nd += 1;
+                };
+                // a second run: does DEC-ONE agree with itself?
+                const again = try gpa.alloc(u8, y.len);
+                defer gpa.free(again);
+                try runLaunches(&g, &launches, bind);
+                try y.read(again);
+                std.debug.print("DEC-ONE {d}x{d} {s} rows {d}: {d} of {d} bytes differ from the chain (first at byte {d}, row {d}); a second run {s} the first\n", .{ c.in, c.out, @tagName(c.dec.codebook), rows, nd, got.len, first, first / (c.out * xsize), if (std.mem.eql(u8, again, got)) "equals" else "differs from" });
+                return error.TestUnexpectedResult;
+            }
             compared += 1;
             // a captured graph, replayed twice: the counters start at 0 each time (prep_sc), so the same bytes
             if (rows == 1 or rows == 9) {
