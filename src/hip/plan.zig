@@ -37,6 +37,11 @@ pub const Role = enum {
     hd,
     hs,
     zd,
+    // the prefill chain's route
+    order,
+    inv,
+    items,
+    counts,
 };
 
 pub const Arg = union(enum) { buf: Role, u: u32, i: i32, f: f32 };
@@ -326,4 +331,142 @@ test "the decode plan's partitions: decode.zig's KS and KS2 at the served ks_max
     // KERNELS.md: at 2560 x 640, KS is 4 (20 input tiles a part) and KS2 is 2 (5 tiles a part)
     try std.testing.expectEqual(@as(u32, 4), base.ksGu());
     try std.testing.expectEqual(@as(u32, 2), base.ksDn());
+}
+
+// ---- routed experts at prefill rows (docs/KERNELS.md section 3) and dense rows above 16 ---------------------------
+
+/// The GEMM's rows a pass and a route tile (prefill.hip kBM).
+pub const gemm_bm: u32 = 64;
+
+fn gemmName(dec: format.Decode, defer_map: bool) [:0]const u8 {
+    return switch (cbIndex(dec, defer_map)) {
+        0 => "t3_pf_gemm_mcg",
+        1 => "t3_pf_gemm_mul1",
+        else => "t3_pf_gemm_mul1d",
+    };
+}
+
+pub const Prefill = struct {
+    hidden: u32,
+    inter: u32,
+    topk: u32,
+    rows: u32,
+    experts: u32,
+    rate: format.Rate,
+    dec: format.Decode,
+    dtype: Dtype,
+    defer_map: bool,
+    profile: Profile = .exl3,
+    limit: f32 = 0,
+
+    pub fn check(d: Prefill) error{BadExl3Shape}!void {
+        if (d.hidden == 0 or d.inter == 0 or d.hidden % 128 != 0 or d.inter % 128 != 0) return error.BadExl3Shape;
+        if (d.rows == 0 or d.topk == 0 or d.topk > 32 or d.experts == 0 or d.experts > 1024) return error.BadExl3Shape;
+        if (d.defer_map and d.dec.codebook != .mul1) return error.BadExl3Shape;
+        if (d.profile == .glm and d.dtype != .bf16) return error.BadExl3Shape;
+    }
+
+    /// the position capacity: every pair (a skipped slot leaves its position unused)
+    pub fn positions(d: Prefill) u32 {
+        return d.rows * d.topk;
+    }
+
+    /// item slots: an item a used expert plus one a further 64 positions
+    pub fn cap(d: Prefill) u32 {
+        const p = d.positions();
+        return @min(p, d.experts) + p / gemm_bm;
+    }
+
+    pub fn bytes(d: Prefill, r: Role) usize {
+        const p: usize = d.positions();
+        return switch (r) {
+            .order, .inv => p * 4,
+            .items => @as(usize, d.cap()) * 12,
+            .counts => 8,
+            .xg, .xu => p * d.hidden * 2,
+            .sg, .su => p * (d.hidden / 128) * 4,
+            .zg => 2 * p * d.inter * 4,
+            .hd => p * d.inter * 2,
+            .hs => p * (d.inter / 128) * 4,
+            .zd => p * d.hidden * 4,
+            .y => if (d.profile == .glm) p * d.hidden * 4 else @as(usize, d.rows) * d.hidden * @as(usize, if (d.dtype == .f32) 4 else 2),
+            else => 0,
+        };
+    }
+};
+
+/// route -> prep -> GEMM (gate + up) -> mid -> GEMM (down) -> fin.
+pub fn prefillChain(d: Prefill) error{BadExl3Shape}![6]Launch {
+    try d.check();
+    const p = d.positions();
+    const glm = d.profile == .glm;
+    var route: Launch = .{ .symbol = "t3_pf_route", .group = "prefill", .grid = .{ 1, 1, 1 }, .block = 1024 };
+    route.add(.{ .buf = .slots });
+    route.add(.{ .u = p });
+    route.add(.{ .u = d.experts });
+    route.add(.{ .u = gemm_bm });
+    for ([_]Role{ .order, .inv, .items }) |r| route.add(.{ .buf = r });
+    route.add(.{ .u = d.cap() });
+    route.add(.{ .buf = .counts });
+    var prep: Launch = .{ .symbol = if (glm) "t3_pf_prep_glm_bf16" else switch (d.dtype) {
+        .f32 => "t3_pf_prep_exl3_f32",
+        .f16 => "t3_pf_prep_exl3_f16",
+        .bf16 => "t3_pf_prep_exl3_bf16",
+    }, .group = "prefill", .grid = .{ d.hidden / 128, p, 1 }, .block = 32 };
+    for ([_]Role{ .x, .order, .slots, .counts, .gate_suh, .up_suh, .xg, .xu, .sg, .su }) |r| prep.add(.{ .buf = r });
+    prep.add(.{ .u = d.hidden });
+    prep.add(.{ .u = d.topk });
+    var gu: Launch = .{ .symbol = gemmName(d.dec, d.defer_map), .group = "prefill", .grid = .{ d.inter / 128, d.cap(), 2 }, .block = 256 };
+    for ([_]Role{ .xg, .xu, .gate_t, .up_t, .items, .zg }) |r| gu.add(.{ .buf = r });
+    for ([_]u32{ d.hidden, d.inter, p, d.rate.n, d.dec.window.mask() }) |v| gu.add(.{ .u = v });
+    var mid: Launch = .{ .symbol = if (glm) "t3_pf_mid_glm" else "t3_pf_mid_exl3", .group = "prefill", .grid = .{ d.inter / 128, p, 1 }, .block = 128 };
+    for ([_]Role{ .zg, .order, .slots, .counts, .gate_svh, .up_svh, .down_suh, .sg, .su, .hd, .hs }) |r| mid.add(.{ .buf = r });
+    for ([_]u32{ d.hidden, d.inter, p }) |v| mid.add(.{ .u = v });
+    mid.add(.{ .i = @intFromBool(d.defer_map) });
+    mid.add(.{ .f = d.limit });
+    var down: Launch = .{ .symbol = gemmName(d.dec, d.defer_map), .group = "prefill", .grid = .{ d.hidden / 128, d.cap(), 1 }, .block = 256 };
+    for ([_]Role{ .hd, .hd, .down_t, .down_t, .items, .zd }) |r| down.add(.{ .buf = r });
+    for ([_]u32{ d.inter, d.hidden, p, d.rate.n, d.dec.window.mask() }) |v| down.add(.{ .u = v });
+    var fin: Launch = .{ .symbol = if (glm) "t3_pf_fin_glm_f32" else switch (d.dtype) {
+        .f32 => "t3_pf_fin_exl3_f32",
+        .f16 => "t3_pf_fin_exl3_f16",
+        .bf16 => "t3_pf_fin_exl3_bf16",
+    }, .group = "prefill", .grid = .{ d.hidden / 128, d.rows, 1 }, .block = 128 };
+    for ([_]Role{ .zd, .inv, .slots, .scores, .down_svh, .hs, .y }) |r| fin.add(.{ .buf = r });
+    for ([_]u32{ d.hidden, d.inter, d.topk, p }) |v| fin.add(.{ .u = v });
+    fin.add(.{ .i = @intFromBool(d.defer_map) });
+    return .{ route, prep, gu, mid, down, fin };
+}
+
+/// Dense rows above 16 (no MLX matmul on AMD): prep_s (natural order) -> the WMMA GEMM over 64-row tiles of the one
+/// matrix -> dfinish (one slice). The host fills `items` with `denseItems`.
+pub fn denseGemm(d: Dense) error{BadExl3Shape}![3]Launch {
+    if (d.in == 0 or d.out == 0 or d.in % 128 != 0 or d.out % 128 != 0 or d.rows == 0) return error.BadExl3Shape;
+    if (d.defer_map and d.dec.codebook != .mul1) return error.BadExl3Shape;
+    const chain = try denseChain(.{ .in = d.in, .out = d.out, .rows = 1, .rate = d.rate, .dec = d.dec, .dtype = d.dtype, .defer_map = d.defer_map });
+    var prep = chain[0];
+    prep.grid = .{ d.in / 128, d.rows, 1 };
+    prep.args[5] = .{ .i = 0 }; // natural order: the GEMM's A
+    var gemm: Launch = .{ .symbol = gemmName(d.dec, d.defer_map), .group = "prefill", .grid = .{ d.out / 128, denseTiles(d.rows), 1 }, .block = 256 };
+    for ([_]Role{ .xp, .xp, .trellis, .trellis, .items, .z }) |r| gemm.add(.{ .buf = r });
+    for ([_]u32{ d.in, d.out, d.rows, d.rate.n, d.dec.window.mask() }) |v| gemm.add(.{ .u = v });
+    var fin = chain[2];
+    fin.grid = .{ d.out / 128, d.rows, 1 };
+    fin.args[5] = .{ .u = d.rows };
+    fin.args[6] = .{ .u = 1 }; // one slice
+    return .{ prep, gemm, fin };
+}
+
+pub fn denseTiles(rows: u32) u32 {
+    return (rows + gemm_bm - 1) / gemm_bm;
+}
+
+/// The dense GEMM's items: (matrix 0, first row, rows) of 64-row tiles.
+pub fn denseItems(rows: u32, out: []i32) void {
+    for (0..denseTiles(rows)) |t| {
+        const first: u32 = @intCast(t * gemm_bm);
+        out[3 * t] = 0;
+        out[3 * t + 1] = @intCast(first);
+        out[3 * t + 2] = @intCast(@min(gemm_bm, rows - first));
+    }
 }

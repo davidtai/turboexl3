@@ -12,33 +12,11 @@
 //     f32 [row-slot][hidden] with no score (the host combines the slots and the shared expert). A slot whose expert id
 //     is >= `experts` (the shared expert) is skipped and its output left as it is.
 
-#include "common.hpp"
+#include "routed.hpp"
 
 namespace {
 
 using namespace t3;
-
-// The unscaled Hadamard of a 128-block held one value a thread (tid 0..127): five lane stages, then two through
-// xch (turboexl3_h128 of gemv_core.metal).
-__device__ __forceinline__ float h128_thread(float v, float* xch, uint32_t tid) {
-    const uint32_t lane = tid & 31u;
-#pragma unroll
-    for (uint32_t s = 0; s < 5u; ++s) {
-        const uint32_t bit = 1u << s;
-        const float p = __shfl_xor(v, static_cast<int>(bit), 32);
-        v = (lane & bit) ? (p - v) : (v + p);
-    }
-#pragma unroll
-    for (uint32_t s = 5; s < 7u; ++s) {
-        const uint32_t bit = 1u << s;
-        xch[tid] = v;
-        __syncthreads();
-        const float p = xch[tid ^ bit];
-        __syncthreads();
-        v = (tid & bit) ? (p - v) : (v + p);
-    }
-    return v;
-}
 
 // Grid (hidden / 128, RK), 32 threads: each routed slot's gate and up inputs, xg / xu f16 [RK][hidden] in lane order,
 // and each 128-block's sums sg / su (the deferred map).
@@ -84,35 +62,6 @@ __device__ void prep2(const void* x, const int* slots, const uint16_t* gate_suh,
     }
 }
 
-// One wave's GEMV over input tiles [tk0, tk1) of an expert matrix into a[BT][2] (turboexl3_gemv_core's order: input
-// tiles ascending, weights m = 0..7, accumulator m >> 2, input element m & 3 of the quad's lane-order four).
-template <int CB, int DEFER, uint32_t BT>
-__device__ __forceinline__ void gemv_tiles(const uint32_t* wbase, const uint16_t* xrow, uint32_t tk0, uint32_t tk1,
-                                           uint32_t blk, uint32_t out_tiles, uint32_t n, uint32_t mask, uint32_t lane,
-                                           float (&a)[BT][2]) {
-    const uint32_t nw = n / 2u;
-    const uint32_t base = lane_base(n, lane);
-    uint32_t off[8];
-#pragma unroll
-    for (uint32_t m = 0; m < 8u; ++m) off[m] = lane_off(n, lane, m, base);
-#pragma unroll
-    for (uint32_t t = 0; t < BT; ++t) a[t][0] = a[t][1] = 0.0f;
-    for (uint32_t tk = tk0; tk < tk1; ++tk) {
-        float xr[4];
-#pragma unroll
-        for (uint32_t j = 0; j < 4u; ++j) xr[j] = half_value(xrow[tk * 16u + j]);
-#pragma unroll
-        for (uint32_t t = 0; t < BT; ++t) {
-            const LaneWords ww = lane_words(wbase + (static_cast<size_t>(tk) * out_tiles + blk * BT + t) * nw, n, base);
-#pragma unroll
-            for (uint32_t m = 0; m < 8u; ++m) {
-                const float w = weight<CB, DEFER>(lane_cw(ww, off[m], mask));
-                a[t][m >> 2] = __builtin_fmaf(xr[m & 3u], w, a[t][m >> 2]);
-            }
-        }
-    }
-}
-
 constexpr uint32_t kBT = 4;  // output tiles a GEMV threadgroup
 
 // Grid (inter / 16 / BT, RK, KS), 128 threads: waves 0, 1 the gate's two halves of slice ks, 2, 3 the up's.
@@ -151,57 +100,18 @@ __device__ void fin3(const float* zg, const float* zu, const int* slots, const u
                      float* hs, uint32_t hidden, uint32_t inter, uint32_t rk_count, uint32_t ks, uint32_t experts,
                      int defer, float limit) {
     __shared__ float xch[128];
-    const uint32_t blk = blockIdx.x, rk = blockIdx.y, tid = threadIdx.x, lane = tid & 31u;
+    const uint32_t blk = blockIdx.x, rk = blockIdx.y, tid = threadIdx.x;
     const int es = slots[rk];
     if (es < 0 || static_cast<uint32_t>(es) >= experts) return;
-    const size_t e = static_cast<size_t>(es);
-    const uint32_t o = blk * 128u + tid;
-    float g = 0.0f, u = 0.0f;
-    for (uint32_t k = 0; k < ks; ++k) {
-        const size_t i = (static_cast<size_t>(k) * rk_count + rk) * inter + o;
-        g += zg[i];
-        u += zu[i];
-    }
-    if (defer) {
-        const uint32_t nb = hidden / 128u;
-        float sgx = 0.0f, sux = 0.0f;
+    const uint32_t nb = hidden / 128u;
+    float sgx = 0.0f, sux = 0.0f;
+    if (defer)
         for (uint32_t q = 0; q < nb; ++q) {
             sgx += xsg[static_cast<size_t>(rk) * nb + q];
             sux += xsu[static_cast<size_t>(rk) * nb + q];
         }
-        g = __builtin_fmaf(g, mul1_a(), mul1_c() * sgx);
-        u = __builtin_fmaf(u, mul1_a(), mul1_c() * sux);
-    }
-    float hv;
-    if constexpr (PROF == 0) {
-        g = h128_thread(round_half(g), xch, tid);
-        u = h128_thread(round_half(u), xch, tid);
-        const float gv = round_half(g * kHadScale * half_value(gate_svh[e * inter + o]));
-        const float uv = round_half(u * kHadScale * half_value(up_svh[e * inter + o]));
-        hv = round_half((gv / (1.0f + expf(-gv))) * uv);
-    } else {
-        g = h128_thread(g, xch, tid);
-        u = h128_thread(u, xch, tid);
-        float gv = bf16_value(bf16_bits(g * kHadScale * half_value(gate_svh[e * inter + o])));
-        float uv = bf16_value(bf16_bits(u * kHadScale * half_value(up_svh[e * inter + o])));
-        if (limit > 0.0f) {
-            gv = gv > limit ? limit : gv;  // a NaN stays a NaN (torch.clamp)
-            uv = uv > limit ? limit : (uv < -limit ? -limit : uv);
-        }
-        const float silu = bf16_value(bf16_bits(gv / (1.0f + expf(-gv))));
-        hv = bf16_value(bf16_bits(silu * uv));
-    }
-    float d = hv * half_value(down_suh[e * inter + o]);
-    d = h128_thread(d, xch, tid);
-    const uint16_t hh = half_bits(d * kHadScale);
-    hd[static_cast<size_t>(rk) * inter + lane_order(o)] = hh;
-    float hsum = half_value(hh);
-#pragma unroll
-    for (int m = 16; m > 0; m >>= 1) hsum += __shfl_xor(hsum, m, 32);
-    __syncthreads();
-    if (lane == 0u) xch[tid >> 5] = hsum;
-    __syncthreads();
-    if (tid == 0u) hs[static_cast<size_t>(rk) * (inter / 128u) + blk] = ((xch[0] + xch[1]) + xch[2]) + xch[3];
+    finish_gate_up<PROF>(zg, zu, rk, rk_count, ks, static_cast<size_t>(es), gate_svh, up_svh, down_suh, sgx, sux, hd, hs,
+                         rk, inter, blk, defer, limit, true, xch, tid);
 }
 
 // Grid (hidden / 16 / BT, RK, KS2), 128 threads: wave sg takes part sg of slice ks; zd f32 [KS2][RK][hidden].
@@ -243,21 +153,12 @@ __device__ void dfin3(const float* zd, const int* slots, const float* scores, co
         const uint32_t rk = row * topk + k;
         const int es = slots[rk];
         if (es < 0 || static_cast<uint32_t>(es) >= experts) continue;  // uniform over the block
-        const size_t e = static_cast<size_t>(es);
-        float v = 0.0f;
-        for (uint32_t q = 0; q < ks; ++q) v += zd[(static_cast<size_t>(q) * rk_count + rk) * hidden + o];
-        if (defer) {
-            float hsum = 0.0f;
+        float hsum = 0.0f;
+        if (defer)
             for (uint32_t q = 0; q < nbi; ++q) hsum += hsx[static_cast<size_t>(rk) * nbi + q];
-            v = __builtin_fmaf(v, mul1_a(), mul1_c() * hsum);
-        }
-        if constexpr (PROF == 0) {
-            v = h128_thread(round_half(v), xch, tid);
-            acc = __builtin_fmaf(scores[rk], round_half(v * kHadScale * half_value(down_svh[e * hidden + o])), acc);
-        } else {
-            v = h128_thread(v, xch, tid);
-            static_cast<float*>(y)[static_cast<size_t>(rk) * hidden + o] = v * kHadScale * half_value(down_svh[e * hidden + o]);
-        }
+        const float v = finish_down<PROF>(zd, rk, rk_count, ks, hsum, defer, down_svh, static_cast<size_t>(es), hidden, o, xch, tid);
+        if constexpr (PROF == 0) acc = __builtin_fmaf(scores[rk], v, acc);
+        else static_cast<float*>(y)[static_cast<size_t>(rk) * hidden + o] = v;
     }
     if constexpr (PROF == 0) store_act<DT>(y, static_cast<size_t>(row) * hidden + o, acc);
 }
