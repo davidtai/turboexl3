@@ -134,7 +134,8 @@ __device__ __forceinline__ void finish_row(const float* z, const float* xs, cons
         float acc = 0.0f;
         for (uint32_t k = 0; k < ks; ++k) {
             const float* p = z + (static_cast<size_t>(k) * rows + row) * out + o;
-            const float zv = nt ? __builtin_nontemporal_load(p) : *p;
+            // the last arriver: a device-scope load, coherent with the other threadgroups' stores
+            const float zv = nt ? __hip_atomic_load(p, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT) : *p;
             acc = k == 0 ? zv : acc + zv;
         }
         if (defer) acc = __builtin_fmaf(acc, mul1_a(), mul1_c() * xsum);
@@ -183,7 +184,9 @@ __device__ void dec0(const uint32_t* w, const uint16_t* xp, float* z, const floa
     const uint32_t per_block = 128u / (16u * BT) * gridDim.z;  // its threadgroups: tiles across, K slices
     __threadfence();
     __syncthreads();
-    if (threadIdx.x == 0) last = atomicAdd(&cnt[blockIdx.y * (out / 128u) + b128], 1u) == per_block - 1u;
+    if (threadIdx.x == 0)
+        last = __hip_atomic_fetch_add(&cnt[blockIdx.y * (out / 128u) + b128], 1u, __ATOMIC_ACQ_REL,
+                                      __HIP_MEMORY_SCOPE_AGENT) == per_block - 1u;
     __syncthreads();
     if (!last) return;
     __threadfence();
