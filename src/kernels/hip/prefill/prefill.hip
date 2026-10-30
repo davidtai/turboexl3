@@ -120,11 +120,11 @@ typedef float f8v __attribute__((ext_vector_type(8)));
 
 // Grid (N / 128, item slots, mats), 256 threads (8 waves: 2 along m x 4 along n). A block owns one item (an expert's
 // tile of at most 64 positions) and one 128-column block: z[(mat P + p) N + column] = X[p] W_q for the item's
-// positions p (f32; MUL1's t under the deferred map). Weights: expert e's trellis at W + e (K / 16)(N / 16)(n / 2) words.
-// With ptrs set, W0 and W1 are u64 [E] tables of each expert's trellis address (routed.hpp expert_trellis).
-template <int CB, int DEFER>
-__device__ void gemm(const uint16_t* X0, const uint16_t* X1, const uint32_t* W0, const uint32_t* W1, const int* items,
-                     float* z, uint32_t k, uint32_t n_out, uint32_t positions, uint32_t n, uint32_t mask, int ptrs) {
+// positions p (f32; MUL1's t under the deferred map). Weights: TABLE 1 (the routed bank), W0 and W1 are u64 [E] tables
+// of each expert's trellis address (routed.hpp expert_trellis); TABLE 0 (a dense matrix, item expert 0), the trellis.
+template <int CB, int DEFER, int TABLE>
+__device__ void gemm(const uint16_t* X0, const uint16_t* X1, const void* W0, const void* W1, const int* items,
+                     float* z, uint32_t k, uint32_t n_out, uint32_t positions, uint32_t n, uint32_t mask) {
 #if defined(__gfx1100__) || defined(__gfx1101__) || defined(__gfx1102__) || defined(__gfx1103__) || \
     defined(__gfx1150__) || defined(__gfx1151__) || defined(__gfx1152__) || defined(__gfx1153__)
     const uint32_t nb = blockIdx.x, it = blockIdx.y, mat = blockIdx.z;
@@ -137,7 +137,8 @@ __device__ void gemm(const uint16_t* X0, const uint16_t* X1, const uint32_t* W0,
     const uint32_t wm = warp & 1u, wn = warp >> 1, l16 = lane & 15u;
     const uint32_t nt_all = n_out / 16u, iters = k / kBK, nw = n / 2u;
     const uint16_t* X = mat ? X1 : X0;
-    const uint32_t* T = expert_trellis(mat ? W1 : W0, e, static_cast<size_t>(k / 16u) * nt_all * nw, ptrs);
+    const void* W = mat ? W1 : W0;
+    const uint32_t* T = TABLE ? expert_trellis(static_cast<const uint64_t*>(W), e) : static_cast<const uint32_t*>(W);
     const uint32_t arow = threadIdx.x >> 2, akc = threadIdx.x & 3u;
     const uint32_t base = lane_base(n, lane);
     uint32_t off[8];
@@ -284,15 +285,19 @@ T3_PF_PREP(exl3, 0, bf16, kBf16)
 T3_PF_PREP(glm, 1, bf16, kBf16)
 #undef T3_PF_PREP
 
-#define T3_PF_GEMM(NAME, CB, DEFER)                                                                                  \
-    extern "C" __global__ void __launch_bounds__(256) t3_pf_gemm_##NAME(                                            \
-        const uint16_t* X0, const uint16_t* X1, const uint32_t* W0, const uint32_t* W1, const int* items, float* z,  \
-        uint32_t k, uint32_t n_out, uint32_t positions, uint32_t n, uint32_t mask, int ptrs) {                       \
-        gemm<CB, DEFER>(X0, X1, W0, W1, items, z, k, n_out, positions, n, mask, ptrs);                               \
+// t3_pf_gemm_*: the routed bank (u64 trellis tables); t3_pf_dgemm_*: one dense matrix (its trellis)
+#define T3_PF_GEMM(KIND, TABLE, WT, NAME, CB, DEFER)                                                                 \
+    extern "C" __global__ void __launch_bounds__(256) t3_pf_##KIND##_##NAME(                                         \
+        const uint16_t* X0, const uint16_t* X1, const WT* W0, const WT* W1, const int* items, float* z, uint32_t k,  \
+        uint32_t n_out, uint32_t positions, uint32_t n, uint32_t mask) {                                             \
+        gemm<CB, DEFER, TABLE>(X0, X1, W0, W1, items, z, k, n_out, positions, n, mask);                              \
     }
-T3_PF_GEMM(mcg, kMcg, 0)
-T3_PF_GEMM(mul1, kMul1, 0)
-T3_PF_GEMM(mul1d, kMul1, 1)
+T3_PF_GEMM(gemm, 1, uint64_t, mcg, kMcg, 0)
+T3_PF_GEMM(gemm, 1, uint64_t, mul1, kMul1, 0)
+T3_PF_GEMM(gemm, 1, uint64_t, mul1d, kMul1, 1)
+T3_PF_GEMM(dgemm, 0, uint32_t, mcg, kMcg, 0)
+T3_PF_GEMM(dgemm, 0, uint32_t, mul1, kMul1, 0)
+T3_PF_GEMM(dgemm, 0, uint32_t, mul1d, kMul1, 1)
 #undef T3_PF_GEMM
 
 #define T3_PF_MID(PNAME, PROF)                                                                                       \

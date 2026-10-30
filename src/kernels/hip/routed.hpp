@@ -6,10 +6,10 @@
 
 namespace t3 {
 
-// Expert e's trellis: the e-th matrix of a contiguous bank [E][K/16][N/16][n/2 words] (ptrs 0), or the address in
-// entry e of a pointer table, u64 [E] (ptrs 1: a host whose loader keeps each expert's tensor apart).
-__device__ __forceinline__ const uint32_t* expert_trellis(const uint32_t* bank, size_t e, size_t words, int ptrs) {
-    return ptrs ? reinterpret_cast<const uint32_t*>(reinterpret_cast<const uint64_t*>(bank)[e]) : bank + e * words;
+// Expert e's trellis ([K/16][N/16][n/2 words]): entry e of the bank's u64 [E] table of each expert's trellis address.
+// The host builds the table (for a contiguous bank, its base plus e (K/16)(N/16)(n/2) words).
+__device__ __forceinline__ const uint32_t* expert_trellis(const uint64_t* table, size_t e) {
+    return reinterpret_cast<const uint32_t*>(table[e]);
 }
 
 // The unscaled Hadamard of a 128-block held one value a thread (tid 0..127): five lane stages, then two through
