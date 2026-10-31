@@ -738,6 +738,25 @@ test "turboexl3 gpu deepseek timing: the decode forward's 40 layers chained in o
             std.debug.print("TURBOEXL3_DS_SWEEP trunk dec_one={} dense_lean={} rows={d} token_min_ms={d:.2} per_layer_us={d:.1}\n", .{ opt[0], opt[1], rows, total[0] / 1000.0, total[0] / @as(f64, nl) });
         }
     }
+    // the trunk alone across the dense paths' row ranges (DEC-ONE to 4, the multi-row GEMV to 16, the register-path NAX GEMM
+    // to 32): whether a verify width's trunk is cheaper on the next path up
+    try root.configure(.{});
+    for ([_]u32{ 6, 8, 12, 16, 17, 20, 24, 32 }) |rows| {
+        const rm = g.mark();
+        defer g.resetTo(rm);
+        const x = try randBf16(a, &g, rnd, &.{ ci(rows), 5120 });
+        var total: [5]f64 = undefined;
+        for (0..total.len + 2) |round| {
+            const fm = g.mark();
+            defer g.resetTo(fm);
+            const t0 = nowNs();
+            const y = try chainForward(&g, s, &layers, &.{}, &.{}, x, rows, .trunk, null);
+            try g.evalAll(&.{y});
+            if (round >= 2) total[round - 2] = @as(f64, @floatFromInt(nowNs() - t0)) / 1000.0;
+        }
+        std.mem.sort(f64, &total, {}, std.sort.asc(f64));
+        std.debug.print("TURBOEXL3_DS_SWEEP trunk_rows rows={d} token_min_ms={d:.2} per_layer_us={d:.1}\n", .{ rows, total[0] / 1000.0, total[0] / @as(f64, nl) });
+    }
 }
 
 // gu8 (the gate|up launch with the prepare inside: form 8, and form 9's one-row arm) at DeepSeek-V4.1's 5120-wide hidden:
