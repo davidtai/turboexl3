@@ -33,6 +33,10 @@ pub const Geometry = struct {
     dec: format.Decode,
     /// timing probes only (never a served kernel): 1 skips the codebook hash, 2 skips the funnel too
     probe: u8 = 0,
+    /// the SwiGLU's clamp (`root.moeClamped`: DeepSeek-V4's and GLM's `swiglu_limit`; 0 none): each row-slot's gate clamped
+    /// from above at `limit` and its up to [-limit, limit] before the SiLU. `Kernels3` carries it in fin7's variant
+    /// (`text_fin7c`, forms 7, 8 and 9); `Kernels` and `Kernels5` refuse a clamped geometry.
+    limit: u32 = 0,
 
     pub fn admitted(g: Geometry) bool {
         return g.hidden % 128 == 0 and g.inter % 128 == 0 and g.hidden > 0 and g.inter > 0 and g.topk > 0 and g.topk <= 32;
@@ -80,6 +84,7 @@ pub const Kernels = struct {
 
     pub fn init(geo: Geometry) !Kernels {
         if (!geo.admitted()) return error.BadExl3Shape;
+        if (geo.limit != 0) return error.Exl3EngineNotImplemented; // the clamped SwiGLU is Kernels3's
         const gu = ks.newKernel("turboexl3_gu", &gu_inputs, &gu_outputs, text_gu, header, true) orelse return error.KernelCreateFailed;
         const down = ks.newKernel("turboexl3_down", &down_inputs, &down_outputs, text_down, header, true) orelse return error.KernelCreateFailed;
         return .{ .geo = geo, .gu = gu, .down = down };
@@ -457,7 +462,11 @@ pub const Kernels3 = struct {
             .fin = ks.newKernel("turboexl3_fin3", &fin3_inputs, &fin3_outputs, text_fin3, header, true) orelse return error.KernelCreateFailed,
             .down = ks.newKernel("turboexl3_down3", &down3_inputs, &down3_outputs, text_down3, header, true) orelse return error.KernelCreateFailed,
             .dfin = ks.newKernel("turboexl3_dfin3", &dfin3_inputs, &down_outputs, text_dfin3, header, true) orelse return error.KernelCreateFailed,
-            .fin7 = ks.newKernel("turboexl3_fin7", &fin3_inputs, &fin3_outputs, text_fin7, header5, true) orelse return error.KernelCreateFailed,
+            // a clamped geometry's fin7 is the clamped variant, so every launch of fin7 (forms 7, 8 and 9) clamps
+            .fin7 = (if (geo.limit == 0)
+                ks.newKernel("turboexl3_fin7", &fin3_inputs, &fin3_outputs, text_fin7, header5, true)
+            else
+                ks.newKernel("turboexl3_fin7c", &fin3_inputs, &fin3_outputs, text_fin7c, header5, true)) orelse return error.KernelCreateFailed,
             .dfin7 = ks.newKernel("turboexl3_dfin7", &dfin3_inputs, &down_outputs, text_dfin7, header5, true) orelse return error.KernelCreateFailed,
             .gu8 = ks.newKernel("turboexl3_gu8", &gu8_inputs, &gu8_outputs, text_gu8, header5, true) orelse return error.KernelCreateFailed,
             .gu3s = ks.newKernel("turboexl3_gu3s", &gu3s_inputs, &gu3s_outputs, text_gu3s, header_s, true) orelse return error.KernelCreateFailed,
@@ -526,7 +535,13 @@ pub const Kernels3 = struct {
     /// 128-aligned; otherwise form 8 runs form 7's launches.
     pub fn gu8Admitted(self: *const Kernels3, rows: usize, kdiv: [4]u32) bool {
         const spt = self.ks_gu / self.kThreadgroups(self.ks_gu, rows, kdiv);
-        return (self.geo.hidden / self.ks_gu * spt) % 128 == 0 and self.geo.hidden % self.ks_gu == 0;
+        if ((self.geo.hidden / self.ks_gu * spt) % 128 != 0 or self.geo.hidden % self.ks_gu != 0) return false;
+        // gu8's threadgroup memory (gu8_1.metal, gu8_2.metal) within Metal's 32 KB: xs, the group members' prepared gate and
+        // up spans (GROUP x 2 x SPT x hidden / KS halves), and red (SPT x 4 x 2 x 16 x BT floats) at the widest BT a form
+        // runs. DeepSeek-V4.1's 5120-wide hidden at two rows (GROUP 2, SPT 4) needs 43,008 bytes: its prepare runs in prep2.
+        const grp: u32 = if (rows >= 2) self.group else 1;
+        const bt = @max(self.bt, @max(self.bt1, self.bt9));
+        return 4 * grp * spt * (self.geo.hidden / self.ks_gu) + 512 * spt * bt <= 32768;
     }
 
     /// Threadgroups along K per row-slot for a row count (`adaptive`, `kdiv`'s defaults): all ks slices apart at one row, two
@@ -586,6 +601,9 @@ pub const Kernels3 = struct {
         const def_t = ks.TemplateArg{ .name = "DEFER", .value = .{ .int = if (self.defer_affine) 1 else 0 } };
         const nbh_t = ks.TemplateArg{ .name = "NBH", .value = .{ .int = @intCast(g.hidden / 128) } };
         const nbi_t = ks.TemplateArg{ .name = "NBI", .value = .{ .int = @intCast(g.inter / 128) } };
+        // fin7's constants, the clamp last where the geometry clamps (an unclamped fin7 takes exactly its five)
+        const fin7_t = [_]ks.TemplateArg{ inter_t, rkt, ks_gu_t, def_t, nbh_t, .{ .name = "LIMIT", .value = .{ .int = @intCast(g.limit) } } };
+        const fin7_n: usize = if (g.limit != 0) fin7_t.len else fin7_t.len - 1;
         const bw: u32 = 16 * bt;
         return .{
             .prep_h = try ks.buildConfig(.{ .grid = .{ (g.hidden / 128) * 32, rk, 1 }, .threadgroup = .{ 32, 1, 1 }, .out_shapes = &.{ &[_]c_int{ rkc, H }, &[_]c_int{ rkc, H }, &[_]c_int{ rkc, @intCast(g.hidden / 128) }, &[_]c_int{ rkc, @intCast(g.hidden / 128) } }, .out_dtypes = &.{ .float16, .float16, .float32, .float32 }, .template = &.{ .{ .name = "DIM", .value = .{ .int = H } }, topk } }),
@@ -593,7 +611,7 @@ pub const Kernels3 = struct {
             .fin = try ks.buildConfig(.{ .grid = .{ (g.inter / 128) * 128, rk, 1 }, .threadgroup = .{ 128, 1, 1 }, .out_shapes = &.{ &[_]c_int{ rkc, I }, &[_]c_int{ rkc, @intCast(g.inter / 128) } }, .out_dtypes = &.{ .float16, .float32 }, .template = &.{ inter_t, rkt, ks_gu_t, def_t, nbh_t } }),
             .down = try ks.buildConfig(.{ .grid = .{ (g.hidden / bw) * 128, rk, z_dn }, .threadgroup = .{ 128, 1, 1 }, .out_shapes = &.{&[_]c_int{ @intCast(self.ks_dn), rkc, H }}, .out_dtypes = &.{.float32}, .template = &.{ nhw, cb, wb, hid, inter_t, rkt, ks_dn_t, spt_dn_t, bt_t, grp_t, def_t } }),
             .dfin = try ks.buildConfig(.{ .grid = .{ (g.hidden / 128) * 128, @intCast(rows), 1 }, .threadgroup = .{ 128, 1, 1 }, .out_shapes = &.{&[_]c_int{ @intCast(rows), H }}, .out_dtypes = &.{self.out_dtype}, .template = &.{ hid, topk, rkt, ks_dn_t, out_t, def_t, nbi_t } }),
-            .fin7 = try ks.buildConfig(.{ .grid = .{ (g.inter / 128) * 32, rk, 1 }, .threadgroup = .{ 32, 1, 1 }, .out_shapes = &.{ &[_]c_int{ rkc, I }, &[_]c_int{ rkc, @intCast(g.inter / 128) } }, .out_dtypes = &.{ .float16, .float32 }, .template = &.{ inter_t, rkt, ks_gu_t, def_t, nbh_t } }),
+            .fin7 = try ks.buildConfig(.{ .grid = .{ (g.inter / 128) * 32, rk, 1 }, .threadgroup = .{ 32, 1, 1 }, .out_shapes = &.{ &[_]c_int{ rkc, I }, &[_]c_int{ rkc, @intCast(g.inter / 128) } }, .out_dtypes = &.{ .float16, .float32 }, .template = fin7_t[0..fin7_n] }),
             .dfin7 = try ks.buildConfig(.{ .grid = .{ (g.hidden / 128) * 32 * g.topk, @intCast(rows), 1 }, .threadgroup = .{ 32 * g.topk, 1, 1 }, .out_shapes = &.{&[_]c_int{ @intCast(rows), H }}, .out_dtypes = &.{self.out_dtype}, .template = &.{ hid, topk, rkt, ks_dn_t, out_t, def_t, nbi_t } }),
             .gu8 = try ks.buildConfig(.{ .grid = .{ (g.inter / bw) * 128, rk, z_gu }, .threadgroup = .{ 128, 1, 1 }, .out_shapes = &.{ &[_]c_int{ @intCast(self.ks_gu), rkc, I }, &[_]c_int{ @intCast(self.ks_gu), rkc, I }, &[_]c_int{ rkc, @intCast(g.hidden / 128) }, &[_]c_int{ rkc, @intCast(g.hidden / 128) } }, .out_dtypes = &.{ .float32, .float32, .float32, .float32 }, .template = &.{ nhw, cb, wb, hid, inter_t, rkt, ks_gu_t, spt_gu_t, bt_t, grp_t, def_t, topk } }),
         };
@@ -613,11 +631,16 @@ pub const Kernels3 = struct {
     /// `form` 3: the five launches above; 7: the same GEMVs with fin7 / dfin7 as launches 3 and 5; 8: form 7 with the
     /// prepare inside the gate|up launch (gu8, four launches) where `gu8Admitted`; 9: form 8 at one row, form 7 from two
     /// rows (gu8 re-rotates its whole span in every output-tile threadgroup, a cost that grows once a threadgroup carries
-    /// several slices), in its own launch shape (bt1, bt9, kdiv9). Every form, form 3's bytes.
+    /// several slices), in its own launch shape (bt1, bt9, kdiv9). Every form, form 3's bytes. A clamped geometry runs forms
+    /// 7, 8 and 9 (fin7's clamped variant) and refuses form 3 (error.Exl3EngineNotImplemented: fin3 has no clamp).
     pub fn moeForm(self: *Kernels3, s: mlx.mlx_stream, x: mlx.mlx_array, slots: mlx.mlx_array, scores: mlx.mlx_array, bank: Kernels.Bank, rows: usize, form: u8) !mlx.mlx_array {
+        if (self.geo.limit != 0 and form < 7) return error.Exl3EngineNotImplemented;
         const one_row9 = form == 9 and rows <= self.gu8_rows;
         const c = if (form == 9) try self.cfgs9(rows) else try self.cfgs(rows);
         const f7 = form >= 7;
+        // dfin7 runs one simdgroup per routed slot and writes each block's 128 outputs from its first 128 threads, so it needs
+        // a top-k of 4 or more; below that form 3's dfin (the same bytes) finishes the down projection.
+        const f7d = f7 and self.geo.topk >= 4;
         // planes[0..2] = zg, zu (the split-K gate|up planes), planes[2..4] = the inputs' per-block sums
         var planes: [4]mlx.mlx_array = undefined;
         if ((form == 8 and self.gu8Admitted(rows, self.kdiv)) or (one_row9 and self.gu8Admitted(rows, self.kdiv9))) {
@@ -643,15 +666,18 @@ pub const Kernels3 = struct {
         };
         const zd = try one(self.down, c.down, &.{ hd[0], slots, bank.down_t }, s);
         defer _ = mlx.mlx_array_free(zd);
-        return one(if (f7) self.dfin7 else self.dfin, if (f7) c.dfin7 else c.dfin, &.{ zd, slots, scores, bank.down_svh, hd[1] }, s);
+        return one(if (f7d) self.dfin7 else self.dfin, if (f7d) c.dfin7 else c.dfin, &.{ zd, slots, scores, bank.down_svh, hd[1] }, s);
     }
 
     /// Whether `moeShared` carries this shared expert at `rows`: up to `shared_rows_max` rows, the routed width as its
     /// intermediate, gate|up K slices of exactly one 128-block of hidden (the heads rotate their block in-kernel: dense prep_s's
-    /// span), a down split of whole 4-part slices, and the rows' bf16 or f16 output (the SwiGLU table's dtype).
+    /// span), a down split of whole 4-part slices, and the rows' bf16 or f16 output (the SwiGLU table's dtype). Never on a
+    /// clamped geometry: the shared heads' table SwiGLU has no clamp (and the routed side launches run fin7's variant).
     pub fn sharedAdmitted(self: *const Kernels3, rows: usize, sb: SharedBank) bool {
         const g = self.geo;
+        if (g.limit != 0) return false;
         if (rows == 0 or rows > shared_rows_max) return false;
+        if (g.topk < 4) return false; // dfin7s and dfin7t write each block from their first 128 threads, as dfin7 does
         if (self.out_dtype != .bfloat16 and self.out_dtype != .float16) return false;
         const gs = mlx.getShape(sb.gate_t);
         const us = mlx.getShape(sb.up_t);
@@ -1489,15 +1515,23 @@ const red5_outputs = [_][*:0]const u8{"y"};
 /// Form 7, launch 3 (fin3 with the H128s in registers): one simdgroup per (128-wide intermediate block, row-slot), lane L
 /// holding elements L + 32 q; fin3's arithmetic in fin3's order (`turboexl3_h128r` is `turboexl3_h128`'s stages, the block sum
 /// the same four simd sums), so fin3's bytes without its twelve threadgroup barriers.
-pub const text_fin7 = fin7_1 ++ fin7_2 ++ fin7_planes ++ fin7_3 ++ fin7_sums ++ fin7_4;
+pub const text_fin7 = fin7_1 ++ fin7_2 ++ fin7_planes ++ fin7_3 ++ fin7_sums ++ fin7_4 ++ fin7_swiglu ++ fin7_5;
 /// fin7's pieces: its constants and grid lines; its body from the expert line, cut at the planes' read (gu3sf reads the
-/// planes through coherent pointers) and at the input sums' read
+/// planes through coherent pointers), at the input sums' read and at the SwiGLU's line (`text_fin7c` clamps there)
 const fin7_1 = @embedFile("kernels/decode/fin7_1.metal");
 const fin7_2 = @embedFile("kernels/decode/fin7_2.metal");
 const fin7_planes = @embedFile("kernels/decode/fin7_planes.metal");
 const fin7_3 = @embedFile("kernels/decode/fin7_3.metal");
 const fin7_sums = @embedFile("kernels/decode/fin7_sums.metal");
 const fin7_4 = @embedFile("kernels/decode/fin7_4.metal");
+const fin7_swiglu = @embedFile("kernels/decode/fin7_swiglu.metal");
+const fin7_5 = @embedFile("kernels/decode/fin7_5.metal");
+
+/// Form 7's launch 3 with the clamped SwiGLU (`Geometry.limit`, the template int LIMIT; `root.moeClamped`): fin7 with its
+/// SwiGLU line replaced by the clamp (the gate clamped from above at LIMIT and up to [-LIMIT, LIMIT], then fin7's SwiGLU
+/// on them), every other statement fin7's, so where no value passes the limit it gives fin7's bytes.
+pub const text_fin7c = fin7_1 ++ fin7_2 ++ fin7_planes ++ fin7_3 ++ fin7_sums ++ fin7_4 ++ fin7_swiglu_clamp ++ fin7_5;
+const fin7_swiglu_clamp = @embedFile("kernels/decode/fin7_swiglu_clamp.metal");
 
 /// Form 7, launch 5 (dfin3 with the slots side by side): per (128-wide hidden block, row), simdgroup k finishes slot k (the
 /// planes' sum, the deferred map, f16 round, H128 in registers, svh, f16 round) into threadgroup memory, then 128 threads
@@ -1577,7 +1611,7 @@ const fin7s_outputs = fin3_outputs ++ sfin_outputs;
 pub const text_gu3sf = sgh_1 ++ vf_head_tg ++ sgh_2 ++ vf_head_decls ++ sgh_3 ++ vf_head_zc ++ sgh_4 ++ vf_head_sumsc ++ sgh_5 ++
     vf_head_arrive ++ sfh_2 ++ vf_sfin_xgc ++ vf_sfin_xuc ++ sfh_3 ++ vf_sfin_g ++ vf_sfin_u ++ sfh_4 ++ vf_head_close ++ sgh_end ++
     gu3_1 ++ rk_line ++ gu3_2 ++ vf_gu3_decls ++ gu3_3 ++ vf_gu3_stores ++ gu3_4 ++ vf_arrive ++
-    fin7_2 ++ vf_fin7_planes ++ fin7_3 ++ fin7_sums ++ fin7_4 ++ vf_fin7_close;
+    fin7_2 ++ vf_fin7_planes ++ fin7_3 ++ fin7_sums ++ fin7_4 ++ fin7_swiglu ++ fin7_5 ++ vf_fin7_close;
 const vf_head_tg = @embedFile("kernels/decode/vf_head_tg.metal");
 const vf_head_decls = @embedFile("kernels/decode/vf_head_decls.metal");
 const vf_head_zc = @embedFile("kernels/decode/vf_head_zc.metal");
@@ -1798,6 +1832,7 @@ pub const Kernels5 = struct {
     pub fn init(geo: Geometry, bt: u32, ks_max: u32, gmax: u32) !Kernels5 {
         if (!geo.admitted() or (bt != 1 and bt != 2 and bt != 4 and bt != 8) or (ks_max != 1 and ks_max != 2 and ks_max != 4 and ks_max != 8) or gmax < 1 or gmax > 4) return error.BadExl3Shape;
         if ((geo.inter / 16) % bt != 0) return error.BadExl3Shape;
+        if (geo.limit != 0) return error.Exl3EngineNotImplemented; // the clamped SwiGLU is Kernels3's (dn5 has no clamp)
         var ks_gu: u32 = ks_max;
         while (ks_gu > 1 and (geo.hidden / 16) % (ks_gu * 2) != 0) ks_gu /= 2;
         var ks_dn: u32 = ks_max;

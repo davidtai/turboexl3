@@ -194,7 +194,7 @@ The routed experts:
 | `Proj`, `Bank`, `Geometry`, `bankGeometry` | one projection's arrays, a bank's gate, up and down, and the geometry that the shapes give |
 | `moe` | the routed experts of one MoE layer: decode rows through the split-K GEMV chain, prefill rows through the fused GEMM chain; its argument `verify_rows` is Sushi's and changes nothing here |
 | `moeWithShared` | `moe`, then an MLX add of a shared-expert output that the caller has already gated |
-| `moeClamped` | GLM's clamped SwiGLU; it checks its operands and refuses for now |
+| `moeClamped` | `moe` with DeepSeek-V4's (and GLM's) clamped SwiGLU, `swiglu_limit` 1 to 128: the gate clamped from above and up to [−limit, limit] before SwiGLU; decode rows on fin7's clamped variant, prefill rows on the clamped mid |
 
 The shared expert and the router, at 1 to 4 decode rows:
 
@@ -211,6 +211,8 @@ The dense projections:
 | `linearSplit` | `linear` with the inner product and the finish of prefill rows on a second MLX stream; the same bytes |
 | `linearInnerSplit`, `linearPrepared`, `linearFinish`, `linearPrep` | `linear` in pieces, so the host can run its fused norm-gate of the GDN layers between them |
 | `linearPiecesBegin`, `linearPieceInner`, `linearPiecePrepared`, `linearPiecesFinish` | `linear` of one call cut into 2 to 4 row pieces, so the host can overlap them with its own launches |
+| `linearGrouped` | a grouped (block-diagonal) linear, DeepSeek-V4.1's `wo_a`: x `[..., G, in]` through G stacked slices. 1 to 16 rows: three launches whatever G. More rows: `linear` of each slice. Each slice has `linear`'s values |
+| `linearBias` | `linear`, then an MLX add of a bias `[out]` in x's dtype (DeepSeek-V4.1's vision tower and aligner) |
 
 The attention projections:
 
@@ -232,8 +234,8 @@ The resident and un-rotated trunk:
 | `attnInStd`, `linearGatedStd` | ATTN-IN and ATTN-OUT over the un-rotated trunk |
 
 The namespaces are `config`, `format` (the reference), `spec`, `lane` (the codeword readers), `decode`, `dense`,
-`prefill`, `attn_io`, `decode_merge`, `unfused` and `ref`. The doc comment of each function states its shapes, its
-dtypes, the chain whose bytes it gives and when it refuses.
+`grouped`, `prefill`, `attn_io`, `decode_merge`, `unfused` and `ref`. The doc comment of each function states its
+shapes, its dtypes, the chain whose bytes it gives and when it refuses.
 
 ## Source layout
 
@@ -369,10 +371,11 @@ The library reads no environment, but the tests do. These variables turn on test
 | variable | file | what it runs |
 |---|---|---|
 | none | every file | the CPU tests: the kernel texts, the launch plans, the tables and the reference |
-| `TURBOEXL3_GPU=1` | `gpu_test.zig`, `prefill_test.zig`, `attn_io_test.zig`, `decb_test.zig`, `bench.zig` | the GPU parity and byte tests, on a Metal device |
+| `TURBOEXL3_GPU=1` | `gpu_test.zig`, `prefill_test.zig`, `attn_io_test.zig`, `decb_test.zig`, `clamped_test.zig`, `deepseek_test.zig`, `topk_test.zig`, `bench.zig` | the GPU parity and byte tests, on a Metal device |
 | `TURBOEXL3_METAL_DUMP=1` | `prefill.zig` | prints each kernel of the routed prefill chain, with its option variants, as one standalone source file for an offline `xcrun metal` compile |
 | `TURBOEXL3_BENCH=1` | `bench.zig` | with `TURBOEXL3_GPU=1`: times the form-3 variants of the decode chain against Sushi's chain |
 | `TURBOEXL3_PF_TIME=1`, `TURBOEXL3_DEC_TIME=1` | `prefill_test.zig` | with `TURBOEXL3_GPU=1`: time the prefill and decode chains against Sushi's |
+| `TURBOEXL3_DS_TIME=1` | `deepseek_test.zig` | with `TURBOEXL3_GPU=1`: times DeepSeek-V4.1's clamped routed MoE (K3, K2; decode rows and a 4096-row chunk), its K6 trunk linears and the grouped `wo_a` |
 | `TURBOEXL3_DENSE_TIME=1` | `gpu_test.zig` | with `TURBOEXL3_GPU=1`: times the dense GEMV against the row-slot GEMV and MLX's 8-bit affine matmul |
 | `TURBOEXL3_REAL_SHARD=<file>` | `gpu_test.zig` | with `TURBOEXL3_GPU=1`: runs `linear` on two real trellises of a trunk shard of the full pack |
 | `TURBOEXL3_PERM_FILE=<file>` | `gpu_test.zig` | a CPU-only tool: the column order of the trunk, the EXL3 pack against the affine pack |
@@ -387,6 +390,7 @@ These variables set or narrow the cases of a test group. The comments of each fi
 | `TURBOEXL3_DENSE_TIME_PREFILL`, `_TAIL`, `_MULTI_ONLY` | `gpu_test.zig` | the dense timing: prompt-chunk rows, the rows of a snapshot tail, or the multi-row GEMV alone |
 | `TURBOEXL3_SHARED_V2` | `gpu_test.zig` | the configurations of the v2 shared heads |
 | `TURBOEXL3_ATTN_ROWS` | `attn_io_test.zig` | the row counts of the attention tests |
+| `TURBOEXL3_CLAMP_N`, `_ROWS` | `clamped_test.zig` | the rates (halfwords per tile) and row counts of the clamped SwiGLU's test at DeepSeek-V4.1-Flash's geometry |
 
 `python3 tools/check_texts.py <src before the change>` checks a refactor on the host. It fails on any Zig string that
 holds Metal. It also proves that each kernel source and header is byte-identical to the one before the change, or

@@ -989,7 +989,11 @@ EXCEPTIONS = {
 # compose kernel texts whose bodies changed (their texts are checked in 1 and 2)
 RECUT = {('decode.zig', 'rk_line'): 'now the whole line the routed bodies are cut at (indent, newline); the one test that '
                                     'compared the bare statement reads it from its pin file',
-         ('decode.zig', 'rk_line_y'): 'the same, the v2 rk line'}
+         ('decode.zig', 'rk_line_y'): 'the same, the v2 rk line',
+         ('decode.zig', 'fin7_4'): 'cut before its SwiGLU line (fin7_swiglu, then fin7_5): text_fin7c swaps that line for the '
+                                   'clamp; text_fin7 and text_gu3sf keep their values (2)',
+         ('prefill.zig', 'mid_4'): 'cut before its SwiGLU line (mid_swiglu, then mid_5): the clamped mids swap that line for '
+                                   'the clamp; text_mid and text_mid_t128 keep their values (2)'}
 RECOMPOSED = {('decode.zig', 'fn routePrepText'): 'the router fold over files (text_route_prep / _prepg: 1, 2)'}
 # declarations a change removed on purpose, by file and key, with the reason; their newKernel calls are listed in 1
 REMOVED = {}
@@ -1004,27 +1008,100 @@ for _f in ('decb.zig', 'decode.zig', 'root.zig'):
     ADDED[(_f, 'const sources')] = 'sources.zig, where the texts more than one kernel splices now live (same values: 2)'
 ADDED[('root.zig', 'const gdn_out')] = 'gdn_out.zig, the GDN tail in one launch'
 ADDED[('root.zig', 'fn gdnOutPrep')] = 'the GDN tail\'s API: z\'s finish, the gated norm and out_proj\'s prepare in one launch'
+ADDED[('root.zig', 'fn moeSwiglu')] = 'moe\'s body with the SwiGLU\'s clamp (limit 0: moe; moeClamped)'
+ADDED[('root.zig', 'const clamp_logged')] = 'the clamped SwiGLU\'s one-time engage line'
+ADDED[('ref.zig', 'const Hits')] = 'what moeRowClamped clamped (the clamped GPU test requires it to act)'
+ADDED[('ref.zig', 'fn swigluClamped')] = 'the reference\'s clamped SwiGLU of one element'
+ADDED[('ref.zig', 'fn moeRowClamped')] = 'moeRowDec with the clamped SwiGLU, moeClamped\'s reference'
 # files a change added on purpose, by name, with the reason
 ADDED_FILES = {'sources.zig': 'the texts more than one kernel splices (had128, the gate gemv and sum), MLX-free, for '
                               'turboexl3\'s kernels and a consumer\'s Metal',
                'gdn_out.zig': 'the GDN tail\'s kernel (turboexl3_gdn_out_prep: its pieces around sources.had128) and launch',
                'gdn_out_test.zig': 'the GDN tail\'s GPU tests against linearFinish, MLX\'s gated norm and linearPrep',
-               'hip_tests.zig': 'the AMD (HIP) kernels\' GPU tests against format.zig (zig build hip-test -Dhip=true); no Metal'}
+               'hip_tests.zig': 'the AMD (HIP) kernels\' GPU tests against format.zig (zig build hip-test -Dhip=true); no Metal',
+               'clamped_test.zig': 'the clamped SwiGLU\'s tests: its texts\' compositions and the reference (CPU), the clamped '
+                                   'launches\' bytes where nothing clamps and moeClamped against ref.moeRowClamped at '
+                                   'DeepSeek-V4.1-Flash\'s geometry (GPU)'}
 # other declarations a change edited on purpose, by file and key, with the reason
 CHANGED = {('tests.zig', 'comptime #0'): 'the test root lists the files the change added'}
+for _f, _key in (('decode.zig', 'const Geometry'), ('prefill.zig', 'const Geometry')):
+    CHANGED[(_f, _key)] = 'the SwiGLU\'s clamp (limit, default 0): part of the geometry, so of the kernel caches\' keys'
+CHANGED[('decode.zig', 'const Kernels')] = 'refuses a clamped geometry (the clamp is Kernels3\'s)'
+CHANGED[('decode.zig', 'const Kernels5')] = 'refuses a clamped geometry (dn5 has no clamp)'
+CHANGED[('decode.zig', 'const Kernels3')] = ('a clamped geometry\'s fin7 is turboexl3_fin7c with LIMIT appended to its constants; '
+                                             'moeForm refuses form 3 and sharedAdmitted the shared heads there; below a top-k of 4 '
+                                             'moeForm finishes the down with form 3\'s dfin (dfin7 writes each block from its first 128 '
+                                             'threads) and sharedAdmitted declines; gu8Admitted checks gu8\'s threadgroup memory against Metal\'s 32 KB')
+CHANGED[('prefill.zig', 'const T128Kernels')] = 'init takes the clamp: a clamped geometry\'s mid is turboexl3_pf_t128_midc'
+CHANGED[('prefill.zig', 'const Prefill')] = ('a clamped geometry\'s mids are turboexl3_pf_midc / _mid_vc, LIMIT appended to '
+                                             'every mid launch\'s constants there (midTempl)')
+for _key in ('fn kernelsFor', 'fn prefillFor'):
+    CHANGED[('root.zig', _key)] = 'the kernel cache matches the clamp too'
+CHANGED[('root.zig', 'fn moe')] = 'its body moved to moeSwiglu (limit 0)'
+CHANGED[('root.zig', 'fn moePrefill')] = 'takes the clamp into the prefill geometry'
+CHANGED[('root.zig', 'fn moeClamped')] = 'serves the clamped SwiGLU on moeSwiglu instead of refusing'
+CHANGED[('root.zig', 'const shared_state')] = 'registers clamp_logged'
+CHANGED[('ref.zig', 'fn moeRowDec')] = 'moeRowClamped at limit 0 (the same arithmetic)'
 # kernels a change added on purpose, by file and kernel name, with the reason; their newKernel calls are listed in 1
 ADDED_KERNELS = {('dense.zig', 'turboexl3_dense_dgemv_lean'): 'the lean GEMV (Config.dense_lean): text_dgemv with its '
                                                               'codeword loop taken by input element',
                  ('decode.zig', 'turboexl3_gu3sf'): 'the fused shared expert\'s gate|up launch with fin7s folded in '
                                                     '(Config.fused_fin_fold): gu3s, then fin7s\'s statements',
                  ('decode.zig', 'turboexl3_vfold_zero'): 'the zeroing of gu3sf\'s arrival counters: dense\'s DEC-ONE '
-                                                         'zeroing text'}
+                                                         'zeroing text',
+                 ('decode.zig', 'turboexl3_fin7c'): 'fin7 with the clamped SwiGLU (root.moeClamped): text_fin7 with its '
+                                                    'SwiGLU line swapped for the clamp piece',
+                 ('prefill.zig', 'turboexl3_pf_midc'): 'the mid with the clamped SwiGLU: text_mid with its SwiGLU line '
+                                                       'swapped for the clamp piece',
+                 ('prefill.zig', 'turboexl3_pf_mid_vc'): 'the vector-layout mid with the clamped SwiGLU (text_mid_v, the '
+                                                         'same swap)',
+                 ('prefill.zig', 'turboexl3_pf_t128_midc'): 'the 128-row tiles\' mid with the clamped SwiGLU '
+                                                            '(text_mid_t128, the same swap)'}
 # tests a change renamed: (file, original name) -> new name
 RENAMED_TESTS = {
     ('bench.zig', "turboexl3 bench: fused vs separately launched steps vs Sushi's chain, K2..K8 (+ n40), Qwen geometry, "
                   "rows 1/4/8 (TURBOEXL3_BENCH=1)"):
         "turboexl3 bench: form-3 variants vs Sushi's chain, K2..K8 (+ n40), Qwen geometry, rows 1/4/8 (TURBOEXL3_BENCH=1)",
 }
+# DeepSeek-V4.1's trunk: the grouped linear (wo_a), the bias helper, their host reference and tests
+ADDED_FILES['grouped.zig'] = ('the grouped linear at decode rows (turboexl3_grouped_prep / _gemv / _finish: dense\'s '
+                              'prep_s, the routed down3 and dfin3 texts with their own template arguments)')
+ADDED_FILES['topk_test.zig'] = ('root.moe below a top-k of 4 (top-1, 2, 3): forms 7, 8 and 9 give form 3\'s bytes, '
+                              'form 3 equals the reference')
+ADDED[('ref.zig', 'fn compareRounded')] = ('compare beyond an output store\'s rounding (half an ulp of each value): '
+                                         'the chain\'s tolerance for bf16 outputs (clamped_test, topk_test)')
+ADDED_FILES['deepseek_test.zig'] = ('DeepSeek-V4.1\'s GPU tests: linear, linearBias and linearGrouped against '
+                                    'ref.Linear at every trunk and vision shape')
+for _key in ('const grouped', 'const grouped_lock', 'const grouped_cache', 'fn groupedFor', 'fn linearGrouped',
+             'fn groupedPrefill', 'fn linearBias'):
+    ADDED[('root.zig', _key)] = 'the grouped linear (linearGrouped) and the bias helper (linearBias)'
+ADDED[('ref.zig', 'const Linear')] = 'a dense linear\'s host reference with its W_hat decoded once (format.project\'s values)'
+ADDED[('ref.zig', 'fn synthLinear')] = 'a random dense linear (or G stacked slices) for ref.Linear'
+CHANGED[('root.zig', 'const dense_cache')] = '64 dense shapes: DeepSeek-V4.1\'s set beside the others in one process'
+CHANGED[('root.zig', 'const pf_cache')] = ('16 prefill geometries: DeepSeek-V4.1 alone serves 8 (K3 and K2 routed banks per '
+                                          'bank kind, the DSpark stages, the shared expert as a one-expert bank)')
+CHANGED[('root.zig', 'const shared_state')] = 'the grouped linears\' cache and its lock'
+# the dense decode GEMV at DeepSeek-V4.1's trunk widths: the grouped linear's GEMV on dense's multi-row GEMV, the launch
+# shapes per row count, and their tests and sweep (deepseek_gemv_test.zig)
+ADDED_KERNELS[('grouped.zig', 'turboexl3_grouped_gemv_d')] = ('the grouped linear\'s GEMV on dense\'s multi-row GEMV '
+                                                             '(Grouped.dense_gemv): gemv_head, dense\'s dgemv_x / _2 / _m / '
+                                                             '_fold verbatim, gemv_store into the routed planes; one decode '
+                                                             'per row chunk where the routed GEMV decodes per row pair')
+ADDED_KERNELS[('grouped.zig', 'turboexl3_grouped_gemv_dl')] = 'the same on dense\'s lean codeword loop (dgemv_2, dgemv_j)'
+for _key in ('const gemv_d_in', 'const gemv_d_out'):
+    ADDED[('grouped.zig', _key)] = 'the dense-GEMV launch\'s operand names'
+CHANGED[('grouped.zig', 'const Grouped')] = ('dense_gemv (step 2 on text_gemv_d, the default; the routed GEMV the tests\' arm), '
+                                           'bt_set (its tiles per threadgroup), resetCfgs')
+CHANGED[('dense.zig', 'const Dense')] = ('bt_set / btAt: the GEMV\'s tiles per threadgroup per decode row count (launch shape '
+                                       'only), btLaunch (BT 2 on lean chunks in launches of 2048 threadgroups or more at '
+                                       'BT 1, btFor\'s elsewhere), resetCfgs')
+ADDED[('root.zig', 'fn denseCached')] = 'test seam: the Dense linear runs a shape on, to set its launch shape'
+ADDED[('root.zig', 'fn groupedCached')] = 'test seam: the Grouped linearGrouped runs a shape on, to set its launch'
+ADDED_FILES['deepseek_gemv_test.zig'] = ('the grouped dense GEMV\'s texts (CPU) and its bytes against the routed GEMV, and the '
+                                         'dense decode GEMV\'s launch-shape sweep on the 40-layer trunk chain (GPU)')
+for _key in ('const N', 'const wo_a', 'fn ci', 'fn bf16Exact', 'fn nowNs', 'const HostProj', 'fn randProj', 'fn randBf16',
+             'const comp_layers', 'const index_layers', 'const ChainLayer', 'const ChainArm', 'fn chainForward'):
+    CHANGED[('deepseek_test.zig', _key)] = 'pub: deepseek_gemv_test.zig\'s chains reuse it'
 
 
 def metal_strings(fn, toks, corpus):

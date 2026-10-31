@@ -51,8 +51,8 @@ Each kernel is in one of three classes:
 
 | class | what it means | why it holds | kernels in the class |
 |---|---|---|---|
-| [byte-identical](GLOSSARY.md#byte-identical) to a chain | every output element has the bit pattern of that chain's output | the kernel runs the chain's statements, in the chain's order, on the same values; only the launch shape changes | decode [forms](GLOSSARY.md#form) 5–9 (to form 3); the heads of the [shared expert](GLOSSARY.md#shared-expert) and the [router](GLOSSARY.md#router) fold (to the [host](GLOSSARY.md#host) chain); the fin fold of the shared expert (to `gu3s` and `fin7s`); [DEC-ONE](GLOSSARY.md#dec-one) (to the three-launch chain); the lean GEMV (to `dgemv`); the prefill options that only move work, and the 128-row tiles (to the option set without them); the [resident W_hat](GLOSSARY.md#resident-trunk) (to a dequantize per call); `linearSplit` and the `linear` pieces (to `linear`); [ATTN-IN](GLOSSARY.md#attn-in-out), ATTN-OUT and the four-member prepare (to the host chain); every decode-row merge (to the host chain) |
-| [within tolerance](GLOSSARY.md#within-tolerance) of `format.project` | the ratio from [`ref.compare`](GLOSSARY.md#ref-compare) is at most the stated bar | the kernel rounds where `format.project` rounds, but it sums in its own order, and `f32` addition is not associative | decode forms 1 and 3; the dense GEMV chain; the inner products of the [register path](GLOSSARY.md#register-path), the fused GEMM and dequantize + matmul; the routed prefill chain. The routed chains also sum in an order other than [Sushi](GLOSSARY.md#sushi)'s |
+| [byte-identical](GLOSSARY.md#byte-identical) to a chain | every output element has the bit pattern of that chain's output | the kernel runs the chain's statements, in the chain's order, on the same values; only the launch shape changes | decode [forms](GLOSSARY.md#form) 5–9 (to form 3); the heads of the [shared expert](GLOSSARY.md#shared-expert) and the [router](GLOSSARY.md#router) fold (to the [host](GLOSSARY.md#host) chain); the fin fold of the shared expert (to `gu3s` and `fin7s`); [DEC-ONE](GLOSSARY.md#dec-one) (to the three-launch chain); the lean GEMV (to `dgemv`); the prefill options that only move work, and the 128-row tiles (to the option set without them); the [resident W_hat](GLOSSARY.md#resident-trunk) (to a dequantize per call); `linearSplit` and the `linear` pieces (to `linear`); [ATTN-IN](GLOSSARY.md#attn-in-out), ATTN-OUT and the four-member prepare (to the host chain); every decode-row merge (to the host chain); the clamped variants where no value reaches the limit (to the unclamped kernels) |
+| [within tolerance](GLOSSARY.md#within-tolerance) of `format.project` | the ratio from [`ref.compare`](GLOSSARY.md#ref-compare) is at most the stated bar | the kernel rounds where `format.project` rounds, but it sums in its own order, and `f32` addition is not associative | decode forms 1 and 3; the dense GEMV chain; the inner products of the [register path](GLOSSARY.md#register-path), the fused GEMM and dequantize + matmul; the routed prefill chain; the clamped routed chains (to `ref.moeRowClamped`). The routed chains also sum in an order other than [Sushi](GLOSSARY.md#sushi)'s |
 | opt-in, its own rounding | within the stated bars | each weight rounds once to the activation dtype, and each output rounds once | the [un-rotated trunk](GLOSSARY.md#unrotated-trunk): `turboexl3_unrot_*` at load, then one plain matmul; the `_std` attention kernels |
 
 A byte test compares bit patterns. A tolerance test uses `ref.compare`: the largest |got − ref| over the output,
@@ -87,12 +87,13 @@ levels.
 
 | family | entry points | rows | Zig file |
 |---|---|---|---|
-| decode GEMV of the [routed experts](GLOSSARY.md#routed-expert) | `moe` | 1–16 | `decode.zig` |
+| decode GEMV of the [routed experts](GLOSSARY.md#routed-expert) | `moe`, `moeClamped` | 1–16 | `decode.zig` |
 | shared expert and router in the decode launches | `moeFusedShared`, `moeFusedSharedRouted` | 1–4 (router fold: 2–4) | `decode.zig` |
-| prefill GEMM of the routed experts | `moe` | 17+ | `prefill.zig` |
-| dense projections | `linear`, `linearSplit`, the `linear` pieces, `trunkUnrot` | any | `dense.zig` |
+| prefill GEMM of the routed experts | `moe`, `moeClamped` | 17+ | `prefill.zig` |
+| dense projections | `linear`, `linearSplit`, the `linear` pieces, `trunkUnrot`, `linearBias` | any | `dense.zig` |
 | attention projections | `attnIn`, `attnPrep4`, `linearPreparedIdx`, `linearGated`, `attnInStd`, `linearGatedStd` | 17+ | `attn_io.zig` |
 | decode-row merges | `decodeMergeGated`, `decodeMergeQmergeGated`, `decodeMergeQPlanes`, `decodeMergeIndexer` | 1–16 | `decb.zig` |
+| grouped (block-diagonal) linear | `linearGrouped` | 1–16 (17+: `linear` of each slice) | `grouped.zig` |
 
 ---
 
@@ -159,6 +160,7 @@ flowchart TB
 | `turboexl3_gu8` | `prep2` and `gu3` in one launch: each threadgroup prepares its own K span in [threadgroup memory](GLOSSARY.md#threadgroup-memory) | `turboexl3_prep` × 2, `turboexl3_gemv` × 2 |
 | `turboexl3_fin3` | the planes added in slice order, the deferred map, the gate and up finishes, SwiGLU in `f32`, then the down input prepared, with its block sums | `turboexl3_finish` × 2, `turboexl3_swiglu`, `turboexl3_prep` |
 | `turboexl3_fin7` | the statements of `fin3`, in the order of `fin3`, with the H128s in registers (no threadgroup exchanges) | as `fin3` |
+| `turboexl3_fin7c` | `fin7` with the clamped SwiGLU (`moeClamped`): its SwiGLU line swapped for the clamp, the template int `LIMIT` | as `fin3` |
 | `turboexl3_down3` | the down inner product as split-K planes | `turboexl3_gemv` |
 | `turboexl3_dfin3` | for each (block of hidden, row): each slot's planes added, the deferred map and the finish, then an `fma` with the slot's score, in slot order; y in x's dtype | `turboexl3_finish`, `turboexl3_reduce` |
 | `turboexl3_dfin7` | `dfin3` with the slots finished side by side (one [simdgroup](GLOSSARY.md#simdgroup) each), then the same chain of score `fma`s | as `dfin3` |
@@ -213,6 +215,16 @@ slices per threadgroup), and that launch shape changes no sum.
   K divisors and grouping, and both MUL1 decodes. Forms 5 and 6 run in `f32`; forms 7–9 run in `f32` and `bf16`.
 - Every form computes SwiGLU in `f32` with `metal::exp`, as the unfused `turboexl3_swiglu` does. The prefill mid uses
   `metal::precise::exp` (section 3).
+
+**The clamped SwiGLU.** `moeClamped` is `moe` with DeepSeek-V4's (and GLM's) `swiglu_limit` L: before SwiGLU, each
+row-slot's gate is clamped from above at L and its up to [−L, L], in `f32` on the finished `f16` values (an integer L is
+exact in `f16`). L is part of the geometry (`decode.Geometry.limit`), so a clamped call has its own cached kernels; only
+fin7 changes: `turboexl3_fin7c` is `fin7` with its SwiGLU line (`fin7_swiglu.metal`) swapped for the clamp
+(`fin7_swiglu_clamp.metal`), and its launch passes `LIMIT` after fin7's constants. Every other kernel of a clamped call is
+the unclamped chain's, and every unclamped kernel's text is unchanged. A clamped call runs forms 7, 8 and 9 as
+configured, and form 9 under forms 3, 5 and 6 (their bytes); the fused shared expert (section 2) has no clamp and refuses
+a clamped geometry. The routing weight multiplies the down projection's `f16` output in the `f32` sum, as in `moe`;
+DeepSeek's reference scales the activation before w2 instead, the same product up to rounding.
 
 ## 2. Shared expert and router inside the decode launches (rows 1–4)
 
@@ -445,6 +457,7 @@ constants, except `alay` and `t128`: the fields `pf_alay` and `pf_t128` of `Conf
 | `turboexl3_pf_mid`, `turboexl3_pf_t128_mid` | the gate and up finishes, SwiGLU in `f32`, the down input prepared, and its block sums (`t128`: each row from the launch that computed it) | — |
 | `turboexl3_pf_fin`, `turboexl3_pf_t128_fin` | the down finish and the score-weighted sum of the slots, in slot order, through `inv` (`t128`: each row from the launch that computed it) | — |
 | `turboexl3_pf_prep_v`, `turboexl3_pf_mid_v`, `turboexl3_pf_fin_v` | `aux`: prep, mid and finish with four consecutive elements per lane and several simdgroups per threadgroup | `_prep`, `_mid`, `_fin` |
+| `turboexl3_pf_midc`, `turboexl3_pf_t128_midc`, `turboexl3_pf_mid_vc` | the three mids with the clamped SwiGLU (`moeClamped`): each mid's SwiGLU line swapped for the clamp, the template int `LIMIT` | `_mid`, `_t128_mid`, `_mid_v` |
 
 The suffixes:
 
@@ -475,6 +488,12 @@ The A layouts (`alay`):
   outputs can differ in the last bits.
 - The mid computes SwiGLU in `f32` with `metal::precise::exp`. The decode forms use `metal::exp`, so the SwiGLU of
   one row can round differently at prefill rows.
+- `moeClamped` runs this chain with the clamp in the mid alone (`prefill.Geometry.limit`; section 1 gives the clamp): the
+  clamped mids (`_midc`, `_t128_midc`, `_mid_vc`) are their mids with the one line `mid_swiglu.metal` swapped for
+  `mid_swiglu_clamp.metal`, and their launches pass `LIMIT` after the mid's constants. Where no value reaches the limit they give their mids' bytes (a GPU test
+  compares the bits at limit 128). A second GPU test holds `moeClamped` at DeepSeek-V4.1-Flash's geometry (K2, K3, K6;
+  decode rows 1, 4, 16, prefill rows 32, 1328) to 1.5e-2 (`bf16`) and 5e-3 (`f32`) of `ref.moeRowClamped`, on inputs that
+  clamp about a tenth of the gates and a quarter of the ups.
 
 ## 4. Dense projections
 
@@ -675,6 +694,38 @@ finite.
     the binade of max |chain|;
   - a CPU test also holds the plain matmul within twice the chain's own distance from the exact linear map, plus 2^-10.
 - Calls of up to 32 rows never read the table of the un-rotated trunk, so they keep the bytes of the trellis paths.
+
+**Grouped linears (`linearGrouped`, `grouped.zig`).** DeepSeek-V4.1's attention `wo_a` is block-diagonal: x
+`[rows, G, in]` meets G slices, each a linear in → out, and y is `[rows, G, out]` (G 8, 4096 → 1024). The slices come
+stacked: trellis `[G, in/16, out/16, n]`, suh `[G, in]`, svh `[G, out]`.
+
+| rows | path | launches | levels |
+|---|---|---|---|
+| 1–16 | `turboexl3_grouped_prep` → `turboexl3_grouped_gemv` → `turboexl3_grouped_finish`, every slice in each launch | 3 | 3 |
+| 17+ | `linear` of each slice: a copy of its columns of x, then `linear`'s launches; then one MLX concatenate (G copies) | 4 per slice at 17–32, 5 from 33, + G | 5 |
+
+The decode kernels are existing texts with their own template arguments, so there is no new Metal:
+
+| kernel | text | what it computes |
+|---|---|---|
+| `turboexl3_grouped_prep` | `dense.text_prep_s` | the prepare in lane order and the block sums, over each row's G slices as one row of G · in values; every 128-block lies inside one slice, so each slice's values are dense's |
+| `turboexl3_grouped_gemv` | `decode.text_down3` | the gather of the routed down GEMV: row-slot r · G + g reads its own prepared row and slice g's trellis, into split-K planes; from two rows up, the row-slots of one slice share one decode (`GROUP` 2) |
+| `turboexl3_grouped_finish` | `decode.text_dfin3` | the routed down finish at top-1 with every score 1, so no sum over slots: the planes in slice order, the deferred map, the finish and the output dtype |
+
+The K split is `Dense.ksFor(in, out)`, dense's split for one slice. `dfin7` would not do: its store covers
+32 · TOPK outputs of each 128-block, all of them only from TOPK 4.
+
+**Biases (`linearBias`).** The vision tower's q, k, v and wo, and the aligner's w1 and w2, carry a bias `[out]`.
+`linearBias` is `linear`, then one MLX Add of the bias in x's dtype; the host converts the pack's `f16` bias once, at
+load. The add is not in the finish: `linear`'s finish is a different kernel on each row path, and the un-rotated
+trunk's matmul has none.
+
+- Each slice of `linearGrouped` has the values of `linear` on it. From 17 rows it is `linear`, so the bytes are
+  equal. At decode rows each launch runs the dense chain's statements in its order, on the same K split. So the values
+  are equal; only the sign of an exact zero can differ, because the finish adds a +0 score product. The GPU test
+  checks every slice against `linear` at 1, 4, 16, 32 and 512 rows. It also holds the output to `format.project`
+  within the dense bars.
+- `linearBias` rounds twice: `linear`'s output, then the sum in x's dtype.
 
 ## 5. Attention projections at prefill rows (17+)
 
