@@ -211,6 +211,8 @@ The dense projections:
 | `linearSplit` | `linear` with the inner product and the finish of prefill rows on a second MLX stream; the same bytes |
 | `linearInnerSplit`, `linearPrepared`, `linearFinish`, `linearPrep` | `linear` in pieces, so the host can run its fused norm-gate of the GDN layers between them |
 | `linearPiecesBegin`, `linearPieceInner`, `linearPiecePrepared`, `linearPiecesFinish` | `linear` of one call cut into 2 to 4 row pieces, so the host can overlap them with its own launches |
+| `linearGrouped` | a grouped (block-diagonal) linear, DeepSeek-V4.1's `wo_a`: x `[..., G, in]` through G stacked slices. 1 to 16 rows: three launches whatever G. More rows: `linear` of each slice. Each slice has `linear`'s values |
+| `linearBias` | `linear`, then an MLX add of a bias `[out]` in x's dtype (DeepSeek-V4.1's vision tower and aligner) |
 
 The attention projections:
 
@@ -232,8 +234,8 @@ The resident and un-rotated trunk:
 | `attnInStd`, `linearGatedStd` | ATTN-IN and ATTN-OUT over the un-rotated trunk |
 
 The namespaces are `config`, `format` (the reference), `spec`, `lane` (the codeword readers), `decode`, `dense`,
-`prefill`, `attn_io`, `decode_merge`, `unfused` and `ref`. The doc comment of each function states its shapes, its
-dtypes, the chain whose bytes it gives and when it refuses.
+`grouped`, `prefill`, `attn_io`, `decode_merge`, `unfused` and `ref`. The doc comment of each function states its
+shapes, its dtypes, the chain whose bytes it gives and when it refuses.
 
 ## Source layout
 
@@ -369,7 +371,7 @@ The library reads no environment, but the tests do. These variables turn on test
 | variable | file | what it runs |
 |---|---|---|
 | none | every file | the CPU tests: the kernel texts, the launch plans, the tables and the reference |
-| `TURBOEXL3_GPU=1` | `gpu_test.zig`, `prefill_test.zig`, `attn_io_test.zig`, `decb_test.zig`, `clamped_test.zig`, `bench.zig` | the GPU parity and byte tests, on a Metal device |
+| `TURBOEXL3_GPU=1` | `gpu_test.zig`, `prefill_test.zig`, `attn_io_test.zig`, `decb_test.zig`, `clamped_test.zig`, `deepseek_test.zig`, `bench.zig` | the GPU parity and byte tests, on a Metal device |
 | `TURBOEXL3_METAL_DUMP=1` | `prefill.zig` | prints each kernel of the routed prefill chain, with its option variants, as one standalone source file for an offline `xcrun metal` compile |
 | `TURBOEXL3_BENCH=1` | `bench.zig` | with `TURBOEXL3_GPU=1`: times the form-3 variants of the decode chain against Sushi's chain |
 | `TURBOEXL3_PF_TIME=1`, `TURBOEXL3_DEC_TIME=1` | `prefill_test.zig` | with `TURBOEXL3_GPU=1`: time the prefill and decode chains against Sushi's |

@@ -90,9 +90,10 @@ levels.
 | decode GEMV of the [routed experts](GLOSSARY.md#routed-expert) | `moe`, `moeClamped` | 1–16 | `decode.zig` |
 | shared expert and router in the decode launches | `moeFusedShared`, `moeFusedSharedRouted` | 1–4 (router fold: 2–4) | `decode.zig` |
 | prefill GEMM of the routed experts | `moe`, `moeClamped` | 17+ | `prefill.zig` |
-| dense projections | `linear`, `linearSplit`, the `linear` pieces, `trunkUnrot` | any | `dense.zig` |
+| dense projections | `linear`, `linearSplit`, the `linear` pieces, `trunkUnrot`, `linearBias` | any | `dense.zig` |
 | attention projections | `attnIn`, `attnPrep4`, `linearPreparedIdx`, `linearGated`, `attnInStd`, `linearGatedStd` | 17+ | `attn_io.zig` |
 | decode-row merges | `decodeMergeGated`, `decodeMergeQmergeGated`, `decodeMergeQPlanes`, `decodeMergeIndexer` | 1–16 | `decb.zig` |
+| grouped (block-diagonal) linear | `linearGrouped` | 1–16 (17+: `linear` of each slice) | `grouped.zig` |
 
 ---
 
@@ -693,6 +694,38 @@ finite.
     the binade of max |chain|;
   - a CPU test also holds the plain matmul within twice the chain's own distance from the exact linear map, plus 2^-10.
 - Calls of up to 32 rows never read the table of the un-rotated trunk, so they keep the bytes of the trellis paths.
+
+**Grouped linears (`linearGrouped`, `grouped.zig`).** DeepSeek-V4.1's attention `wo_a` is block-diagonal: x
+`[rows, G, in]` meets G slices, each a linear in → out, and y is `[rows, G, out]` (G 8, 4096 → 1024). The slices come
+stacked: trellis `[G, in/16, out/16, n]`, suh `[G, in]`, svh `[G, out]`.
+
+| rows | path | launches | levels |
+|---|---|---|---|
+| 1–16 | `turboexl3_grouped_prep` → `turboexl3_grouped_gemv` → `turboexl3_grouped_finish`, every slice in each launch | 3 | 3 |
+| 17+ | `linear` of each slice: a copy of its columns of x, then `linear`'s launches; then one MLX concatenate (G copies) | 4 per slice at 17–32, 5 from 33, + G | 5 |
+
+The decode kernels are existing texts with their own template arguments, so there is no new Metal:
+
+| kernel | text | what it computes |
+|---|---|---|
+| `turboexl3_grouped_prep` | `dense.text_prep_s` | the prepare in lane order and the block sums, over each row's G slices as one row of G · in values; every 128-block lies inside one slice, so each slice's values are dense's |
+| `turboexl3_grouped_gemv` | `decode.text_down3` | the gather of the routed down GEMV: row-slot r · G + g reads its own prepared row and slice g's trellis, into split-K planes; from two rows up, the row-slots of one slice share one decode (`GROUP` 2) |
+| `turboexl3_grouped_finish` | `decode.text_dfin3` | the routed down finish at top-1 with every score 1, so no sum over slots: the planes in slice order, the deferred map, the finish and the output dtype |
+
+The K split is `Dense.ksFor(in, out)`, dense's split for one slice. `dfin7` would not do: its store covers
+32 · TOPK outputs of each 128-block, all of them only from TOPK 4.
+
+**Biases (`linearBias`).** The vision tower's q, k, v and wo, and the aligner's w1 and w2, carry a bias `[out]`.
+`linearBias` is `linear`, then one MLX Add of the bias in x's dtype; the host converts the pack's `f16` bias once, at
+load. The add is not in the finish: `linear`'s finish is a different kernel on each row path, and the un-rotated
+trunk's matmul has none.
+
+- Each slice of `linearGrouped` has the values of `linear` on it. From 17 rows it is `linear`, so the bytes are
+  equal. At decode rows each launch runs the dense chain's statements in its order, on the same K split. So the values
+  are equal; only the sign of an exact zero can differ, because the finish adds a +0 score product. The GPU test
+  checks every slice against `linear` at 1, 4, 16, 32 and 512 rows. It also holds the output to `format.project`
+  within the dense bars.
+- `linearBias` rounds twice: `linear`'s output, then the sum in x's dtype.
 
 ## 5. Attention projections at prefill rows (17+)
 

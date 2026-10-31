@@ -28,6 +28,8 @@ pub const prefill = @import("prefill.zig");
 pub const sources = @import("sources.zig");
 /// The GDN layer's tail in one launch (`gdnOutPrep`).
 pub const gdn_out = @import("gdn_out.zig");
+/// The grouped linear's decode rows (`linearGrouped`).
+pub const grouped = @import("grouped.zig");
 
 pub const Spec = spec.Spec;
 pub const parseExpertQuant = spec.parseExpertQuant;
@@ -228,9 +230,11 @@ fn decodeForm() u8 {
 }
 
 /// The dense-linear kernels of every (in, out, rate, decode, dtype) this process has served: the trunk of a fully EXL3 model
-/// has a dozen shapes (attention q/k/v/o, indexer, GDN qkv/z/out, shared gate/up/down, lm_head, MTP fc).
+/// has a dozen shapes (attention q/k/v/o, indexer, GDN qkv/z/out, shared gate/up/down, lm_head, MTP fc), DeepSeek-V4.1's
+/// fourteen with its vision tower, its aligner and `wo_a`'s slice. 64 holds two such models at two dtypes (every test in
+/// one process).
 const dense_lock = Global(std.atomic.Value(u32), "root_dense_lock", std.atomic.Value(u32).init(0));
-const dense_cache = Global([32]?dense.Dense, "root_dense_cache", @splat(null));
+const dense_cache = Global([64]?dense.Dense, "root_dense_cache", @splat(null));
 
 fn denseFor(shape: dense.Shape) !*dense.Dense {
     while (dense_lock.get().*.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
@@ -295,6 +299,131 @@ fn linearOn(s: mlx.mlx_stream, rs: mlx.mlx_stream, x: mlx.mlx_array, trellis: ml
     errdefer freeArr(y);
     try mlx.check(mlx.mlx_reshape(&y, y2, osh[0..xsh.len].ptr, @intCast(xsh.len), s));
     return y;
+}
+
+// ── DeepSeek-V4.1's trunk: the grouped linear and the biased linear ──
+
+/// The grouped linears' kernels per (groups, in, out, rate, decode, dtype): DeepSeek-V4.1's `wo_a` is one shape per
+/// activation dtype.
+const grouped_lock = Global(std.atomic.Value(u32), "root_grouped_lock", std.atomic.Value(u32).init(0));
+const grouped_cache = Global([8]?grouped.Grouped, "root_grouped_cache", @splat(null));
+
+fn groupedFor(shape: grouped.Shape) !*grouped.Grouped {
+    while (grouped_lock.get().*.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
+    defer grouped_lock.get().*.store(0, .release);
+    var free_slot: ?usize = null;
+    for (&grouped_cache.get().*, 0..) |*slot, i| {
+        if (slot.*) |*gr| {
+            if (gr.shape.eql(shape)) return gr;
+        } else if (free_slot == null) free_slot = i;
+    }
+    const i = free_slot orelse return error.Exl3EngineCacheFull;
+    grouped_cache.get().*[i] = try grouped.Grouped.init(shape);
+    return &grouped_cache.get().*[i].?;
+}
+
+/// The grouped (block-diagonal) linear, DeepSeek-V4.1's attention `wo_a` (`o = einsum("bsgd,grd->bsgr", o, wo_a)`):
+/// y [..., G, out] in x's dtype for x [..., G, in] (bf16, f16 or f32). Slice g of y is the linear of slice g of x through
+/// slice g of `p`. `p` holds the G slices stacked: trellis U16/I16 [G, in/16, out/16, n], suh F16 [G, in], svh F16
+/// [G, out]. Each slice's values are `linear`'s on it at every row count (at decode rows but for the sign of an exact
+/// zero).
+/// - Decode rows (<= `kernels.DECODE_ROWS_MAX`): three launches whatever G (`grouped.zig`): the prepare of every slice,
+///   the routed down GEMV's gather with row-slot r G + g on slice g, and the routed down finish at top-1.
+/// - Prefill rows: `linear` on each slice (views of the stacked arrays, no weight copy), then one MLX concatenate.
+pub fn linearGrouped(s: mlx.mlx_stream, x: mlx.mlx_array, p: Proj, dec: format.Decode) !mlx.mlx_array {
+    const xsh = mlx.getShape(x);
+    const tsh = mlx.getShape(p.trellis);
+    if (xsh.len < 2 or xsh.len > 8 or tsh.len != 4 or tsh[0] < 1 or tsh[1] < 1 or tsh[2] < 1 or tsh[3] < 1) return error.BadExl3Shape;
+    const groups = tsh[0];
+    const in_dim = tsh[1] * 16;
+    const out_dim = tsh[2] * 16;
+    const rate = format.Rate.fromN(@intCast(tsh[3])) orelse return error.BadExl3Shape;
+    if (xsh[xsh.len - 2] != groups or xsh[xsh.len - 1] != in_dim) return error.BadExl3Shape;
+    if (!std.mem.eql(c_int, &.{ groups, in_dim }, mlx.getShape(p.suh)) or !std.mem.eql(c_int, &.{ groups, out_dim }, mlx.getShape(p.svh))) return error.BadExl3Shape;
+    const td = mlx.mlx_array_dtype(p.trellis);
+    if ((td != .uint16 and td != .int16) or mlx.mlx_array_dtype(p.suh) != .float16 or mlx.mlx_array_dtype(p.svh) != .float16) return error.BadExl3Dtype;
+    const xd = mlx.mlx_array_dtype(x);
+    if (xd != .bfloat16 and xd != .float32 and xd != .float16) return error.BadExl3Dtype;
+    var rows: c_int = 1;
+    for (xsh[0 .. xsh.len - 2]) |d| rows *= d;
+    if (rows < 1) return error.BadExl3Shape;
+    const shape: grouped.Shape = .{ .groups = @intCast(groups), .in = @intCast(in_dim), .out = @intCast(out_dim), .rate = rate, .dec = dec, .out_dtype = xd };
+    if (!shape.admitted()) return error.BadExl3Shape;
+    // a row's G slices as one row of G in values
+    var x2 = mlx.mlx_array_new();
+    defer freeArr(x2);
+    try mlx.check(mlx.mlx_reshape(&x2, x, &[_]c_int{ rows, groups * in_dim }, 2, s));
+    const y2 = if (@as(usize, @intCast(rows)) <= kernels.DECODE_ROWS_MAX)
+        try (try groupedFor(shape)).decodeRows(s, x2, p.trellis, p.suh, p.svh, @intCast(rows))
+    else
+        try groupedPrefill(s, x2, p, shape, rows, dec);
+    defer freeArr(y2);
+    var osh: [8]c_int = undefined;
+    @memcpy(osh[0..xsh.len], xsh);
+    osh[xsh.len - 1] = out_dim;
+    var y = mlx.mlx_array_new();
+    errdefer freeArr(y);
+    try mlx.check(mlx.mlx_reshape(&y, y2, osh[0..xsh.len].ptr, @intCast(xsh.len), s));
+    return y;
+}
+
+/// `linearGrouped` at prefill rows: y [rows, G out] from x2 [rows, G in], `linear` of each slice on its columns of x2 (one
+/// copy of them, as any strided x of `linear`), the G outputs side by side. The slices are views: the stacked trellis as
+/// [G in/16, out/16, n] and suh / svh flat, each slice one contiguous range.
+fn groupedPrefill(s: mlx.mlx_stream, x2: mlx.mlx_array, p: Proj, shape: grouped.Shape, rows: c_int, dec: format.Decode) !mlx.mlx_array {
+    const gn: c_int = @intCast(shape.groups);
+    const in_dim: c_int = @intCast(shape.in);
+    const out_dim: c_int = @intCast(shape.out);
+    const tsh = mlx.getShape(p.trellis);
+    var t3 = mlx.mlx_array_new();
+    defer freeArr(t3);
+    try mlx.check(mlx.mlx_reshape(&t3, p.trellis, &[_]c_int{ gn * tsh[1], tsh[2], tsh[3] }, 3, s));
+    var suh1 = mlx.mlx_array_new();
+    defer freeArr(suh1);
+    try mlx.check(mlx.mlx_reshape(&suh1, p.suh, &[_]c_int{gn * in_dim}, 1, s));
+    var svh1 = mlx.mlx_array_new();
+    defer freeArr(svh1);
+    try mlx.check(mlx.mlx_reshape(&svh1, p.svh, &[_]c_int{gn * out_dim}, 1, s));
+    var ys: [grouped.max_groups]mlx.mlx_array = undefined;
+    var made: usize = 0;
+    defer for (ys[0..made]) |a| freeArr(a);
+    for (0..shape.groups) |gi| {
+        const g: c_int = @intCast(gi);
+        // x's columns, the trellis's input-tile rows, suh's and svh's ranges of slice g
+        var v: [4]mlx.mlx_array = .{ mlx.mlx_array_new(), mlx.mlx_array_new(), mlx.mlx_array_new(), mlx.mlx_array_new() };
+        defer for (v) |a| freeArr(a);
+        try mlx.check(mlx.mlx_slice(&v[0], x2, &[_]c_int{ 0, g * in_dim }, 2, &[_]c_int{ rows, (g + 1) * in_dim }, 2, &[_]c_int{ 1, 1 }, 2, s));
+        try mlx.check(mlx.mlx_slice(&v[1], t3, &[_]c_int{ g * tsh[1], 0, 0 }, 3, &[_]c_int{ (g + 1) * tsh[1], tsh[2], tsh[3] }, 3, &[_]c_int{ 1, 1, 1 }, 3, s));
+        try mlx.check(mlx.mlx_slice(&v[2], suh1, &[_]c_int{g * in_dim}, 1, &[_]c_int{(g + 1) * in_dim}, 1, &[_]c_int{1}, 1, s));
+        try mlx.check(mlx.mlx_slice(&v[3], svh1, &[_]c_int{g * out_dim}, 1, &[_]c_int{(g + 1) * out_dim}, 1, &[_]c_int{1}, 1, s));
+        ys[gi] = try linearOn(s, s, v[0], v[1], v[2], v[3], dec);
+        made += 1;
+    }
+    const vec = mlx.mlx_vector_array_new_data(&ys, made);
+    defer _ = mlx.mlx_vector_array_free(vec);
+    var y2 = mlx.mlx_array_new();
+    errdefer freeArr(y2);
+    try mlx.check(mlx.mlx_concatenate_axis(&y2, vec, 1, s));
+    return y2;
+}
+
+/// `linear` plus a bias, for the linears that carry one (DeepSeek-V4.1's vision tower q/k/v/wo and its aligner w1/w2):
+/// y [..., out] = `linear`(x) + bias. `bias` [out] is in x's dtype: the host converts a pack's F16 bias once, at load, so
+/// a call casts nothing. The add is one MLX Add in x's dtype after `linear`'s output rounding, so a sum rounds twice
+/// (`linear`'s output, then the sum). It is a helper, not a finish epilogue: `linear`'s finish is another kernel on each
+/// row path (DEC-ONE's two, the GEMV chain's, the register path's and the matmul's, the pieces'), and the un-rotated
+/// trunk's matmul has none. A fused bias would need a variant of each, for a tower that runs once per image.
+pub fn linearBias(s: mlx.mlx_stream, x: mlx.mlx_array, trellis: mlx.mlx_array, suh: mlx.mlx_array, svh: mlx.mlx_array, bias: mlx.mlx_array, dec: format.Decode) !mlx.mlx_array {
+    const tsh = mlx.getShape(trellis);
+    const bsh = mlx.getShape(bias);
+    if (tsh.len != 3 or bsh.len != 1 or bsh[0] != tsh[1] * 16) return error.BadExl3Shape;
+    if (mlx.mlx_array_dtype(bias) != mlx.mlx_array_dtype(x)) return error.BadExl3Dtype;
+    const y = try linear(s, x, trellis, suh, svh, dec);
+    defer freeArr(y);
+    var out = mlx.mlx_array_new();
+    errdefer freeArr(out);
+    try mlx.check(mlx.mlx_add(&out, y, bias, s));
+    return out;
 }
 
 // ── The un-rotated trunk: the resident trunk out of the Hadamard basis (dense.zig's module comment) ──
@@ -1280,6 +1409,8 @@ pub const shared_state = .{
     decode_form_override,
     dense_lock,
     dense_cache,
+    grouped_lock,
+    grouped_cache,
     unrot_failed_said,
     pf_lock,
     pf_cache,

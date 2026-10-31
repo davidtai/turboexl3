@@ -186,6 +186,68 @@ pub fn compare(got: []const f32, ref: []const f32) Err {
     return .{ .max_abs = max_abs, .rms_ref = rms, .max_ratio = if (rms > 0) max_abs / rms else max_abs };
 }
 
+/// A dense EXL3 linear in -> out on the host, or `groups` stacked slices of one (a grouped linear's), drawn as `synthBank`
+/// draws a projection: trellis [groups, in/16, out/16, n] (every pattern a valid codeword), suh [groups, in] in [0.5, 1.5],
+/// svh [groups, out] in [0.5, 1.5] / sqrt(in) (outputs O(1)). `w` holds each slice's W_hat [in, out] (f16 bits,
+/// `format.reconstructInner`), decoded once, so a row's reference (`row`) is a GEMV, not a decode of every tile.
+pub const Linear = struct {
+    groups: usize,
+    in: usize,
+    out: usize,
+    rate: format.Rate,
+    trellis: []u16,
+    suh: []u16,
+    svh: []u16,
+    w: []u16,
+
+    pub fn deinit(self: *Linear, a: std.mem.Allocator) void {
+        a.free(self.trellis);
+        a.free(self.suh);
+        a.free(self.svh);
+        a.free(self.w);
+    }
+
+    /// slice g's trellis halfwords, [in/16, out/16, n]
+    pub fn trellisOf(self: *const Linear, g: usize) []const u16 {
+        const n = (self.in / 16) * (self.out / 16) * self.rate.n;
+        return self.trellis[g * n ..][0..n];
+    }
+
+    /// y [out], slice g of one row x [in]: `format.project`'s stages on the decoded W_hat, each output summed over the input
+    /// in ascending order as `format.innerGemv` sums it, so `format.project`'s values. `transformed` [in] and `inner` [out]
+    /// are scratch.
+    pub fn row(self: *const Linear, g: usize, x: []const f32, transformed: []f32, inner: []f32, y: []f32) void {
+        const w = self.w[g * self.in * self.out ..][0 .. self.in * self.out];
+        format.prepareInput(x, self.suh[g * self.in ..][0..self.in], transformed);
+        @memset(inner, 0);
+        for (0..self.in) |k| {
+            const xv = transformed[k];
+            for (inner, w[k * self.out ..][0..self.out]) |*o, bits| o.* += xv * format.f16BitsToF32(bits);
+        }
+        for (inner) |*v| v.* = format.f16BitsToF32(format.f32ToF16Bits(v.*));
+        format.finishOutput(inner, self.svh[g * self.out ..][0..self.out], y);
+    }
+};
+
+/// `Linear` with random weights at `rate`, its W_hat decoded under `dec`.
+pub fn synthLinear(a: std.mem.Allocator, rnd: std.Random, groups: usize, in: usize, out: usize, rate: format.Rate, dec: format.Decode) !Linear {
+    const per = (in / 16) * (out / 16) * rate.n;
+    const trellis = try a.alloc(u16, groups * per);
+    errdefer a.free(trellis);
+    const suh = try a.alloc(u16, groups * in);
+    errdefer a.free(suh);
+    const svh = try a.alloc(u16, groups * out);
+    errdefer a.free(svh);
+    const w = try a.alloc(u16, groups * in * out);
+    errdefer a.free(w);
+    for (trellis) |*v| v.* = rnd.int(u16);
+    const out_scale: f32 = 1.0 / @sqrt(@as(f32, @floatFromInt(in)));
+    for (suh) |*s| s.* = format.f32ToF16Bits(0.5 + rnd.float(f32));
+    for (svh) |*s| s.* = format.f32ToF16Bits((0.5 + rnd.float(f32)) * out_scale);
+    for (0..groups) |g| format.reconstructInner(trellis[g * per ..][0..per], in, out, rate, dec, w[g * in * out ..][0 .. in * out]);
+    return .{ .groups = groups, .in = in, .out = out, .rate = rate, .trellis = trellis, .suh = suh, .svh = svh, .w = w };
+}
+
 const testing = std.testing;
 
 test "turboexl3 ref: a 256x128 K4 bank's row through the reference is finite and O(1); slot order is the summation order" {

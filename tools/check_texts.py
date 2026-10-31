@@ -1061,6 +1061,18 @@ RENAMED_TESTS = {
                   "rows 1/4/8 (TURBOEXL3_BENCH=1)"):
         "turboexl3 bench: form-3 variants vs Sushi's chain, K2..K8 (+ n40), Qwen geometry, rows 1/4/8 (TURBOEXL3_BENCH=1)",
 }
+# DeepSeek-V4.1's trunk: the grouped linear (wo_a), the bias helper, their host reference and tests
+ADDED_FILES['grouped.zig'] = ('the grouped linear at decode rows (turboexl3_grouped_prep / _gemv / _finish: dense\'s '
+                              'prep_s, the routed down3 and dfin3 texts with their own template arguments)')
+ADDED_FILES['deepseek_test.zig'] = ('DeepSeek-V4.1\'s GPU tests: linear, linearBias and linearGrouped against '
+                                    'ref.Linear at every trunk and vision shape')
+for _key in ('const grouped', 'const grouped_lock', 'const grouped_cache', 'fn groupedFor', 'fn linearGrouped',
+             'fn groupedPrefill', 'fn linearBias'):
+    ADDED[('root.zig', _key)] = 'the grouped linear (linearGrouped) and the bias helper (linearBias)'
+ADDED[('ref.zig', 'const Linear')] = 'a dense linear\'s host reference with its W_hat decoded once (format.project\'s values)'
+ADDED[('ref.zig', 'fn synthLinear')] = 'a random dense linear (or G stacked slices) for ref.Linear'
+CHANGED[('root.zig', 'const dense_cache')] = '64 dense shapes: DeepSeek-V4.1\'s set beside the others in one process'
+CHANGED[('root.zig', 'const shared_state')] = 'the grouped linears\' cache and its lock'
 
 
 def metal_strings(fn, toks, corpus):

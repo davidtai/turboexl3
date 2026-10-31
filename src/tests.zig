@@ -17,6 +17,7 @@ comptime {
     _ = @import("decb.zig");
     _ = @import("attn_io.zig");
     _ = @import("gdn_out.zig");
+    _ = @import("grouped.zig");
     _ = @import("root.zig");
     _ = @import("test_support.zig");
     _ = @import("gpu_test.zig");
@@ -25,5 +26,6 @@ comptime {
     _ = @import("attn_io_test.zig");
     _ = @import("gdn_out_test.zig");
     _ = @import("clamped_test.zig");
+    _ = @import("deepseek_test.zig");
     _ = @import("bench.zig");
 }
