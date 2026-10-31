@@ -104,7 +104,7 @@ pub const Grouped = struct {
     /// step 2 on `text_gemv_d` (one decode of a slice's weights per row chunk); false the routed down GEMV (one per row
     /// pair), the tests' reference arm. The same bytes. Set before the configs of a row count are built (`resetCfgs`).
     dense_gemv: bool = true,
-    /// `text_gemv_d`'s output tiles per threadgroup per row count, 0 for `dense.Dense.btFor`'s: launch shape only
+    /// `text_gemv_d`'s output tiles per threadgroup per row count, 0 for `dense.Dense.btLaunch`'s: launch shape only
     bt_set: [decode.Kernels.max_rows + 1]u8 = @splat(0),
     cfg: [decode.Kernels.max_rows + 1]?Cfg = @splat(null),
 
@@ -152,15 +152,16 @@ pub const Grouped = struct {
     }
 
     /// `text_gemv_d`'s launch at `rows` rows: dense's chain chunks (`dense.Dense.chainRb` with the lean cap: one chunk up
-    /// to 8 rows, the lean text past `dense.Dense.max_rb`), its tiles per threadgroup (`bt_set`, else `dense.Dense.btFor`)
+    /// to 8 rows, the lean text past `dense.Dense.max_rb`), its tiles per threadgroup (`bt_set`, else
+    /// `dense.Dense.btLaunch`'s for its threadgroups at BT 1)
     fn denseGemvCfg(self: *const Grouped, rows: usize) !struct { cfg: mlx.mlx_fast_metal_kernel_config, lean: bool } {
         const sh = self.shape;
         const rows_u: u32 = @intCast(rows);
         const rb = dense.Dense.rbCap(rows_u, dense.Dense.lean_rb);
-        const o = self.bt_set[rows];
-        const bt: u32 = if (o != 0) o else dense.Dense.btFor(rb);
-        if (8 % bt != 0) return error.BadExl3Shape;
         const chunks = (rows_u + rb - 1) / rb;
+        const o = self.bt_set[rows];
+        const bt: u32 = if (o != 0) o else dense.Dense.btLaunch(rb, (sh.out / 16) * chunks * sh.groups * self.plan.ks);
+        if (8 % bt != 0) return error.BadExl3Shape;
         const cfg = try ks.buildConfig(.{
             .grid = .{ (sh.out / (16 * bt)) * 128, chunks * sh.groups, self.plan.ks },
             .threadgroup = .{ 128, 1, 1 },

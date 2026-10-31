@@ -50,6 +50,32 @@ test "turboexl3 deepseek gemv: the grouped dense-GEMV texts are dense's GEMV sta
     }
 }
 
+test "turboexl3 deepseek gemv: lean chunks take BT 2 in launches of 2048 threadgroups or more at BT 1 (DeepSeek-V4.1's wq_b and wo_a), btFor's elsewhere" {
+    const D = dense.Dense;
+    for (1..9) |i| {
+        const rb: u32 = @intCast(i);
+        try testing.expectEqual(D.btFor(rb), D.btLaunch(rb, D.lean_bt2_threadgroups - 1));
+        try testing.expectEqual(if (rb > D.max_rb) @as(u32, 2) else D.btFor(rb), D.btLaunch(rb, D.lean_bt2_threadgroups));
+    }
+    // the trunk's classes at one lean chunk (rows 6 to 8): threadgroups at BT 1 = output tiles x K slices (x slices)
+    const Want = struct { c: GemvClass, tgs: u32, bt: u32 };
+    const want = [_]Want{
+        .{ .c = .wq_a, .tgs = 640, .bt = 1 },  .{ .c = .wq_b, .tgs = 2048, .bt = 2 }, .{ .c = .wkv, .tgs = 640, .bt = 1 },
+        .{ .c = .iwq_b, .tgs = 1024, .bt = 1 }, .{ .c = .wo_b, .tgs = 640, .bt = 1 },  .{ .c = .w13, .tgs = 720, .bt = 1 },
+        .{ .c = .w2, .tgs = 640, .bt = 1 },    .{ .c = .wo_a, .tgs = 8192, .bt = 2 },
+    };
+    for (want) |w| {
+        const io = classShape(w.c);
+        const tgs = if (w.c == .wo_a) (io[1] / 16) * ds.wo_a.groups * grouped.planFor(io[0], io[1]).ks else (io[1] / 16) * D.ksFor(io[0], io[1]);
+        try testing.expectEqual(w.tgs, tgs);
+        for (6..9) |rows| try testing.expectEqual(w.bt, D.btLaunch(D.rbCap(@intCast(rows), D.lean_rb), tgs));
+        if (w.c == .wo_a) for (1..17) |rows| {
+            const rb = D.rbCap(@intCast(rows), D.lean_rb);
+            try testing.expectEqual(if (rb > D.max_rb) @as(u32, 2) else D.btFor(rb), groupedBt(@intCast(rows)));
+        };
+    }
+}
+
 // The grouped linear's GEMV on dense's multi-row GEMV (`grouped.text_gemv_d`, the default) against the routed down GEMV it
 // replaces (`Grouped.dense_gemv` false), byte for byte: wo_a's grouping (8 slices of 4096 -> 1024, K6, K split 16) and a
 // smaller one (4 slices of 1024 -> 512 at K4), every decode row count 1..16 (one chunk to 8 rows, the lean text past 5,
@@ -199,6 +225,14 @@ fn restoreDense(d: *dense.Dense, rows: u32, sv: DenseSaved) void {
 
 const decode_rows_max: usize = root.kernels.DECODE_ROWS_MAX;
 
+/// The grouped wo_a's served tiles per threadgroup at `rows` (`Grouped.denseGemvCfg`'s: `dense.Dense.btLaunch` over its
+/// threadgroups at BT 1)
+fn groupedBt(rows: u32) u32 {
+    const rb = dense.Dense.rbCap(rows, dense.Dense.lean_rb);
+    const chunks = (rows + rb - 1) / rb;
+    return dense.Dense.btLaunch(rb, (ds.wo_a.out / 16) * chunks * ds.wo_a.groups * grouped.planFor(ds.wo_a.in, ds.wo_a.out).ks);
+}
+
 /// The launch-shape choices tried for `class` at `rows` (the served one first): tiles per threadgroup, DEC-ONE's prepare
 /// inside or in its own launch, DEC-ONE against the three-launch chain, the lean text's one chunk against text_dgemv's
 /// chunks of up to 5; for wo_a the dense GEMV's tiles and the routed down GEMV.
@@ -209,7 +243,7 @@ fn gemvConfs(d: ?*dense.Dense, class: GemvClass, rows: u32, buf: []GemvConf) ![]
     if (class == .wo_a) {
         const grb = dense.Dense.rbCap(rows, dense.Dense.lean_rb);
         for ([_]u8{ 1, 2, 4 }) |bt| {
-            if (bt == dense.Dense.btFor(grb) or 2 * @as(u32, bt) * grb > 32) continue;
+            if (bt == groupedBt(rows) or 2 * @as(u32, bt) * grb > 32) continue;
             buf[n] = .{ .bt = bt };
             n += 1;
         }
@@ -221,7 +255,7 @@ fn gemvConfs(d: ?*dense.Dense, class: GemvClass, rows: u32, buf: []GemvConf) ![]
     const dec = dd.decTakes(rows);
     const rb = if (dec) dense.Dense.rbFor(rows) else dd.chainRb(rows);
     for ([_]u8{ 1, 2, 4, 8 }) |bt| {
-        if (bt == dense.Dense.btFor(rb)) continue;
+        if (bt == dd.btAt(rows, rb)) continue;
         // a lane's 2 BT RB accumulators: at most 32 floats
         if (2 * @as(u32, bt) * rb > 32) continue;
         buf[n] = .{ .bt = bt };
@@ -269,13 +303,69 @@ fn bytesDiffer(p: []const f32, q: []const f32) usize {
     return n;
 }
 
+/// deepseek_test.zig's 40-layer decode chain, its trunk weights only (each layer's in its own buffers, the routed bank a
+/// placeholder the trunk arm never reads), 40 of the indexer's wq_b for the per-class costs (the chain has 8), and the
+/// cached `Dense` of each shape class and the grouped wo_a's `Grouped` (the objects `root.linear` / `linearGrouped` run)
+const TrunkChain = struct {
+    const nl = 40;
+    layers: [nl]ds.ChainLayer,
+    iwq: [nl]root.Proj,
+    dense_of: [gemv_classes.len]?*dense.Dense,
+    grp: *grouped.Grouped,
+
+    fn init(a: std.mem.Allocator, g: *G, rnd: std.Random) !TrunkChain {
+        var hp = [_]ds.HostProj{
+            try ds.HostProj.draw(a, rnd, null, 5120, 1280, ds.N), // 0 wq_a
+            try ds.HostProj.draw(a, rnd, null, 1280, 32768, ds.N), // 1 wq_b
+            try ds.HostProj.draw(a, rnd, null, 5120, 512, ds.N), // 2 wkv, the compressor's wkv and wgate
+            try ds.HostProj.draw(a, rnd, null, 1280, 4096, ds.N), // 3 the indexer's wq_b
+            try ds.HostProj.draw(a, rnd, ds.wo_a.groups, ds.wo_a.in, ds.wo_a.out, ds.N), // 4 wo_a
+            try ds.HostProj.draw(a, rnd, null, 8192, 5120, ds.N), // 5 wo_b
+            try ds.HostProj.draw(a, rnd, null, 5120, 2304, ds.N), // 6 the shared w1 and w3
+            try ds.HostProj.draw(a, rnd, null, 2304, 5120, ds.N), // 7 the shared w2
+        };
+        defer for (&hp) |*h| h.deinit(a);
+        var tc: TrunkChain = undefined;
+        for (&tc.layers, 0..) |*ly, li| {
+            const L: u32 = @intCast(li);
+            const comp = std.mem.indexOfScalar(u32, &ds.comp_layers, L) != null;
+            const idx = std.mem.indexOfScalar(u32, &ds.index_layers, L) != null;
+            const wq_a = try hp[0].upload(g);
+            ly.* = .{
+                .wq_a = wq_a,
+                .wq_b = try hp[1].upload(g),
+                .wkv = try hp[2].upload(g),
+                .cwkv = if (comp) try hp[2].upload(g) else null,
+                .cwgate = if (comp) try hp[2].upload(g) else null,
+                .iwq_b = if (idx) try hp[3].upload(g) else null,
+                .wo_a = try hp[4].upload(g),
+                .wo_b = try hp[5].upload(g),
+                .sw1 = try hp[6].upload(g),
+                .sw3 = try hp[6].upload(g),
+                .sw2 = try hp[7].upload(g),
+                .bank = .{ .gate = wq_a, .up = wq_a, .down = wq_a },
+            };
+        }
+        for (&tc.iwq) |*p| p.* = try hp[3].upload(g);
+        tc.dense_of = @splat(null);
+        for (gemv_classes, 0..) |c, k| {
+            if (c == .wo_a) continue;
+            const io = classShape(c);
+            tc.dense_of[k] = try root.denseCached(denseShape(io[0], io[1]));
+        }
+        tc.grp = try root.groupedCached(groupedShape());
+        return tc;
+    }
+};
+
 // TURBOEXL3_DS_GEMV=1 with TURBOEXL3_GPU=1: the dense decode GEMV's launch shapes swept on the 40-layer trunk chain
 // (deepseek_test.zig's `chainForward`, its trunk arm, the served kernels around it), rows 1..8. Per row count: the chain
 // as served, then for each shape class each launch-shape choice on that class's linears alone (`gemvConfs`), the chain's
 // ms and its delta from the served chain's (measured before and after the row count's sweep), and the chain output's
-// bytes against the served chain's (every choice is a launch shape: the bytes must not move). Then the per-class GEMV costs: 40 calls of one class
-// (serialized by their launches' own dependencies) against 40 of its GEMV launches alone on one prepared input (no barrier
-// between them). Then the best choice per (class, row count) together, against the served chain, in interleaved rounds.
+// bytes against the served chain's (every choice is a launch shape: the bytes must not move). Then the per-class GEMV
+// costs: 40 calls of one class (serialized by their launches' own dependencies) against 40 of its GEMV launches alone on
+// one prepared input (no barrier between them). Then the best choice per (class, row count) together, against the served
+// chain, in interleaved rounds.
 test "turboexl3 gpu deepseek gemv sweep: the dense decode GEMV's launch shapes on the 40-layer trunk chain, rows 1..8 (TURBOEXL3_DS_GEMV=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
     _ = std.c.getenv("TURBOEXL3_DS_GEMV") orelse return error.SkipZigTest;
@@ -286,50 +376,14 @@ test "turboexl3 gpu deepseek gemv sweep: the dense decode GEMV's launch shapes o
     defer g.deinit();
     var prng = std.Random.DefaultPrng.init(0xD5C4A2);
     const rnd = prng.random();
-    const nl = 40;
-    var hp = [_]ds.HostProj{
-        try ds.HostProj.draw(a, rnd, null, 5120, 1280, ds.N), // 0 wq_a
-        try ds.HostProj.draw(a, rnd, null, 1280, 32768, ds.N), // 1 wq_b
-        try ds.HostProj.draw(a, rnd, null, 5120, 512, ds.N), // 2 wkv, the compressor's wkv and wgate
-        try ds.HostProj.draw(a, rnd, null, 1280, 4096, ds.N), // 3 the indexer's wq_b
-        try ds.HostProj.draw(a, rnd, ds.wo_a.groups, ds.wo_a.in, ds.wo_a.out, ds.N), // 4 wo_a
-        try ds.HostProj.draw(a, rnd, null, 8192, 5120, ds.N), // 5 wo_b
-        try ds.HostProj.draw(a, rnd, null, 5120, 2304, ds.N), // 6 the shared w1 and w3
-        try ds.HostProj.draw(a, rnd, null, 2304, 5120, ds.N), // 7 the shared w2
-    };
-    defer for (&hp) |*h| h.deinit(a);
-    // a placeholder bank: the trunk arm never reads it
-    var layers: [nl]ds.ChainLayer = undefined;
-    for (&layers, 0..) |*ly, li| {
-        const L: u32 = @intCast(li);
-        const comp = std.mem.indexOfScalar(u32, &ds.comp_layers, L) != null;
-        const idx = std.mem.indexOfScalar(u32, &ds.index_layers, L) != null;
-        const wq_a = try hp[0].upload(&g);
-        ly.* = .{
-            .wq_a = wq_a,
-            .wq_b = try hp[1].upload(&g),
-            .wkv = try hp[2].upload(&g),
-            .cwkv = if (comp) try hp[2].upload(&g) else null,
-            .cwgate = if (comp) try hp[2].upload(&g) else null,
-            .iwq_b = if (idx) try hp[3].upload(&g) else null,
-            .wo_a = try hp[4].upload(&g),
-            .wo_b = try hp[5].upload(&g),
-            .sw1 = try hp[6].upload(&g),
-            .sw3 = try hp[6].upload(&g),
-            .sw2 = try hp[7].upload(&g),
-            .bank = .{ .gate = wq_a, .up = wq_a, .down = wq_a },
-        };
-    }
-    // 40 of the indexer's wq_b for the per-class costs (the chain has 8)
-    var iwq: [nl]root.Proj = undefined;
-    for (&iwq) |*p| p.* = try hp[3].upload(&g);
-    var dense_of: [gemv_classes.len]?*dense.Dense = @splat(null);
-    for (gemv_classes, 0..) |c, ci_| {
-        if (c == .wo_a) continue;
-        const io = classShape(c);
-        dense_of[ci_] = try root.denseCached(denseShape(io[0], io[1]));
-    }
-    const grp = try root.groupedCached(groupedShape());
+    const nl = TrunkChain.nl;
+    const tc = try a.create(TrunkChain);
+    defer a.destroy(tc);
+    tc.* = try TrunkChain.init(a, &g, rnd);
+    const layers = &tc.layers;
+    const iwq = &tc.iwq;
+    const dense_of = tc.dense_of;
+    const grp = tc.grp;
     // the chosen choice per (row count, class): the fastest past 0.3% of the served chain
     var best: [9][gemv_classes.len]GemvConf = @splat(@splat(.{}));
     var name_buf: [96]u8 = undefined;
@@ -342,7 +396,7 @@ test "turboexl3 gpu deepseek gemv sweep: the dense decode GEMV's launch shapes o
         defer a.free(want);
         const got = try a.alloc(f32, rows * 5120);
         defer a.free(got);
-        const base0 = try trunkMin(&g, s, &layers, x, rows, want);
+        const base0 = try trunkMin(&g, s, layers, x, rows, want);
         std.debug.print("TURBOEXL3_DS_GEMV rows={d} served chain_ms={d:.3}\n", .{ rows, base0 });
         var results: [gemv_classes.len][12]f64 = undefined;
         var confs_of: [gemv_classes.len][12]GemvConf = undefined;
@@ -363,7 +417,7 @@ test "turboexl3 gpu deepseek gemv sweep: the dense decode GEMV's launch shapes o
                     grp.bt_set[rows] = cf.bt;
                     grp.resetCfgs();
                 }
-                const t = trunkMin(&g, s, &layers, x, rows, got) catch |e| blk: {
+                const t = trunkMin(&g, s, layers, x, rows, got) catch |e| blk: {
                     std.debug.print("TURBOEXL3_DS_GEMV rows={d} class={s} conf={s} error={s}\n", .{ rows, @tagName(c), cf.name(&name_buf), @errorName(e) });
                     break :blk std.math.inf(f64);
                 };
@@ -378,7 +432,7 @@ test "turboexl3 gpu deepseek gemv sweep: the dense decode GEMV's launch shapes o
                 if (diff != 0) results[k][j] = std.math.inf(f64);
             }
         }
-        const base1 = try trunkMin(&g, s, &layers, x, rows, got);
+        const base1 = try trunkMin(&g, s, layers, x, rows, got);
         const base = @min(base0, base1);
         std.debug.print("TURBOEXL3_DS_GEMV rows={d} served_again chain_ms={d:.3} (drift {d:.3}) differing={d}\n", .{ rows, base1, base1 - base0, bytesDiffer(got, want) });
         for (gemv_classes, 0..) |c, k| {
@@ -459,7 +513,7 @@ test "turboexl3 gpu deepseek gemv sweep: the dense decode GEMV's launch shapes o
         var t_chosen: f64 = std.math.inf(f64);
         var diff: usize = 0;
         for (0..3) |_| {
-            t_served = @min(t_served, try trunkMin(&g, s, &layers, x, rows, want));
+            t_served = @min(t_served, try trunkMin(&g, s, layers, x, rows, want));
             var saved: [gemv_classes.len]?DenseSaved = @splat(null);
             for (gemv_classes, 0..) |_, k| {
                 const cf = best[ri][k];
@@ -470,7 +524,7 @@ test "turboexl3 gpu deepseek gemv sweep: the dense decode GEMV's launch shapes o
                     grp.resetCfgs();
                 }
             }
-            t_chosen = @min(t_chosen, try trunkMin(&g, s, &layers, x, rows, got));
+            t_chosen = @min(t_chosen, try trunkMin(&g, s, layers, x, rows, got));
             diff += bytesDiffer(got, want);
             for (gemv_classes, 0..) |_, k| {
                 if (dense_of[k]) |d| {
@@ -484,4 +538,111 @@ test "turboexl3 gpu deepseek gemv sweep: the dense decode GEMV's launch shapes o
         }
         std.debug.print("TURBOEXL3_DS_GEMV_CHOSEN rows={d} served_ms={d:.3} chosen_ms={d:.3} gain={d:.2}% differing={d} {s}\n", .{ rows, t_served, t_chosen, 100.0 * (t_served - t_chosen) / t_served, diff, if (diff == 0) "BYTES_OK" else "BYTES_DIFFER" });
     }
+}
+
+/// An arm of the A/B on the trunk chain: the served launches, the lean chunks at BT 1 (btFor's, before btLaunch), or
+/// window 12's per-class choices at rows 1 to 4 (`ab_table`)
+const AbArm = enum { served, bt1, table };
+
+/// Window 12's fastest per-class choices at rows 1 to 4 (TURBOEXL3_DS_GEMV_BEST), in `gemv_classes`' order
+const ab_table = [4][gemv_classes.len]GemvConf{
+    .{ .{ .bt = 2 }, .{ .bt = 2 }, .{ .dec_on = false }, .{}, .{ .bt = 2 }, .{}, .{}, .{} },
+    .{ .{}, .{ .bt = 1 }, .{ .dec_on = false }, .{}, .{}, .{ .dec_on = false }, .{}, .{} },
+    .{ .{}, .{}, .{ .dec_on = false }, .{}, .{}, .{ .dec_on = false }, .{}, .{} },
+    .{ .{}, .{}, .{ .dec_on = false }, .{}, .{}, .{ .dec_on = false }, .{}, .{} },
+};
+
+/// Sets `arm`'s launches at `rows` on the chain's linears (`saved`: what to put back with `clearArm`)
+fn setArm(tc: *TrunkChain, arm: AbArm, rows: u32, saved: *[gemv_classes.len]?DenseSaved) void {
+    saved.* = @splat(null);
+    for (gemv_classes, 0..) |c, k| {
+        const cf: GemvConf = switch (arm) {
+            .served => .{},
+            .table => if (rows >= 1 and rows <= ab_table.len) ab_table[rows - 1][k] else .{},
+            .bt1 => blk: {
+                if (c == .wo_a) break :blk if (dense.Dense.rbCap(rows, dense.Dense.lean_rb) > dense.Dense.max_rb) GemvConf{ .bt = 1 } else GemvConf{};
+                const d = tc.dense_of[k].?;
+                break :blk if (!d.decTakes(rows) and d.leanFor(d.chainRb(rows))) GemvConf{ .bt = 1 } else GemvConf{};
+            },
+        };
+        if (cf.isDefault()) continue;
+        if (tc.dense_of[k]) |d| saved[k] = applyDense(d, rows, cf) else {
+            tc.grp.bt_set[rows] = cf.bt;
+            tc.grp.resetCfgs();
+        }
+    }
+}
+
+fn clearArm(tc: *TrunkChain, rows: u32, saved: *[gemv_classes.len]?DenseSaved) void {
+    for (gemv_classes, 0..) |_, k| {
+        if (tc.dense_of[k]) |d| {
+            if (saved[k]) |sv| restoreDense(d, rows, sv);
+        } else {
+            tc.grp.bt_set[rows] = 0;
+            tc.grp.resetCfgs();
+        }
+    }
+    saved.* = @splat(null);
+}
+
+fn median(xs: []f64) f64 {
+    std.mem.sort(f64, xs, {}, std.sort.asc(f64));
+    return if (xs.len % 2 == 1) xs[xs.len / 2] else 0.5 * (xs[xs.len / 2 - 1] + xs[xs.len / 2]);
+}
+
+// TURBOEXL3_DS_GEMV_AB=1 with TURBOEXL3_GPU=1: the served launches against their alternatives on the 40-layer trunk chain,
+// A B B A in 3 rounds (each run the min of 5 evaluations after 2): at rows 6, 7, 8, 12 and 16 the lean chunks at BT 1 (A,
+// the launches before `btLaunch`) against the served BT (B); at rows 1 to 4 the served launches (A) against window 12's
+// per-class table (B, `ab_table`); at row 5, where neither applies, the served launches twice (the noise floor). Every
+// run's chain output is held to the first run's bytes. Lines: TURBOEXL3_DS_GEMV_AB per run, TURBOEXL3_DS_GEMV_AB_SUM per
+// row count.
+test "turboexl3 gpu deepseek gemv ab: the lean chunks' BT rule and window 12's table against the launches before them on the trunk chain, A B B A (TURBOEXL3_DS_GEMV_AB=1)" {
+    _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    _ = std.c.getenv("TURBOEXL3_DS_GEMV_AB") orelse return error.SkipZigTest;
+    const s = mlx.mlx_default_gpu_stream_new();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    const a = std.heap.page_allocator;
+    var g = try G.init(a, s);
+    defer g.deinit();
+    var prng = std.Random.DefaultPrng.init(0xD5C4A3);
+    const rnd = prng.random();
+    const tc = try a.create(TrunkChain);
+    defer a.destroy(tc);
+    tc.* = try TrunkChain.init(a, &g, rnd);
+    var saved: [gemv_classes.len]?DenseSaved = @splat(null);
+    var failed = false;
+    for ([_]u32{ 6, 7, 8, 12, 16, 1, 2, 3, 4, 5 }) |rows| {
+        const rm = g.mark();
+        defer g.resetTo(rm);
+        const x = try ds.randBf16(a, &g, rnd, &.{ ds.ci(rows), 5120 });
+        const want = try a.alloc(f32, rows * 5120);
+        defer a.free(want);
+        const got = try a.alloc(f32, rows * 5120);
+        defer a.free(got);
+        const arms: [2]AbArm = if (rows <= 4) .{ .served, .table } else if (rows == 5) .{ .served, .served } else .{ .bt1, .served };
+        var t: [2][6]f64 = undefined;
+        var n: [2]usize = .{ 0, 0 };
+        var diff: usize = 0;
+        var first = true;
+        for (0..3) |round| for ([_]u1{ 0, 1, 1, 0 }, 0..) |ai, pos| {
+            setArm(tc, arms[ai], rows, &saved);
+            const ms = try trunkMin(&g, s, &tc.layers, x, rows, if (first) want else got);
+            clearArm(tc, rows, &saved);
+            const d = if (first) 0 else bytesDiffer(got, want);
+            first = false;
+            diff += d;
+            t[ai][n[ai]] = ms;
+            n[ai] += 1;
+            std.debug.print("TURBOEXL3_DS_GEMV_AB rows={d} round={d} pos={d} arm={s}{s} chain_ms={d:.3} differing={d}\n", .{ rows, round, pos, if (ai == 0) "A:" else "B:", @tagName(arms[ai]), ms, d });
+        };
+        var amin: f64 = std.math.inf(f64);
+        var bmin: f64 = std.math.inf(f64);
+        for (t[0]) |v| amin = @min(amin, v);
+        for (t[1]) |v| bmin = @min(bmin, v);
+        const amed = median(&t[0]);
+        const bmed = median(&t[1]);
+        std.debug.print("TURBOEXL3_DS_GEMV_AB_SUM rows={d} A={s} B={s} a_min_ms={d:.3} a_med_ms={d:.3} b_min_ms={d:.3} b_med_ms={d:.3} b_minus_a_min={d:.3} b_minus_a_med={d:.3} differing={d} {s}\n", .{ rows, @tagName(arms[0]), @tagName(arms[1]), amin, amed, bmin, bmed, bmin - amin, bmed - amed, diff, if (diff == 0) "BYTES_OK" else "BYTES_DIFFER" });
+        if (diff != 0) failed = true;
+    }
+    try testing.expect(!failed);
 }

@@ -74,7 +74,8 @@ pub const dgemv_store = @embedFile("kernels/dense/dgemv_store.metal");
 /// a row feeds codeword j's weight into accumulator 0 and codeword j + 4's into accumulator 1 (dgemv_j), so every
 /// accumulator takes text_dgemv's FMAs in text_dgemv's order (m = 0..3, then 4..7) on the same operands, and a row's inputs
 /// stay half until their use. A lane keeps 2 BT RB accumulators and at most 2 RB input registers (a row's four halves),
-/// 32 at RB 8 and BT 1, where text_dgemv's 4 RB input floats make 48. text_dgemv's bytes.
+/// 32 at RB 8 and BT 1, where text_dgemv's 4 RB input floats make 48 (48 at BT 2, `Dense.btLaunch`'s on a launch of many
+/// threadgroups). text_dgemv's bytes.
 pub const text_dgemv_lean = dgemv_1 ++ dgemv_2 ++ dgemv_j ++ dgemv_3;
 pub const dgemv_j = @embedFile("kernels/dense/dgemv_j.metal");
 
@@ -221,7 +222,7 @@ pub const Dense = struct {
     /// the finish over row pieces (`text_finish_pieces`, `finishPieces`): made on first use, so a process that never
     /// splits a call never builds it
     finish_pieces: ?mlx.mlx_fast_metal_kernel = null,
-    /// output tiles per GEMV threadgroup per decode row count (DEC-ONE's and the chain's), 0 for `btFor`'s: launch shape
+    /// output tiles per GEMV threadgroup per decode row count (DEC-ONE's and the chain's), 0 for `btAt`'s: launch shape
     /// only (a row's sums do not depend on it). 1, 2, 4 or 8; set before the configs of that row count are built
     /// (`resetCfgs` drops the built ones).
     bt_set: [decode.Kernels.max_rows + 1]u8 = @splat(0),
@@ -287,10 +288,25 @@ pub const Dense = struct {
         return if (rb == 1) 4 else if (rb <= 4) 2 else 1;
     }
 
-    /// the output tiles per threadgroup a call of `rows` rows in chunks of `rb` takes: `bt_set`'s, else `btFor`'s
+    /// The threadgroups a GEMV launch of lean chunks (past max_rb rows) puts in flight at BT 1 from which BT 2 runs it
+    /// faster (M5 Max, DeepSeek-V4.1's K6 trunk on the 40-layer chain at rows 6 to 8: wq_b's 2048 threadgroups and wo_a's
+    /// 8192 take 0.18 to 0.22 and 0.30 to 0.37 ms a token less at BT 2; launches of 640 to 1024 move within 0.05 ms either
+    /// way, and BT 2 on text_dgemv's chunks of 5 rows costs 0.2 to 2.5 ms)
+    pub const lean_bt2_threadgroups: u32 = 2048;
+
+    /// output tiles per threadgroup for chunks of `rb` rows in a launch of `tgs1` threadgroups at BT 1: `btFor`'s, but 2
+    /// on the lean chunks of a launch of at least `lean_bt2_threadgroups` (2 BT RB = 32 accumulators at RB 8)
+    pub fn btLaunch(rb: u32, tgs1: u32) u32 {
+        return if (rb > max_rb and tgs1 >= lean_bt2_threadgroups) 2 else btFor(rb);
+    }
+
+    /// the output tiles per threadgroup a call of `rows` rows in chunks of `rb` takes: `bt_set`'s, else `btLaunch`'s for
+    /// the GEMV's threadgroups at BT 1 (its output tiles, row chunks and K slices)
     pub fn btAt(self: *const Dense, rows: usize, rb: u32) u32 {
         const o = self.bt_set[rows];
-        return if (o != 0) o else btFor(rb);
+        if (o != 0) return o;
+        const chunks: u32 = (@as(u32, @intCast(rows)) + rb - 1) / rb;
+        return btLaunch(rb, (self.shape.out / 16) * chunks * self.ks_split);
     }
 
     /// Drops every built decode config (`cfg`, `dec_cfg`), so the next call of each row count builds its launches from the
