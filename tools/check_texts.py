@@ -989,7 +989,11 @@ EXCEPTIONS = {
 # compose kernel texts whose bodies changed (their texts are checked in 1 and 2)
 RECUT = {('decode.zig', 'rk_line'): 'now the whole line the routed bodies are cut at (indent, newline); the one test that '
                                     'compared the bare statement reads it from its pin file',
-         ('decode.zig', 'rk_line_y'): 'the same, the v2 rk line'}
+         ('decode.zig', 'rk_line_y'): 'the same, the v2 rk line',
+         ('decode.zig', 'fin7_4'): 'cut before its SwiGLU line (fin7_swiglu, then fin7_5): text_fin7c swaps that line for the '
+                                   'clamp; text_fin7 and text_gu3sf keep their values (2)',
+         ('prefill.zig', 'mid_4'): 'cut before its SwiGLU line (mid_swiglu, then mid_5): the clamped mids swap that line for '
+                                   'the clamp; text_mid and text_mid_t128 keep their values (2)'}
 RECOMPOSED = {('decode.zig', 'fn routePrepText'): 'the router fold over files (text_route_prep / _prepg: 1, 2)'}
 # declarations a change removed on purpose, by file and key, with the reason; their newKernel calls are listed in 1
 REMOVED = {}
@@ -1004,21 +1008,53 @@ for _f in ('decb.zig', 'decode.zig', 'root.zig'):
     ADDED[(_f, 'const sources')] = 'sources.zig, where the texts more than one kernel splices now live (same values: 2)'
 ADDED[('root.zig', 'const gdn_out')] = 'gdn_out.zig, the GDN tail in one launch'
 ADDED[('root.zig', 'fn gdnOutPrep')] = 'the GDN tail\'s API: z\'s finish, the gated norm and out_proj\'s prepare in one launch'
+ADDED[('root.zig', 'fn moeSwiglu')] = 'moe\'s body with the SwiGLU\'s clamp (limit 0: moe; moeClamped)'
+ADDED[('root.zig', 'const clamp_logged')] = 'the clamped SwiGLU\'s one-time engage line'
+ADDED[('ref.zig', 'const Hits')] = 'what moeRowClamped clamped (the clamped GPU test requires it to act)'
+ADDED[('ref.zig', 'fn swigluClamped')] = 'the reference\'s clamped SwiGLU of one element'
+ADDED[('ref.zig', 'fn moeRowClamped')] = 'moeRowDec with the clamped SwiGLU, moeClamped\'s reference'
 # files a change added on purpose, by name, with the reason
 ADDED_FILES = {'sources.zig': 'the texts more than one kernel splices (had128, the gate gemv and sum), MLX-free, for '
                               'turboexl3\'s kernels and a consumer\'s Metal',
                'gdn_out.zig': 'the GDN tail\'s kernel (turboexl3_gdn_out_prep: its pieces around sources.had128) and launch',
                'gdn_out_test.zig': 'the GDN tail\'s GPU tests against linearFinish, MLX\'s gated norm and linearPrep',
-               'hip_tests.zig': 'the AMD (HIP) kernels\' GPU tests against format.zig (zig build hip-test -Dhip=true); no Metal'}
+               'hip_tests.zig': 'the AMD (HIP) kernels\' GPU tests against format.zig (zig build hip-test -Dhip=true); no Metal',
+               'clamped_test.zig': 'the clamped SwiGLU\'s tests: its texts\' compositions and the reference (CPU), the clamped '
+                                   'launches\' bytes where nothing clamps and moeClamped against ref.moeRowClamped at '
+                                   'DeepSeek-V4.1-Flash\'s geometry (GPU)'}
 # other declarations a change edited on purpose, by file and key, with the reason
 CHANGED = {('tests.zig', 'comptime #0'): 'the test root lists the files the change added'}
+for _f, _key in (('decode.zig', 'const Geometry'), ('prefill.zig', 'const Geometry')):
+    CHANGED[(_f, _key)] = 'the SwiGLU\'s clamp (limit, default 0): part of the geometry, so of the kernel caches\' keys'
+CHANGED[('decode.zig', 'const Kernels')] = 'refuses a clamped geometry (the clamp is Kernels3\'s)'
+CHANGED[('decode.zig', 'const Kernels5')] = 'refuses a clamped geometry (dn5 has no clamp)'
+CHANGED[('decode.zig', 'const Kernels3')] = ('a clamped geometry\'s fin7 is turboexl3_fin7c with LIMIT appended to its constants; '
+                                             'moeForm refuses form 3 and sharedAdmitted the shared heads there')
+CHANGED[('prefill.zig', 'const T128Kernels')] = 'init takes the clamp: a clamped geometry\'s mid is turboexl3_pf_t128_midc'
+CHANGED[('prefill.zig', 'const Prefill')] = ('a clamped geometry\'s mids are turboexl3_pf_midc / _mid_vc, LIMIT appended to '
+                                             'every mid launch\'s constants there (midTempl)')
+for _key in ('fn kernelsFor', 'fn prefillFor'):
+    CHANGED[('root.zig', _key)] = 'the kernel cache matches the clamp too'
+CHANGED[('root.zig', 'fn moe')] = 'its body moved to moeSwiglu (limit 0)'
+CHANGED[('root.zig', 'fn moePrefill')] = 'takes the clamp into the prefill geometry'
+CHANGED[('root.zig', 'fn moeClamped')] = 'serves the clamped SwiGLU on moeSwiglu instead of refusing'
+CHANGED[('root.zig', 'const shared_state')] = 'registers clamp_logged'
+CHANGED[('ref.zig', 'fn moeRowDec')] = 'moeRowClamped at limit 0 (the same arithmetic)'
 # kernels a change added on purpose, by file and kernel name, with the reason; their newKernel calls are listed in 1
 ADDED_KERNELS = {('dense.zig', 'turboexl3_dense_dgemv_lean'): 'the lean GEMV (Config.dense_lean): text_dgemv with its '
                                                               'codeword loop taken by input element',
                  ('decode.zig', 'turboexl3_gu3sf'): 'the fused shared expert\'s gate|up launch with fin7s folded in '
                                                     '(Config.fused_fin_fold): gu3s, then fin7s\'s statements',
                  ('decode.zig', 'turboexl3_vfold_zero'): 'the zeroing of gu3sf\'s arrival counters: dense\'s DEC-ONE '
-                                                         'zeroing text'}
+                                                         'zeroing text',
+                 ('decode.zig', 'turboexl3_fin7c'): 'fin7 with the clamped SwiGLU (root.moeClamped): text_fin7 with its '
+                                                    'SwiGLU line swapped for the clamp piece',
+                 ('prefill.zig', 'turboexl3_pf_midc'): 'the mid with the clamped SwiGLU: text_mid with its SwiGLU line '
+                                                       'swapped for the clamp piece',
+                 ('prefill.zig', 'turboexl3_pf_mid_vc'): 'the vector-layout mid with the clamped SwiGLU (text_mid_v, the '
+                                                         'same swap)',
+                 ('prefill.zig', 'turboexl3_pf_t128_midc'): 'the 128-row tiles\' mid with the clamped SwiGLU '
+                                                            '(text_mid_t128, the same swap)'}
 # tests a change renamed: (file, original name) -> new name
 RENAMED_TESTS = {
     ('bench.zig', "turboexl3 bench: fused vs separately launched steps vs Sushi's chain, K2..K8 (+ n40), Qwen geometry, "

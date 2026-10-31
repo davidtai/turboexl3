@@ -1,7 +1,8 @@
 //! The host reference of one routed MoE layer and the synthetic banks the GPU tests and benches use. The reference is
 //! Sushi's `moeSwigluHost` over this library's `format.project`: gate and up through the full projection (f16 rounding at
 //! the input, the inner product and the output), SwiGLU in f32, the down projection on that f32 h (its prepare rounds h
-//! to f16), and the score-weighted sum over the slots in slot order. Every kernel is held to this within a tolerance.
+//! to f16), and the score-weighted sum over the slots in slot order. Every kernel is held to this within a tolerance;
+//! the clamped SwiGLU's (`root.moeClamped`) to the same with gate and up clamped first (`moeRowClamped`).
 const std = @import("std");
 const format = @import("format.zig");
 
@@ -108,6 +109,33 @@ pub fn moeRow(a: std.mem.Allocator, b: *const Bank, x: []const f32, slots: []con
 
 /// `moeRow` under a decode (codebook, window) other than MUL1 w16.
 pub fn moeRowDec(a: std.mem.Allocator, b: *const Bank, dec: format.Decode, x: []const f32, slots: []const u32, scores: []const f32, y: []f32) !void {
+    _ = try moeRowClamped(a, b, dec, 0, x, slots, scores, y);
+}
+
+/// The elements `moeRowClamped` clamped over a row's slots: gates above the limit and ups outside [-limit, limit], of
+/// `total` each (the slots times the intermediate width).
+pub const Hits = struct { gate: usize = 0, up: usize = 0, total: usize = 0 };
+
+/// One element's SwiGLU in f32 with DeepSeek-V4's and GLM's clamp (`limit` > 0; 0 none): the gate clamped from above only,
+/// up to [-limit, limit], then silu(gate) * up. Comparisons, so a NaN passes through as torch.clamp passes it (the Metal
+/// clamp's rule).
+pub fn swigluClamped(g: f32, u: f32, limit: f32) f32 {
+    var gc = g;
+    var uc = u;
+    if (limit > 0) {
+        gc = if (g > limit) limit else g;
+        uc = if (u > limit) limit else if (u < -limit) -limit else u;
+    }
+    return (gc / (1.0 + @exp(-gc))) * uc;
+}
+
+/// `moeRowDec` with the clamped SwiGLU (`root.moeClamped`'s reference; DeepSeek-V4.1's Expert at swiglu_limit `limit`):
+/// gate and up through the full projection, both clamped (`swigluClamped`) on their f16-rounded values, SwiGLU in f32, the
+/// down projection and the score-weighted sum in slot order. The reference model scales the f32 activation by the slot's
+/// weight before w2 and rounds it to x's dtype; here, as in the kernels, the weight scales the down projection's
+/// f16-rounded output (the same product, the down projection being linear; the rounding points differ). `limit` 0 is
+/// `moeRowDec`. Returns what it clamped.
+pub fn moeRowClamped(a: std.mem.Allocator, b: *const Bank, dec: format.Decode, limit: f32, x: []const f32, slots: []const u32, scores: []const f32, y: []f32) !Hits {
     const hidden = b.hidden;
     const inter = b.inter;
     @memset(y, 0);
@@ -124,18 +152,24 @@ pub fn moeRowDec(a: std.mem.Allocator, b: *const Bank, dec: format.Decode, x: []
     const down_y = try a.alloc(f32, hidden);
     defer a.free(down_y);
     const stride = b.guStride();
+    var hits: Hits = .{};
     for (slots, scores) |e_u, w| {
         const e: usize = e_u;
         const off = e * stride;
         format.project(x, b.gate_t[off..][0..stride], b.gate_suh[e * hidden ..][0..hidden], b.gate_svh[e * inter ..][0..inter], hidden, inter, b.rate, dec, transformed, inner[0..inter], gate_y);
         format.project(x, b.up_t[off..][0..stride], b.up_suh[e * hidden ..][0..hidden], b.up_svh[e * inter ..][0..inter], hidden, inter, b.rate, dec, transformed, inner[0..inter], up_y);
         for (0..inter) |i| {
-            const g = gate_y[i];
-            h[i] = (g / (1.0 + @exp(-g))) * up_y[i];
+            h[i] = swigluClamped(gate_y[i], up_y[i], limit);
+            if (limit > 0) {
+                hits.gate += @intFromBool(gate_y[i] > limit);
+                hits.up += @intFromBool(@abs(up_y[i]) > limit);
+            }
         }
+        hits.total += inter;
         format.project(h, b.down_t[off..][0..stride], b.down_suh[e * inter ..][0..inter], b.down_svh[e * hidden ..][0..hidden], inter, hidden, b.rate, dec, inner[0..inter], transformed, down_y);
         for (0..hidden) |i| y[i] += w * down_y[i];
     }
+    return hits;
 }
 
 /// max |a - b| and the rms of b.

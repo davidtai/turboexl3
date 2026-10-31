@@ -194,7 +194,7 @@ The routed experts:
 | `Proj`, `Bank`, `Geometry`, `bankGeometry` | one projection's arrays, a bank's gate, up and down, and the geometry that the shapes give |
 | `moe` | the routed experts of one MoE layer: decode rows through the split-K GEMV chain, prefill rows through the fused GEMM chain; its argument `verify_rows` is Sushi's and changes nothing here |
 | `moeWithShared` | `moe`, then an MLX add of a shared-expert output that the caller has already gated |
-| `moeClamped` | GLM's clamped SwiGLU; it checks its operands and refuses for now |
+| `moeClamped` | `moe` with DeepSeek-V4's (and GLM's) clamped SwiGLU, `swiglu_limit` 1 to 128: the gate clamped from above and up to [−limit, limit] before SwiGLU; decode rows on fin7's clamped variant, prefill rows on the clamped mid |
 
 The shared expert and the router, at 1 to 4 decode rows:
 
@@ -369,7 +369,7 @@ The library reads no environment, but the tests do. These variables turn on test
 | variable | file | what it runs |
 |---|---|---|
 | none | every file | the CPU tests: the kernel texts, the launch plans, the tables and the reference |
-| `TURBOEXL3_GPU=1` | `gpu_test.zig`, `prefill_test.zig`, `attn_io_test.zig`, `decb_test.zig`, `bench.zig` | the GPU parity and byte tests, on a Metal device |
+| `TURBOEXL3_GPU=1` | `gpu_test.zig`, `prefill_test.zig`, `attn_io_test.zig`, `decb_test.zig`, `clamped_test.zig`, `bench.zig` | the GPU parity and byte tests, on a Metal device |
 | `TURBOEXL3_METAL_DUMP=1` | `prefill.zig` | prints each kernel of the routed prefill chain, with its option variants, as one standalone source file for an offline `xcrun metal` compile |
 | `TURBOEXL3_BENCH=1` | `bench.zig` | with `TURBOEXL3_GPU=1`: times the form-3 variants of the decode chain against Sushi's chain |
 | `TURBOEXL3_PF_TIME=1`, `TURBOEXL3_DEC_TIME=1` | `prefill_test.zig` | with `TURBOEXL3_GPU=1`: time the prefill and decode chains against Sushi's |
@@ -387,6 +387,7 @@ These variables set or narrow the cases of a test group. The comments of each fi
 | `TURBOEXL3_DENSE_TIME_PREFILL`, `_TAIL`, `_MULTI_ONLY` | `gpu_test.zig` | the dense timing: prompt-chunk rows, the rows of a snapshot tail, or the multi-row GEMV alone |
 | `TURBOEXL3_SHARED_V2` | `gpu_test.zig` | the configurations of the v2 shared heads |
 | `TURBOEXL3_ATTN_ROWS` | `attn_io_test.zig` | the row counts of the attention tests |
+| `TURBOEXL3_CLAMP_N`, `_ROWS` | `clamped_test.zig` | the rates (halfwords per tile) and row counts of the clamped SwiGLU's test at DeepSeek-V4.1-Flash's geometry |
 
 `python3 tools/check_texts.py <src before the change>` checks a refactor on the host. It fails on any Zig string that
 holds Metal. It also proves that each kernel source and header is byte-identical to the one before the change, or

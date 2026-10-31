@@ -13,8 +13,8 @@
 //!             half [S, hidden] in sorted order, and inv[order[p]] = p
 //!   gemm      gate|up: per (M tile, projection, 64-wide output tile), the K loop of 64-deep stages: decode the stage's 16
 //!             trellis tiles into B^T (threadgroup memory), barrier, NAX MMA; the inner product rounded to f16
-//!   mid       per (sorted position, 128-block of inter): finish gate and up (H128, svh, f16), SwiGLU in f32, the down
-//!             input (f16 round, suh, H128, f16 round)
+//!   mid       per (sorted position, 128-block of inter): finish gate and up (H128, svh, f16), SwiGLU in f32 (a clamped
+//!             geometry clamps gate and up first: `Geometry.limit`), the down input (f16 round, suh, H128, f16 round)
 //!   gemm      down: the same kernel over the inter dim (A/B options: 128-deep stages, several output blocks per threadgroup)
 //!   finish    per (row, 128-block of hidden): each slot's down inner through inv, H128, svh, f16, times its score,
 //!             summed in slot order
@@ -86,13 +86,24 @@ pub const text_prep = @embedFile("kernels/prefill/prep.metal");
 
 /// gate|up finish, SwiGLU and the down input, per (128-block of inter, sorted position): xd half [S, INTER] (ALAY: in
 /// `text_prep`'s A layout).
-pub const text_mid = mid_1 ++ mid_2 ++ mid_3 ++ mid_4;
-/// `text_mid` in the pieces the 128-row tiles' mid (`text_mid_t128`) composes: mid_1 ends at the expert line, mid_3 is the
-/// gate and up loads
+pub const text_mid = mid_1 ++ mid_2 ++ mid_3 ++ mid_4 ++ mid_swiglu ++ mid_5;
+/// `text_mid` in the pieces the 128-row tiles' mid (`text_mid_t128`) and the clamped mids compose: mid_1 ends at the expert
+/// line, mid_3 is the gate and up loads, mid_swiglu the SwiGLU's line (the vector-layout mid's too)
 const mid_1 = @embedFile("kernels/prefill/mid_1.metal");
 const mid_2 = @embedFile("kernels/prefill/mid_2.metal");
 const mid_3 = @embedFile("kernels/prefill/mid_3.metal");
 const mid_4 = @embedFile("kernels/prefill/mid_4.metal");
+const mid_swiglu = @embedFile("kernels/prefill/mid_swiglu.metal");
+const mid_5 = @embedFile("kernels/prefill/mid_5.metal");
+
+/// The clamped SwiGLU (`Geometry.limit`, the template int LIMIT; `root.moeClamped`): each mid with its SwiGLU line replaced
+/// by the clamp (the gate clamped from above at LIMIT and up to [-LIMIT, LIMIT], then the mid's SwiGLU on them), every
+/// other statement the mid's, so where no value passes the limit each gives its mid's bytes: `text_midc` `text_mid`'s,
+/// `text_mid_vc` `text_mid_v`'s, `text_mid_t128c` `text_mid_t128`'s.
+const mid_swiglu_clamp = @embedFile("kernels/prefill/mid_swiglu_clamp.metal");
+pub const text_midc = mid_1 ++ mid_2 ++ mid_3 ++ mid_4 ++ mid_swiglu_clamp ++ mid_5;
+pub const text_mid_vc = mid_v_1 ++ mid_swiglu_clamp ++ mid_v_2;
+pub const text_mid_t128c: [:0]const u8 = sentinel(mid_1 ++ mid_t128_pick ++ mid_2 ++ mid_t128_loads ++ mid_4 ++ mid_swiglu_clamp ++ mid_5);
 
 /// The down finish and the slot reduce, per (128-block of hidden, row): y OUT_T [R, HID] = sum over the row's slots in slot
 /// order of score * f16(H128(zd[inv[slot]]) * 2^-3.5 * svh_e).
@@ -109,7 +120,10 @@ const finish_4 = @embedFile("kernels/prefill/finish_4.metal");
 /// the flattened (position or row, block) items instead of one small threadgroup per position.
 pub const text_prep_v = @embedFile("kernels/prefill/prep_v.metal");
 
-pub const text_mid_v = @embedFile("kernels/prefill/mid_v.metal");
+pub const text_mid_v = mid_v_1 ++ mid_swiglu ++ mid_v_2;
+/// `text_mid_v` cut at its SwiGLU line (`mid_swiglu`, the same line as `text_mid`'s)
+const mid_v_1 = @embedFile("kernels/prefill/mid_v_1.metal");
+const mid_v_2 = @embedFile("kernels/prefill/mid_v_2.metal");
 
 pub const text_finish_v = @embedFile("kernels/prefill/finish_v.metal");
 
@@ -265,7 +279,8 @@ pub const text_froute_t128: [:0]const u8 = sentinel(@embedFile("kernels/prefill/
 /// the 128-row tiles' outputs, for p < xbase[e]; zg / zu, the mixed launch's, otherwise); one simdgroup holds one position,
 /// so the choice is uniform per simdgroup. Nothing else changes, so the same bytes from the same rows.
 const mid_t128_pick = @embedFile("kernels/prefill/mid_t128_pick.metal");
-pub const text_mid_t128: [:0]const u8 = sentinel(mid_1 ++ mid_t128_pick ++ mid_2 ++ @embedFile("kernels/prefill/mid_t128_loads.metal") ++ mid_4);
+const mid_t128_loads = @embedFile("kernels/prefill/mid_t128_loads.metal");
+pub const text_mid_t128: [:0]const u8 = sentinel(mid_1 ++ mid_t128_pick ++ mid_2 ++ mid_t128_loads ++ mid_4 ++ mid_swiglu ++ mid_5);
 /// The 128-row tiles' finish: `text_finish` with each slot's down row from the launch that computed it (zdt for p < xbase[e],
 /// else zd)
 const finish_t128_pick = @embedFile("kernels/prefill/finish_t128_pick.metal");
@@ -299,6 +314,9 @@ pub const Geometry = struct {
     experts: u32,
     rate: format.Rate,
     dec: format.Decode,
+    /// the SwiGLU's clamp (`root.moeClamped`: DeepSeek-V4's and GLM's `swiglu_limit`; 0 none): every mid is its clamped
+    /// variant (`text_midc`, `text_mid_vc`, `text_mid_t128c`) with LIMIT = limit; nothing else changes
+    limit: u32 = 0,
 
     pub fn admitted(g: Geometry) bool {
         return g.hidden % 128 == 0 and g.inter % 128 == 0 and g.hidden % BK == 0 and g.inter % BK == 0 and
@@ -548,7 +566,7 @@ pub fn t128Tables(a: std.mem.Allocator, counts: []const u32, bm: u32, cut: u8, t
 
 /// The 128-row tiles' kernels (`Options.t128`): the route, both GEMMs' launches (over the remainder table: the mixed launch;
 /// over the 128-row tiles: the shared-decode body at bm 128; the mixed chain's texts, header, inputs and outputs), and mid
-/// and finish taking each row from the launch that computed it.
+/// and finish taking each row from the launch that computed it (mid's clamped variant where the geometry clamps).
 pub const T128Kernels = struct {
     route: mlx.mlx_fast_metal_kernel,
     gu_mixed: mlx.mlx_fast_metal_kernel,
@@ -558,14 +576,17 @@ pub const T128Kernels = struct {
     mid: mlx.mlx_fast_metal_kernel,
     fin: mlx.mlx_fast_metal_kernel,
 
-    fn init() !T128Kernels {
+    fn init(limit: u32) !T128Kernels {
         return .{
             .route = ks.newKernel("turboexl3_pf_t128_route", &froute_in, &froute_t128_out, text_froute_t128, header_small, true) orelse return error.KernelCreateFailed,
             .gu_mixed = ks.newKernel("turboexl3_pf_t128_gum", &gemm2_in, &gemm2_out, gemm2m_text, header_nax, true) orelse return error.KernelCreateFailed,
             .gu_t128 = ks.newKernel("turboexl3_pf_t128_gut", &gemm2_in, &gemm2_out, gemm2_text, header_nax, true) orelse return error.KernelCreateFailed,
             .dn_mixed = ks.newKernel("turboexl3_pf_t128_dnm", &gemm1_in, &gemm1_out, gemm1m_text, header_nax, true) orelse return error.KernelCreateFailed,
             .dn_t128 = ks.newKernel("turboexl3_pf_t128_dnt", &gemm1_in, &gemm1_out, gemm1_text, header_nax, true) orelse return error.KernelCreateFailed,
-            .mid = ks.newKernel("turboexl3_pf_t128_mid", &mid_t128_in, &mid_out, text_mid_t128, header_small, true) orelse return error.KernelCreateFailed,
+            .mid = (if (limit == 0)
+                ks.newKernel("turboexl3_pf_t128_mid", &mid_t128_in, &mid_out, text_mid_t128, header_small, true)
+            else
+                ks.newKernel("turboexl3_pf_t128_midc", &mid_t128_in, &mid_out, text_mid_t128c, header_small, true)) orelse return error.KernelCreateFailed,
             .fin = ks.newKernel("turboexl3_pf_t128_fin", &fin_t128_in, &fin_out, text_finish_t128, header_small, true) orelse return error.KernelCreateFailed,
         };
     }
@@ -610,7 +631,11 @@ pub const Prefill = struct {
             .prep_k = ks.newKernel("turboexl3_pf_prep", &prep_in, &prep_out, text_prep, header_small, true) orelse return error.KernelCreateFailed,
             .gemm2 = ks.newKernel("turboexl3_pf_gemm2", &gemm2_in, &gemm2_out, gemm2_text, header_nax, true) orelse return error.KernelCreateFailed,
             .gemm1 = ks.newKernel("turboexl3_pf_gemm1", &gemm1_in, &gemm1_out, gemm1_text, header_nax, true) orelse return error.KernelCreateFailed,
-            .mid_k = ks.newKernel("turboexl3_pf_mid", &mid_in, &mid_out, text_mid, header_small, true) orelse return error.KernelCreateFailed,
+            // a clamped geometry's mids are the clamped variants (`Geometry.limit`)
+            .mid_k = (if (geo.limit == 0)
+                ks.newKernel("turboexl3_pf_mid", &mid_in, &mid_out, text_mid, header_small, true)
+            else
+                ks.newKernel("turboexl3_pf_midc", &mid_in, &mid_out, text_midc, header_small, true)) orelse return error.KernelCreateFailed,
             .fin = ks.newKernel("turboexl3_pf_fin", &fin_in, &fin_out, text_finish, header_small, true) orelse return error.KernelCreateFailed,
             .gemm2s = ks.newKernel("turboexl3_pf_gemm2s", &gemm2_in, &gemm2_out, gemm2s_text, header_nax_small, true) orelse return error.KernelCreateFailed,
             .gemm1s = ks.newKernel("turboexl3_pf_gemm1s", &gemm1_in, &gemm1_out, gemm1s_text, header_nax_small, true) orelse return error.KernelCreateFailed,
@@ -620,9 +645,12 @@ pub const Prefill = struct {
             .froute = ks.newKernel("turboexl3_pf_froute", &froute_in, &froute_out, text_froute, header_small, true) orelse return error.KernelCreateFailed,
             .froute_m = ks.newKernel("turboexl3_pf_froute_m", &froute_in, &froute_out, text_froute_m, header_small, true) orelse return error.KernelCreateFailed,
             .prep_v = ks.newKernel("turboexl3_pf_prep_v", &prep_in, &prep_out, text_prep_v, header_small, true) orelse return error.KernelCreateFailed,
-            .mid_v = ks.newKernel("turboexl3_pf_mid_v", &mid_in, &mid_out, text_mid_v, header_small, true) orelse return error.KernelCreateFailed,
+            .mid_v = (if (geo.limit == 0)
+                ks.newKernel("turboexl3_pf_mid_v", &mid_in, &mid_out, text_mid_v, header_small, true)
+            else
+                ks.newKernel("turboexl3_pf_mid_vc", &mid_in, &mid_out, text_mid_vc, header_small, true)) orelse return error.KernelCreateFailed,
             .fin_v = ks.newKernel("turboexl3_pf_fin_v", &fin_in, &fin_out, text_finish_v, header_small, true) orelse return error.KernelCreateFailed,
-            .t128_k = if (!opts.t128) null else try T128Kernels.init(),
+            .t128_k = if (!opts.t128) null else try T128Kernels.init(geo.limit),
         };
     }
 
@@ -780,19 +808,29 @@ pub const Prefill = struct {
         if (self.opts.aux != 0) {
             const asg: u32 = self.opts.aux;
             const tgs = (S * (g.inter / 128) + asg - 1) / asg;
-            try run(self.mid_v, .{ .grid = .{ tgs * 32 * asg, 1, 1 }, .threadgroup = .{ 32 * asg, 1, 1 }, .out_shapes = &.{ &[_]c_int{ @intCast(S), I }, &[_]c_int{ @intCast(S), @intCast(g.inter / 128) } }, .out_dtypes = &.{ .float16, .float32 }, .template = &.{
+            var tv: [4]ks.TemplateArg = undefined;
+            try run(self.mid_v, .{ .grid = .{ tgs * 32 * asg, 1, 1 }, .threadgroup = .{ 32 * asg, 1, 1 }, .out_shapes = &.{ &[_]c_int{ @intCast(S), I }, &[_]c_int{ @intCast(S), @intCast(g.inter / 128) } }, .out_dtypes = &.{ .float16, .float32 }, .template = self.midTempl(&tv, .{
                 .{ .name = "INTER", .value = .{ .int = I } },
                 .{ .name = "ASG", .value = .{ .int = @intCast(asg) } },
                 .{ .name = "XSO", .value = .{ .int = @intFromBool(self.opts.aux_lane_sums) } },
-            } }, &.{ zg, zu, inds, order, b.gate_svh, b.up_svh, b.down_suh }, &xd, s);
+            }) }, &.{ zg, zu, inds, order, b.gate_svh, b.up_svh, b.down_suh }, &xd, s);
             return xd;
         }
-        try run(self.mid_k, .{ .grid = .{ (g.inter / 128 / bpt) * 32 * bpt, S, 1 }, .threadgroup = .{ 32 * bpt, 1, 1 }, .out_shapes = &.{ &[_]c_int{ @intCast(S), I }, &[_]c_int{ @intCast(S), @intCast(g.inter / 128) } }, .out_dtypes = &.{ .float16, .float32 }, .template = &.{
+        var tm: [4]ks.TemplateArg = undefined;
+        try run(self.mid_k, .{ .grid = .{ (g.inter / 128 / bpt) * 32 * bpt, S, 1 }, .threadgroup = .{ 32 * bpt, 1, 1 }, .out_shapes = &.{ &[_]c_int{ @intCast(S), I }, &[_]c_int{ @intCast(S), @intCast(g.inter / 128) } }, .out_dtypes = &.{ .float16, .float32 }, .template = self.midTempl(&tm, .{
             .{ .name = "INTER", .value = .{ .int = I } },
             .{ .name = "BPT", .value = .{ .int = @intCast(bpt) } },
             .{ .name = "ALAY", .value = .{ .int = self.opts.alay } },
-        } }, &.{ zg, zu, inds, order, b.gate_svh, b.up_svh, b.down_suh }, &xd, s);
+        }) }, &.{ zg, zu, inds, order, b.gate_svh, b.up_svh, b.down_suh }, &xd, s);
         return xd;
+    }
+
+    /// A mid launch's template constants: its three, then the clamp's LIMIT where the geometry clamps (an unclamped mid takes
+    /// exactly its three). They live in the caller's `buf` (the launch only points at them).
+    fn midTempl(self: *const Prefill, buf: *[4]ks.TemplateArg, own: [3]ks.TemplateArg) []const ks.TemplateArg {
+        buf.* = .{ own[0], own[1], own[2], .{ .name = "LIMIT", .value = .{ .int = @intCast(self.geo.limit) } } };
+        const n: usize = if (self.geo.limit != 0) 4 else 3;
+        return buf[0..n];
     }
 
     /// the down inner product, half [S, hidden] (sorted order); `Options.bk128` / `ncb` shape its shared-decode body
@@ -927,11 +965,12 @@ pub const Prefill = struct {
         const I: c_int = @intCast(g.inter);
         const bpt = bptFor(g.inter / 128);
         var xd: [2]mlx.mlx_array = undefined;
-        try run(k.mid, .{ .grid = .{ (g.inter / 128 / bpt) * 32 * bpt, S, 1 }, .threadgroup = .{ 32 * bpt, 1, 1 }, .out_shapes = &.{ &[_]c_int{ @intCast(S), I }, &[_]c_int{ @intCast(S), @intCast(g.inter / 128) } }, .out_dtypes = &.{ .float16, .float32 }, .template = &.{
+        var tm: [4]ks.TemplateArg = undefined;
+        try run(k.mid, .{ .grid = .{ (g.inter / 128 / bpt) * 32 * bpt, S, 1 }, .threadgroup = .{ 32 * bpt, 1, 1 }, .out_shapes = &.{ &[_]c_int{ @intCast(S), I }, &[_]c_int{ @intCast(S), @intCast(g.inter / 128) } }, .out_dtypes = &.{ .float16, .float32 }, .template = self.midTempl(&tm, .{
             .{ .name = "INTER", .value = .{ .int = I } },
             .{ .name = "BPT", .value = .{ .int = @intCast(bpt) } },
             .{ .name = "ALAY", .value = .{ .int = self.opts.alay } },
-        } }, &.{ zt.m[0], zt.m[1], inds, rt.order, b.gate_svh, b.up_svh, b.down_suh, zt.t[0], zt.t[1], rt.xbase }, &xd, s);
+        }) }, &.{ zt.m[0], zt.m[1], inds, rt.order, b.gate_svh, b.up_svh, b.down_suh, zt.t[0], zt.t[1], rt.xbase }, &xd, s);
         return xd;
     }
 

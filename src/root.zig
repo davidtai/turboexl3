@@ -7,8 +7,8 @@
 //! Status: `moe` serves decode rows (<= DECODE_ROWS_MAX) through the form `Config.decode_form` names: forms 3, 7, 8 and 9
 //! run form 3's split-K chain (`decode.Kernels3`; 9, the default, in four or five launches), forms 5 and 6 the same bytes
 //! in three or two launches with expert-grouped row-slots (`decode.Kernels5`); prefill rows run the fused GEMM chain
-//! (`prefill.zig`). The clamped (GLM) form still refuses `error.Exl3EngineNotImplemented`. A consumer's choices are one
-//! `Config` (`configure`); the library reads no environment.
+//! (`prefill.zig`). `moeClamped` (DeepSeek-V4's and GLM's clamped SwiGLU) runs the same chains with the clamp in fin7's
+//! and the prefill mid's variants. A consumer's choices are one `Config` (`configure`); the library reads no environment.
 const std = @import("std");
 /// A module global, the host's `Shared` where the consumer's `sdk` brings one (`global.zig`).
 pub const Global = @import("global.zig").Global;
@@ -114,7 +114,7 @@ fn kernelsFor(geo: decode.Geometry, out_dtype: mlx.mlx_dtype) !*decode.Kernels3 
         if (slot.*) |*k| {
             const g = k.geo;
             if (g.hidden == geo.hidden and g.inter == geo.inter and g.topk == geo.topk and g.rate.n == geo.rate.n and
-                g.dec.codebook == geo.dec.codebook and g.dec.window == geo.dec.window and k.out_dtype == out_dtype) return k;
+                g.dec.codebook == geo.dec.codebook and g.dec.window == geo.dec.window and g.limit == geo.limit and k.out_dtype == out_dtype) return k;
         } else if (free_slot == null) free_slot = i;
     }
     const i = free_slot orelse return error.Exl3EngineCacheFull;
@@ -845,7 +845,7 @@ fn prefillFor(geo: prefill.Geometry) !*prefill.Prefill {
         if (slot.*) |*p| {
             const g = p.geo;
             if (g.hidden == geo.hidden and g.inter == geo.inter and g.topk == geo.topk and g.experts == geo.experts and
-                g.rate.n == geo.rate.n and g.dec.codebook == geo.dec.codebook and g.dec.window == geo.dec.window) return p;
+                g.rate.n == geo.rate.n and g.dec.codebook == geo.dec.codebook and g.dec.window == geo.dec.window and g.limit == geo.limit) return p;
         } else if (free_slot == null) free_slot = i;
     }
     const i = free_slot orelse return error.Exl3EngineCacheFull;
@@ -884,18 +884,29 @@ fn freeArr(a: mlx.mlx_array) void {
 /// `Config.prefill` or `Config.nax` is off (the host keeps its prefill arm for them). Gate, up and down must share a rate.
 pub fn moe(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array, scores: mlx.mlx_array, dec: format.Decode, verify_rows: bool) !mlx.mlx_array {
     _ = verify_rows;
+    return moeSwiglu(s, x, bank, inds, scores, dec, 0);
+}
+
+/// `moe`'s chains with the SwiGLU's clamp `limit` (0: none, `moe` itself; `moeClamped`). The clamp is part of the decode and
+/// prefill geometries, so a clamped call builds and caches its own kernels (fin7's and the mids' clamped variants) beside
+/// the unclamped ones, and every other kernel is the unclamped chain's.
+fn moeSwiglu(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array, scores: mlx.mlx_array, dec: format.Decode, limit: u32) !mlx.mlx_array {
     const geo = try validateCall(x, bank, inds, scores);
     if (geo.gate_up.n != geo.down.n) return error.Exl3EngineNotImplemented;
     const xsh = mlx.getShape(x);
     const rows_c: c_int = xsh[0] * xsh[1];
     const rows: usize = @intCast(rows_c);
     const K: c_int = mlx.getShape(inds)[2];
+    if (limit != 0 and !clamp_logged.get().*) {
+        clamp_logged.get().* = true;
+        std.debug.print("[turboexl3] clamped SwiGLU engaged (swiglu_limit {d}): fin7's and the prefill mid's clamped variants\n", .{limit});
+    }
     if (rows > kernels.DECODE_ROWS_MAX) {
         if (!config.get().prefill or !config.get().nax) return error.Exl3EngineNotImplemented;
-        return moePrefill(s, x, bank, inds, scores, dec, geo, rows, K);
+        return moePrefill(s, x, bank, inds, scores, dec, geo, rows, K, limit);
     }
     if (SlotStats.enabled()) SlotStats.record(inds, rows, @intCast(K)) catch {};
-    const dgeo: decode.Geometry = .{ .hidden = @intCast(geo.hidden), .inter = @intCast(geo.width), .topk = @intCast(K), .rate = geo.gate_up, .dec = dec };
+    const dgeo: decode.Geometry = .{ .hidden = @intCast(geo.hidden), .inter = @intCast(geo.width), .topk = @intCast(K), .rate = geo.gate_up, .dec = dec, .limit = limit };
     // the operands the kernels take as the host holds them: x [rows, D] (bf16/f16/f32), slots [rows * K] (i32/u32), scores
     // [rows * K] (bf16/f16/f32); the kernels convert in place and write y in x's dtype, so no cast launches per layer. At one
     // row (`flatOperands`) the host's x [1, 1, D], inds and scores [1, 1, K] go as they are: every kernel indexes them flat
@@ -927,7 +938,10 @@ pub fn moe(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array,
         .down_suh = bank.down.suh,
         .down_svh = bank.down.svh,
     };
-    const form = decodeForm();
+    // the clamp is in fin7's variant (forms 7, 8 and 9): a clamped call under form 3, 5 or 6 runs form 9, whose bytes those
+    // forms share
+    const configured = decodeForm();
+    const form: u8 = if (limit != 0 and configured < 7) 9 else configured;
     if (form >= 7 and !decode_form_logged.get().*) {
         decode_form_logged.get().* = true;
         std.debug.print("[turboexl3] decode engaged: form {d} (form 3's bytes in fewer dependent launches)\n", .{form});
@@ -979,10 +993,10 @@ const PfCapture = struct {
     }
 };
 
-fn moePrefill(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array, scores: mlx.mlx_array, dec: format.Decode, geo: Geometry, rows: usize, K: c_int) !mlx.mlx_array {
+fn moePrefill(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array, scores: mlx.mlx_array, dec: format.Decode, geo: Geometry, rows: usize, K: c_int, limit: u32) !mlx.mlx_array {
     const xsh = mlx.getShape(x);
     const rows_c: c_int = @intCast(rows);
-    const pf = try prefillFor(.{ .hidden = @intCast(geo.hidden), .inter = @intCast(geo.width), .topk = @intCast(K), .experts = @intCast(geo.experts), .rate = geo.gate_up, .dec = dec });
+    const pf = try prefillFor(.{ .hidden = @intCast(geo.hidden), .inter = @intCast(geo.width), .topk = @intCast(K), .experts = @intCast(geo.experts), .rate = geo.gate_up, .dec = dec, .limit = limit });
     var x2 = mlx.mlx_array_new();
     defer freeArr(x2);
     try mlx.check(mlx.mlx_reshape(&x2, x, &[_]c_int{ rows_c, xsh[2] }, 2, s));
@@ -1200,14 +1214,22 @@ pub fn moeFusedSharedRouted(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, log
 }
 const routed_logged = Global([2]bool, "root_routed_logged", .{ false, false });
 
-/// GLM's gate is upper-clamped and its up branch symmetrically clamped before SwiGLU and the down projection.
+/// DeepSeek-V4's clamped SwiGLU (inference/model.py's Expert at `swiglu_limit`; GLM's is the same) over the routed experts:
+/// `moe` with each row-slot's gate clamped from above at `limit` and its up to [-limit, limit] before the SiLU, in f32 on
+/// the projections' f16-rounded outputs (an integer limit is exact in f16, so the clamp before or after that rounding is
+/// the same). Decode rows run form 9's launches with fin7's clamped variant (`decode.text_fin7c`; forms 7 and 8 where the
+/// config names them, form 9 for forms 3, 5 and 6, whose bytes it shares), prefill rows the fused chain with the clamped
+/// mid (`prefill.text_mid_t128c` as served); `moe`'s refusals hold (prefill rows need `Config.prefill` and `Config.nax`;
+/// gate, up and down at one rate). The routing weight: the reference model multiplies the f32 activation by it before w2
+/// and rounds that product to x's dtype; here, as in `moe`, it multiplies the down projection's f16-rounded output in the
+/// score-weighted f32 sum (the same value up to rounding, the down projection being linear). No fused shared-expert entry
+/// takes a clamp (a clamped Kernels3 refuses `sharedAdmitted`): the caller runs a clamped shared expert itself.
+/// `limit` in 1..128, else error.InvalidExl3Clamp. `ref.moeRowClamped` is the reference.
 pub fn moeClamped(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array, scores: mlx.mlx_array, dec: format.Decode, limit: c_int) !mlx.mlx_array {
-    _ = s;
-    _ = dec;
     if (limit <= 0 or limit > 128) return error.InvalidExl3Clamp;
-    _ = try validateCall(x, bank, inds, scores);
-    return error.Exl3EngineNotImplemented;
+    return moeSwiglu(s, x, bank, inds, scores, dec, @intCast(limit));
 }
+const clamp_logged = Global(bool, "root_clamp_logged", false);
 
 test {
     _ = config;
@@ -1265,6 +1287,7 @@ pub const shared_state = .{
     PfCapture.calls,
     fused_shared_logged,
     routed_logged,
+    clamp_logged,
     attn_io.shared_state,
     config.shared_state,
     decode_merge.shared_state,

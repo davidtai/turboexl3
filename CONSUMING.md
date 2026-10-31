@@ -91,8 +91,9 @@ The bill of a block is its stored size, because the plugin uses the arrays that 
   `<base>.biases` (`svh`). These are the names of the affine format. It checks the shapes and the dtypes.
 - **`load_bank`** (bank blocks) takes `<base>.trellis`, `<base>.suh` and `<base>.svh`, in Sushi's layout.
 - **`matmul`** runs turboexl3's `linear`.
-- **`swiglu`** runs turboexl3's `moe` on the three banks of one layer. It refuses a clamped SwiGLU, and banks that
-  decode differently.
+- **`swiglu`** runs turboexl3's `moe` on the three banks of one layer, or `moeClamped` for a clamped SwiGLU (`limit`
+  above 0; the claim keeps a clamped pack's banks off this table, so only a model plugin's in-process table gets one). It
+  refuses banks that decode differently.
 - **`moe`**, for one projection at a time, always refuses by name: the banks of a layer run as one routed SwiGLU.
 
 A refusal during a call returns a verdict that names the error.

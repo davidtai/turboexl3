@@ -24,5 +24,6 @@ comptime {
     _ = @import("decb_test.zig");
     _ = @import("attn_io_test.zig");
     _ = @import("gdn_out_test.zig");
+    _ = @import("clamped_test.zig");
     _ = @import("bench.zig");
 }
