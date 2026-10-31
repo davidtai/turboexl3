@@ -451,3 +451,67 @@ test "turboexl3 gpu deepseek timing: the routed MoE at K3 and K2, the K6 trunk l
         }
     }
 }
+
+// gu8 (the gate|up launch with the prepare inside: form 8, and form 9's one-row arm) at DeepSeek-V4.1's 5120-wide hidden:
+// from two rows its threadgroup memory would pass Metal's 32 KB (43,008 bytes at GROUP 2, SPT 4) and form 8 failed to load
+// its kernel; gu8Admitted sends those rows to prep2. Forms 7, 8 and 9 give form 3's bytes unclamped, and forms 8 and 9 give
+// form 7's clamped (a clamped call refuses form 3), at rows 1 to 6.
+test "turboexl3 gpu deepseek: decode forms 7, 8 and 9 give form 3's bytes at DeepSeek-V4.1's routed geometry, rows 1 to 6, clamped and not (TURBOEXL3_GPU=1)" {
+    _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    const s = mlx.mlx_default_gpu_stream_new();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    const a = std.heap.page_allocator;
+    var g = try G.init(a, s);
+    defer g.deinit();
+    defer root.decode_form_override.get().* = null;
+    var prng = std.Random.DefaultPrng.init(0xD5F08);
+    const rnd = prng.random();
+    const experts: u32 = 48;
+    const topk: u32 = 6;
+    const bank: root.Bank = .{
+        .gate = try randProj(a, &g, rnd, experts, 5120, 2304, 48),
+        .up = try randProj(a, &g, rnd, experts, 5120, 2304, 48),
+        .down = try randProj(a, &g, rnd, experts, 2304, 5120, 48),
+    };
+    var failed = false;
+    for (1..7) |ri| {
+        const rows: u32 = @intCast(ri);
+        const rm = g.mark();
+        defer g.resetTo(rm);
+        const ib = try a.alloc(i32, rows * topk);
+        defer a.free(ib);
+        const sb = try a.alloc(f32, rows * topk);
+        defer a.free(sb);
+        for (0..rows) |r| {
+            var used: u64 = 0;
+            for (0..topk) |k| {
+                var e: u32 = rnd.uintLessThan(u32, experts);
+                while ((used >> @as(u6, @intCast(e))) & 1 != 0) e = rnd.uintLessThan(u32, experts);
+                used |= @as(u64, 1) << @as(u6, @intCast(e));
+                ib[r * topk + k] = @intCast(e);
+                sb[r * topk + k] = bf16Exact(0.05 + 0.3 * rnd.float(f32));
+            }
+        }
+        const x = try randBf16(a, &g, rnd, &.{ 1, ci(rows), 5120 });
+        const inds = try g.hostArray(std.mem.sliceAsBytes(ib), &.{ 1, ci(rows), ci(topk) }, .int32);
+        const sc = try g.astype(try g.hostArray(std.mem.sliceAsBytes(sb), &.{ 1, ci(rows), ci(topk) }, .float32), .bfloat16);
+        const want = try a.alloc(f32, rows * 5120);
+        defer a.free(want);
+        const got = try a.alloc(f32, rows * 5120);
+        defer a.free(got);
+        for ([_]c_int{ 0, 10 }) |limit| {
+            const forms: []const u8 = if (limit == 0) &.{ 3, 7, 8, 9 } else &.{ 7, 8, 9 };
+            for (forms, 0..) |form, fi| {
+                root.decode_form_override.get().* = form;
+                const y = try g.adopt(if (limit == 0) try root.moe(s, x, bank, inds, sc, .mul1, false) else try root.moeClamped(s, x, bank, inds, sc, .mul1, limit));
+                _ = try g.hostF32(try g.astype(y, .float32), if (fi == 0) want else got);
+                if (fi == 0) continue;
+                var differing: usize = 0;
+                for (got, want) |p, q| differing += @intFromBool(@as(u32, @bitCast(p)) != @as(u32, @bitCast(q)));
+                std.debug.print("TURBOEXL3_DS_FORMS rows={d} limit={d} form={d} vs form={d} differing={d}/{d} {s}\n", .{ rows, limit, form, forms[0], differing, got.len, if (differing == 0) "PASS" else "FAIL" });
+                if (differing != 0) failed = true;
+            }
+        }
+    }
+    try testing.expect(!failed);
+}

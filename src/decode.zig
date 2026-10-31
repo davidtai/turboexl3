@@ -535,7 +535,13 @@ pub const Kernels3 = struct {
     /// 128-aligned; otherwise form 8 runs form 7's launches.
     pub fn gu8Admitted(self: *const Kernels3, rows: usize, kdiv: [4]u32) bool {
         const spt = self.ks_gu / self.kThreadgroups(self.ks_gu, rows, kdiv);
-        return (self.geo.hidden / self.ks_gu * spt) % 128 == 0 and self.geo.hidden % self.ks_gu == 0;
+        if ((self.geo.hidden / self.ks_gu * spt) % 128 != 0 or self.geo.hidden % self.ks_gu != 0) return false;
+        // gu8's threadgroup memory (gu8_1.metal, gu8_2.metal) within Metal's 32 KB: xs, the group members' prepared gate and
+        // up spans (GROUP x 2 x SPT x hidden / KS halves), and red (SPT x 4 x 2 x 16 x BT floats) at the widest BT a form
+        // runs. DeepSeek-V4.1's 5120-wide hidden at two rows (GROUP 2, SPT 4) needs 43,008 bytes: its prepare runs in prep2.
+        const grp: u32 = if (rows >= 2) self.group else 1;
+        const bt = @max(self.bt, @max(self.bt1, self.bt9));
+        return 4 * grp * spt * (self.geo.hidden / self.ks_gu) + 512 * spt * bt <= 32768;
     }
 
     /// Threadgroups along K per row-slot for a row count (`adaptive`, `kdiv`'s defaults): all ks slices apart at one row, two

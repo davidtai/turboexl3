@@ -1031,7 +1031,7 @@ CHANGED[('decode.zig', 'const Kernels5')] = 'refuses a clamped geometry (dn5 has
 CHANGED[('decode.zig', 'const Kernels3')] = ('a clamped geometry\'s fin7 is turboexl3_fin7c with LIMIT appended to its constants; '
                                              'moeForm refuses form 3 and sharedAdmitted the shared heads there; below a top-k of 4 '
                                              'moeForm finishes the down with form 3\'s dfin (dfin7 writes each block from its first 128 '
-                                             'threads) and sharedAdmitted declines')
+                                             'threads) and sharedAdmitted declines; gu8Admitted checks gu8\'s threadgroup memory against Metal\'s 32 KB')
 CHANGED[('prefill.zig', 'const T128Kernels')] = 'init takes the clamp: a clamped geometry\'s mid is turboexl3_pf_t128_midc'
 CHANGED[('prefill.zig', 'const Prefill')] = ('a clamped geometry\'s mids are turboexl3_pf_midc / _mid_vc, LIMIT appended to '
                                              'every mid launch\'s constants there (midTempl)')
