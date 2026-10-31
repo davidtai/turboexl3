@@ -23,7 +23,7 @@ const grouped = @import("grouped.zig");
 const testing = std.testing;
 
 /// K6: the rate of every DeepSeek-V4.1 trunk linear in the pack
-const N: u32 = 96;
+pub const N: u32 = 96;
 
 const Case = struct { name: []const u8, in: u32, out: u32, bias: bool = false, head: bool = false };
 
@@ -45,21 +45,21 @@ const cases = [_]Case{
 };
 
 /// The attention's wo_a: 8 slices of 4096 -> 1024
-const wo_a = struct {
-    const groups: u32 = 8;
-    const in: u32 = 4096;
-    const out: u32 = 1024;
+pub const wo_a = struct {
+    pub const groups: u32 = 8;
+    pub const in: u32 = 4096;
+    pub const out: u32 = 1024;
 };
 
 /// DEC-ONE (1, 4), the GEMV chain's two chunks (16), the register path (32), dequantize + matmul (512)
 const row_counts = [_]u32{ 1, 4, 16, 32, 512 };
 const head_rows = [_]u32{ 1, 4 };
 
-fn ci(x: anytype) c_int {
+pub fn ci(x: anytype) c_int {
     return @intCast(x);
 }
 
-fn bf16Exact(v: f32) f32 {
+pub fn bf16Exact(v: f32) f32 {
     return @bitCast(@as(u32, support.bf16Bits(v)) << 16);
 }
 
@@ -267,7 +267,7 @@ test "turboexl3 gpu deepseek: root.linearGrouped at wo_a (8 slices of 4096 -> 10
     try testing.expectEqual(@as(usize, 0), failed);
 }
 
-fn nowNs() u64 {
+pub fn nowNs() u64 {
     var ts: std.c.timespec = undefined;
     _ = std.c.clock_gettime(.MONOTONIC, &ts);
     return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
@@ -295,7 +295,7 @@ fn timeIt(g: *G, ctx: anytype, calls: usize) !Stat {
 /// One projection's host values (or `lead` stacked ones), drawn as `synthBank` scales them: every trellis pattern a
 /// codeword, suh in [0.5, 1.5], svh in [0.5, 1.5] / sqrt(in). `upload` copies them into new device arrays, each call its
 /// own buffers, so a chain of layers reads each layer's weights from its own memory as a forward does.
-const HostProj = struct {
+pub const HostProj = struct {
     lead: ?u32,
     in: u32,
     out: u32,
@@ -304,7 +304,7 @@ const HostProj = struct {
     su: []u16,
     sv: []u16,
 
-    fn draw(a: std.mem.Allocator, rnd: std.Random, lead: ?u32, in: u32, out: u32, n: u32) !HostProj {
+    pub fn draw(a: std.mem.Allocator, rnd: std.Random, lead: ?u32, in: u32, out: u32, n: u32) !HostProj {
         const L: usize = lead orelse 1;
         const t = try a.alloc(u16, L * (in / 16) * (out / 16) * n);
         errdefer a.free(t);
@@ -317,13 +317,13 @@ const HostProj = struct {
         return .{ .lead = lead, .in = in, .out = out, .n = n, .t = t, .su = su, .sv = sv };
     }
 
-    fn deinit(h: *HostProj, a: std.mem.Allocator) void {
+    pub fn deinit(h: *HostProj, a: std.mem.Allocator) void {
         a.free(h.t);
         a.free(h.su);
         a.free(h.sv);
     }
 
-    fn upload(h: *const HostProj, g: *G) !root.Proj {
+    pub fn upload(h: *const HostProj, g: *G) !root.Proj {
         if (h.lead) |e| return .{
             .trellis = try g.hostArray(std.mem.sliceAsBytes(h.t), &.{ ci(e), ci(h.in / 16), ci(h.out / 16), ci(h.n) }, .uint16),
             .suh = try g.hostArray(std.mem.sliceAsBytes(h.su), &.{ ci(e), ci(h.in) }, .float16),
@@ -338,13 +338,13 @@ const HostProj = struct {
 };
 
 /// A projection's random operands on the device (`HostProj`, drawn and uploaded once).
-fn randProj(a: std.mem.Allocator, g: *G, rnd: std.Random, lead: ?u32, in: u32, out: u32, n: u32) !root.Proj {
+pub fn randProj(a: std.mem.Allocator, g: *G, rnd: std.Random, lead: ?u32, in: u32, out: u32, n: u32) !root.Proj {
     var h = try HostProj.draw(a, rnd, lead, in, out, n);
     defer h.deinit(a);
     return h.upload(g);
 }
 
-fn randBf16(a: std.mem.Allocator, g: *G, rnd: std.Random, shape: []const c_int) !mlx.mlx_array {
+pub fn randBf16(a: std.mem.Allocator, g: *G, rnd: std.Random, shape: []const c_int) !mlx.mlx_array {
     var len: usize = 1;
     for (shape) |d| len *= @intCast(d);
     const x = try a.alloc(f32, len);
@@ -482,12 +482,12 @@ test "turboexl3 gpu deepseek timing: the routed MoE at K3 and K2, the K6 trunk l
 
 /// DeepSeek-V4.1's layers that run the compressor (its KV-source layers) and the indexer (its index-source layers), and the
 /// SC 2.81 pack's K2 routed layers
-const comp_layers = [_]u32{ 2, 8, 14, 20 };
-const index_layers = [_]u32{ 2, 8, 14, 20, 24, 28, 32, 36 };
+pub const comp_layers = [_]u32{ 2, 8, 14, 20 };
+pub const index_layers = [_]u32{ 2, 8, 14, 20, 24, 28, 32, 36 };
 const k2_layers = [_]u32{ 23, 32, 33, 34, 35, 36, 37, 38, 39 };
 
 /// One layer's weights of the decode chain, each in its own device buffers
-const ChainLayer = struct {
+pub const ChainLayer = struct {
     wq_a: root.Proj,
     wq_b: root.Proj,
     wkv: root.Proj,
@@ -503,7 +503,7 @@ const ChainLayer = struct {
 };
 
 /// What a chained forward runs in each layer: the trunk alone, the routed MoE alone, or both (and then the head)
-const ChainArm = enum { trunk, routed, layer };
+pub const ChainArm = enum { trunk, routed, layer };
 
 fn chainLin(g: *G, s: mlx.mlx_stream, x: mlx.mlx_array, p: root.Proj) !mlx.mlx_array {
     return g.adopt(try root.linear(s, x, p.trellis, p.suh, p.svh, .mul1));
@@ -514,7 +514,7 @@ fn chainLin(g: *G, s: mlx.mlx_stream, x: mlx.mlx_array, p: root.Proj) !mlx.mlx_a
 /// the grouped wo_a on q reshaped as the attention output it stands in for, wo_b, then the shared expert: w1 and w3, the
 /// SwiGLU, w2), then the routed MoE (moeClamped at limit 10 on fixed ids). The attention core, the hyper-connections, the
 /// norms, the router and Engram are not in it.
-fn chainForward(g: *G, s: mlx.mlx_stream, layers: []const ChainLayer, inds: []const mlx.mlx_array, sc: []const mlx.mlx_array, x: mlx.mlx_array, rows: u32, arm: ChainArm, head: ?root.Proj) !mlx.mlx_array {
+pub fn chainForward(g: *G, s: mlx.mlx_stream, layers: []const ChainLayer, inds: []const mlx.mlx_array, sc: []const mlx.mlx_array, x: mlx.mlx_array, rows: u32, arm: ChainArm, head: ?root.Proj) !mlx.mlx_array {
     const R = ci(rows);
     var h = x;
     for (layers, 0..) |ly, L| {

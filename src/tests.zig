@@ -27,6 +27,7 @@ comptime {
     _ = @import("gdn_out_test.zig");
     _ = @import("clamped_test.zig");
     _ = @import("deepseek_test.zig");
+    _ = @import("deepseek_gemv_test.zig");
     _ = @import("topk_test.zig");
     _ = @import("bench.zig");
 }

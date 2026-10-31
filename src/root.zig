@@ -252,6 +252,12 @@ fn denseFor(shape: dense.Shape) !*dense.Dense {
     return &dense_cache.get().*[i].?;
 }
 
+/// Test seam: the `dense.Dense` `linear` runs a shape on (the process's cached one, made on first use), for a test that
+/// sets its launch shape (`bt_set`, `dec_prep_rows`, ..., then `resetCfgs`) or reads its plan
+pub fn denseCached(shape: dense.Shape) !*dense.Dense {
+    return denseFor(shape);
+}
+
 /// A dense EXL3 linear: y [..., out] in x's dtype for x [..., in], trellis U16/I16 [in/16, out/16, n], suh F16 [in], svh F16
 /// [out]. Rows up to `kernels.DECODE_ROWS_MAX` take the GEMV kernels (DEC-ONE's one launch up to 4 rows), rows 17 to 32
 /// the register-path GEMM (`Config.nax`), wider calls MLX's matmul against the dequantized trellis: decoded per call, or
@@ -320,6 +326,12 @@ fn groupedFor(shape: grouped.Shape) !*grouped.Grouped {
     const i = free_slot orelse return error.Exl3EngineCacheFull;
     grouped_cache.get().*[i] = try grouped.Grouped.init(shape);
     return &grouped_cache.get().*[i].?;
+}
+
+/// Test seam: the `grouped.Grouped` `linearGrouped` runs a shape's decode rows on (the process's cached one), for a test
+/// that sets its launch (`dense_gemv`, `bt_set`, then `resetCfgs`)
+pub fn groupedCached(shape: grouped.Shape) !*grouped.Grouped {
+    return groupedFor(shape);
 }
 
 /// The grouped (block-diagonal) linear, DeepSeek-V4.1's attention `wo_a` (`o = einsum("bsgd,grd->bsgr", o, wo_a)`):

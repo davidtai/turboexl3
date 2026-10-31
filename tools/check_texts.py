@@ -1081,6 +1081,26 @@ CHANGED[('root.zig', 'const dense_cache')] = '64 dense shapes: DeepSeek-V4.1\'s 
 CHANGED[('root.zig', 'const pf_cache')] = ('16 prefill geometries: DeepSeek-V4.1 alone serves 8 (K3 and K2 routed banks per '
                                           'bank kind, the DSpark stages, the shared expert as a one-expert bank)')
 CHANGED[('root.zig', 'const shared_state')] = 'the grouped linears\' cache and its lock'
+# the dense decode GEMV at DeepSeek-V4.1's trunk widths: the grouped linear's GEMV on dense's multi-row GEMV, the launch
+# shapes per row count, and their tests and sweep (deepseek_gemv_test.zig)
+ADDED_KERNELS[('grouped.zig', 'turboexl3_grouped_gemv_d')] = ('the grouped linear\'s GEMV on dense\'s multi-row GEMV '
+                                                             '(Grouped.dense_gemv): gemv_head, dense\'s dgemv_x / _2 / _m / '
+                                                             '_fold verbatim, gemv_store into the routed planes; one decode '
+                                                             'per row chunk where the routed GEMV decodes per row pair')
+ADDED_KERNELS[('grouped.zig', 'turboexl3_grouped_gemv_dl')] = 'the same on dense\'s lean codeword loop (dgemv_2, dgemv_j)'
+for _key in ('const gemv_d_in', 'const gemv_d_out'):
+    ADDED[('grouped.zig', _key)] = 'the dense-GEMV launch\'s operand names'
+CHANGED[('grouped.zig', 'const Grouped')] = ('dense_gemv (step 2 on text_gemv_d, the default; the routed GEMV the tests\' arm), '
+                                           'bt_set (its tiles per threadgroup), resetCfgs')
+CHANGED[('dense.zig', 'const Dense')] = ('bt_set / btAt: the GEMV\'s tiles per threadgroup per decode row count (launch shape '
+                                       'only; btFor\'s by default), resetCfgs')
+ADDED[('root.zig', 'fn denseCached')] = 'test seam: the Dense linear runs a shape on, to set its launch shape'
+ADDED[('root.zig', 'fn groupedCached')] = 'test seam: the Grouped linearGrouped runs a shape on, to set its launch'
+ADDED_FILES['deepseek_gemv_test.zig'] = ('the grouped dense GEMV\'s texts (CPU) and its bytes against the routed GEMV, and the '
+                                         'dense decode GEMV\'s launch-shape sweep on the 40-layer trunk chain (GPU)')
+for _key in ('const N', 'const wo_a', 'fn ci', 'fn bf16Exact', 'fn nowNs', 'const HostProj', 'fn randProj', 'fn randBf16',
+             'const comp_layers', 'const index_layers', 'const ChainLayer', 'const ChainArm', 'fn chainForward'):
+    CHANGED[('deepseek_test.zig', _key)] = 'pub: deepseek_gemv_test.zig\'s chains reuse it'
 
 
 def metal_strings(fn, toks, corpus):
