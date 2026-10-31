@@ -381,9 +381,15 @@ test "turboexl3 gpu clamped: root.moeClamped at DeepSeek-V4.1-Flash's routed geo
                 _ = try g.hostF32(try g.astype(y, .float32), got);
                 var bad: usize = 0;
                 for (got) |v| bad += @intFromBool(!std.math.isFinite(v));
+                // the chain's tolerance in both dtypes: a bf16 output is judged beyond its store's rounding (2^-8 of each
+                // value), which a flat bar over the RMS cannot carry for a row's largest outputs (1328 rows at K3: 1.69e-2)
                 var worst: f64 = 0;
-                for (sample, 0..) |r, i| worst = @max(worst, ref.compare(got[r * hidden ..][0..hidden], want[i * hidden ..][0..hidden]).max_ratio);
-                const bar: f64 = if (dt == .float32) 5e-3 else 1.5e-2;
+                for (sample, 0..) |r, i| {
+                    const gr = got[r * hidden ..][0..hidden];
+                    const wr = want[i * hidden ..][0..hidden];
+                    worst = @max(worst, (if (dt == .float32) ref.compare(gr, wr) else ref.compareRounded(gr, wr, 0x1p-8)).max_ratio);
+                }
+                const bar: f64 = 5e-3;
                 const ok = hit and bad == 0 and worst <= bar;
                 const path: []const u8 = if (rows <= root.kernels.DECODE_ROWS_MAX) "decode" else "prefill";
                 std.debug.print("TURBOEXL3_CLAMP_PARITY n={d} rows={d} path={s} out={s} worst_vs_ref={e:.3} bar={e:.1} nonfinite={d} gates_clamped={d}/{d} ups_clamped={d}/{d} {s}\n", .{ n, rows, path, @tagName(dt), worst, bar, bad, hits.gate, hits.total, hits.up, hits.total, if (ok) "PASS" else "FAIL" });

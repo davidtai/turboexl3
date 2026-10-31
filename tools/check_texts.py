@@ -1029,7 +1029,9 @@ for _f, _key in (('decode.zig', 'const Geometry'), ('prefill.zig', 'const Geomet
 CHANGED[('decode.zig', 'const Kernels')] = 'refuses a clamped geometry (the clamp is Kernels3\'s)'
 CHANGED[('decode.zig', 'const Kernels5')] = 'refuses a clamped geometry (dn5 has no clamp)'
 CHANGED[('decode.zig', 'const Kernels3')] = ('a clamped geometry\'s fin7 is turboexl3_fin7c with LIMIT appended to its constants; '
-                                             'moeForm refuses form 3 and sharedAdmitted the shared heads there')
+                                             'moeForm refuses form 3 and sharedAdmitted the shared heads there; below a top-k of 4 '
+                                             'moeForm finishes the down with form 3\'s dfin (dfin7 writes each block from its first 128 '
+                                             'threads) and sharedAdmitted declines')
 CHANGED[('prefill.zig', 'const T128Kernels')] = 'init takes the clamp: a clamped geometry\'s mid is turboexl3_pf_t128_midc'
 CHANGED[('prefill.zig', 'const Prefill')] = ('a clamped geometry\'s mids are turboexl3_pf_midc / _mid_vc, LIMIT appended to '
                                              'every mid launch\'s constants there (midTempl)')
@@ -1064,6 +1066,10 @@ RENAMED_TESTS = {
 # DeepSeek-V4.1's trunk: the grouped linear (wo_a), the bias helper, their host reference and tests
 ADDED_FILES['grouped.zig'] = ('the grouped linear at decode rows (turboexl3_grouped_prep / _gemv / _finish: dense\'s '
                               'prep_s, the routed down3 and dfin3 texts with their own template arguments)')
+ADDED_FILES['topk_test.zig'] = ('root.moe below a top-k of 4 (top-1, 2, 3): forms 7, 8 and 9 give form 3\'s bytes, '
+                              'form 3 equals the reference')
+ADDED[('ref.zig', 'fn compareRounded')] = ('compare beyond an output store\'s rounding (half an ulp of each value): '
+                                         'the chain\'s tolerance for bf16 outputs (clamped_test, topk_test)')
 ADDED_FILES['deepseek_test.zig'] = ('DeepSeek-V4.1\'s GPU tests: linear, linearBias and linearGrouped against '
                                     'ref.Linear at every trunk and vision shape')
 for _key in ('const grouped', 'const grouped_lock', 'const grouped_cache', 'fn groupedFor', 'fn linearGrouped',

@@ -186,6 +186,20 @@ pub fn compare(got: []const f32, ref: []const f32) Err {
     return .{ .max_abs = max_abs, .rms_ref = rms, .max_ratio = if (rms > 0) max_abs / rms else max_abs };
 }
 
+/// `compare` for an output stored in a narrower dtype after the chain: each element may also differ by that store's
+/// rounding, at most half a unit in its last place (`half_ulp` of its value: 2^-8 in bf16, 2^-11 in f16), so `max_ratio`
+/// is the largest error beyond that rounding over the reference's RMS, the chain's own tolerance in any output dtype.
+pub fn compareRounded(got: []const f32, ref: []const f32, half_ulp: f64) Err {
+    var max_abs: f64 = 0;
+    var ss: f64 = 0;
+    for (got, ref) |g, r| {
+        max_abs = @max(max_abs, @abs(@as(f64, g) - @as(f64, r)) - half_ulp * @abs(@as(f64, r)));
+        ss += @as(f64, r) * @as(f64, r);
+    }
+    const rms = @sqrt(ss / @as(f64, @floatFromInt(ref.len)));
+    return .{ .max_abs = max_abs, .rms_ref = rms, .max_ratio = if (rms > 0) max_abs / rms else max_abs };
+}
+
 /// A dense EXL3 linear in -> out on the host, or `groups` stacked slices of one (a grouped linear's), drawn as `synthBank`
 /// draws a projection: trellis [groups, in/16, out/16, n] (every pattern a valid codeword), suh [groups, in] in [0.5, 1.5],
 /// svh [groups, out] in [0.5, 1.5] / sqrt(in) (outputs O(1)). `w` holds each slice's W_hat [in, out] (f16 bits,

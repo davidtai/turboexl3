@@ -632,6 +632,9 @@ pub const Kernels3 = struct {
         const one_row9 = form == 9 and rows <= self.gu8_rows;
         const c = if (form == 9) try self.cfgs9(rows) else try self.cfgs(rows);
         const f7 = form >= 7;
+        // dfin7 runs one simdgroup per routed slot and writes each block's 128 outputs from its first 128 threads, so it needs
+        // a top-k of 4 or more; below that form 3's dfin (the same bytes) finishes the down projection.
+        const f7d = f7 and self.geo.topk >= 4;
         // planes[0..2] = zg, zu (the split-K gate|up planes), planes[2..4] = the inputs' per-block sums
         var planes: [4]mlx.mlx_array = undefined;
         if ((form == 8 and self.gu8Admitted(rows, self.kdiv)) or (one_row9 and self.gu8Admitted(rows, self.kdiv9))) {
@@ -657,7 +660,7 @@ pub const Kernels3 = struct {
         };
         const zd = try one(self.down, c.down, &.{ hd[0], slots, bank.down_t }, s);
         defer _ = mlx.mlx_array_free(zd);
-        return one(if (f7) self.dfin7 else self.dfin, if (f7) c.dfin7 else c.dfin, &.{ zd, slots, scores, bank.down_svh, hd[1] }, s);
+        return one(if (f7d) self.dfin7 else self.dfin, if (f7d) c.dfin7 else c.dfin, &.{ zd, slots, scores, bank.down_svh, hd[1] }, s);
     }
 
     /// Whether `moeShared` carries this shared expert at `rows`: up to `shared_rows_max` rows, the routed width as its
@@ -668,6 +671,7 @@ pub const Kernels3 = struct {
         const g = self.geo;
         if (g.limit != 0) return false;
         if (rows == 0 or rows > shared_rows_max) return false;
+        if (g.topk < 4) return false; // dfin7s and dfin7t write each block from their first 128 threads, as dfin7 does
         if (self.out_dtype != .bfloat16 and self.out_dtype != .float16) return false;
         const gs = mlx.getShape(sb.gate_t);
         const us = mlx.getShape(sb.up_t);
