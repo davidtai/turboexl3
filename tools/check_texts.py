@@ -1078,6 +1078,8 @@ for _key in ('const grouped', 'const grouped_lock', 'const grouped_cache', 'fn g
 ADDED[('ref.zig', 'const Linear')] = 'a dense linear\'s host reference with its W_hat decoded once (format.project\'s values)'
 ADDED[('ref.zig', 'fn synthLinear')] = 'a random dense linear (or G stacked slices) for ref.Linear'
 CHANGED[('root.zig', 'const dense_cache')] = '64 dense shapes: DeepSeek-V4.1\'s set beside the others in one process'
+CHANGED[('root.zig', 'const pf_cache')] = ('16 prefill geometries: DeepSeek-V4.1 alone serves 8 (K3 and K2 routed banks per '
+                                          'bank kind, the DSpark stages, the shared expert as a one-expert bank)')
 CHANGED[('root.zig', 'const shared_state')] = 'the grouped linears\' cache and its lock'
 
 

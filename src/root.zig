@@ -944,9 +944,11 @@ pub fn linearPiecesFinish(s: mlx.mlx_stream, inners: []const mlx.mlx_array, p: P
     return d.finishPieces(s, inners, p.svh);
 }
 
-/// The prefill kernels of every geometry this process has served (one per expert bank shape).
+/// The prefill kernels of every geometry this process has served (one per expert bank shape, the bank's expert count
+/// included): DeepSeek-V4.1 alone serves 8 (its K3 and K2 routed banks per streamed bank kind, the DSpark stages, the
+/// shared expert as a one-expert bank).
 const pf_lock = Global(std.atomic.Value(u32), "root_pf_lock", std.atomic.Value(u32).init(0));
-const pf_cache = Global([8]?prefill.Prefill, "root_pf_cache", @splat(null));
+const pf_cache = Global([16]?prefill.Prefill, "root_pf_cache", @splat(null));
 const pf_logged = Global(bool, "root_pf_logged", false);
 
 /// The served prefill variant: 64-row tiles (bm 64) with the register path for <= 32-row remainders in one launch (mixed),
