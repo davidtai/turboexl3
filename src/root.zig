@@ -1403,8 +1403,10 @@ pub const BankedHalf = struct { hd: mlx.mlx_array, hs: mlx.mlx_array };
 /// the base text reads them. `banks`: base, ext, transient, each its own expert (slot) count at one geometry and rate,
 /// the trellis U16 or I16 (the streamer's code arrays), every trellis one dtype; a bank no id names may repeat another's
 /// arrays. `ids` u32 or i32 [rows], rows 1..banked_rows_max; x [rows, hidden] bf16, f16 or f32; `limit` 1..128, else
-/// error.InvalidExl3Clamp. `moeClampedBankedGateUp` then `moeClampedBankedDown` are its two halves (a caller that runs
-/// each pair's down only once its bytes landed).
+/// error.InvalidExl3Clamp. `moeClampedBankedGateUp` then `moeClampedBankedDown` are its two halves. The gate|up half ends
+/// in fin7cb, which prepares the down's input and so reads each bank's down suh as well as its gate and up arrays: a caller
+/// whose arrays land in parts (an expert streamer's gate and up, then its down) has every array in place before it, or runs
+/// the whole call at its down.
 pub fn moeClampedBanked(s: mlx.mlx_stream, x: mlx.mlx_array, banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, limit: c_int) !mlx.mlx_array {
     const h = try moeClampedBankedGateUp(s, x, banks, ids, dec, limit);
     defer freeArr(h.hd);
@@ -1412,7 +1414,8 @@ pub fn moeClampedBanked(s: mlx.mlx_stream, x: mlx.mlx_array, banks: *const [3]Ba
     return moeClampedBankedDown(s, h, banks, ids, dec, limit);
 }
 
-/// `moeClampedBanked`'s gate|up: prep2b, gu3b and fin7cb (`decode.Kernels3.bankedGateUp`).
+/// `moeClampedBanked`'s gate|up: prep2b, gu3b and fin7cb (`decode.Kernels3.bankedGateUp`). It reads every bank's gate and
+/// up arrays and its down suh (fin7cb prepares the down's input).
 pub fn moeClampedBankedGateUp(s: mlx.mlx_stream, x: mlx.mlx_array, banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, limit: c_int) !BankedHalf {
     const c = try bankedCall(banks, ids, dec, limit);
     const xs = mlx.getShape(x);

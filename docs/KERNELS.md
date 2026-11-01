@@ -241,8 +241,9 @@ packed ids, so two row-slots share a decode only on one bank's one slot. Every o
 pair's bytes are `moeClamped`'s on its bank; the GPU test (`banked_test.zig`) holds every pair to them, byte for byte,
 and sampled pairs to the clamped reference. Each bank's arrays are separate inputs: at most 14 inputs and 2 outputs a
 launch. The trellis may be `I16` (the streamer's code arrays: the kernels read its words). `moeClampedBankedGateUp` and
-`moeClampedBankedDown` split the call after `fin7cb` (the down's prepared input and its block sums), for a caller that runs
-a pair's down only once its bytes landed.
+`moeClampedBankedDown` split the call after `fin7cb` (the down's prepared input and its block sums). `fin7cb` reads each
+bank's down suh, so the gate|up half needs the down's suh in place as well as the gate and up arrays: a caller whose
+arrays land in parts (an expert streamer's gate and up, then its down) runs the whole call at its down.
 
 ## 2. Shared expert and router inside the decode launches (rows 1–4)
 
