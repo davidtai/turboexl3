@@ -544,3 +544,269 @@ test "turboexl3 gpu banked decode time: the banked call and its halves against m
         }
     }
 }
+
+// ── The grouped banked decode (`Config.banked_group` 4) ──
+
+test "turboexl3 grouped banked decode texts: prep2bg, fin7cbg and dfin3bg are the banked texts with the skip line before their bank lines; gu3bg and down3bg take the banked weight base between the four-member pieces" {
+    const decode = @import("decode.zig");
+    const skip = @embedFile("kernels/decode/skip_rk.metal");
+    const skip_next = @embedFile("kernels/decode/skip_rk_next.metal");
+    const Ins = struct { banked: []const u8, grouped: []const u8, piece: []const u8, line: []const u8 };
+    for ([_]Ins{
+        .{ .banked = decode.text_prep2b, .grouped = decode.text_prep2bg, .piece = @embedFile("kernels/decode/prep2b_expert.metal"), .line = skip },
+        .{ .banked = decode.text_fin7cb, .grouped = decode.text_fin7cbg, .piece = @embedFile("kernels/decode/fin7b_expert.metal"), .line = skip },
+        .{ .banked = decode.text_dfin3b, .grouped = decode.text_dfin3bg, .piece = @embedFile("kernels/decode/dfin3b_expert.metal"), .line = skip_next },
+    }) |c| {
+        const i = std.mem.indexOf(u8, c.banked, c.piece).?;
+        try testing.expectEqualStrings(c.banked[0..i], c.grouped[0..i]);
+        try testing.expectEqualStrings(c.line, c.grouped[i .. i + c.line.len]);
+        try testing.expectEqualStrings(c.banked[i..], c.grouped[i + c.line.len ..]);
+    }
+    const Gemv = struct { banked: []const u8, grouped: []const u8, w: []const u8, head: []const u8 };
+    for ([_]Gemv{
+        .{ .banked = decode.text_gu3b, .grouped = decode.text_gu3bg, .w = @embedFile("kernels/decode/gu3b_w.metal"), .head = @embedFile("kernels/decode/gu3g_2.metal") },
+        .{ .banked = decode.text_down3b, .grouped = decode.text_down3bg, .w = @embedFile("kernels/decode/down3b_w.metal"), .head = @embedFile("kernels/decode/down3g_2.metal") },
+    }) |c| {
+        // the constants and grid line are the banked text's, then the member head, the weight base, the member tail
+        const i = std.mem.indexOf(u8, c.grouped, c.head).?;
+        try testing.expectEqualStrings(c.banked[0..i], c.grouped[0..i]);
+        try testing.expectEqual(i + c.head.len, std.mem.indexOf(u8, c.grouped, c.w).?);
+        try testing.expectEqual(@as(usize, 1), std.mem.count(u8, c.grouped, c.w));
+    }
+}
+
+/// A Kernels3 at DeepSeek-V4.1's routed geometry (top-1, clamped, MUL1) as `root` builds it for a banked call, its
+/// banked GEMVs at `group` row-slots per lead.
+fn bankedKernels3(rate: format.Rate, group: u32) !@import("decode.zig").Kernels3 {
+    var k = try @import("decode.zig").Kernels3.initWith(.{ .hidden = hidden, .inter = inter, .topk = 1, .rate = rate, .dec = .mul1, .limit = @intCast(limit) }, 1, 4, 2);
+    k.out_dtype = .float32;
+    k.banked_group = group;
+    return k;
+}
+
+/// The banked launches' banks of three root banks.
+fn kernelBanks(rb: *const [3]root.Bank) [3]@import("decode.zig").Kernels.Bank {
+    var kb: [3]@import("decode.zig").Kernels.Bank = undefined;
+    for (rb, &kb) |b, *o| o.* = .{ .gate_t = b.gate.trellis, .gate_suh = b.gate.suh, .gate_svh = b.gate.svh, .up_t = b.up.trellis, .up_suh = b.up.suh, .up_svh = b.up.svh, .down_t = b.down.trellis, .down_suh = b.down.suh, .down_svh = b.down.svh };
+    return kb;
+}
+
+/// One banked call (gate|up, then down) on `k`: y f32 [rows, hidden]; the caller frees it.
+fn groupCall(k: *@import("decode.zig").Kernels3, s: mlx.mlx_stream, x: mlx.mlx_array, ids: mlx.mlx_array, kb: *const [3]@import("decode.zig").Kernels.Bank, rows: usize) !mlx.mlx_array {
+    const h = try k.bankedGateUp(s, x, ids, kb, rows);
+    defer _ = mlx.mlx_array_free(h[0]);
+    defer _ = mlx.mlx_array_free(h[1]);
+    return k.bankedDown(s, h[0], h[1], ids, kb, rows);
+}
+
+// TURBOEXL3_GPU=1: the grouped banked call (banked_group 4) against the banked call (2) over the same three banks (20, 12
+// and 8 experts), K3 and K2 (TURBOEXL3_BANKED_N), at rows 6, 12, 36 and 48 (TURBOEXL3_BANKED_ROWS), x bf16, trellis I16.
+// The pairs in tokens of six: one expert in every token (up to eight row-slots of one id: two leads at four), one of three
+// in each, the rest drawn; two skipped row-slots (`banked_skip_id` in the grouped call, base row 0 in the banked call, as
+// DEVROUTE sends a miss today). Every other row-slot's y row byte for byte, a skipped one's 0.
+test "turboexl3 gpu banked group: the grouped banked call's rows are the banked call's byte for byte, a skipped row-slot's 0, at DeepSeek-V4.1's routed geometry (K3, K2) (TURBOEXL3_GPU=1)" {
+    _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    const s = mlx.mlx_default_gpu_stream_new();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    const a = std.heap.page_allocator;
+    var g = try G.init(a, s);
+    defer g.deinit();
+    var nbuf: [8]u32 = undefined;
+    const rates = envList("TURBOEXL3_BANKED_N", &.{ 48, 32 }, &nbuf);
+    var rbuf: [16]u32 = undefined;
+    const row_counts = envList("TURBOEXL3_BANKED_ROWS", &.{ 6, 12, 36, 48 }, &rbuf);
+    var failed = false;
+    for (rates) |n| {
+        defer _ = mlx.mlx_clear_cache();
+        const rate = format.Rate.fromN(n) orelse return error.Exl3RateUnsupported;
+        const mark = g.mark();
+        defer g.resetTo(mark);
+        var prng = std.Random.DefaultPrng.init(0x96A0C4 ^ @as(u64, n));
+        const rnd = prng.random();
+        var rb: [3]root.Bank = undefined;
+        for (&rb, bank_experts) |*b, e| {
+            var hb = try ref.synthBank(a, rnd, e, hidden, inter, rate);
+            defer hb.deinit(a);
+            b.* = try rootBank(&g, &hb, .int16);
+            try g.evalAll(&.{ b.gate.trellis, b.gate.suh, b.gate.svh, b.up.trellis, b.up.suh, b.up.svh, b.down.trellis, b.down.suh, b.down.svh });
+        }
+        const kb = kernelBanks(&rb);
+        var k2 = try bankedKernels3(rate, 2);
+        defer k2.deinit();
+        var k4 = try bankedKernels3(rate, 4);
+        defer k4.deinit();
+        for (row_counts) |rows| {
+            if (rows < 6 or rows % 6 != 0 or rows > root.banked_rows_max) continue;
+            const m2 = g.mark();
+            defer g.resetTo(m2);
+            var ids2: [root.banked_rows_max]u32 = undefined;
+            var ids4: [root.banked_rows_max]u32 = undefined;
+            for (0..rows) |p| {
+                // every token's expert (base row 1), one of three (ext rows 0..2), the rest drawn
+                var bk: u32 = 0;
+                var sl: u32 = 1;
+                if (p % 6 == 1) {
+                    bk = 1;
+                    sl = @intCast((p / 6) % 3);
+                } else if (p % 6 != 0) {
+                    bk = rnd.uintLessThan(u32, 3);
+                    sl = rnd.uintLessThan(u32, bank_experts[bk]);
+                }
+                ids2[p] = (bk << 24) | sl;
+                ids4[p] = ids2[p];
+            }
+            const skipped = [2]usize{ rows - 1, rows - 4 };
+            for (skipped) |p| {
+                ids2[p] = 0;
+                ids4[p] = root.banked_skip_id;
+            }
+            const xh = try a.alloc(f32, rows * hidden);
+            defer a.free(xh);
+            for (xh) |*v| v.* = bfExact(sigma * rnd.floatNorm(f32));
+            const x = try g.astype(try g.hostArray(std.mem.sliceAsBytes(xh), &.{ ci(rows), ci(hidden) }, .float32), .bfloat16);
+            const a2 = try g.hostArray(std.mem.sliceAsBytes(ids2[0..rows]), &.{ci(rows)}, .uint32);
+            const a4 = try g.hostArray(std.mem.sliceAsBytes(ids4[0..rows]), &.{ci(rows)}, .uint32);
+            const y2 = try g.adopt(try groupCall(&k2, s, x, a2, &kb, rows));
+            const y4 = try g.adopt(try groupCall(&k4, s, x, a4, &kb, rows));
+            try g.evalAll(&.{ y2, y4 });
+            const b2 = try a.alloc(f32, rows * hidden);
+            defer a.free(b2);
+            const b4 = try a.alloc(f32, rows * hidden);
+            defer a.free(b4);
+            const v2 = try g.hostF32(y2, b2);
+            const v4 = try g.hostF32(y4, b4);
+            var differing: usize = 0;
+            var nonfinite: usize = 0;
+            var skipped_nonzero: usize = 0;
+            for (0..rows) |r| {
+                const row4 = v4[r * hidden .. (r + 1) * hidden];
+                if (r == skipped[0] or r == skipped[1]) {
+                    for (row4) |v| skipped_nonzero += @intFromBool(@as(u32, @bitCast(v)) != 0);
+                    continue;
+                }
+                const d = bitDiff(row4, v2[r * hidden .. (r + 1) * hidden]);
+                differing += d.differing;
+                nonfinite += d.nonfinite;
+            }
+            const ok = differing == 0 and nonfinite == 0 and skipped_nonzero == 0;
+            if (!ok) failed = true;
+            std.debug.print("TURBOEXL3_BANKED_GROUP_BYTES n={d} rows={d} differing={d} nonfinite={d} skipped_nonzero={d} {s}\n", .{ n, rows, differing, nonfinite, skipped_nonzero, if (ok) "OK" else "FAIL" });
+        }
+    }
+    try testing.expect(!failed);
+}
+
+/// A timed call's hit multiplicities: `count[c]` experts named by c row-slots each (34 hit row-slots), as a 36-pair
+/// verify call of DeepSeek-V4.1's names them (recorded routes: p10, about the median and p90 of the distinct experts).
+const Profile = struct { name: []const u8, count: [7]u32 };
+const profiles = [_]Profile{
+    .{ .name = "d18", .count = .{ 0, 10, 4, 2, 1, 0, 1 } },
+    .{ .name = "d22", .count = .{ 0, 14, 5, 2, 1, 0, 0 } },
+    .{ .name = "d29", .count = .{ 0, 25, 3, 1, 0, 0, 0 } },
+};
+const GroupArm = enum { g2, g4, g4m };
+
+// TURBOEXL3_BANKED_TIME=1: 36 row-slots (34 hits by a profile, 2 misses) on banks of 48, 16 and 8 experts, K3
+// (TURBOEXL3_BANKED_N), x bf16, trellis I16; the arms: g2 the banked call with the misses on base row 0 (today's device
+// wave), g4 the grouped call with the misses skipped, g4m the grouped call with the misses on base row 0. 3 warm then 21
+// timed rounds, the arms interleaved with a rotated start; each sample one call built and evaluated.
+test "turboexl3 gpu banked group time: the grouped banked call against the banked call at a verify's 36 pairs (TURBOEXL3_GPU=1 TURBOEXL3_BANKED_TIME=1)" {
+    _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    _ = std.c.getenv("TURBOEXL3_BANKED_TIME") orelse return error.SkipZigTest;
+    const s = mlx.mlx_default_gpu_stream_new();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    const a = std.heap.page_allocator;
+    var g = try G.init(a, s);
+    defer g.deinit();
+    var nbuf: [8]u32 = undefined;
+    const rates = envList("TURBOEXL3_BANKED_N", &.{48}, &nbuf);
+    const rows: usize = 36;
+    const warm: usize = 3;
+    const timed: usize = 21;
+    for (rates) |n| {
+        defer _ = mlx.mlx_clear_cache();
+        const rate = format.Rate.fromN(n) orelse return error.Exl3RateUnsupported;
+        const mark = g.mark();
+        defer g.resetTo(mark);
+        var prng = std.Random.DefaultPrng.init(0x7A1E5 ^ @as(u64, n));
+        const rnd = prng.random();
+        var rb: [3]root.Bank = undefined;
+        for (&rb, time_experts) |*b, e| {
+            var hb = try ref.synthBank(a, rnd, e, hidden, inter, rate);
+            defer hb.deinit(a);
+            b.* = try rootBank(&g, &hb, .int16);
+            try g.evalAll(&.{ b.gate.trellis, b.gate.suh, b.gate.svh, b.up.trellis, b.up.suh, b.up.svh, b.down.trellis, b.down.suh, b.down.svh });
+        }
+        const kb = kernelBanks(&rb);
+        var k2 = try bankedKernels3(rate, 2);
+        defer k2.deinit();
+        var k4 = try bankedKernels3(rate, 4);
+        defer k4.deinit();
+        for (profiles) |pf| {
+            const m2 = g.mark();
+            defer g.resetTo(m2);
+            // the hit experts: distinct global indexes over base rows 1..47 and the ext bank, never base row 0
+            var order: [63]u32 = undefined;
+            for (&order, 0..) |*o, i| o.* = @intCast(i + 1);
+            rnd.shuffle(u32, &order);
+            var hit: [rows]u32 = undefined;
+            var nh: usize = 0;
+            var d: usize = 0;
+            for (pf.count, 0..) |cnt, c| for (0..cnt) |_| {
+                const e = order[d];
+                d += 1;
+                const id: u32 = if (e < 48) e else (1 << 24) | (e - 48);
+                for (0..c) |_| {
+                    hit[nh] = id;
+                    nh += 1;
+                }
+            };
+            std.debug.assert(nh == rows - 2);
+            rnd.shuffle(u32, hit[0..nh]);
+            var ids_row0: [rows]u32 = undefined;
+            var ids_skip: [rows]u32 = undefined;
+            const miss = [2]usize{ 7, 29 };
+            var hi: usize = 0;
+            for (0..rows) |p| {
+                if (p == miss[0] or p == miss[1]) {
+                    ids_row0[p] = 0;
+                    ids_skip[p] = root.banked_skip_id;
+                } else {
+                    ids_row0[p] = hit[hi];
+                    ids_skip[p] = hit[hi];
+                    hi += 1;
+                }
+            }
+            const xh = try a.alloc(f32, rows * hidden);
+            defer a.free(xh);
+            for (xh) |*v| v.* = bfExact(sigma * rnd.floatNorm(f32));
+            const x = try g.astype(try g.hostArray(std.mem.sliceAsBytes(xh), &.{ ci(rows), ci(hidden) }, .float32), .bfloat16);
+            const a_row0 = try g.hostArray(std.mem.sliceAsBytes(&ids_row0), &.{ci(rows)}, .uint32);
+            const a_skip = try g.hostArray(std.mem.sliceAsBytes(&ids_skip), &.{ci(rows)}, .uint32);
+            try g.evalAll(&.{ x, a_row0, a_skip });
+            const arms = [_]GroupArm{ .g2, .g4, .g4m };
+            var samples: [arms.len][timed]u64 = undefined;
+            for (0..warm + timed) |round| {
+                for (0..arms.len) |k| {
+                    const ai = (k + round) % arms.len;
+                    const t0 = nowNs();
+                    const y = switch (arms[ai]) {
+                        .g2 => try groupCall(&k2, s, x, a_row0, &kb, rows),
+                        .g4 => try groupCall(&k4, s, x, a_skip, &kb, rows),
+                        .g4m => try groupCall(&k4, s, x, a_row0, &kb, rows),
+                    };
+                    defer _ = mlx.mlx_array_free(y);
+                    try mlx.check(mlx.mlx_array_eval(y));
+                    const dt = nowNs() - t0;
+                    if (round >= warm) samples[ai][round - warm] = dt;
+                }
+            }
+            for (arms, 0..) |arm, ai| {
+                std.mem.sort(u64, &samples[ai], {}, std.sort.asc(u64));
+                const min_us = @as(f64, @floatFromInt(samples[ai][0])) / 1000.0;
+                const med_us = @as(f64, @floatFromInt(samples[ai][timed / 2])) / 1000.0;
+                std.debug.print("TURBOEXL3_BANKED_GROUP_TIME n={d} profile={s} distinct={d} arm={s} min_us={d:.1} median_us={d:.1}\n", .{ n, pf.name, d, @tagName(arm), min_us, med_us });
+            }
+        }
+    }
+}

@@ -141,6 +141,8 @@ fn kernelsFor(geo: decode.Geometry, out_dtype: mlx.mlx_dtype) !*decode.Kernels3 
     // the shared expert's gate|up K slices per GEMV threadgroup in `moeFusedShared` (of its 20; a value that does not divide
     // them runs 1). Launch shape only: the planes, so the bytes, stay.
     k3.sspt = config.get().shared_spt;
+    // the banked GEMVs' members per lead: 2 the banked texts, 4 the grouped ones (which skip `skip_id` row-slots)
+    k3.banked_group = config.get().banked_group;
     cache.get().*[i] = k3;
     return &cache.get().*[i].?;
 }
@@ -1389,6 +1391,8 @@ const clamp_logged = Global(bool, "root_clamp_logged", false);
 
 /// The most row-slots (routed pairs) a banked call takes (`moeClampedBanked`).
 pub const banked_rows_max = decode.Kernels3.banked_rows_max;
+/// A banked call's id for a row-slot that runs no expert (`Config.banked_group` 4): no decode, its y row 0.
+pub const banked_skip_id = decode.skip_id;
 
 /// The banked gate|up's result, its down's input: `hd` f16 [rows, inter] (the down's prepared input, lane order) and `hs`
 /// f32 [rows, inter / 128] (its 128-block sums). The caller frees both.
@@ -1406,7 +1410,9 @@ pub const BankedHalf = struct { hd: mlx.mlx_array, hs: mlx.mlx_array };
 /// error.InvalidExl3Clamp. `moeClampedBankedGateUp` then `moeClampedBankedDown` are its two halves. The gate|up half ends
 /// in fin7cb, which prepares the down's input and so reads each bank's down suh as well as its gate and up arrays: a caller
 /// whose arrays land in parts (an expert streamer's gate and up, then its down) has every array in place before it, or runs
-/// the whole call at its down.
+/// the whole call at its down. With `Config.banked_group` 4 the GEMVs share a decode among up to four row-slots of one id
+/// (two at 2), and a row-slot whose id is `banked_skip_id` runs no expert: its y row is 0. Every other row-slot's bytes
+/// are the same at either.
 pub fn moeClampedBanked(s: mlx.mlx_stream, x: mlx.mlx_array, banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, limit: c_int) !mlx.mlx_array {
     const h = try moeClampedBankedGateUp(s, x, banks, ids, dec, limit);
     defer freeArr(h.hd);

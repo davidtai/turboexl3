@@ -36,6 +36,10 @@ pub const Config = struct {
     /// (`dense.Dense.wideLean`: DeepSeek-V4.1's LM head, wq_b and wo_a at 5, 9 and 10 rows); false keeps them on
     /// text_dgemv at BT 1. The same bytes.
     dense_lean5: bool = true,
+    /// The banked decode's row-slots of one packed id per GEMV lead threadgroup (`moeClampedBanked`): 2 pairs them, 4 runs
+    /// the grouped texts, which take up to four and skip a row-slot whose id is `skip_id` (no decode, its y row 0). The
+    /// same bytes for every other row-slot.
+    banked_group: u32 = 2,
     /// A diagnostic: each routed decode call's routing read back (a sync per call), its expert multiplicities printed
     /// every 480 calls.
     slot_stats: bool = false,
@@ -47,7 +51,8 @@ pub const Config = struct {
         const forms = [_]u8{ 3, 5, 6, 7, 8, 9 };
         const spts = [_]u32{ 1, 2, 4, 5, 10, 20 };
         return std.mem.indexOfScalar(u8, &forms, c.decode_form) != null and
-            std.mem.indexOfScalar(u32, &spts, c.shared_spt) != null and c.pf_alay <= 2;
+            std.mem.indexOfScalar(u32, &spts, c.shared_spt) != null and c.pf_alay <= 2 and
+            (c.banked_group == 2 or c.banked_group == 4);
     }
 };
 
@@ -74,6 +79,9 @@ test "turboexl3 config: the defaults are valid and served; an unserved form, sli
     for ([_]u8{ 0, 4, 10 }) |f| try t.expect(!(Config{ .decode_form = f }).valid());
     try t.expect(!(Config{ .shared_spt = 3 }).valid());
     try t.expect(!(Config{ .pf_alay = 3 }).valid());
+    try t.expectEqual(@as(u32, 2), d.banked_group);
+    try t.expect((Config{ .banked_group = 4 }).valid());
+    for ([_]u32{ 0, 1, 3, 8 }) |g| try t.expect(!(Config{ .banked_group = g }).valid());
     try t.expect(d.dense_lean);
     try t.expect(d.fused_fin_fold);
     const saved = current.get().*;

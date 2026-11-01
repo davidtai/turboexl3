@@ -286,6 +286,30 @@ pub const fin7b_inputs = [_][*:0]const u8{ "zg", "zu", "slots", "gate_svh0", "ga
 pub const down3b_inputs = [_][*:0]const u8{ "hdp", "slots", "down_t0", "down_t1", "down_t2" };
 pub const dfin3b_inputs = [_][*:0]const u8{ "zd", "slots", "scores", "down_svh0", "down_svh1", "down_svh2", "hsx" };
 
+// ── The grouped banked decode (`Kernels3.banked_group` 4) ──
+//
+// The banked launches with the GEMVs' members widened from two row-slots to four of one packed id per lead threadgroup
+// (`turboexl3_members_g`, `turboexl3_gemv_group`: every weight read and decoded once and fed to each member in the
+// one-member order, so a row-slot's bytes are the banked call's), and a row-slot whose id is `skip_id` skipped by every
+// launch: no decode, its y row 0 (DEVROUTE's pairs whose expert no bank holds; the caller replaces their rows).
+pub const skip_id: u32 = 0xFFFFFFFF;
+/// The grouped GEMVs' members and core, after the base header
+pub const header_group: [:0]const u8 = header ++ @embedFile("kernels/decode/gemv_group.metal");
+pub const text_prep2bg = prep2_1 ++ skip_rk ++ prep2b_expert ++ prep2_row ++ prep2_body;
+pub const text_gu3bg = gu3_1 ++ rk_line ++ gu3g_2 ++ gu3b_w ++ gu3g_3;
+pub const text_fin7cbg = fin7_1 ++ skip_rk ++ fin7b_expert ++ fin7_2 ++ fin7_planes ++ fin7_3 ++ fin7_sums ++ fin7_4 ++ fin7_swiglu_clamp ++ fin7_5;
+pub const text_down3bg = down3_1 ++ rk_line ++ down3g_2 ++ down3b_w ++ down3g_3;
+pub const text_dfin3bg = dfin3_1 ++ skip_rk_next ++ dfin3b_expert ++ dfin3_2;
+/// The skipped row-slot's line where a launch starts on one (prep2, fin7) and in dfin3's slot loop
+const skip_rk = @embedFile("kernels/decode/skip_rk.metal");
+const skip_rk_next = @embedFile("kernels/decode/skip_rk_next.metal");
+/// gu3's and down3's pieces after the constants and grid line and around the weight base: four members per lead, the
+/// reduction buffer for each and the planes' stores for each
+const gu3g_2 = @embedFile("kernels/decode/gu3g_2.metal");
+const gu3g_3 = @embedFile("kernels/decode/gu3g_3.metal");
+const down3g_2 = @embedFile("kernels/decode/down3g_2.metal");
+const down3g_3 = @embedFile("kernels/decode/down3g_3.metal");
+
 /// Form 3: five launches (prepare gate and up, split-K gate/up planes, finish + SwiGLU + down prepare, split-K down
 /// planes, finish + reduce); KS slices fill the GPU at one row.
 pub const Kernels3 = struct {
@@ -401,6 +425,12 @@ pub const Kernels3 = struct {
     banked: ?BankedKernels = null,
     cfgb: [banked_rows_max + 1]?Cfg = @splat(null),
     banked_ones: ?mlx.mlx_array = null,
+    /// The banked GEMVs' row-slots of one packed id per lead threadgroup: 2 the banked texts (`group`'s pairing), 4 the
+    /// grouped texts (`text_gu3bg` .. `text_dfin3bg`), which also skip a row-slot whose id is `skip_id`. The same bytes
+    /// for every other row-slot. Set before the first banked call.
+    banked_group: u32 = 2,
+    banked_g: ?BankedKernels = null,
+    cfgbg: [banked_rows_max + 1]?Cfg = @splat(null),
 
     /// The most row-slots a banked call takes (an expert streamer's route: 8 verify rows of top-6 = 48 pairs)
     pub const banked_rows_max: usize = 64;
@@ -591,7 +621,12 @@ pub const Kernels3 = struct {
             inline for (.{ cc.prep_h, cc.gu, cc.fin, cc.down, cc.dfin, cc.fin7, cc.dfin7, cc.gu8 }) |k| _ = mlx.mlx_fast_metal_kernel_config_free(k);
             c.* = null;
         };
+        for (&self.cfgbg) |*c| if (c.*) |cc| {
+            inline for (.{ cc.prep_h, cc.gu, cc.fin, cc.down, cc.dfin, cc.fin7, cc.dfin7, cc.gu8 }) |k| _ = mlx.mlx_fast_metal_kernel_config_free(k);
+            c.* = null;
+        };
         if (self.banked) |b| inline for (.{ b.prep, b.gu, b.fin, b.down, b.dfin }) |k| freeKernel(k);
+        if (self.banked_g) |b| inline for (.{ b.prep, b.gu, b.fin, b.down, b.dfin }) |k| freeKernel(k);
         if (self.banked_ones) |o| _ = mlx.mlx_array_free(o);
         inline for (.{ self.prep, self.gu, self.fin, self.down, self.dfin, self.fin7, self.dfin7, self.gu8, self.gu3s, self.gu8s, self.fin7s, self.down3s, self.dfin7s, self.sgu, self.sfin, self.sdown }) |k| freeKernel(k);
         inline for (.{ self.gu8t, self.gu3t, self.gu3p, self.prep2t, self.fin7t, self.down3t, self.dfin7t, self.sgu2, self.sgu2p, self.sprep2, self.sfin2, self.sdown2 }) |k| freeKernel(k);
@@ -643,6 +678,11 @@ pub const Kernels3 = struct {
     }
 
     fn buildCfgsSplit(self: *Kernels3, rows: usize, bt: u32, kdiv: [4]u32, kdiv_dn: [4]u32) !Cfg {
+        return self.buildCfgsGroup(rows, bt, kdiv, kdiv_dn, self.group);
+    }
+
+    /// `buildCfgsSplit` at `group` row-slots per lead (the GEMVs' GROUP from two rows up)
+    fn buildCfgsGroup(self: *Kernels3, rows: usize, bt: u32, kdiv: [4]u32, kdiv_dn: [4]u32, group: u32) !Cfg {
         const g = self.geo;
         const z_gu = self.kThreadgroups(self.ks_gu, rows, kdiv);
         const z_dn = self.kThreadgroups(self.ks_dn, rows, kdiv_dn);
@@ -662,7 +702,7 @@ pub const Kernels3 = struct {
         const spt_gu_t = ks.TemplateArg{ .name = "SPT", .value = .{ .int = @intCast(self.ks_gu / z_gu) } };
         const spt_dn_t = ks.TemplateArg{ .name = "SPT", .value = .{ .int = @intCast(self.ks_dn / z_dn) } };
         const bt_t = ks.TemplateArg{ .name = "BT", .value = .{ .int = @intCast(bt) } };
-        const grp_t = ks.TemplateArg{ .name = "GROUP", .value = .{ .int = @intCast(if (rows >= 2) self.group else 1) } };
+        const grp_t = ks.TemplateArg{ .name = "GROUP", .value = .{ .int = @intCast(if (rows >= 2) group else 1) } };
         const out_t = ks.TemplateArg{ .name = "OUT_T", .value = .{ .dtype = self.out_dtype } };
         const def_t = ks.TemplateArg{ .name = "DEFER", .value = .{ .int = if (self.defer_affine) 1 else 0 } };
         const nbh_t = ks.TemplateArg{ .name = "NBH", .value = .{ .int = @intCast(g.hidden / 128) } };
@@ -765,6 +805,43 @@ pub const Kernels3 = struct {
         return c;
     }
 
+    /// The grouped banked kernels (`banked_group` 4), made on first use; the geometry as `bankedKernels` takes it.
+    fn bankedKernelsG(self: *Kernels3) !*const BankedKernels {
+        if (self.banked_g) |*b| return b;
+        if (self.geo.limit == 0 or self.geo.topk != 1) return error.Exl3EngineNotImplemented;
+        const prep = ks.newKernel("turboexl3_prep2bg", &prep2b_inputs, &prep2_outputs, text_prep2bg, header, true) orelse return error.KernelCreateFailed;
+        errdefer freeKernel(prep);
+        const gu = ks.newKernel("turboexl3_gu3bg", &gu3b_inputs, &gu3_outputs, text_gu3bg, header_group, true) orelse return error.KernelCreateFailed;
+        errdefer freeKernel(gu);
+        const fin = ks.newKernel("turboexl3_fin7cbg", &fin7b_inputs, &fin3_outputs, text_fin7cbg, header5, true) orelse return error.KernelCreateFailed;
+        errdefer freeKernel(fin);
+        const down = ks.newKernel("turboexl3_down3bg", &down3b_inputs, &down3_outputs, text_down3bg, header_group, true) orelse return error.KernelCreateFailed;
+        errdefer freeKernel(down);
+        const dfin = ks.newKernel("turboexl3_dfin3bg", &dfin3b_inputs, &down_outputs, text_dfin3bg, header, true) orelse return error.KernelCreateFailed;
+        self.banked_g = .{ .prep = prep, .gu = gu, .fin = fin, .down = down, .dfin = dfin };
+        return &self.banked_g.?;
+    }
+
+    /// `cfgsBanked` at `banked_group` row-slots per lead, in a table of its own.
+    fn cfgsBankedG(self: *Kernels3, rows: usize) !Cfg {
+        if (rows == 0 or rows > banked_rows_max) return error.BadExl3Shape;
+        if (self.cfgbg[rows]) |c| return c;
+        const bt = if (rows == 1) self.bt1 else self.bt9;
+        if (bt != 1 and bt != 2 and bt != 4 and bt != 8) return error.BadExl3Shape;
+        const c = try self.buildCfgsGroup(rows, bt, self.kdiv9, self.kdiv9d orelse self.kdiv9, self.banked_group);
+        self.cfgbg[rows] = c;
+        return c;
+    }
+
+    /// The banked launches and configs at `banked_group`: the banked texts at 2, the grouped texts at 4.
+    fn bankedSet(self: *Kernels3, rows: usize) !struct { k: *const BankedKernels, c: Cfg } {
+        return switch (self.banked_group) {
+            2 => .{ .k = try self.bankedKernels(), .c = try self.cfgsBanked(rows) },
+            4 => .{ .k = try self.bankedKernelsG(), .c = try self.cfgsBankedG(rows) },
+            else => error.BadExl3Shape,
+        };
+    }
+
     /// dfin3's unit scores in the banked down (f32 [banked_rows_max], made and evaluated on first use).
     fn bankedOnes(self: *Kernels3) !mlx.mlx_array {
         if (self.banked_ones) |o| return o;
@@ -783,8 +860,9 @@ pub const Kernels3 = struct {
     /// count (a bank no id names may repeat another's arrays). Needs a clamped top-1 geometry; rows 1..banked_rows_max.
     /// The caller frees both.
     pub fn bankedGateUp(self: *Kernels3, s: mlx.mlx_stream, x: mlx.mlx_array, ids: mlx.mlx_array, banks: *const [3]Kernels.Bank, rows: usize) ![2]mlx.mlx_array {
-        const k = try self.bankedKernels();
-        const c = try self.cfgsBanked(rows);
+        const set = try self.bankedSet(rows);
+        const k = set.k;
+        const c = set.c;
         const b = banks;
         var xp: [4]mlx.mlx_array = undefined; // xg, xu, and their per-block input sums
         try ks.applyConfig(k.prep, c.prep_h, &.{ x, ids, b[0].gate_suh, b[1].gate_suh, b[2].gate_suh, b[0].up_suh, b[1].up_suh, b[2].up_suh }, &xp, s);
@@ -804,8 +882,9 @@ pub const Kernels3 = struct {
     /// The banked decode's down (down3b, then dfin3b at top-1 with unit scores): `hd`, `hs` (`bankedGateUp`'s), the same
     /// ids and banks -> y f32 [rows, hidden], row-slot r's expert output at weight 1. The caller frees y.
     pub fn bankedDown(self: *Kernels3, s: mlx.mlx_stream, hd: mlx.mlx_array, hs: mlx.mlx_array, ids: mlx.mlx_array, banks: *const [3]Kernels.Bank, rows: usize) !mlx.mlx_array {
-        const k = try self.bankedKernels();
-        const c = try self.cfgsBanked(rows);
+        const set = try self.bankedSet(rows);
+        const k = set.k;
+        const c = set.c;
         const ones = try self.bankedOnes();
         const b = banks;
         const zd = try one(k.down, c.down, &.{ hd, ids, b[0].down_t, b[1].down_t, b[2].down_t }, s);
