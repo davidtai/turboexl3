@@ -209,13 +209,14 @@ test "turboexl3 decode geometry admission: 128-aligned widths, top-k within the 
 /// each; no atomics).
 pub const text_gu3 = gu3_1 ++ rk_line ++ gu3_body;
 /// gu3's pieces after its rk line, cut where gu3sf differs: after its reduction buffer (its declarations) and at the
-/// planes' stores
+/// planes' stores; and where the banked text differs: at the weight base (`gu3_w`)
 const gu3_1 = @embedFile("kernels/decode/gu3_1.metal");
 const gu3_2 = @embedFile("kernels/decode/gu3_2.metal");
+const gu3_w = @embedFile("kernels/decode/gu3_w.metal");
 const gu3_3 = @embedFile("kernels/decode/gu3_3.metal");
 const gu3_stores = @embedFile("kernels/decode/gu3_stores.metal");
 const gu3_4 = @embedFile("kernels/decode/gu3_4.metal");
-const gu3_body = gu3_2 ++ gu3_3 ++ gu3_stores ++ gu3_4;
+const gu3_body = gu3_2 ++ gu3_w ++ gu3_3 ++ gu3_stores ++ gu3_4;
 
 /// Form 3, launch 3: per (128-wide intermediate block, row-slot): sum the planes, f16 round, H128, svh, f16 round,
 /// SwiGLU, then the down's input rotation (f16 round, down suh, H128, f16 round) into hd in lane order.
@@ -223,14 +224,30 @@ pub const text_fin3 = @embedFile("kernels/decode/fin3.metal");
 
 /// Form 3, launch 4: the down GEMV as split-K planes zd f32 [KS2, RK, hidden], the partition fixed per geometry and SPT
 /// slices per threadgroup as in launch 2.
-pub const text_down3 = @embedFile("kernels/decode/down3_1.metal") ++ rk_line ++ @embedFile("kernels/decode/down3_2.metal");
+pub const text_down3 = down3_1 ++ rk_line ++ down3_2 ++ down3_w ++ down3_3;
+/// down3's pieces: its constants and grid line, then its body cut at the weight base (`down3_w`; the banked text's
+/// differs)
+const down3_1 = @embedFile("kernels/decode/down3_1.metal");
+const down3_2 = @embedFile("kernels/decode/down3_2.metal");
+const down3_w = @embedFile("kernels/decode/down3_w.metal");
+const down3_3 = @embedFile("kernels/decode/down3_3.metal");
 
 /// Form 3, launch 5: per (128-wide hidden block, row): for each slot in order sum the planes, f16 round, H128, svh,
 /// f16 round, times the score; y f32 [rows, hidden].
-pub const text_dfin3 = @embedFile("kernels/decode/dfin3.metal");
+pub const text_dfin3 = dfin3_1 ++ dfin3_expert ++ dfin3_2;
+/// dfin3's pieces, cut at the slot's expert line (the banked text's differs)
+const dfin3_1 = @embedFile("kernels/decode/dfin3_1.metal");
+const dfin3_expert = @embedFile("kernels/decode/dfin3_expert.metal");
+const dfin3_2 = @embedFile("kernels/decode/dfin3_2.metal");
 
 /// Form 3's prepare for gate and up in one launch: xg, xu half [RK, DIM] in lane order from x [rows, DIM] and the two suh.
-pub const text_prep2 = @embedFile("kernels/decode/prep2_1.metal") ++ prep2_body;
+pub const text_prep2 = prep2_1 ++ expert_line ++ prep2_row ++ prep2_body;
+/// prep2's constants and grid lines, and its row line after the expert line
+const prep2_1 = @embedFile("kernels/decode/prep2_1.metal");
+const prep2_row = @embedFile("kernels/decode/prep2_row.metal");
+/// A row-slot's expert, read where the kernel starts (prep2, fin7); the banked texts read a bank and a slot row there
+/// (`prep2b_expert`, `fin7b_expert`)
+const expert_line = @embedFile("kernels/decode/expert_line.metal");
 const prep2_inputs = [_][*:0]const u8{ "x", "slots", "gate_suh", "up_suh" };
 const prep2_outputs = [_][*:0]const u8{ "xg", "xu", "sg", "su" };
 
@@ -241,6 +258,33 @@ const fin3_outputs = [_][*:0]const u8{ "hd", "hs" };
 const down3_inputs = [_][*:0]const u8{ "hdp", "slots", "down_t" };
 const down3_outputs = [_][*:0]const u8{"zd"};
 const dfin3_inputs = [_][*:0]const u8{ "zd", "slots", "scores", "down_svh", "hsx" };
+
+// ── The banked decode (`Kernels3.bankedGateUp` / `bankedDown`) ──
+//
+// A call's row-slots over three expert banks (an expert streamer's slot banks: base, ext, transient, each its own arrays
+// with its own slot count), a row-slot's id packed (bank << 24 | slot row). Form 7's launches at top-1 (prep2, gu3, fin7
+// clamped, down3, dfin3), each its base text with the lines that read a bank's arrays replaced and every other statement
+// kept: where the base reads the expert line, the banked text takes the slot row and selects the row-slot's suh / svh
+// arrays by its bank (`prep2b_expert`, `fin7b_expert`, `dfin3b_expert`); where the GEMVs take their weight base, the
+// bank's trellis at the slot row (`gu3b_w`, `down3b_w`). The GEMVs' members compare the packed ids, so two row-slots
+// share a decode only on one bank's one slot. A row-slot's statements, so its bytes, are the base launch's on its bank.
+// Each bank's arrays are separate inputs (at most 14 inputs and 2 outputs a launch, within Metal's 31 buffers).
+pub const text_prep2b = prep2_1 ++ prep2b_expert ++ prep2_row ++ prep2_body;
+pub const text_gu3b = gu3_1 ++ rk_line ++ gu3_2 ++ gu3b_w ++ gu3_3 ++ gu3_stores ++ gu3_4;
+pub const text_fin7cb = fin7_1 ++ fin7b_expert ++ fin7_2 ++ fin7_planes ++ fin7_3 ++ fin7_sums ++ fin7_4 ++ fin7_swiglu_clamp ++ fin7_5;
+pub const text_down3b = down3_1 ++ rk_line ++ down3_2 ++ down3b_w ++ down3_3;
+pub const text_dfin3b = dfin3_1 ++ dfin3b_expert ++ dfin3_2;
+const prep2b_expert = @embedFile("kernels/decode/prep2b_expert.metal");
+const gu3b_w = @embedFile("kernels/decode/gu3b_w.metal");
+const fin7b_expert = @embedFile("kernels/decode/fin7b_expert.metal");
+const down3b_w = @embedFile("kernels/decode/down3b_w.metal");
+const dfin3b_expert = @embedFile("kernels/decode/dfin3b_expert.metal");
+/// The banked launches' inputs: each banked array once per bank (0 base, 1 ext, 2 transient), in the base's order
+pub const prep2b_inputs = [_][*:0]const u8{ "x", "slots", "gate_suh0", "gate_suh1", "gate_suh2", "up_suh0", "up_suh1", "up_suh2" };
+pub const gu3b_inputs = [_][*:0]const u8{ "xgp", "xup", "slots", "gate_t0", "gate_t1", "gate_t2", "up_t0", "up_t1", "up_t2" };
+pub const fin7b_inputs = [_][*:0]const u8{ "zg", "zu", "slots", "gate_svh0", "gate_svh1", "gate_svh2", "up_svh0", "up_svh1", "up_svh2", "down_suh0", "down_suh1", "down_suh2", "xsg", "xsu" };
+pub const down3b_inputs = [_][*:0]const u8{ "hdp", "slots", "down_t0", "down_t1", "down_t2" };
+pub const dfin3b_inputs = [_][*:0]const u8{ "zd", "slots", "scores", "down_svh0", "down_svh1", "down_svh2", "hsx" };
 
 /// Form 3: five launches (prepare gate and up, split-K gate/up planes, finish + SwiGLU + down prepare, split-K down
 /// planes, finish + reduce); KS slices fill the GPU at one row.
@@ -352,6 +396,22 @@ pub const Kernels3 = struct {
     route_prepg: ?mlx.mlx_fast_metal_kernel = null,
     route_cfg: [Kernels.max_rows + 1]?mlx.mlx_fast_metal_kernel_config = @splat(null),
     route_key: [Kernels.max_rows + 1]RouteKey = undefined,
+    /// The banked decode (`bankedGateUp`, `bankedDown`; a top-1 clamped geometry): its kernels, built on first use, one
+    /// config set per row-slot count up to `banked_rows_max` (form 9's launch shape), and dfin3's unit scores
+    banked: ?BankedKernels = null,
+    cfgb: [banked_rows_max + 1]?Cfg = @splat(null),
+    banked_ones: ?mlx.mlx_array = null,
+
+    /// The most row-slots a banked call takes (an expert streamer's route: 8 verify rows of top-6 = 48 pairs)
+    pub const banked_rows_max: usize = 64;
+    /// The banked texts' kernels (`text_prep2b` .. `text_dfin3b`)
+    pub const BankedKernels = struct {
+        prep: mlx.mlx_fast_metal_kernel,
+        gu: mlx.mlx_fast_metal_kernel,
+        fin: mlx.mlx_fast_metal_kernel,
+        down: mlx.mlx_fast_metal_kernel,
+        dfin: mlx.mlx_fast_metal_kernel,
+    };
 
     /// The shared expert `moeShared` folds into the routed launches: three dense EXL3 linears (gate, up: hidden -> inter;
     /// down: inter -> hidden; trellis U16 [in/16, out/16, n], suh [in], svh [out]) as dense.zig serves them (`n_*` their
@@ -527,6 +587,12 @@ pub const Kernels3 = struct {
         inline for (.{ self.route_prep, self.route_prepg }) |k| if (k) |kk| {
             freeKernel(kk);
         };
+        for (&self.cfgb) |*c| if (c.*) |cc| {
+            inline for (.{ cc.prep_h, cc.gu, cc.fin, cc.down, cc.dfin, cc.fin7, cc.dfin7, cc.gu8 }) |k| _ = mlx.mlx_fast_metal_kernel_config_free(k);
+            c.* = null;
+        };
+        if (self.banked) |b| inline for (.{ b.prep, b.gu, b.fin, b.down, b.dfin }) |k| freeKernel(k);
+        if (self.banked_ones) |o| _ = mlx.mlx_array_free(o);
         inline for (.{ self.prep, self.gu, self.fin, self.down, self.dfin, self.fin7, self.dfin7, self.gu8, self.gu3s, self.gu8s, self.fin7s, self.down3s, self.dfin7s, self.sgu, self.sfin, self.sdown }) |k| freeKernel(k);
         inline for (.{ self.gu8t, self.gu3t, self.gu3p, self.prep2t, self.fin7t, self.down3t, self.dfin7t, self.sgu2, self.sgu2p, self.sprep2, self.sfin2, self.sdown2 }) |k| freeKernel(k);
     }
@@ -667,6 +733,84 @@ pub const Kernels3 = struct {
         const zd = try one(self.down, c.down, &.{ hd[0], slots, bank.down_t }, s);
         defer _ = mlx.mlx_array_free(zd);
         return one(if (f7d) self.dfin7 else self.dfin, if (f7d) c.dfin7 else c.dfin, &.{ zd, slots, scores, bank.down_svh, hd[1] }, s);
+    }
+
+    /// The banked decode's kernels, made on first use: a clamped top-1 geometry's (each row-slot a pair at weight 1, its
+    /// SwiGLU fin7c's); error.Exl3EngineNotImplemented for any other.
+    fn bankedKernels(self: *Kernels3) !*const BankedKernels {
+        if (self.banked) |*b| return b;
+        if (self.geo.limit == 0 or self.geo.topk != 1) return error.Exl3EngineNotImplemented;
+        const prep = ks.newKernel("turboexl3_prep2b", &prep2b_inputs, &prep2_outputs, text_prep2b, header, true) orelse return error.KernelCreateFailed;
+        errdefer freeKernel(prep);
+        const gu = ks.newKernel("turboexl3_gu3b", &gu3b_inputs, &gu3_outputs, text_gu3b, header, true) orelse return error.KernelCreateFailed;
+        errdefer freeKernel(gu);
+        const fin = ks.newKernel("turboexl3_fin7cb", &fin7b_inputs, &fin3_outputs, text_fin7cb, header5, true) orelse return error.KernelCreateFailed;
+        errdefer freeKernel(fin);
+        const down = ks.newKernel("turboexl3_down3b", &down3b_inputs, &down3_outputs, text_down3b, header, true) orelse return error.KernelCreateFailed;
+        errdefer freeKernel(down);
+        const dfin = ks.newKernel("turboexl3_dfin3b", &dfin3b_inputs, &down_outputs, text_dfin3b, header, true) orelse return error.KernelCreateFailed;
+        self.banked = .{ .prep = prep, .gu = gu, .fin = fin, .down = down, .dfin = dfin };
+        return &self.banked.?;
+    }
+
+    /// The banked decode's configs at `rows` row-slots: form 9's launch shape at that many row-slots (`cfgs9`'s: bt1 at
+    /// one, bt9 above, kdiv9's K threadgroups), in a table of its own up to `banked_rows_max`.
+    fn cfgsBanked(self: *Kernels3, rows: usize) !Cfg {
+        if (rows == 0 or rows > banked_rows_max) return error.BadExl3Shape;
+        if (self.cfgb[rows]) |c| return c;
+        const bt = if (rows == 1) self.bt1 else self.bt9;
+        if (bt != 1 and bt != 2 and bt != 4 and bt != 8) return error.BadExl3Shape;
+        const c = try self.buildCfgsSplit(rows, bt, self.kdiv9, self.kdiv9d orelse self.kdiv9);
+        self.cfgb[rows] = c;
+        return c;
+    }
+
+    /// dfin3's unit scores in the banked down (f32 [banked_rows_max], made and evaluated on first use).
+    fn bankedOnes(self: *Kernels3) !mlx.mlx_array {
+        if (self.banked_ones) |o| return o;
+        const buf: [banked_rows_max]f32 = @splat(1.0);
+        const o = mlx.mlx_array_new_data(&buf, &[_]c_int{banked_rows_max}, 1, .float32);
+        if (o.ctx == null) return error.MlxError;
+        errdefer _ = mlx.mlx_array_free(o);
+        try mlx.check(mlx.mlx_array_eval(o));
+        self.banked_ones = o;
+        return o;
+    }
+
+    /// The banked decode's gate|up (prep2b, gu3b, fin7cb): x [rows, hidden] (bf16, f16 or f32: row-slot r's row), `ids`
+    /// [rows] u32 or i32, row-slot r's id packed (bank << 24 | slot row) -> the down's prepared input hd f16 [rows, inter]
+    /// (lane order) and its 128-block sums hs f32 [rows, inter / 128]. `banks`: base, ext, transient, each its own slot
+    /// count (a bank no id names may repeat another's arrays). Needs a clamped top-1 geometry; rows 1..banked_rows_max.
+    /// The caller frees both.
+    pub fn bankedGateUp(self: *Kernels3, s: mlx.mlx_stream, x: mlx.mlx_array, ids: mlx.mlx_array, banks: *const [3]Kernels.Bank, rows: usize) ![2]mlx.mlx_array {
+        const k = try self.bankedKernels();
+        const c = try self.cfgsBanked(rows);
+        const b = banks;
+        var xp: [4]mlx.mlx_array = undefined; // xg, xu, and their per-block input sums
+        try ks.applyConfig(k.prep, c.prep_h, &.{ x, ids, b[0].gate_suh, b[1].gate_suh, b[2].gate_suh, b[0].up_suh, b[1].up_suh, b[2].up_suh }, &xp, s);
+        defer for (xp) |a| {
+            _ = mlx.mlx_array_free(a);
+        };
+        var z: [2]mlx.mlx_array = undefined; // the split-K gate|up planes
+        try ks.applyConfig(k.gu, c.gu, &.{ xp[0], xp[1], ids, b[0].gate_t, b[1].gate_t, b[2].gate_t, b[0].up_t, b[1].up_t, b[2].up_t }, &z, s);
+        defer for (z) |a| {
+            _ = mlx.mlx_array_free(a);
+        };
+        var hd: [2]mlx.mlx_array = undefined;
+        try ks.applyConfig(k.fin, c.fin7, &.{ z[0], z[1], ids, b[0].gate_svh, b[1].gate_svh, b[2].gate_svh, b[0].up_svh, b[1].up_svh, b[2].up_svh, b[0].down_suh, b[1].down_suh, b[2].down_suh, xp[2], xp[3] }, &hd, s);
+        return hd;
+    }
+
+    /// The banked decode's down (down3b, then dfin3b at top-1 with unit scores): `hd`, `hs` (`bankedGateUp`'s), the same
+    /// ids and banks -> y f32 [rows, hidden], row-slot r's expert output at weight 1. The caller frees y.
+    pub fn bankedDown(self: *Kernels3, s: mlx.mlx_stream, hd: mlx.mlx_array, hs: mlx.mlx_array, ids: mlx.mlx_array, banks: *const [3]Kernels.Bank, rows: usize) !mlx.mlx_array {
+        const k = try self.bankedKernels();
+        const c = try self.cfgsBanked(rows);
+        const ones = try self.bankedOnes();
+        const b = banks;
+        const zd = try one(k.down, c.down, &.{ hd, ids, b[0].down_t, b[1].down_t, b[2].down_t }, s);
+        defer _ = mlx.mlx_array_free(zd);
+        return one(k.dfin, c.dfin, &.{ zd, ids, ones, b[0].down_svh, b[1].down_svh, b[2].down_svh, hs }, s);
     }
 
     /// Whether `moeShared` carries this shared expert at `rows`: up to `shared_rows_max` rows, the routed width as its
@@ -1515,9 +1659,10 @@ const red5_outputs = [_][*:0]const u8{"y"};
 /// Form 7, launch 3 (fin3 with the H128s in registers): one simdgroup per (128-wide intermediate block, row-slot), lane L
 /// holding elements L + 32 q; fin3's arithmetic in fin3's order (`turboexl3_h128r` is `turboexl3_h128`'s stages, the block sum
 /// the same four simd sums), so fin3's bytes without its twelve threadgroup barriers.
-pub const text_fin7 = fin7_1 ++ fin7_2 ++ fin7_planes ++ fin7_3 ++ fin7_sums ++ fin7_4 ++ fin7_swiglu ++ fin7_5;
-/// fin7's pieces: its constants and grid lines; its body from the expert line, cut at the planes' read (gu3sf reads the
-/// planes through coherent pointers), at the input sums' read and at the SwiGLU's line (`text_fin7c` clamps there)
+pub const text_fin7 = fin7_1 ++ expert_line ++ fin7_2 ++ fin7_planes ++ fin7_3 ++ fin7_sums ++ fin7_4 ++ fin7_swiglu ++ fin7_5;
+/// fin7's pieces: its constants and grid lines; the expert line (`expert_line`: the banked text reads a bank there); its
+/// body, cut at the planes' read (gu3sf reads the planes through coherent pointers), at the input sums' read and at the
+/// SwiGLU's line (`text_fin7c` clamps there)
 const fin7_1 = @embedFile("kernels/decode/fin7_1.metal");
 const fin7_2 = @embedFile("kernels/decode/fin7_2.metal");
 const fin7_planes = @embedFile("kernels/decode/fin7_planes.metal");
@@ -1530,7 +1675,7 @@ const fin7_5 = @embedFile("kernels/decode/fin7_5.metal");
 /// Form 7's launch 3 with the clamped SwiGLU (`Geometry.limit`, the template int LIMIT; `root.moeClamped`): fin7 with its
 /// SwiGLU line replaced by the clamp (the gate clamped from above at LIMIT and up to [-LIMIT, LIMIT], then fin7's SwiGLU
 /// on them), every other statement fin7's, so where no value passes the limit it gives fin7's bytes.
-pub const text_fin7c = fin7_1 ++ fin7_2 ++ fin7_planes ++ fin7_3 ++ fin7_sums ++ fin7_4 ++ fin7_swiglu_clamp ++ fin7_5;
+pub const text_fin7c = fin7_1 ++ expert_line ++ fin7_2 ++ fin7_planes ++ fin7_3 ++ fin7_sums ++ fin7_4 ++ fin7_swiglu_clamp ++ fin7_5;
 const fin7_swiglu_clamp = @embedFile("kernels/decode/fin7_swiglu_clamp.metal");
 
 /// Form 7, launch 5 (dfin3 with the slots side by side): per (128-wide hidden block, row), simdgroup k finishes slot k (the
@@ -1610,8 +1755,8 @@ const fin7s_outputs = fin3_outputs ++ sfin_outputs;
 // counters (routed [RK, NBI], then shared [NBI]) come zeroed from text_vfold_zero. fin7s's bytes, one dependent launch fewer.
 pub const text_gu3sf = sgh_1 ++ vf_head_tg ++ sgh_2 ++ vf_head_decls ++ sgh_3 ++ vf_head_zc ++ sgh_4 ++ vf_head_sumsc ++ sgh_5 ++
     vf_head_arrive ++ sfh_2 ++ vf_sfin_xgc ++ vf_sfin_xuc ++ sfh_3 ++ vf_sfin_g ++ vf_sfin_u ++ sfh_4 ++ vf_head_close ++ sgh_end ++
-    gu3_1 ++ rk_line ++ gu3_2 ++ vf_gu3_decls ++ gu3_3 ++ vf_gu3_stores ++ gu3_4 ++ vf_arrive ++
-    fin7_2 ++ vf_fin7_planes ++ fin7_3 ++ fin7_sums ++ fin7_4 ++ fin7_swiglu ++ fin7_5 ++ vf_fin7_close;
+    gu3_1 ++ rk_line ++ gu3_2 ++ vf_gu3_decls ++ gu3_w ++ gu3_3 ++ vf_gu3_stores ++ gu3_4 ++ vf_arrive ++
+    expert_line ++ fin7_2 ++ vf_fin7_planes ++ fin7_3 ++ fin7_sums ++ fin7_4 ++ fin7_swiglu ++ fin7_5 ++ vf_fin7_close;
 const vf_head_tg = @embedFile("kernels/decode/vf_head_tg.metal");
 const vf_head_decls = @embedFile("kernels/decode/vf_head_decls.metal");
 const vf_head_zc = @embedFile("kernels/decode/vf_head_zc.metal");
@@ -1709,7 +1854,7 @@ const rk_line = @embedFile("kernels/decode/rk_line.metal");
 const rk_line_y = @embedFile("kernels/decode/rk_line_y.metal");
 const text_gu8_y: [:0]const u8 = @embedFile("kernels/decode/gu8_1.metal") ++ rk_line_y ++ @embedFile("kernels/decode/gu8_2.metal");
 const text_gu3_y: [:0]const u8 = gu3_1 ++ rk_line_y ++ gu3_body;
-const text_down3_y: [:0]const u8 = @embedFile("kernels/decode/down3_1.metal") ++ rk_line_y ++ @embedFile("kernels/decode/down3_2.metal");
+const text_down3_y: [:0]const u8 = down3_1 ++ rk_line_y ++ down3_2 ++ down3_w ++ down3_3;
 pub const text_gu8t: [:0]const u8 = shared_gu2_head ++ text_gu8_y;
 pub const text_gu3t: [:0]const u8 = shared_gu2_head ++ text_gu3_y;
 pub const text_gu3p: [:0]const u8 = shared_gu2p_head ++ text_gu3_y;

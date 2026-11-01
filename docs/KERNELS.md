@@ -88,6 +88,7 @@ levels.
 | family | entry points | rows | Zig file |
 |---|---|---|---|
 | decode GEMV of the [routed experts](GLOSSARY.md#routed-expert) | `moe`, `moeClamped` | 1–16 | `decode.zig` |
+| the same over three expert banks, one routed pair a row-slot | `moeClampedBanked` | 1–64 pairs | `decode.zig` |
 | shared expert and router in the decode launches | `moeFusedShared`, `moeFusedSharedRouted` | 1–4 (router fold: 2–4) | `decode.zig` |
 | prefill GEMM of the routed experts | `moe`, `moeClamped` | 17+ | `prefill.zig` |
 | dense projections | `linear`, `linearSplit`, the `linear` pieces, `trunkUnrot`, `linearBias` | any | `dense.zig` |
@@ -164,6 +165,7 @@ flowchart TB
 | `turboexl3_down3` | the down inner product as split-K planes | `turboexl3_gemv` |
 | `turboexl3_dfin3` | for each (block of hidden, row): each slot's planes added, the deferred map and the finish, then an `fma` with the slot's score, in slot order; y in x's dtype | `turboexl3_finish`, `turboexl3_reduce` |
 | `turboexl3_dfin7` | `dfin3` with the slots finished side by side (one [simdgroup](GLOSSARY.md#simdgroup) each), then the same chain of score `fma`s | as `dfin3` |
+| `turboexl3_prep2b`, `turboexl3_gu3b`, `turboexl3_fin7cb`, `turboexl3_down3b`, `turboexl3_dfin3b` | the banked decode (`moeClampedBanked`): `prep2`, `gu3`, `fin7c`, `down3` and `dfin3` with each row-slot's arrays read from one of three banks by its packed id (bank << 24 \| slot row) | as their base kernels |
 | `turboexl3_gu5` | form 5: the inputs of an expert group (up to 4 row-slots) prepared in threadgroup memory, then the GEMV of `gu3` for every member from one decode | `turboexl3_prep` × 2, `turboexl3_gemv` × 2 |
 | `turboexl3_dn5` | form 5: the mid of `fin3` for every member, the down GEMV in the partition of `down3`, then each slot finished up to its score (`f16`) | `turboexl3_finish` × 3, `turboexl3_swiglu`, `turboexl3_prep`, `turboexl3_gemv` |
 | `turboexl3_red5` | form 5: the chain of score `fma`s, in slot order | `turboexl3_reduce` |
@@ -225,6 +227,22 @@ the unclamped chain's, and every unclamped kernel's text is unchanged. A clamped
 configured, and form 9 under forms 3, 5 and 6 (their bytes); the fused shared expert (section 2) has no clamp and refuses
 a clamped geometry. The routing weight multiplies the down projection's `f16` output in the `f32` sum, as in `moe`;
 DeepSeek's reference scales the activation before w2 instead, the same product up to rounding.
+
+**The banked decode.** `moeClampedBanked` serves an expert streamer whose experts sit in three slot banks (mlx-serve's
+streamed DeepSeek-V4.1 bank: base, ext, transient, each its own arrays and slot count). A call is up to 64 routed pairs,
+each one [row-slot](GLOSSARY.md#row-slot) at top-1 with its id packed (bank << 24 | slot row), and it returns each pair's
+output at weight 1 (`f32` `[pairs, hidden]`); the caller weighs and sums them. It runs form 7's launches with form 9's
+launch shape at that many row-slots: `turboexl3_prep2b`, `turboexl3_gu3b`, `turboexl3_fin7cb`, `turboexl3_down3b` and
+`turboexl3_dfin3b` (top-1, unit scores). Each is its base text with the lines that read a bank's arrays swapped for lines
+that read the row-slot's bank: the expert line of `prep2`, `fin7c` and `dfin3` becomes the slot row and the bank's suh /
+svh pointers (`prep2b_expert.metal`, `fin7b_expert.metal`, `dfin3b_expert.metal`), and the weight base of `gu3` and
+`down3` becomes the bank's trellis at the slot row (`gu3b_w.metal`, `down3b_w.metal`). The GEMVs' members compare the
+packed ids, so two row-slots share a decode only on one bank's one slot. Every other statement is the base text's, so a
+pair's bytes are `moeClamped`'s on its bank; the GPU test (`banked_test.zig`) holds every pair to them, byte for byte,
+and sampled pairs to the clamped reference. Each bank's arrays are separate inputs: at most 14 inputs and 2 outputs a
+launch. The trellis may be `I16` (the streamer's code arrays: the kernels read its words). `moeClampedBankedGateUp` and
+`moeClampedBankedDown` split the call after `fin7cb` (the down's prepared input and its block sums), for a caller that runs
+a pair's down only once its bytes landed.
 
 ## 2. Shared expert and router inside the decode launches (rows 1–4)
 

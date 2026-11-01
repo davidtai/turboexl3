@@ -195,6 +195,7 @@ The routed experts:
 | `moe` | the routed experts of one MoE layer: decode rows through the split-K GEMV chain, prefill rows through the fused GEMM chain; its argument `verify_rows` is Sushi's and changes nothing here |
 | `moeWithShared` | `moe`, then an MLX add of a shared-expert output that the caller has already gated |
 | `moeClamped` | `moe` with DeepSeek-V4's (and GLM's) clamped SwiGLU, `swiglu_limit` 1 to 128: the gate clamped from above and up to [−limit, limit] before SwiGLU; decode rows on fin7's clamped variant, prefill rows on the clamped mid |
+| `moeClampedBanked` (`moeClampedBankedGateUp`, `moeClampedBankedDown`) | `moeClamped`'s decode launches over an expert streamer's three slot banks: up to 64 routed pairs, each a row-slot whose id is packed (bank << 24 \| slot row), each pair's output at weight 1 with `moeClamped`'s bytes on its bank at top-1; the gate\|up and the down as two calls for a caller that runs the down once its bytes landed |
 
 The shared expert and the router, at 1 to 4 decode rows:
 

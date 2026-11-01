@@ -1102,6 +1102,40 @@ ADDED_FILES['deepseek_gemv_test.zig'] = ('the grouped dense GEMV\'s texts (CPU) 
 for _key in ('const N', 'const wo_a', 'fn ci', 'fn bf16Exact', 'fn nowNs', 'const HostProj', 'fn randProj', 'fn randBf16',
              'const comp_layers', 'const index_layers', 'const ChainLayer', 'const ChainArm', 'fn chainForward'):
     CHANGED[('deepseek_test.zig', _key)] = 'pub: deepseek_gemv_test.zig\'s chains reuse it'
+# the banked decode (root.moeClampedBanked): a call's routed pairs over an expert streamer's three slot banks, form 7's
+# launches at top-1 with each line that reads a bank's arrays swapped for one that reads the row-slot's bank
+# (banked_test.zig)
+RECUT[('decode.zig', 'fin7_2')] = ('cut after its expert line (expert_line, then fin7_2): the banked fin7 reads a bank there; '
+                                   'text_fin7, text_fin7c and text_gu3sf keep their values (2)')
+RECUT[('decode.zig', 'gu3_3')] = ('cut after its weight base (gu3_w, then gu3_3): the banked gu3 reads its bank\'s trellis '
+                                  'there; text_gu3 and text_gu3sf keep their values (2)')
+for _name, _why in (('turboexl3_prep2b', 'prep2 with its expert line swapped for the slot row and the bank\'s suh '
+                                         '(prep2b_expert)'),
+                    ('turboexl3_gu3b', 'gu3 with its weight base swapped for the bank\'s trellis at the slot row (gu3b_w); '
+                                       'the members compare the packed ids'),
+                    ('turboexl3_fin7cb', 'fin7c with its expert line swapped for the slot row and the bank\'s svh / down suh '
+                                         '(fin7b_expert)'),
+                    ('turboexl3_down3b', 'down3 with its weight base swapped for the bank\'s trellis at the slot row '
+                                         '(down3b_w); the members compare the packed ids'),
+                    ('turboexl3_dfin3b', 'dfin3 with its expert line swapped for the slot row and the bank\'s down svh '
+                                         '(dfin3b_expert)')):
+    ADDED_KERNELS[('decode.zig', _name)] = _why
+for _key in ('const prep2b_inputs', 'const gu3b_inputs', 'const fin7b_inputs', 'const down3b_inputs', 'const dfin3b_inputs'):
+    ADDED[('decode.zig', _key)] = 'the banked launches\' operand names (each banked array once per bank)'
+for _key in ('fn validateProjectionAs', 'fn bankGeometryAs'):
+    ADDED[('root.zig', _key)] = 'validateClampedProjection\'s and bankGeometry\'s checks with the trellis dtype a parameter'
+for _key in ('const banked_rows_max', 'const BankedHalf', 'fn moeClampedBanked', 'fn moeClampedBankedGateUp',
+             'fn moeClampedBankedDown', 'const BankedCall', 'fn bankedCall', 'fn bankedGeometry'):
+    ADDED[('root.zig', _key)] = 'the banked decode\'s API and its operands\' checks'
+CHANGED[('root.zig', 'fn validateClampedProjection')] = 'its checks moved to validateProjectionAs at U16 (the same refusals)'
+CHANGED[('root.zig', 'fn bankGeometry')] = 'its body moved to bankGeometryAs at U16 (the same refusals)'
+CHANGED[('decode.zig', 'const Kernels3')] += ('; the banked decode: bankedGateUp / bankedDown, their kernels made on first use, '
+                                              'their configs form 9\'s launch shape at up to banked_rows_max row-slots '
+                                              '(cfgsBanked), dfin3\'s unit scores')
+ADDED_FILES['banked_test.zig'] = ('the banked decode\'s tests: its texts\' compositions and its refusals (CPU), each pair '
+                                  'against moeClamped on its bank byte for byte and sampled pairs against '
+                                  'ref.moeRowClamped (GPU), its timing against moeClamped\'s launches '
+                                  '(TURBOEXL3_BANKED_TIME)')
 
 
 def metal_strings(fn, toks, corpus):

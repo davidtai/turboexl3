@@ -8,7 +8,9 @@
 //! run form 3's split-K chain (`decode.Kernels3`; 9, the default, in four or five launches), forms 5 and 6 the same bytes
 //! in three or two launches with expert-grouped row-slots (`decode.Kernels5`); prefill rows run the fused GEMM chain
 //! (`prefill.zig`). `moeClamped` (DeepSeek-V4's and GLM's clamped SwiGLU) runs the same chains with the clamp in fin7's
-//! and the prefill mid's variants. A consumer's choices are one `Config` (`configure`); the library reads no environment.
+//! and the prefill mid's variants; `moeClampedBanked` runs its decode launches over an expert streamer's three slot banks,
+//! each row-slot one routed pair at weight 1. A consumer's choices are one `Config` (`configure`); the library reads no
+//! environment.
 const std = @import("std");
 /// A module global, the host's `Shared` where the consumer's `sdk` brings one (`global.zig`).
 pub const Global = @import("global.zig").Global;
@@ -59,23 +61,34 @@ pub const Geometry = struct {
 
 /// A projection's shapes and dtypes against the geometry: the refusals Sushi's loader makes, by the same names.
 pub fn validateClampedProjection(p: Proj, experts: c_int, input: c_int, output: c_int) !void {
+    return validateProjectionAs(p, experts, input, output, .uint16);
+}
+
+/// `validateClampedProjection` with the trellis in `trellis_dtype` (the banked decode also takes an expert streamer's I16
+/// code arrays: the kernels read the trellis words, whatever their sign).
+fn validateProjectionAs(p: Proj, experts: c_int, input: c_int, output: c_int, trellis_dtype: mlx.mlx_dtype) !void {
     const sh = mlx.getShape(p.trellis);
     if (input <= 0 or output <= 0 or @mod(input, 128) != 0 or @mod(output, 128) != 0 or
         sh.len != 4 or sh[0] != experts or sh[1] != @divExact(input, 16) or sh[2] != @divExact(output, 16) or sh[3] < 0 or
         format.kFromPackedDim(@intCast(sh[3])) == null or
         !std.mem.eql(c_int, &.{ experts, input }, mlx.getShape(p.suh)) or
         !std.mem.eql(c_int, &.{ experts, output }, mlx.getShape(p.svh))) return error.BadExl3Shape;
-    if (mlx.mlx_array_dtype(p.trellis) != .uint16 or mlx.mlx_array_dtype(p.suh) != .float16 or mlx.mlx_array_dtype(p.svh) != .float16) return error.BadExl3Dtype;
+    if (mlx.mlx_array_dtype(p.trellis) != trellis_dtype or mlx.mlx_array_dtype(p.suh) != .float16 or mlx.mlx_array_dtype(p.svh) != .float16) return error.BadExl3Dtype;
 }
 
 /// The bank's geometry from its shapes, every projection validated; gate and up must share a rate.
 pub fn bankGeometry(bank: Bank, hidden: c_int) !Geometry {
+    return bankGeometryAs(bank, hidden, .uint16);
+}
+
+/// `bankGeometry` with every trellis in `trellis_dtype` (`validateProjectionAs`).
+fn bankGeometryAs(bank: Bank, hidden: c_int, trellis_dtype: mlx.mlx_dtype) !Geometry {
     const gs = mlx.getShape(bank.gate.trellis);
     if (gs.len != 4 or gs[0] <= 0 or gs[2] <= 0 or gs[2] > std.math.maxInt(c_int) / 16) return error.BadExl3Shape;
     const width = gs[2] * 16;
-    try validateClampedProjection(bank.gate, gs[0], hidden, width);
-    try validateClampedProjection(bank.up, gs[0], hidden, width);
-    try validateClampedProjection(bank.down, gs[0], width, hidden);
+    try validateProjectionAs(bank.gate, gs[0], hidden, width, trellis_dtype);
+    try validateProjectionAs(bank.up, gs[0], hidden, width, trellis_dtype);
+    try validateProjectionAs(bank.down, gs[0], width, hidden, trellis_dtype);
     const us = mlx.getShape(bank.up.trellis);
     if (us[3] != gs[3]) return error.Exl3GateUpRateMismatch;
     const ds = mlx.getShape(bank.down.trellis);
@@ -1373,6 +1386,99 @@ pub fn moeClamped(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx.mlx
     return moeSwiglu(s, x, bank, inds, scores, dec, @intCast(limit));
 }
 const clamp_logged = Global(bool, "root_clamp_logged", false);
+
+/// The most row-slots (routed pairs) a banked call takes (`moeClampedBanked`).
+pub const banked_rows_max = decode.Kernels3.banked_rows_max;
+
+/// The banked gate|up's result, its down's input: `hd` f16 [rows, inter] (the down's prepared input, lane order) and `hs`
+/// f32 [rows, inter / 128] (its 128-block sums). The caller frees both.
+pub const BankedHalf = struct { hd: mlx.mlx_array, hs: mlx.mlx_array };
+
+/// `moeClamped` over an expert streamer's slot banks at decode (DeepSeek-V4.1's streamed routed experts: mlx-serve's
+/// streamed EXL3 source serves a call's routed pairs from three banks, base, ext and transient): row-slot r is one pair,
+/// x's row r through the expert at `ids[r]`, packed (bank << 24 | slot row), at weight 1, and y f32 [rows, hidden] holds
+/// each pair's output (the caller weighs and sums them). Each pair's bytes are `moeClamped`'s on its bank at top-1 with
+/// score 1 (the GPU test holds them so): `decode.Kernels3`'s banked texts, form 7's launches (prep2, gu3, fin7 clamped,
+/// down3, dfin3) on form 9's launch shape at that many row-slots, each text reading a row-slot's arrays from its bank where
+/// the base text reads them. `banks`: base, ext, transient, each its own expert (slot) count at one geometry and rate,
+/// the trellis U16 or I16 (the streamer's code arrays), every trellis one dtype; a bank no id names may repeat another's
+/// arrays. `ids` u32 or i32 [rows], rows 1..banked_rows_max; x [rows, hidden] bf16, f16 or f32; `limit` 1..128, else
+/// error.InvalidExl3Clamp. `moeClampedBankedGateUp` then `moeClampedBankedDown` are its two halves (a caller that runs
+/// each pair's down only once its bytes landed).
+pub fn moeClampedBanked(s: mlx.mlx_stream, x: mlx.mlx_array, banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, limit: c_int) !mlx.mlx_array {
+    const h = try moeClampedBankedGateUp(s, x, banks, ids, dec, limit);
+    defer freeArr(h.hd);
+    defer freeArr(h.hs);
+    return moeClampedBankedDown(s, h, banks, ids, dec, limit);
+}
+
+/// `moeClampedBanked`'s gate|up: prep2b, gu3b and fin7cb (`decode.Kernels3.bankedGateUp`).
+pub fn moeClampedBankedGateUp(s: mlx.mlx_stream, x: mlx.mlx_array, banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, limit: c_int) !BankedHalf {
+    const c = try bankedCall(banks, ids, dec, limit);
+    const xs = mlx.getShape(x);
+    if (xs.len != 2 or xs[0] != @as(c_int, @intCast(c.rows)) or xs[1] != @as(c_int, @intCast(c.geo.hidden))) return error.BadExl3Shape;
+    const xd = mlx.mlx_array_dtype(x);
+    if (xd != .bfloat16 and xd != .float32 and xd != .float16) return error.BadExl3Dtype;
+    const hd = try (try kernelsFor(c.geo, .float32)).bankedGateUp(s, x, ids, &c.kb, c.rows);
+    return .{ .hd = hd[0], .hs = hd[1] };
+}
+
+/// `moeClampedBanked`'s down: down3b and dfin3b (`decode.Kernels3.bankedDown`) over the gate|up's `h` -> y f32 [rows,
+/// hidden]; the caller frees y (and `h`).
+pub fn moeClampedBankedDown(s: mlx.mlx_stream, h: BankedHalf, banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, limit: c_int) !mlx.mlx_array {
+    const c = try bankedCall(banks, ids, dec, limit);
+    const r: c_int = @intCast(c.rows);
+    const w: c_int = @intCast(c.geo.inter);
+    if (!std.mem.eql(c_int, mlx.getShape(h.hd), &.{ r, w }) or !std.mem.eql(c_int, mlx.getShape(h.hs), &.{ r, @divExact(w, 128) })) return error.BadExl3Shape;
+    if (mlx.mlx_array_dtype(h.hd) != .float16 or mlx.mlx_array_dtype(h.hs) != .float32) return error.BadExl3Dtype;
+    return (try kernelsFor(c.geo, .float32)).bankedDown(s, h.hd, h.hs, ids, &c.kb, c.rows);
+}
+
+/// A banked call's checked operands: the decode geometry (top-1, the clamp), its row-slots and the banks as the kernels
+/// take them.
+const BankedCall = struct { geo: decode.Geometry, rows: usize, kb: [3]decode.Kernels.Bank };
+
+fn bankedCall(banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, limit: c_int) !BankedCall {
+    if (limit <= 0 or limit > 128) return error.InvalidExl3Clamp;
+    const is = mlx.getShape(ids);
+    if (is.len != 1 or is[0] < 1 or is[0] > banked_rows_max) return error.BadExl3Shape;
+    const idd = mlx.mlx_array_dtype(ids);
+    if (idd != .uint32 and idd != .int32) return error.BadExl3Dtype;
+    const geo = try bankedGeometry(banks);
+    if (geo.gate_up.n != geo.down.n) return error.Exl3EngineNotImplemented;
+    var kb: [3]decode.Kernels.Bank = undefined;
+    for (banks, &kb) |b, *o| o.* = .{
+        .gate_t = b.gate.trellis,
+        .gate_suh = b.gate.suh,
+        .gate_svh = b.gate.svh,
+        .up_t = b.up.trellis,
+        .up_suh = b.up.suh,
+        .up_svh = b.up.svh,
+        .down_t = b.down.trellis,
+        .down_suh = b.down.suh,
+        .down_svh = b.down.svh,
+    };
+    return .{
+        .geo = .{ .hidden = @intCast(geo.hidden), .inter = @intCast(geo.width), .topk = 1, .rate = geo.gate_up, .dec = dec, .limit = @intCast(limit) },
+        .rows = @intCast(is[0]),
+        .kb = kb,
+    };
+}
+
+/// The banks' one geometry: each bank as `bankGeometry` checks it, its trellis in bank 0's gate trellis dtype (U16 or
+/// I16), every bank at bank 0's widths and rates (its own expert count).
+fn bankedGeometry(banks: *const [3]Bank) !Geometry {
+    const gs = mlx.getShape(banks[0].gate.trellis);
+    if (gs.len != 4 or gs[1] <= 0 or gs[1] > std.math.maxInt(c_int) / 16) return error.BadExl3Shape;
+    const td = mlx.mlx_array_dtype(banks[0].gate.trellis);
+    if (td != .uint16 and td != .int16) return error.BadExl3Dtype;
+    const geo = try bankGeometryAs(banks[0], gs[1] * 16, td);
+    for (banks[1..]) |b| {
+        const g = try bankGeometryAs(b, geo.hidden, td);
+        if (g.width != geo.width or g.gate_up.n != geo.gate_up.n or g.down.n != geo.down.n) return error.BadExl3Shape;
+    }
+    return geo;
+}
 
 test {
     _ = config;
