@@ -294,19 +294,47 @@ pub const Dense = struct {
     /// way, and BT 2 on text_dgemv's chunks of 5 rows costs 0.2 to 2.5 ms)
     pub const lean_bt2_threadgroups: u32 = 2048;
 
-    /// output tiles per threadgroup for chunks of `rb` rows in a launch of `tgs1` threadgroups at BT 1: `btFor`'s, but 2
-    /// on the lean chunks of a launch of at least `lean_bt2_threadgroups` (2 BT RB = 32 accumulators at RB 8)
-    pub fn btLaunch(rb: u32, tgs1: u32) u32 {
-        return if (rb > max_rb and tgs1 >= lean_bt2_threadgroups) 2 else btFor(rb);
+    /// whether a launch of `tgs1` threadgroups at BT 1 takes its chunks of `rb` rows on the lean text at BT 2: the lean
+    /// chunks (past max_rb rows) of a launch of at least `lean_bt2_threadgroups`, and with `Config.dense_lean5` the
+    /// chunks of max_rb rows of one too (text_dgemv's state at RB 5 and BT 2, (2 BT + 4) RB = 40 floats, would spill;
+    /// the lean text's, (2 BT + 2) RB, is 30)
+    pub fn wideLean(rb: u32, tgs1: u32) bool {
+        if (tgs1 < lean_bt2_threadgroups) return false;
+        return rb > max_rb or (rb == max_rb and config.get().dense_lean5);
     }
 
-    /// the output tiles per threadgroup a call of `rows` rows in chunks of `rb` takes: `bt_set`'s, else `btLaunch`'s for
-    /// the GEMV's threadgroups at BT 1 (its output tiles, row chunks and K slices)
+    /// output tiles per threadgroup for lean chunks of `rb` rows in a launch of `tgs1` threadgroups at BT 1: `btFor`'s,
+    /// but 2 where `wideLean` holds (2 BT RB = 32 accumulators at RB 8)
+    pub fn btLaunch(rb: u32, tgs1: u32) u32 {
+        return if (wideLean(rb, tgs1)) 2 else btFor(rb);
+    }
+
+    /// the GEMV's threadgroups at BT 1 for a call of `rows` rows in chunks of `rb`: its output tiles, row chunks and K
+    /// slices
+    pub fn tgs1At(self: *const Dense, rows: usize, rb: u32) u32 {
+        const chunks: u32 = (@as(u32, @intCast(rows)) + rb - 1) / rb;
+        return (self.shape.out / 16) * chunks * self.ks_split;
+    }
+
+    /// whether the chain's call of `rows` rows in chunks of `rb` runs the lean text: with `lean`, past max_rb rows, and
+    /// at max_rb rows in a launch `wideLean` takes
+    pub fn leanAt(self: *const Dense, rows: usize, rb: u32) bool {
+        return self.lean and (rb > max_rb or (rb == max_rb and wideLean(rb, self.tgs1At(rows, rb))));
+    }
+
+    /// the output tiles per threadgroup the chain's call of `rows` rows in chunks of `rb` takes: `bt_set`'s, else
+    /// `btLaunch`'s on the lean text (`leanAt`), `btFor`'s on text_dgemv
     pub fn btAt(self: *const Dense, rows: usize, rb: u32) u32 {
         const o = self.bt_set[rows];
         if (o != 0) return o;
-        const chunks: u32 = (@as(u32, @intCast(rows)) + rb - 1) / rb;
-        return btLaunch(rb, (self.shape.out / 16) * chunks * self.ks_split);
+        return if (self.leanAt(rows, rb)) btLaunch(rb, self.tgs1At(rows, rb)) else btFor(rb);
+    }
+
+    /// DEC-ONE's output tiles per threadgroup at `rows` rows in chunks of `rb` (`rbFor`'s, text_dgemv's loop): `bt_set`'s,
+    /// else `btFor`'s
+    pub fn btDec(self: *const Dense, rows: usize, rb: u32) u32 {
+        const o = self.bt_set[rows];
+        return if (o != 0) o else btFor(rb);
     }
 
     /// Drops every built decode config (`cfg`, `dec_cfg`), so the next call of each row count builds its launches from the
@@ -391,7 +419,7 @@ pub const Dense = struct {
         const OUT: c_int = @intCast(self.shape.out);
         const t = self.templ();
         const rb: u32 = rbFor(rows_u);
-        const bt = self.btAt(rows, rb);
+        const bt = self.btDec(rows, rb);
         if (8 % bt != 0) return error.BadExl3Shape;
         const chunks: u32 = (rows_u + rb - 1) / rb;
         const ksv: c_int = @intCast(self.ks_split);
@@ -522,7 +550,7 @@ pub const Dense = struct {
             .prep = try ks.buildConfig(.{ .grid = .{ (self.shape.in / 128) * 32, @intCast(rows), 1 }, .threadgroup = .{ 32, 1, 1 }, .out_shapes = &.{ &[_]c_int{ r, IN }, &[_]c_int{ r, @intCast(self.shape.in / 128) } }, .out_dtypes = &.{ .float16, .float32 }, .template = &.{ .{ .name = "DIM", .value = .{ .int = IN } }, .{ .name = "LANE_ORDER", .value = .{ .int = 1 } } } }),
             .gemv = try ks.buildConfig(.{ .grid = .{ (self.shape.out / 16 / bt) * 128, chunks, self.ks_split }, .threadgroup = .{ 128, 1, 1 }, .out_shapes = &.{&[_]c_int{ ksv * r, OUT }}, .out_dtypes = &.{.float32}, .template = &.{ t[0], t[1], t[2], .{ .name = "IN", .value = .{ .int = IN } }, .{ .name = "OUT", .value = .{ .int = OUT } }, .{ .name = "KS", .value = .{ .int = ksv } }, .{ .name = "BT", .value = .{ .int = @intCast(bt) } }, .{ .name = "RB", .value = .{ .int = @intCast(rb) } }, .{ .name = "ROWS", .value = .{ .int = r } }, defer_t } }),
             .finish = try ks.buildConfig(.{ .grid = .{ (self.shape.out / 128) * 32, @intCast(rows), 1 }, .threadgroup = .{ 32, 1, 1 }, .out_shapes = &.{&[_]c_int{ r, OUT }}, .out_dtypes = &.{self.shape.out_dtype}, .template = &.{ .{ .name = "DIM", .value = .{ .int = OUT } }, out_t, .{ .name = "KS", .value = .{ .int = ksv } }, .{ .name = "ROWS", .value = .{ .int = r } }, .{ .name = "INBLK", .value = .{ .int = @intCast(self.shape.in / 128) } }, defer_t } }),
-            .lean = self.leanFor(rb),
+            .lean = self.leanAt(rows, rb),
         };
     }
 

@@ -16,6 +16,10 @@ const dense = @import("dense.zig");
 const decode = @import("decode.zig");
 const grouped = @import("grouped.zig");
 const ds = @import("deepseek_test.zig");
+const config = @import("config.zig");
+
+/// DeepSeek-V4.1's vocabulary: the LM head's outputs (5120 -> 129280 at the trunk's rate)
+const head_out: u32 = 129280;
 
 const testing = std.testing;
 
@@ -50,29 +54,52 @@ test "turboexl3 deepseek gemv: the grouped dense-GEMV texts are dense's GEMV sta
     }
 }
 
-test "turboexl3 deepseek gemv: lean chunks take BT 2 in launches of 2048 threadgroups or more at BT 1 (DeepSeek-V4.1's wq_b and wo_a), btFor's elsewhere" {
+test "turboexl3 deepseek gemv: lean chunks, and with dense_lean5 chunks of 5 rows, take BT 2 on the lean text in launches of 2048 threadgroups or more at BT 1 (DeepSeek-V4.1's head, wq_b and wo_a), btFor's elsewhere" {
     const D = dense.Dense;
-    for (1..9) |i| {
-        const rb: u32 = @intCast(i);
-        try testing.expectEqual(D.btFor(rb), D.btLaunch(rb, D.lean_bt2_threadgroups - 1));
-        try testing.expectEqual(if (rb > D.max_rb) @as(u32, 2) else D.btFor(rb), D.btLaunch(rb, D.lean_bt2_threadgroups));
-    }
-    // the trunk's classes at one lean chunk (rows 6 to 8): threadgroups at BT 1 = output tiles x K slices (x slices)
-    const Want = struct { c: GemvClass, tgs: u32, bt: u32 };
-    const want = [_]Want{
-        .{ .c = .wq_a, .tgs = 640, .bt = 1 },  .{ .c = .wq_b, .tgs = 2048, .bt = 2 }, .{ .c = .wkv, .tgs = 640, .bt = 1 },
-        .{ .c = .iwq_b, .tgs = 1024, .bt = 1 }, .{ .c = .wo_b, .tgs = 640, .bt = 1 },  .{ .c = .w13, .tgs = 720, .bt = 1 },
-        .{ .c = .w2, .tgs = 640, .bt = 1 },    .{ .c = .wo_a, .tgs = 8192, .bt = 2 },
-    };
-    for (want) |w| {
-        const io = classShape(w.c);
-        const tgs = if (w.c == .wo_a) (io[1] / 16) * ds.wo_a.groups * grouped.planFor(io[0], io[1]).ks else (io[1] / 16) * D.ksFor(io[0], io[1]);
-        try testing.expectEqual(w.tgs, tgs);
-        for (6..9) |rows| try testing.expectEqual(w.bt, D.btLaunch(D.rbCap(@intCast(rows), D.lean_rb), tgs));
-        if (w.c == .wo_a) for (1..17) |rows| {
-            const rb = D.rbCap(@intCast(rows), D.lean_rb);
-            try testing.expectEqual(if (rb > D.max_rb) @as(u32, 2) else D.btFor(rb), groupedBt(@intCast(rows)));
+    const saved = config.get().*;
+    defer config.configure(saved) catch unreachable;
+    for ([_]bool{ false, true }) |l5| {
+        var c = saved;
+        c.dense_lean5 = l5;
+        try config.configure(c);
+        for (1..9) |i| {
+            const rb: u32 = @intCast(i);
+            try testing.expect(!D.wideLean(rb, D.lean_bt2_threadgroups - 1));
+            try testing.expectEqual(D.btFor(rb), D.btLaunch(rb, D.lean_bt2_threadgroups - 1));
+            const wide = rb > D.max_rb or (l5 and rb == D.max_rb);
+            try testing.expectEqual(wide, D.wideLean(rb, D.lean_bt2_threadgroups));
+            try testing.expectEqual(if (wide) @as(u32, 2) else D.btFor(rb), D.btLaunch(rb, D.lean_bt2_threadgroups));
+        }
+        // the trunk's classes at one lean chunk (rows 6 to 8): threadgroups at BT 1 = output tiles x K slices (x slices)
+        const Want = struct { c: GemvClass, tgs: u32, bt: u32 };
+        const want = [_]Want{
+            .{ .c = .wq_a, .tgs = 640, .bt = 1 },  .{ .c = .wq_b, .tgs = 2048, .bt = 2 }, .{ .c = .wkv, .tgs = 640, .bt = 1 },
+            .{ .c = .iwq_b, .tgs = 1024, .bt = 1 }, .{ .c = .wo_b, .tgs = 640, .bt = 1 },  .{ .c = .w13, .tgs = 720, .bt = 1 },
+            .{ .c = .w2, .tgs = 640, .bt = 1 },    .{ .c = .wo_a, .tgs = 8192, .bt = 2 },
         };
+        for (want) |w| {
+            const io = classShape(w.c);
+            const tgs = if (w.c == .wo_a) (io[1] / 16) * ds.wo_a.groups * grouped.planFor(io[0], io[1]).ks else (io[1] / 16) * D.ksFor(io[0], io[1]);
+            try testing.expectEqual(w.tgs, tgs);
+            for (6..9) |rows| try testing.expectEqual(w.bt, D.btLaunch(D.rbCap(@intCast(rows), D.lean_rb), tgs));
+            // chunks of 5 rows (5, 9 and 10 rows): BT 2 with dense_lean5 where the launch is wide
+            for ([_]u32{ 5, 9, 10 }) |rows| {
+                const rb = D.rbCap(rows, D.lean_rb);
+                try testing.expectEqual(D.max_rb, rb);
+                const t1 = tgs * ((rows + rb - 1) / rb);
+                try testing.expectEqual(l5 and t1 >= D.lean_bt2_threadgroups, D.wideLean(rb, t1));
+            }
+            if (w.c == .wo_a) for (1..17) |rows| {
+                const rb = D.rbCap(@intCast(rows), D.lean_rb);
+                try testing.expectEqual(if (rb > D.max_rb or (l5 and rb == D.max_rb)) @as(u32, 2) else D.btFor(rb), groupedBt(@intCast(rows)));
+            };
+        }
+        // the LM head (5120 -> 129280, K split 1): 8080 threadgroups at BT 1, so 5 rows take the lean text at BT 2 with
+        // dense_lean5; 1 to 4 rows (DEC-ONE) keep btFor's
+        const head_tgs = (head_out / 16) * D.ksFor(5120, head_out);
+        try testing.expectEqual(@as(u32, 8080), head_tgs);
+        try testing.expectEqual(l5, D.wideLean(D.max_rb, head_tgs));
+        for (1..5) |rb| try testing.expect(!D.wideLean(@intCast(rb), head_tgs));
     }
 }
 
@@ -226,11 +253,14 @@ fn restoreDense(d: *dense.Dense, rows: u32, sv: DenseSaved) void {
 const decode_rows_max: usize = root.kernels.DECODE_ROWS_MAX;
 
 /// The grouped wo_a's served tiles per threadgroup at `rows` (`Grouped.denseGemvCfg`'s: `dense.Dense.btLaunch` over its
-/// threadgroups at BT 1)
+/// threadgroups at BT 1 on the lean text, `dense.Dense.btFor`'s on text_gemv_d)
 fn groupedBt(rows: u32) u32 {
-    const rb = dense.Dense.rbCap(rows, dense.Dense.lean_rb);
+    const D = dense.Dense;
+    const rb = D.rbCap(rows, D.lean_rb);
     const chunks = (rows + rb - 1) / rb;
-    return dense.Dense.btLaunch(rb, (ds.wo_a.out / 16) * chunks * ds.wo_a.groups * grouped.planFor(ds.wo_a.in, ds.wo_a.out).ks);
+    const tgs1 = (ds.wo_a.out / 16) * chunks * ds.wo_a.groups * grouped.planFor(ds.wo_a.in, ds.wo_a.out).ks;
+    const lean = rb > D.max_rb or (rb == D.max_rb and D.wideLean(rb, tgs1));
+    return if (lean) D.btLaunch(rb, tgs1) else D.btFor(rb);
 }
 
 /// The launch-shape choices tried for `class` at `rows` (the served one first): tiles per threadgroup, DEC-ONE's prepare
@@ -642,6 +672,162 @@ test "turboexl3 gpu deepseek gemv ab: the lean chunks' BT rule and window 12's t
         const amed = median(&t[0]);
         const bmed = median(&t[1]);
         std.debug.print("TURBOEXL3_DS_GEMV_AB_SUM rows={d} A={s} B={s} a_min_ms={d:.3} a_med_ms={d:.3} b_min_ms={d:.3} b_med_ms={d:.3} b_minus_a_min={d:.3} b_minus_a_med={d:.3} differing={d} {s}\n", .{ rows, @tagName(arms[0]), @tagName(arms[1]), amin, amed, bmin, bmed, bmin - amin, bmed - amed, diff, if (diff == 0) "BYTES_OK" else "BYTES_DIFFER" });
+        if (diff != 0) failed = true;
+    }
+    try testing.expect(!failed);
+}
+
+// ---- TURBOEXL3_DS_LEAN5: chunks of 5 rows on the lean text at BT 2 in wide launches (Config.dense_lean5) ----
+
+/// An arm of the lean5 A/B on the LM head: text_dgemv at BT 1 (dense_lean5 off, the launches before it), the lean text
+/// at BT 2 (dense_lean5 on), the lean text at BT 1 (dense_lean5 on, BT set to 1)
+const Lean5Arm = enum { text_bt1, lean_bt2, lean_bt1 };
+
+fn setLean5(on: bool) !void {
+    var c = config.get().*;
+    c.dense_lean5 = on;
+    try config.configure(c);
+}
+
+fn setHeadArm(hd: *dense.Dense, rows: u32, arm: Lean5Arm) !void {
+    try setLean5(arm != .text_bt1);
+    hd.bt_set[rows] = if (arm == .lean_bt1) 1 else 0;
+    hd.resetCfgs();
+}
+
+/// The trunk chain's linears under dense_lean5 `on` (their built launches dropped, so the next call builds them anew)
+fn setTrunkLean5(tc: *TrunkChain, on: bool) !void {
+    try setLean5(on);
+    for (tc.dense_of) |d| if (d) |dd| dd.resetCfgs();
+    tc.grp.resetCfgs();
+}
+
+/// `calls` LM head calls chained in one evaluation (each call's input the previous output's first 5120 columns, bf16):
+/// the min ms per call over 5 evaluations after 2, host graph build included; the last call's output (as f32) in `out`
+fn headChainMs(g: *G, s: mlx.mlx_stream, p: root.Proj, x: mlx.mlx_array, rows: u32, calls: usize, out: []f32) !f64 {
+    var best: f64 = std.math.inf(f64);
+    for (0..7) |round| {
+        const fm = g.mark();
+        defer g.resetTo(fm);
+        const t0 = ds.nowNs();
+        var h = x;
+        var y = x;
+        for (0..calls) |c| {
+            y = try g.adopt(try root.linear(s, h, p.trellis, p.suh, p.svh, .mul1));
+            if (c + 1 < calls) h = try g.astype(try g.slice(y, &.{ 0, 0 }, &.{ ds.ci(rows), 5120 }, &.{ 1, 1 }), .bfloat16);
+        }
+        try g.evalAll(&.{y});
+        const dt = ds.nowNs() - t0;
+        if (round >= 2) best = @min(best, @as(f64, @floatFromInt(dt)) / 1e6 / @as(f64, @floatFromInt(calls)));
+        if (round == 0) _ = try g.hostF32(try g.astype(y, .float32), out);
+    }
+    return best;
+}
+
+fn minOf(xs: []const f64) f64 {
+    var m: f64 = std.math.inf(f64);
+    for (xs) |v| m = @min(m, v);
+    return m;
+}
+
+// TURBOEXL3_DS_LEAN5=1 with TURBOEXL3_GPU=1: chunks of 5 rows on the lean text at BT 2 in launches of
+// `dense.Dense.lean_bt2_threadgroups` or more at BT 1 (Config.dense_lean5) against text_dgemv at BT 1, the launches before
+// it. (1) DeepSeek-V4.1's LM head (5120 -> 129280 at the trunk's rate, 8080 threadgroups at BT 1) at 5 rows, as the DSpark
+// draft runs it: 8 calls chained per evaluation, the arms A (text_dgemv, BT 1), B (lean, BT 2) and C (lean, BT 1) in the
+// order A B C C B A, 3 rounds, each run the min of 5 evaluations after 2. (2) The 40-layer trunk chain at rows 5, 9 and
+// 10 (chunks of 5 rows: wq_b and wo_a take the rule, from 9 rows the indexer's wq_b too), A (off) B (on) B A in 3 rounds.
+// Every run's output bytes against its row count's first run. Lines: TURBOEXL3_DS_LEAN5 per run, TURBOEXL3_DS_LEAN5_SUM
+// per comparison (min and median ms of each arm, B or C minus A).
+test "turboexl3 gpu deepseek gemv lean5: chunks of 5 rows on the lean text at BT 2 in wide launches against text_dgemv at BT 1, the LM head and the trunk chain (TURBOEXL3_DS_LEAN5=1)" {
+    _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    _ = std.c.getenv("TURBOEXL3_DS_LEAN5") orelse return error.SkipZigTest;
+    const s = mlx.mlx_default_gpu_stream_new();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    const a = std.heap.page_allocator;
+    var g = try G.init(a, s);
+    defer g.deinit();
+    var prng = std.Random.DefaultPrng.init(0xD5C4A5);
+    const rnd = prng.random();
+    const saved_cfg = config.get().*;
+    defer config.configure(saved_cfg) catch {};
+    var failed = false;
+    {
+        const hm = g.mark();
+        defer g.resetTo(hm);
+        var hh = try ds.HostProj.draw(a, rnd, null, 5120, head_out, ds.N);
+        const head = hh.upload(&g) catch |e| {
+            hh.deinit(a);
+            return e;
+        };
+        hh.deinit(a);
+        const hd = try root.denseCached(denseShape(5120, head_out));
+        defer {
+            hd.bt_set[5] = 0;
+            hd.resetCfgs();
+        }
+        const rows: u32 = 5;
+        const x = try ds.randBf16(a, &g, rnd, &.{ ds.ci(rows), 5120 });
+        const want = try a.alloc(f32, rows * head_out);
+        defer a.free(want);
+        const got = try a.alloc(f32, rows * head_out);
+        defer a.free(got);
+        var t: [3][6]f64 = undefined;
+        var n: [3]usize = @splat(0);
+        var diff: usize = 0;
+        var first = true;
+        for (0..3) |round| for ([_]Lean5Arm{ .text_bt1, .lean_bt2, .lean_bt1, .lean_bt1, .lean_bt2, .text_bt1 }, 0..) |arm, pos| {
+            try setHeadArm(hd, rows, arm);
+            const cfg = try hd.cfgs(rows);
+            const ms = try headChainMs(&g, s, head, x, rows, 8, if (first) want else got);
+            const d = if (first) 0 else bytesDiffer(got, want);
+            first = false;
+            diff += d;
+            const ai = @intFromEnum(arm);
+            t[ai][n[ai]] = ms;
+            n[ai] += 1;
+            std.debug.print("TURBOEXL3_DS_LEAN5 head rows={d} round={d} pos={d} arm={s} lean={} bt={d} ms_per_call={d:.4} differing={d}\n", .{ rows, round, pos, @tagName(arm), cfg.lean, hd.btAt(rows, hd.chainRb(rows)), ms, d });
+        };
+        const amin = minOf(&t[0]);
+        const amed = median(&t[0]);
+        for ([_]Lean5Arm{ .lean_bt2, .lean_bt1 }) |arm| {
+            const ai = @intFromEnum(arm);
+            const bmin = minOf(&t[ai]);
+            const bmed = median(&t[ai]);
+            std.debug.print("TURBOEXL3_DS_LEAN5_SUM head rows={d} A=text_bt1 B={s} a_min_ms={d:.4} a_med_ms={d:.4} b_min_ms={d:.4} b_med_ms={d:.4} b_minus_a_min={d:.4} b_minus_a_med={d:.4} differing={d} {s}\n", .{ rows, @tagName(arm), amin, amed, bmin, bmed, bmin - amin, bmed - amed, diff, if (diff == 0) "BYTES_OK" else "BYTES_DIFFER" });
+        }
+        if (diff != 0) failed = true;
+    }
+    const tc = try a.create(TrunkChain);
+    defer a.destroy(tc);
+    tc.* = try TrunkChain.init(a, &g, rnd);
+    defer setTrunkLean5(tc, saved_cfg.dense_lean5) catch {};
+    for ([_]u32{ 5, 9, 10 }) |rows| {
+        const rm = g.mark();
+        defer g.resetTo(rm);
+        const x = try ds.randBf16(a, &g, rnd, &.{ ds.ci(rows), 5120 });
+        const want = try a.alloc(f32, rows * 5120);
+        defer a.free(want);
+        const got = try a.alloc(f32, rows * 5120);
+        defer a.free(got);
+        var t: [2][6]f64 = undefined;
+        var n: [2]usize = .{ 0, 0 };
+        var diff: usize = 0;
+        var first = true;
+        for (0..3) |round| for ([_]u1{ 0, 1, 1, 0 }, 0..) |ai, pos| {
+            try setTrunkLean5(tc, ai == 1);
+            const ms = try trunkMin(&g, s, &tc.layers, x, rows, if (first) want else got);
+            const d = if (first) 0 else bytesDiffer(got, want);
+            first = false;
+            diff += d;
+            t[ai][n[ai]] = ms;
+            n[ai] += 1;
+            std.debug.print("TURBOEXL3_DS_LEAN5 trunk rows={d} round={d} pos={d} arm={s} chain_ms={d:.3} differing={d}\n", .{ rows, round, pos, if (ai == 0) "A:off" else "B:lean5", ms, d });
+        };
+        const amin = minOf(&t[0]);
+        const bmin = minOf(&t[1]);
+        const amed = median(&t[0]);
+        const bmed = median(&t[1]);
+        std.debug.print("TURBOEXL3_DS_LEAN5_SUM trunk rows={d} A=off B=lean5 a_min_ms={d:.3} a_med_ms={d:.3} b_min_ms={d:.3} b_med_ms={d:.3} b_minus_a_min={d:.3} b_minus_a_med={d:.3} differing={d} {s}\n", .{ rows, amin, amed, bmin, bmed, bmin - amin, bmed - amed, diff, if (diff == 0) "BYTES_OK" else "BYTES_DIFFER" });
         if (diff != 0) failed = true;
     }
     try testing.expect(!failed);

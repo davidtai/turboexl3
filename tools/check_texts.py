@@ -1091,10 +1091,15 @@ ADDED_KERNELS[('grouped.zig', 'turboexl3_grouped_gemv_dl')] = 'the same on dense
 for _key in ('const gemv_d_in', 'const gemv_d_out'):
     ADDED[('grouped.zig', _key)] = 'the dense-GEMV launch\'s operand names'
 CHANGED[('grouped.zig', 'const Grouped')] = ('dense_gemv (step 2 on text_gemv_d, the default; the routed GEMV the tests\' arm), '
-                                           'bt_set (its tiles per threadgroup), resetCfgs')
+                                           'bt_set (its tiles per threadgroup), resetCfgs; chunks of 5 rows on the lean text '
+                                           'at BT 2 where dense.Dense.wideLean takes the launch')
 CHANGED[('dense.zig', 'const Dense')] = ('bt_set / btAt: the GEMV\'s tiles per threadgroup per decode row count (launch shape '
                                        'only), btLaunch (BT 2 on lean chunks in launches of 2048 threadgroups or more at '
-                                       'BT 1, btFor\'s elsewhere), resetCfgs')
+                                       'BT 1, btFor\'s elsewhere), resetCfgs; wideLean / leanAt (with Config.dense_lean5, '
+                                       'chunks of 5 rows in such launches on the lean text at BT 2), btDec (DEC-ONE\'s '
+                                       'tiles: bt_set\'s or btFor\'s, as before)')
+CHANGED[('config.zig', 'const Config')] = ('dense_lean5: chunks of 5 rows in GEMV launches of 2048 threadgroups or more at BT 1 '
+                                         'on the lean text at BT 2 (launch shape only)')
 ADDED[('root.zig', 'fn denseCached')] = 'test seam: the Dense linear runs a shape on, to set its launch shape'
 ADDED[('root.zig', 'fn groupedCached')] = 'test seam: the Grouped linearGrouped runs a shape on, to set its launch'
 ADDED_FILES['deepseek_gemv_test.zig'] = ('the grouped dense GEMV\'s texts (CPU) and its bytes against the routed GEMV, and the '

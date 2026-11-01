@@ -32,6 +32,10 @@ pub const Config = struct {
     /// The row chunks of the dense decode GEMV chain: at most 8 rows, a chunk of 6 to 8 rows on the lean GEMV text (its
     /// codeword loop by input element); false keeps chunks of at most 5 rows, all on the plain GEMV text. The same bytes.
     dense_lean: bool = true,
+    /// Chunks of 5 rows in a GEMV launch of `dense.Dense.lean_bt2_threadgroups` or more at BT 1 on the lean text at BT 2
+    /// (`dense.Dense.wideLean`: DeepSeek-V4.1's LM head, wq_b and wo_a at 5, 9 and 10 rows); false keeps them on
+    /// text_dgemv at BT 1. The same bytes.
+    dense_lean5: bool = true,
     /// A diagnostic: each routed decode call's routing read back (a sync per call), its expert multiplicities printed
     /// every 480 calls.
     slot_stats: bool = false,
