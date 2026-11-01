@@ -1050,3 +1050,64 @@ test "HIP routed bank, experts' trellises apart: the bytes of the contiguous ban
     }
     std.debug.print("RESULT HIP routed bank, trellises apart: {d} calls (decode forms 3 and 9, prefill; both profiles) byte-identical to the contiguous bank; contiguous digest 0x{x:0>16}\n", .{ compared, digest });
 }
+
+test "HIP routed experts, shared input (one rotation a row): the bytes of a rotation a slot in decode forms 3 and 9 and prefill, both profiles" {
+    var h = try rt.Hip.open();
+    defer h.close();
+    var g = try Groups.load(&h);
+    defer g.unload();
+    var prng = std.Random.DefaultPrng.init(0x5A7);
+    const rnd = prng.random();
+    const Case = struct { c: DecodeCase, profile: plan.Profile };
+    const cases = [_]Case{
+        .{ .c = .{ .hidden = 512, .inter = 256, .experts = 12, .topk = 4, .n = 64, .dec = .mcg, .dtype = .f32, .defer_map = false }, .profile = .exl3 },
+        .{ .c = .{ .hidden = 512, .inter = 256, .experts = 12, .topk = 4, .n = 64, .dec = .mul1, .dtype = .f32, .defer_map = true }, .profile = .exl3 },
+        .{ .c = .{ .hidden = 2560, .inter = 640, .experts = 16, .topk = 10, .n = 48, .dec = .mul1, .dtype = .bf16, .defer_map = true }, .profile = .exl3 },
+        .{ .c = .{ .hidden = 4096, .inter = 2048, .experts = 9, .topk = 9, .n = 64, .dec = .mcg, .dtype = .bf16, .defer_map = false }, .profile = .glm },
+    };
+    var compared: usize = 0;
+    for (cases) |cs| {
+        const c = cs.c;
+        const rate = format.Rate.fromN(c.n).?;
+        var bank = try ref.synthBank(gpa, rnd, c.experts, c.hidden, c.inter, rate);
+        defer bank.deinit(gpa);
+        // a checkpoint's shared input: expert 0's gate and up suh for every expert
+        for (1..c.experts) |e| {
+            @memcpy(bank.gate_suh[e * c.hidden ..][0..c.hidden], bank.gate_suh[0..c.hidden]);
+            @memcpy(bank.up_suh[e * c.hidden ..][0..c.hidden], bank.up_suh[0..c.hidden]);
+        }
+        var dbank = try DevBank.init(&h, &bank);
+        defer dbank.deinit();
+        const max_rows = 40;
+        var x = try Input.init(rnd, max_rows * c.hidden, c.dtype);
+        defer x.deinit();
+        const glm = cs.profile == .glm;
+        const rt_ = try routing(rnd, max_rows, if (glm) c.topk - 1 else c.topk, c.experts, glm);
+        defer gpa.free(rt_.slots);
+        defer gpa.free(rt_.scores);
+        const limit: f32 = if (glm) 7.0 else 0;
+        for ([_]u32{ 1, 4, 16 }) |rows| {
+            for ([_]u8{ 3, 9 }) |form| {
+                var d: plan.Decode = .{ .hidden = c.hidden, .inter = c.inter, .topk = c.topk, .rows = rows, .experts = c.experts, .rate = rate, .dec = c.dec, .dtype = c.dtype, .defer_map = c.defer_map, .profile = cs.profile, .limit = limit };
+                const ys = try decodeRunForm(&h, &g, &dbank, x, rt_.slots, rt_.scores, 0, d, form);
+                defer gpa.free(ys);
+                d.shared_input = true;
+                const yr = try decodeRunForm(&h, &g, &dbank, x, rt_.slots, rt_.scores, 0, d, form);
+                defer gpa.free(yr);
+                try expect(std.mem.eql(u8, ys, yr), "shared input {d}x{d} {s} form {d} rows {d}: bytes differ from a rotation a slot", .{ c.hidden, c.inter, @tagName(cs.profile), form, rows });
+                compared += 1;
+            }
+        }
+        for ([_]u32{ 17, 40 }) |rows| {
+            var d: plan.Prefill = .{ .hidden = c.hidden, .inter = c.inter, .topk = c.topk, .rows = rows, .experts = c.experts, .rate = rate, .dec = c.dec, .dtype = c.dtype, .defer_map = c.defer_map, .profile = cs.profile, .limit = limit };
+            const ys = try prefillRun(&h, &g, &dbank, x, rt_.slots, rt_.scores, 0, d);
+            defer gpa.free(ys);
+            d.shared_input = true;
+            const yr = try prefillRun(&h, &g, &dbank, x, rt_.slots, rt_.scores, 0, d);
+            defer gpa.free(yr);
+            try expect(std.mem.eql(u8, ys, yr), "shared input {d}x{d} {s} prefill rows {d}: bytes differ from a rotation a slot", .{ c.hidden, c.inter, @tagName(cs.profile), rows });
+            compared += 1;
+        }
+    }
+    std.debug.print("RESULT HIP routed experts, shared input: {d} calls (decode forms 3 and 9, prefill; both profiles) byte-identical to a rotation a slot\n", .{compared});
+}

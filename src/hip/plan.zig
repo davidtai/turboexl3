@@ -238,6 +238,9 @@ pub const Decode = struct {
     limit: f32 = 0,
     /// the partitions' first K split (decode.zig Kernels3.init's ks_max; served 4)
     ks_max: u32 = 4,
+    /// every routed expert's gate_suh is the same, and every up_suh (a checkpoint's shared input): the inputs rotate
+    /// once a row with expert 0's suh, not once a row-slot. The bytes are the same.
+    shared_input: bool = false,
 
     pub fn check(d: Decode) error{BadExl3Shape}!void {
         if (d.hidden == 0 or d.inter == 0 or d.hidden % 128 != 0 or d.inter % 128 != 0) return error.BadExl3Shape;
@@ -301,19 +304,23 @@ pub fn decodeForm3(d: Decode) error{BadExl3Shape}![5]Launch {
         .f32 => "t3_dec_prep2_exl3_f32",
         .f16 => "t3_dec_prep2_exl3_f16",
         .bf16 => "t3_dec_prep2_exl3_bf16",
-    }, .group = "decode", .grid = .{ d.hidden / 128, rkn, 1 }, .block = 32 };
+    }, .group = "decode", .grid = .{ d.hidden / 128, if (d.shared_input) d.rows else rkn, 1 }, .block = 32 };
     for ([_]Role{ .x, .slots, .gate_suh, .up_suh, .xg, .xu, .sg, .su }) |r| prep.add(.{ .buf = r });
     prep.add(.{ .u = d.hidden });
     prep.add(.{ .u = d.topk });
     prep.add(.{ .u = d.experts });
+    prep.add(.{ .i = @intFromBool(d.shared_input) });
+    // the readers' row of a slot's input: 0 the slot's own, topk its row's
+    const xdiv: u32 = if (d.shared_input) d.topk else 0;
     var gu: Launch = .{ .symbol = gemvName("gu3", d.dec, d.defer_map), .group = "decode", .grid = .{ d.inter / 16 / kBT, rkn, d.ksGu() }, .block = 128 };
     for ([_]Role{ .xg, .xu, .slots, .gate_t, .up_t, .zg, .zu }) |r| gu.add(.{ .buf = r });
-    for ([_]u32{ d.hidden, d.inter, rkn, d.experts, d.rate.n, d.dec.window.mask() }) |v| gu.add(.{ .u = v });
+    for ([_]u32{ d.hidden, d.inter, rkn, d.experts, d.rate.n, d.dec.window.mask(), xdiv }) |v| gu.add(.{ .u = v });
     var fin: Launch = .{ .symbol = if (glm) "t3_dec_fin3_glm" else "t3_dec_fin3_exl3", .group = "decode", .grid = .{ d.inter / 128, rkn, 1 }, .block = 128 };
     for ([_]Role{ .zg, .zu, .slots, .gate_svh, .up_svh, .down_suh, .sg, .su, .hd, .hs }) |r| fin.add(.{ .buf = r });
     for ([_]u32{ d.hidden, d.inter, rkn, d.ksGu(), d.experts }) |v| fin.add(.{ .u = v });
     fin.add(.{ .i = @intFromBool(d.defer_map) });
     fin.add(.{ .f = d.limit });
+    fin.add(.{ .u = xdiv });
     var down: Launch = .{ .symbol = gemvName("down3", d.dec, d.defer_map), .group = "decode", .grid = .{ d.hidden / 16 / kBT, rkn, d.ksDn() }, .block = 128 };
     for ([_]Role{ .hd, .slots, .down_t, .zd }) |r| down.add(.{ .buf = r });
     for ([_]u32{ d.hidden, d.inter, rkn, d.experts, d.rate.n, d.dec.window.mask() }) |v| down.add(.{ .u = v });
@@ -351,6 +358,7 @@ pub fn decodeForm9(d: Decode) error{BadExl3Shape}!struct { launches: [5]Launch, 
     };
     dfin7.block = 32 * d.topk;
     if (!gu8Admitted(d)) return .{ .launches = .{ f3[0], f3[1], fin7, f3[3], dfin7 }, .len = 5 };
+    fin7.args[fin7.nargs - 1] = .{ .u = 0 }; // gu8 rotates each slot's input in LDS and stores its sums a slot
     const names = [4][3][:0]const u8{
         .{ "t3_dec_gu8_exl3_f32_mcg", "t3_dec_gu8_exl3_f32_mul1", "t3_dec_gu8_exl3_f32_mul1d" },
         .{ "t3_dec_gu8_exl3_f16_mcg", "t3_dec_gu8_exl3_f16_mul1", "t3_dec_gu8_exl3_f16_mul1d" },
@@ -399,6 +407,9 @@ pub const Prefill = struct {
     defer_map: bool,
     profile: Profile = .exl3,
     limit: f32 = 0,
+    /// every routed expert's gate_suh is the same, and every up_suh (a checkpoint's shared input): the inputs rotate
+    /// once a row with expert 0's suh, not once a row-slot. The bytes are the same.
+    shared_input: bool = false,
 
     pub fn check(d: Prefill) error{BadExl3Shape}!void {
         if (d.hidden == 0 or d.inter == 0 or d.hidden % 128 != 0 or d.inter % 128 != 0) return error.BadExl3Shape;
@@ -453,21 +464,29 @@ pub fn prefillChain(d: Prefill) error{BadExl3Shape}![6]Launch {
         .f32 => "t3_pf_prep_exl3_f32",
         .f16 => "t3_pf_prep_exl3_f16",
         .bf16 => "t3_pf_prep_exl3_bf16",
-    }, .group = "prefill", .grid = .{ d.hidden / 128, p, 1 }, .block = 32 };
+    }, .group = "prefill", .grid = .{ d.hidden / 128, if (d.shared_input) d.rows else p, 1 }, .block = 32 };
     for ([_]Role{ .x, .order, .slots, .counts, .gate_suh, .up_suh, .xg, .xu, .sg, .su }) |r| prep.add(.{ .buf = r });
     prep.add(.{ .u = d.hidden });
     prep.add(.{ .u = d.topk });
+    prep.add(.{ .i = @intFromBool(d.shared_input) });
+    // the GEMM's and mid's row of a position's input: 0 the position's own, topk its row's (order[p] / topk)
+    const xdiv: u32 = if (d.shared_input) d.topk else 0;
     var gu: Launch = .{ .symbol = gemmName(d.dec, d.defer_map, true), .group = "prefill", .grid = .{ d.inter / 128, d.cap(), 2 }, .block = 256 };
     for ([_]Role{ .xg, .xu, .gate_t, .up_t, .items, .zg }) |r| gu.add(.{ .buf = r });
     for ([_]u32{ d.hidden, d.inter, p, d.rate.n, d.dec.window.mask() }) |v| gu.add(.{ .u = v });
+    gu.add(.{ .buf = .order });
+    gu.add(.{ .u = xdiv });
     var mid: Launch = .{ .symbol = if (glm) "t3_pf_mid_glm" else "t3_pf_mid_exl3", .group = "prefill", .grid = .{ d.inter / 128, p, 1 }, .block = 128 };
     for ([_]Role{ .zg, .order, .slots, .counts, .gate_svh, .up_svh, .down_suh, .sg, .su, .hd, .hs }) |r| mid.add(.{ .buf = r });
     for ([_]u32{ d.hidden, d.inter, p }) |v| mid.add(.{ .u = v });
     mid.add(.{ .i = @intFromBool(d.defer_map) });
     mid.add(.{ .f = d.limit });
+    mid.add(.{ .u = xdiv });
     var down: Launch = .{ .symbol = gemmName(d.dec, d.defer_map, true), .group = "prefill", .grid = .{ d.hidden / 128, d.cap(), 1 }, .block = 256 };
     for ([_]Role{ .hd, .hd, .down_t, .down_t, .items, .zd }) |r| down.add(.{ .buf = r });
     for ([_]u32{ d.inter, d.hidden, p, d.rate.n, d.dec.window.mask() }) |v| down.add(.{ .u = v });
+    down.add(.{ .buf = .order });
+    down.add(.{ .u = 0 }); // hd is a position's own
     var fin: Launch = .{ .symbol = if (glm) "t3_pf_fin_glm_f32" else switch (d.dtype) {
         .f32 => "t3_pf_fin_exl3_f32",
         .f16 => "t3_pf_fin_exl3_f16",
@@ -491,6 +510,8 @@ pub fn denseGemm(d: Dense) error{BadExl3Shape}![3]Launch {
     var gemm: Launch = .{ .symbol = gemmName(d.dec, d.defer_map, false), .group = "prefill", .grid = .{ d.out / 128, denseTiles(d.rows), 1 }, .block = 256 };
     for ([_]Role{ .xp, .xp, .trellis, .trellis, .items, .z }) |r| gemm.add(.{ .buf = r });
     for ([_]u32{ d.in, d.out, d.rows, d.rate.n, d.dec.window.mask() }) |v| gemm.add(.{ .u = v });
+    gemm.add(.{ .buf = .order }); // unread at xdiv 0
+    gemm.add(.{ .u = 0 });
     var fin = chain[2];
     fin.grid = .{ d.out / 128, d.rows, 1 };
     fin.args[5] = .{ .u = d.rows };

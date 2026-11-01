@@ -71,16 +71,22 @@ __device__ void route_kernel(const int* slots, uint32_t rk_count, uint32_t exper
 }
 
 // Grid (hidden / 128, positions), 32 threads: each sorted position's gate and up inputs (natural order: the GEMM's A),
-// xg / xu f16 [P][hidden], and their 128-block sums. Positions past counts[1] are skipped.
+// xg / xu f16 [P][hidden], and their 128-block sums. Positions past counts[1] are skipped. With `shared` (every routed
+// expert's gate suh the same, and every up suh: a checkpoint's shared input), grid (hidden / 128, rows): each row's
+// inputs once, with expert 0's suh, xg / xu [rows][hidden]; the GEMM and mid read row order[p] / topk (their `xdiv`).
 template <int DT, int PROF>
 __device__ void prep(const void* x, const int* order, const int* slots, const int* counts, const uint16_t* gate_suh,
                      const uint16_t* up_suh, uint16_t* xg, uint16_t* xu, float* sg, float* su, uint32_t hidden,
-                     uint32_t topk) {
-    const uint32_t b = blockIdx.x, p = blockIdx.y, lane = threadIdx.x;
-    if (p >= static_cast<uint32_t>(counts[1])) return;
-    const uint32_t rk = static_cast<uint32_t>(order[p]);
-    const size_t e = static_cast<size_t>(slots[rk]);
-    const uint32_t row = rk / topk;
+                     uint32_t topk, int shared) {
+    const uint32_t b = blockIdx.x, p = blockIdx.y, lane = threadIdx.x;  // p: a sorted position, or a row (shared)
+    size_t e = 0;
+    uint32_t row = p;
+    if (!shared) {
+        if (p >= static_cast<uint32_t>(counts[1])) return;
+        const uint32_t rk = static_cast<uint32_t>(order[p]);
+        e = static_cast<size_t>(slots[rk]);
+        row = rk / topk;
+    }
     float vg[4], vu[4];
 #pragma unroll
     for (uint32_t j = 0; j < 4u; ++j) {
@@ -122,9 +128,11 @@ typedef float f8v __attribute__((ext_vector_type(8)));
 // tile of at most 64 positions) and one 128-column block: z[(mat P + p) N + column] = X[p] W_q for the item's
 // positions p (f32; MUL1's t under the deferred map). Weights: TABLE 1 (the routed bank), W0 and W1 are u64 [E] tables
 // of each expert's trellis address (routed.hpp expert_trellis); TABLE 0 (a dense matrix, item expert 0), the trellis.
+// X's row of position p: p (xdiv 0), or order[p] / xdiv (prep's `shared`).
 template <int CB, int DEFER, int TABLE>
 __device__ void gemm(const uint16_t* X0, const uint16_t* X1, const void* W0, const void* W1, const int* items,
-                     float* z, uint32_t k, uint32_t n_out, uint32_t positions, uint32_t n, uint32_t mask) {
+                     float* z, uint32_t k, uint32_t n_out, uint32_t positions, uint32_t n, uint32_t mask,
+                     const int* order, uint32_t xdiv) {
 #if defined(__gfx1100__) || defined(__gfx1101__) || defined(__gfx1102__) || defined(__gfx1103__) || \
     defined(__gfx1150__) || defined(__gfx1151__) || defined(__gfx1152__) || defined(__gfx1153__)
     const uint32_t nb = blockIdx.x, it = blockIdx.y, mat = blockIdx.z;
@@ -147,7 +155,9 @@ __device__ void gemm(const uint16_t* X0, const uint16_t* X1, const void* W0, con
     for (uint32_t h0 = 0; h0 < count; h0 += kBM) {
         const uint32_t rows = count - h0 < kBM ? count - h0 : kBM;
         const bool alive = arow < rows;
-        const uint16_t* xa = X + (alive ? static_cast<size_t>(first + h0 + arow) * k : 0) + akc * 8u;
+        const uint32_t pa = first + h0 + arow;
+        const size_t xi = !alive ? 0u : xdiv ? static_cast<uint32_t>(order[pa]) / xdiv : pa;
+        const uint16_t* xa = X + xi * k + akc * 8u;
         uint4 ra;
         LaneWords rb[2];
         auto gload = [&](uint32_t s) {
@@ -218,21 +228,24 @@ __device__ void gemm(const uint16_t* X0, const uint16_t* X1, const void* W0, con
 }
 
 // Grid (inter / 128, positions), 128 threads: each sorted position's gate and up finish, SwiGLU and the down's prepare
-// (natural order: the down GEMM's A), with its block sums.
+// (natural order: the down GEMM's A), with its block sums. The input's block sums xsg / xsu: position p (xdiv 0), or
+// row order[p] / xdiv (prep's `shared`).
 template <int PROF>
 __device__ void mid(const float* z, const int* order, const int* slots, const int* counts, const uint16_t* gate_svh,
                     const uint16_t* up_svh, const uint16_t* down_suh, const float* xsg, const float* xsu, uint16_t* hd,
-                    float* hs, uint32_t hidden, uint32_t inter, uint32_t positions, int defer, float limit) {
+                    float* hs, uint32_t hidden, uint32_t inter, uint32_t positions, int defer, float limit,
+                    uint32_t xdiv) {
     __shared__ float xch[128];
     const uint32_t blk = blockIdx.x, p = blockIdx.y, tid = threadIdx.x;
     if (p >= static_cast<uint32_t>(counts[1])) return;
     const size_t e = static_cast<size_t>(slots[order[p]]);
     const uint32_t nb = hidden / 128u;
+    const size_t xr = xdiv ? static_cast<uint32_t>(order[p]) / xdiv : p;
     float sgx = 0.0f, sux = 0.0f;
     if (defer)
         for (uint32_t q = 0; q < nb; ++q) {
-            sgx += xsg[static_cast<size_t>(p) * nb + q];
-            sux += xsu[static_cast<size_t>(p) * nb + q];
+            sgx += xsg[xr * nb + q];
+            sux += xsu[xr * nb + q];
         }
     // the gate's z at plane 0, the up's at plane 1 (the GEMM's mat), one slice each
     finish_gate_up<PROF>(z, z + static_cast<size_t>(positions) * inter, p, positions, 1u, e, gate_svh, up_svh, down_suh,
@@ -276,8 +289,9 @@ extern "C" __global__ void __launch_bounds__(kRouteThreads) t3_pf_route(const in
 #define T3_PF_PREP(PNAME, PROF, DNAME, DT)                                                                           \
     extern "C" __global__ void __launch_bounds__(32) t3_pf_prep_##PNAME##_##DNAME(                                  \
         const void* x, const int* order, const int* slots, const int* counts, const uint16_t* gate_suh,              \
-        const uint16_t* up_suh, uint16_t* xg, uint16_t* xu, float* sg, float* su, uint32_t hidden, uint32_t topk) {  \
-        prep<DT, PROF>(x, order, slots, counts, gate_suh, up_suh, xg, xu, sg, su, hidden, topk);                    \
+        const uint16_t* up_suh, uint16_t* xg, uint16_t* xu, float* sg, float* su, uint32_t hidden, uint32_t topk,    \
+        int shared) {                                                                                                \
+        prep<DT, PROF>(x, order, slots, counts, gate_suh, up_suh, xg, xu, sg, su, hidden, topk, shared);             \
     }
 T3_PF_PREP(exl3, 0, f32, kF32)
 T3_PF_PREP(exl3, 0, f16, kF16)
@@ -289,8 +303,8 @@ T3_PF_PREP(glm, 1, bf16, kBf16)
 #define T3_PF_GEMM(KIND, TABLE, WT, NAME, CB, DEFER)                                                                 \
     extern "C" __global__ void __launch_bounds__(256) t3_pf_##KIND##_##NAME(                                         \
         const uint16_t* X0, const uint16_t* X1, const WT* W0, const WT* W1, const int* items, float* z, uint32_t k,  \
-        uint32_t n_out, uint32_t positions, uint32_t n, uint32_t mask) {                                             \
-        gemm<CB, DEFER, TABLE>(X0, X1, W0, W1, items, z, k, n_out, positions, n, mask);                              \
+        uint32_t n_out, uint32_t positions, uint32_t n, uint32_t mask, const int* order, uint32_t xdiv) {            \
+        gemm<CB, DEFER, TABLE>(X0, X1, W0, W1, items, z, k, n_out, positions, n, mask, order, xdiv);                 \
     }
 T3_PF_GEMM(gemm, 1, uint64_t, mcg, kMcg, 0)
 T3_PF_GEMM(gemm, 1, uint64_t, mul1, kMul1, 0)
@@ -304,9 +318,9 @@ T3_PF_GEMM(dgemm, 0, uint32_t, mul1d, kMul1, 1)
     extern "C" __global__ void __launch_bounds__(128) t3_pf_mid_##PNAME(                                            \
         const float* z, const int* order, const int* slots, const int* counts, const uint16_t* gate_svh,             \
         const uint16_t* up_svh, const uint16_t* down_suh, const float* xsg, const float* xsu, uint16_t* hd,          \
-        float* hs, uint32_t hidden, uint32_t inter, uint32_t positions, int defer, float limit) {                    \
+        float* hs, uint32_t hidden, uint32_t inter, uint32_t positions, int defer, float limit, uint32_t xdiv) {     \
         mid<PROF>(z, order, slots, counts, gate_svh, up_svh, down_suh, xsg, xsu, hd, hs, hidden, inter, positions,   \
-                  defer, limit);                                                                                     \
+                  defer, limit, xdiv);                                                                               \
     }
 T3_PF_MID(exl3, 0)
 T3_PF_MID(glm, 1)
