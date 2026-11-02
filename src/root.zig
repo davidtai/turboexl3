@@ -7,8 +7,10 @@
 //! Status: `moe` serves decode rows (<= DECODE_ROWS_MAX) through the form `Config.decode_form` names: forms 3, 7, 8 and 9
 //! run form 3's split-K chain (`decode.Kernels3`; 9, the default, in four or five launches), forms 5 and 6 the same bytes
 //! in three or two launches with expert-grouped row-slots (`decode.Kernels5`); prefill rows run the fused GEMM chain
-//! (`prefill.zig`). The clamped (GLM) form still refuses `error.Exl3EngineNotImplemented`. A consumer's choices are one
-//! `Config` (`configure`); the library reads no environment.
+//! (`prefill.zig`). `moeClamped` (DeepSeek-V4's and GLM's clamped SwiGLU) runs the same chains with the clamp in fin7's
+//! and the prefill mid's variants; `moeClampedBanked` runs its decode launches over an expert streamer's three slot banks,
+//! each row-slot one routed pair at weight 1. A consumer's choices are one `Config` (`configure`); the library reads no
+//! environment.
 const std = @import("std");
 /// A module global, the host's `Shared` where the consumer's `sdk` brings one (`global.zig`).
 pub const Global = @import("global.zig").Global;
@@ -23,11 +25,15 @@ pub const decode = @import("decode.zig");
 pub const ref = @import("ref.zig");
 pub const unfused = @import("unfused.zig");
 pub const dense = @import("dense.zig");
+/// pg2: a dense linear's prefill matmul and finish as one launch at this machine's tiles (pgemm.zig); the host sets `pgemm.mode`.
+pub const pgemm = @import("pgemm.zig");
 pub const prefill = @import("prefill.zig");
 /// The kernel texts a consumer may splice into its own Metal (MLX-free; `sources.zig`).
 pub const sources = @import("sources.zig");
 /// The GDN layer's tail in one launch (`gdnOutPrep`).
 pub const gdn_out = @import("gdn_out.zig");
+/// The grouped linear's decode rows (`linearGrouped`).
+pub const grouped = @import("grouped.zig");
 
 pub const Spec = spec.Spec;
 pub const parseExpertQuant = spec.parseExpertQuant;
@@ -57,23 +63,34 @@ pub const Geometry = struct {
 
 /// A projection's shapes and dtypes against the geometry: the refusals Sushi's loader makes, by the same names.
 pub fn validateClampedProjection(p: Proj, experts: c_int, input: c_int, output: c_int) !void {
+    return validateProjectionAs(p, experts, input, output, .uint16);
+}
+
+/// `validateClampedProjection` with the trellis in `trellis_dtype` (the banked decode also takes an expert streamer's I16
+/// code arrays: the kernels read the trellis words, whatever their sign).
+fn validateProjectionAs(p: Proj, experts: c_int, input: c_int, output: c_int, trellis_dtype: mlx.mlx_dtype) !void {
     const sh = mlx.getShape(p.trellis);
     if (input <= 0 or output <= 0 or @mod(input, 128) != 0 or @mod(output, 128) != 0 or
         sh.len != 4 or sh[0] != experts or sh[1] != @divExact(input, 16) or sh[2] != @divExact(output, 16) or sh[3] < 0 or
         format.kFromPackedDim(@intCast(sh[3])) == null or
         !std.mem.eql(c_int, &.{ experts, input }, mlx.getShape(p.suh)) or
         !std.mem.eql(c_int, &.{ experts, output }, mlx.getShape(p.svh))) return error.BadExl3Shape;
-    if (mlx.mlx_array_dtype(p.trellis) != .uint16 or mlx.mlx_array_dtype(p.suh) != .float16 or mlx.mlx_array_dtype(p.svh) != .float16) return error.BadExl3Dtype;
+    if (mlx.mlx_array_dtype(p.trellis) != trellis_dtype or mlx.mlx_array_dtype(p.suh) != .float16 or mlx.mlx_array_dtype(p.svh) != .float16) return error.BadExl3Dtype;
 }
 
 /// The bank's geometry from its shapes, every projection validated; gate and up must share a rate.
 pub fn bankGeometry(bank: Bank, hidden: c_int) !Geometry {
+    return bankGeometryAs(bank, hidden, .uint16);
+}
+
+/// `bankGeometry` with every trellis in `trellis_dtype` (`validateProjectionAs`).
+fn bankGeometryAs(bank: Bank, hidden: c_int, trellis_dtype: mlx.mlx_dtype) !Geometry {
     const gs = mlx.getShape(bank.gate.trellis);
     if (gs.len != 4 or gs[0] <= 0 or gs[2] <= 0 or gs[2] > std.math.maxInt(c_int) / 16) return error.BadExl3Shape;
     const width = gs[2] * 16;
-    try validateClampedProjection(bank.gate, gs[0], hidden, width);
-    try validateClampedProjection(bank.up, gs[0], hidden, width);
-    try validateClampedProjection(bank.down, gs[0], width, hidden);
+    try validateProjectionAs(bank.gate, gs[0], hidden, width, trellis_dtype);
+    try validateProjectionAs(bank.up, gs[0], hidden, width, trellis_dtype);
+    try validateProjectionAs(bank.down, gs[0], width, hidden, trellis_dtype);
     const us = mlx.getShape(bank.up.trellis);
     if (us[3] != gs[3]) return error.Exl3GateUpRateMismatch;
     const ds = mlx.getShape(bank.down.trellis);
@@ -114,7 +131,7 @@ fn kernelsFor(geo: decode.Geometry, out_dtype: mlx.mlx_dtype) !*decode.Kernels3 
         if (slot.*) |*k| {
             const g = k.geo;
             if (g.hidden == geo.hidden and g.inter == geo.inter and g.topk == geo.topk and g.rate.n == geo.rate.n and
-                g.dec.codebook == geo.dec.codebook and g.dec.window == geo.dec.window and k.out_dtype == out_dtype) return k;
+                g.dec.codebook == geo.dec.codebook and g.dec.window == geo.dec.window and g.limit == geo.limit and k.out_dtype == out_dtype) return k;
         } else if (free_slot == null) free_slot = i;
     }
     const i = free_slot orelse return error.Exl3EngineCacheFull;
@@ -126,6 +143,10 @@ fn kernelsFor(geo: decode.Geometry, out_dtype: mlx.mlx_dtype) !*decode.Kernels3 
     // the shared expert's gate|up K slices per GEMV threadgroup in `moeFusedShared` (of its 20; a value that does not divide
     // them runs 1). Launch shape only: the planes, so the bytes, stay.
     k3.sspt = config.get().shared_spt;
+    // the banked GEMVs' members per lead: 2 the banked texts, 4 the grouped ones (which skip `skip_id` row-slots)
+    k3.banked_group = config.get().banked_group;
+    // hw4b: the M = 3 member path at GROUP 4
+    k3.banked_m3 = config.get().banked_m3;
     cache.get().*[i] = k3;
     return &cache.get().*[i].?;
 }
@@ -228,9 +249,11 @@ fn decodeForm() u8 {
 }
 
 /// The dense-linear kernels of every (in, out, rate, decode, dtype) this process has served: the trunk of a fully EXL3 model
-/// has a dozen shapes (attention q/k/v/o, indexer, GDN qkv/z/out, shared gate/up/down, lm_head, MTP fc).
+/// has a dozen shapes (attention q/k/v/o, indexer, GDN qkv/z/out, shared gate/up/down, lm_head, MTP fc), DeepSeek-V4.1's
+/// fourteen with its vision tower, its aligner and `wo_a`'s slice. 64 holds two such models at two dtypes (every test in
+/// one process).
 const dense_lock = Global(std.atomic.Value(u32), "root_dense_lock", std.atomic.Value(u32).init(0));
-const dense_cache = Global([32]?dense.Dense, "root_dense_cache", @splat(null));
+const dense_cache = Global([64]?dense.Dense, "root_dense_cache", @splat(null));
 
 fn denseFor(shape: dense.Shape) !*dense.Dense {
     while (dense_lock.get().*.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
@@ -246,6 +269,76 @@ fn denseFor(shape: dense.Shape) !*dense.Dense {
     const i = free_slot orelse return error.Exl3EngineCacheFull;
     dense_cache.get().*[i] = try dense.Dense.init(shape);
     return &dense_cache.get().*[i].?;
+}
+
+/// Test seam: the `dense.Dense` `linear` runs a shape on (the process's cached one, made on first use), for a test that
+/// sets its launch shape (`bt_set`, `dec_prep_rows`, ..., then `resetCfgs`) or reads its plan
+pub fn denseCached(shape: dense.Shape) !*dense.Dense {
+    return denseFor(shape);
+}
+
+/// F3 at x [..., in] through the gate `p1`, the up `p3` (in -> inter each) and the down `p2` (inter -> out): the rows and
+/// the two Dense when `sharedSwiglu` serves the call (decode rows the dense chain takes: 5 to DECODE_ROWS_MAX, DEC-ONE
+/// keeping up to 4; one rate and decode; the down's input in `act`); else null.
+fn swigluPlan(x: mlx.mlx_array, p1: Proj, p3: Proj, p2: Proj, act: mlx.mlx_dtype, dec: format.Decode) !?struct { rows: usize, gu: *dense.Dense, down: *dense.Dense } {
+    const xsh = mlx.getShape(x);
+    const t1 = mlx.getShape(p1.trellis);
+    const t3 = mlx.getShape(p3.trellis);
+    const t2 = mlx.getShape(p2.trellis);
+    if (xsh.len < 1 or t1.len != 3 or t3.len != 3 or t2.len != 3) return null;
+    const xd = mlx.mlx_array_dtype(x);
+    if (xd != .bfloat16 and xd != .float32 and xd != .float16) return null;
+    if (act != .bfloat16 and act != .float32 and act != .float16) return null;
+    if (!std.mem.eql(c_int, t1, t3) or t2[0] != t1[1] or t2[2] != t1[2]) return null;
+    const in_dim = t1[0] * 16;
+    const inter = t1[1] * 16;
+    const out_dim = t2[1] * 16;
+    if (xsh[xsh.len - 1] != in_dim) return null;
+    const rate = format.Rate.fromN(@intCast(t1[2])) orelse return null;
+    for ([_]Proj{ p1, p3 }) |p| if (mlx.getShape(p.suh).len != 1 or mlx.getShape(p.suh)[0] != in_dim or mlx.getShape(p.svh).len != 1 or mlx.getShape(p.svh)[0] != inter) return null;
+    if (mlx.getShape(p2.suh).len != 1 or mlx.getShape(p2.suh)[0] != inter or mlx.getShape(p2.svh).len != 1 or mlx.getShape(p2.svh)[0] != out_dim) return null;
+    var rows: usize = 1;
+    for (xsh[0 .. xsh.len - 1]) |d| rows *= @intCast(d);
+    if (rows < 1 or rows > kernels.DECODE_ROWS_MAX) return null;
+    const gu = try denseFor(.{ .in = @intCast(in_dim), .out = @intCast(inter), .rate = rate, .dec = dec, .out_dtype = xd });
+    const down = try denseFor(.{ .in = @intCast(inter), .out = @intCast(out_dim), .rate = rate, .dec = dec, .out_dtype = act });
+    if (!gu.preparedTakes(rows) or !down.preparedTakes(rows)) return null;
+    return .{ .rows = rows, .gu = gu, .down = down };
+}
+
+/// F3: whether `sharedSwiglu` serves x through `p1`, `p3` and `p2` (`swigluPlan`)
+pub fn sharedSwigluTakes(x: mlx.mlx_array, p1: Proj, p3: Proj, p2: Proj, act: mlx.mlx_dtype, dec: format.Decode) !bool {
+    return (try swigluPlan(x, p1, p3, p2, act, dec)) != null;
+}
+
+/// F3: the host's shared expert at decode rows, `linear(astype(clampedSwiGLU(astype(linear(x, p1), f32),
+/// astype(linear(x, p3), f32), limit), act), p2)` (limit > 0), in three launches fewer: the gate's and up's prepares and
+/// GEMVs, one launch of their finishes, the SwiGLU and the down's prepare (`dense.text_swiglu_prep`), then the down's GEMV
+/// and finish, bit for bit; y [..., out] in `act`. error.Exl3EngineNotImplemented where `sharedSwigluTakes` does not hold.
+pub fn sharedSwiglu(s: mlx.mlx_stream, x: mlx.mlx_array, p1: Proj, p3: Proj, p2: Proj, limit: f32, act: mlx.mlx_dtype, dec: format.Decode) !mlx.mlx_array {
+    const plan = (try swigluPlan(x, p1, p3, p2, act, dec)) orelse return error.Exl3EngineNotImplemented;
+    if (!(limit > 0)) return error.Exl3EngineNotImplemented;
+    const xsh = mlx.getShape(x);
+    const gu = plan.gu;
+    var x2 = mlx.mlx_array_new();
+    defer freeArr(x2);
+    try mlx.check(mlx.mlx_reshape(&x2, x, &[_]c_int{ @intCast(plan.rows), @intCast(gu.shape.in) }, 2, s));
+    const g = try gu.prepareGemv(s, x2, p1.trellis, p1.suh, plan.rows);
+    defer for (g) |a| freeArr(a);
+    const u = try gu.prepareGemv(s, x2, p3.trellis, p3.suh, plan.rows);
+    defer for (u) |a| freeArr(a);
+    const pre = try gu.swigluPrep(s, g[0], g[1], p1.svh, u[0], u[1], p3.svh, p2.suh, limit, act, plan.rows);
+    defer for (pre) |a| freeArr(a);
+    const y2 = try plan.down.linearPrepared(s, pre[0], pre[1], p2.trellis, p2.svh, plan.rows);
+    defer freeArr(y2);
+    var osh: [8]c_int = undefined;
+    if (xsh.len > osh.len) return error.BadExl3Shape;
+    @memcpy(osh[0..xsh.len], xsh);
+    osh[xsh.len - 1] = @intCast(plan.down.shape.out);
+    var y = mlx.mlx_array_new();
+    errdefer freeArr(y);
+    try mlx.check(mlx.mlx_reshape(&y, y2, osh[0..xsh.len].ptr, @intCast(xsh.len), s));
+    return y;
 }
 
 /// A dense EXL3 linear: y [..., out] in x's dtype for x [..., in], trellis U16/I16 [in/16, out/16, n], suh F16 [in], svh F16
@@ -295,6 +388,137 @@ fn linearOn(s: mlx.mlx_stream, rs: mlx.mlx_stream, x: mlx.mlx_array, trellis: ml
     errdefer freeArr(y);
     try mlx.check(mlx.mlx_reshape(&y, y2, osh[0..xsh.len].ptr, @intCast(xsh.len), s));
     return y;
+}
+
+// ── DeepSeek-V4.1's trunk: the grouped linear and the biased linear ──
+
+/// The grouped linears' kernels per (groups, in, out, rate, decode, dtype): DeepSeek-V4.1's `wo_a` is one shape per
+/// activation dtype.
+const grouped_lock = Global(std.atomic.Value(u32), "root_grouped_lock", std.atomic.Value(u32).init(0));
+const grouped_cache = Global([8]?grouped.Grouped, "root_grouped_cache", @splat(null));
+
+fn groupedFor(shape: grouped.Shape) !*grouped.Grouped {
+    while (grouped_lock.get().*.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
+    defer grouped_lock.get().*.store(0, .release);
+    var free_slot: ?usize = null;
+    for (&grouped_cache.get().*, 0..) |*slot, i| {
+        if (slot.*) |*gr| {
+            if (gr.shape.eql(shape)) return gr;
+        } else if (free_slot == null) free_slot = i;
+    }
+    const i = free_slot orelse return error.Exl3EngineCacheFull;
+    grouped_cache.get().*[i] = try grouped.Grouped.init(shape);
+    return &grouped_cache.get().*[i].?;
+}
+
+/// Test seam: the `grouped.Grouped` `linearGrouped` runs a shape's decode rows on (the process's cached one), for a test
+/// that sets its launch (`dense_gemv`, `bt_set`, then `resetCfgs`)
+pub fn groupedCached(shape: grouped.Shape) !*grouped.Grouped {
+    return groupedFor(shape);
+}
+
+/// The grouped (block-diagonal) linear, DeepSeek-V4.1's attention `wo_a` (`o = einsum("bsgd,grd->bsgr", o, wo_a)`):
+/// y [..., G, out] in x's dtype for x [..., G, in] (bf16, f16 or f32). Slice g of y is the linear of slice g of x through
+/// slice g of `p`. `p` holds the G slices stacked: trellis U16/I16 [G, in/16, out/16, n], suh F16 [G, in], svh F16
+/// [G, out]. Each slice's values are `linear`'s on it at every row count (at decode rows but for the sign of an exact
+/// zero).
+/// - Decode rows (<= `kernels.DECODE_ROWS_MAX`): three launches whatever G (`grouped.zig`): the prepare of every slice,
+///   the routed down GEMV's gather with row-slot r G + g on slice g, and the routed down finish at top-1.
+/// - Prefill rows: `linear` on each slice (views of the stacked arrays, no weight copy), then one MLX concatenate.
+pub fn linearGrouped(s: mlx.mlx_stream, x: mlx.mlx_array, p: Proj, dec: format.Decode) !mlx.mlx_array {
+    const xsh = mlx.getShape(x);
+    const tsh = mlx.getShape(p.trellis);
+    if (xsh.len < 2 or xsh.len > 8 or tsh.len != 4 or tsh[0] < 1 or tsh[1] < 1 or tsh[2] < 1 or tsh[3] < 1) return error.BadExl3Shape;
+    const groups = tsh[0];
+    const in_dim = tsh[1] * 16;
+    const out_dim = tsh[2] * 16;
+    const rate = format.Rate.fromN(@intCast(tsh[3])) orelse return error.BadExl3Shape;
+    if (xsh[xsh.len - 2] != groups or xsh[xsh.len - 1] != in_dim) return error.BadExl3Shape;
+    if (!std.mem.eql(c_int, &.{ groups, in_dim }, mlx.getShape(p.suh)) or !std.mem.eql(c_int, &.{ groups, out_dim }, mlx.getShape(p.svh))) return error.BadExl3Shape;
+    const td = mlx.mlx_array_dtype(p.trellis);
+    if ((td != .uint16 and td != .int16) or mlx.mlx_array_dtype(p.suh) != .float16 or mlx.mlx_array_dtype(p.svh) != .float16) return error.BadExl3Dtype;
+    const xd = mlx.mlx_array_dtype(x);
+    if (xd != .bfloat16 and xd != .float32 and xd != .float16) return error.BadExl3Dtype;
+    var rows: c_int = 1;
+    for (xsh[0 .. xsh.len - 2]) |d| rows *= d;
+    if (rows < 1) return error.BadExl3Shape;
+    const shape: grouped.Shape = .{ .groups = @intCast(groups), .in = @intCast(in_dim), .out = @intCast(out_dim), .rate = rate, .dec = dec, .out_dtype = xd };
+    if (!shape.admitted()) return error.BadExl3Shape;
+    // a row's G slices as one row of G in values
+    var x2 = mlx.mlx_array_new();
+    defer freeArr(x2);
+    try mlx.check(mlx.mlx_reshape(&x2, x, &[_]c_int{ rows, groups * in_dim }, 2, s));
+    const y2 = if (@as(usize, @intCast(rows)) <= kernels.DECODE_ROWS_MAX)
+        try (try groupedFor(shape)).decodeRows(s, x2, p.trellis, p.suh, p.svh, @intCast(rows))
+    else
+        try groupedPrefill(s, x2, p, shape, rows, dec);
+    defer freeArr(y2);
+    var osh: [8]c_int = undefined;
+    @memcpy(osh[0..xsh.len], xsh);
+    osh[xsh.len - 1] = out_dim;
+    var y = mlx.mlx_array_new();
+    errdefer freeArr(y);
+    try mlx.check(mlx.mlx_reshape(&y, y2, osh[0..xsh.len].ptr, @intCast(xsh.len), s));
+    return y;
+}
+
+/// `linearGrouped` at prefill rows: y [rows, G out] from x2 [rows, G in], `linear` of each slice on its columns of x2 (one
+/// copy of them, as any strided x of `linear`), the G outputs side by side. The slices are views: the stacked trellis as
+/// [G in/16, out/16, n] and suh / svh flat, each slice one contiguous range.
+fn groupedPrefill(s: mlx.mlx_stream, x2: mlx.mlx_array, p: Proj, shape: grouped.Shape, rows: c_int, dec: format.Decode) !mlx.mlx_array {
+    const gn: c_int = @intCast(shape.groups);
+    const in_dim: c_int = @intCast(shape.in);
+    const out_dim: c_int = @intCast(shape.out);
+    const tsh = mlx.getShape(p.trellis);
+    var t3 = mlx.mlx_array_new();
+    defer freeArr(t3);
+    try mlx.check(mlx.mlx_reshape(&t3, p.trellis, &[_]c_int{ gn * tsh[1], tsh[2], tsh[3] }, 3, s));
+    var suh1 = mlx.mlx_array_new();
+    defer freeArr(suh1);
+    try mlx.check(mlx.mlx_reshape(&suh1, p.suh, &[_]c_int{gn * in_dim}, 1, s));
+    var svh1 = mlx.mlx_array_new();
+    defer freeArr(svh1);
+    try mlx.check(mlx.mlx_reshape(&svh1, p.svh, &[_]c_int{gn * out_dim}, 1, s));
+    var ys: [grouped.max_groups]mlx.mlx_array = undefined;
+    var made: usize = 0;
+    defer for (ys[0..made]) |a| freeArr(a);
+    for (0..shape.groups) |gi| {
+        const g: c_int = @intCast(gi);
+        // x's columns, the trellis's input-tile rows, suh's and svh's ranges of slice g
+        var v: [4]mlx.mlx_array = .{ mlx.mlx_array_new(), mlx.mlx_array_new(), mlx.mlx_array_new(), mlx.mlx_array_new() };
+        defer for (v) |a| freeArr(a);
+        try mlx.check(mlx.mlx_slice(&v[0], x2, &[_]c_int{ 0, g * in_dim }, 2, &[_]c_int{ rows, (g + 1) * in_dim }, 2, &[_]c_int{ 1, 1 }, 2, s));
+        try mlx.check(mlx.mlx_slice(&v[1], t3, &[_]c_int{ g * tsh[1], 0, 0 }, 3, &[_]c_int{ (g + 1) * tsh[1], tsh[2], tsh[3] }, 3, &[_]c_int{ 1, 1, 1 }, 3, s));
+        try mlx.check(mlx.mlx_slice(&v[2], suh1, &[_]c_int{g * in_dim}, 1, &[_]c_int{(g + 1) * in_dim}, 1, &[_]c_int{1}, 1, s));
+        try mlx.check(mlx.mlx_slice(&v[3], svh1, &[_]c_int{g * out_dim}, 1, &[_]c_int{(g + 1) * out_dim}, 1, &[_]c_int{1}, 1, s));
+        ys[gi] = try linearOn(s, s, v[0], v[1], v[2], v[3], dec);
+        made += 1;
+    }
+    const vec = mlx.mlx_vector_array_new_data(&ys, made);
+    defer _ = mlx.mlx_vector_array_free(vec);
+    var y2 = mlx.mlx_array_new();
+    errdefer freeArr(y2);
+    try mlx.check(mlx.mlx_concatenate_axis(&y2, vec, 1, s));
+    return y2;
+}
+
+/// `linear` plus a bias, for the linears that carry one (DeepSeek-V4.1's vision tower q/k/v/wo and its aligner w1/w2):
+/// y [..., out] = `linear`(x) + bias. `bias` [out] is in x's dtype: the host converts a pack's F16 bias once, at load, so
+/// a call casts nothing. The add is one MLX Add in x's dtype after `linear`'s output rounding, so a sum rounds twice
+/// (`linear`'s output, then the sum). It is a helper, not a finish epilogue: `linear`'s finish is another kernel on each
+/// row path (DEC-ONE's two, the GEMV chain's, the register path's and the matmul's, the pieces'), and the un-rotated
+/// trunk's matmul has none. A fused bias would need a variant of each, for a tower that runs once per image.
+pub fn linearBias(s: mlx.mlx_stream, x: mlx.mlx_array, trellis: mlx.mlx_array, suh: mlx.mlx_array, svh: mlx.mlx_array, bias: mlx.mlx_array, dec: format.Decode) !mlx.mlx_array {
+    const tsh = mlx.getShape(trellis);
+    const bsh = mlx.getShape(bias);
+    if (tsh.len != 3 or bsh.len != 1 or bsh[0] != tsh[1] * 16) return error.BadExl3Shape;
+    if (mlx.mlx_array_dtype(bias) != mlx.mlx_array_dtype(x)) return error.BadExl3Dtype;
+    const y = try linear(s, x, trellis, suh, svh, dec);
+    defer freeArr(y);
+    var out = mlx.mlx_array_new();
+    errdefer freeArr(out);
+    try mlx.check(mlx.mlx_add(&out, y, bias, s));
+    return out;
 }
 
 // ── The un-rotated trunk: the resident trunk out of the Hadamard basis (dense.zig's module comment) ──
@@ -815,9 +1039,11 @@ pub fn linearPiecesFinish(s: mlx.mlx_stream, inners: []const mlx.mlx_array, p: P
     return d.finishPieces(s, inners, p.svh);
 }
 
-/// The prefill kernels of every geometry this process has served (one per expert bank shape).
+/// The prefill kernels of every geometry this process has served (one per expert bank shape, the bank's expert count
+/// included): DeepSeek-V4.1 alone serves 8 (its K3 and K2 routed banks per streamed bank kind, the DSpark stages, the
+/// shared expert as a one-expert bank).
 const pf_lock = Global(std.atomic.Value(u32), "root_pf_lock", std.atomic.Value(u32).init(0));
-const pf_cache = Global([8]?prefill.Prefill, "root_pf_cache", @splat(null));
+const pf_cache = Global([16]?prefill.Prefill, "root_pf_cache", @splat(null));
 const pf_logged = Global(bool, "root_pf_logged", false);
 
 /// The served prefill variant: 64-row tiles (bm 64) with the register path for <= 32-row remainders in one launch (mixed),
@@ -845,7 +1071,7 @@ fn prefillFor(geo: prefill.Geometry) !*prefill.Prefill {
         if (slot.*) |*p| {
             const g = p.geo;
             if (g.hidden == geo.hidden and g.inter == geo.inter and g.topk == geo.topk and g.experts == geo.experts and
-                g.rate.n == geo.rate.n and g.dec.codebook == geo.dec.codebook and g.dec.window == geo.dec.window) return p;
+                g.rate.n == geo.rate.n and g.dec.codebook == geo.dec.codebook and g.dec.window == geo.dec.window and g.limit == geo.limit) return p;
         } else if (free_slot == null) free_slot = i;
     }
     const i = free_slot orelse return error.Exl3EngineCacheFull;
@@ -884,18 +1110,29 @@ fn freeArr(a: mlx.mlx_array) void {
 /// `Config.prefill` or `Config.nax` is off (the host keeps its prefill arm for them). Gate, up and down must share a rate.
 pub fn moe(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array, scores: mlx.mlx_array, dec: format.Decode, verify_rows: bool) !mlx.mlx_array {
     _ = verify_rows;
+    return moeSwiglu(s, x, bank, inds, scores, dec, 0);
+}
+
+/// `moe`'s chains with the SwiGLU's clamp `limit` (0: none, `moe` itself; `moeClamped`). The clamp is part of the decode and
+/// prefill geometries, so a clamped call builds and caches its own kernels (fin7's and the mids' clamped variants) beside
+/// the unclamped ones, and every other kernel is the unclamped chain's.
+fn moeSwiglu(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array, scores: mlx.mlx_array, dec: format.Decode, limit: u32) !mlx.mlx_array {
     const geo = try validateCall(x, bank, inds, scores);
     if (geo.gate_up.n != geo.down.n) return error.Exl3EngineNotImplemented;
     const xsh = mlx.getShape(x);
     const rows_c: c_int = xsh[0] * xsh[1];
     const rows: usize = @intCast(rows_c);
     const K: c_int = mlx.getShape(inds)[2];
+    if (limit != 0 and !clamp_logged.get().*) {
+        clamp_logged.get().* = true;
+        std.debug.print("[turboexl3] clamped SwiGLU engaged (swiglu_limit {d}): fin7's and the prefill mid's clamped variants\n", .{limit});
+    }
     if (rows > kernels.DECODE_ROWS_MAX) {
         if (!config.get().prefill or !config.get().nax) return error.Exl3EngineNotImplemented;
-        return moePrefill(s, x, bank, inds, scores, dec, geo, rows, K);
+        return moePrefill(s, x, bank, inds, scores, dec, geo, rows, K, limit);
     }
     if (SlotStats.enabled()) SlotStats.record(inds, rows, @intCast(K)) catch {};
-    const dgeo: decode.Geometry = .{ .hidden = @intCast(geo.hidden), .inter = @intCast(geo.width), .topk = @intCast(K), .rate = geo.gate_up, .dec = dec };
+    const dgeo: decode.Geometry = .{ .hidden = @intCast(geo.hidden), .inter = @intCast(geo.width), .topk = @intCast(K), .rate = geo.gate_up, .dec = dec, .limit = limit };
     // the operands the kernels take as the host holds them: x [rows, D] (bf16/f16/f32), slots [rows * K] (i32/u32), scores
     // [rows * K] (bf16/f16/f32); the kernels convert in place and write y in x's dtype, so no cast launches per layer. At one
     // row (`flatOperands`) the host's x [1, 1, D], inds and scores [1, 1, K] go as they are: every kernel indexes them flat
@@ -927,7 +1164,10 @@ pub fn moe(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array,
         .down_suh = bank.down.suh,
         .down_svh = bank.down.svh,
     };
-    const form = decodeForm();
+    // the clamp is in fin7's variant (forms 7, 8 and 9): a clamped call under form 3, 5 or 6 runs form 9, whose bytes those
+    // forms share
+    const configured = decodeForm();
+    const form: u8 = if (limit != 0 and configured < 7) 9 else configured;
     if (form >= 7 and !decode_form_logged.get().*) {
         decode_form_logged.get().* = true;
         std.debug.print("[turboexl3] decode engaged: form {d} (form 3's bytes in fewer dependent launches)\n", .{form});
@@ -979,10 +1219,10 @@ const PfCapture = struct {
     }
 };
 
-fn moePrefill(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array, scores: mlx.mlx_array, dec: format.Decode, geo: Geometry, rows: usize, K: c_int) !mlx.mlx_array {
+fn moePrefill(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array, scores: mlx.mlx_array, dec: format.Decode, geo: Geometry, rows: usize, K: c_int, limit: u32) !mlx.mlx_array {
     const xsh = mlx.getShape(x);
     const rows_c: c_int = @intCast(rows);
-    const pf = try prefillFor(.{ .hidden = @intCast(geo.hidden), .inter = @intCast(geo.width), .topk = @intCast(K), .experts = @intCast(geo.experts), .rate = geo.gate_up, .dec = dec });
+    const pf = try prefillFor(.{ .hidden = @intCast(geo.hidden), .inter = @intCast(geo.width), .topk = @intCast(K), .experts = @intCast(geo.experts), .rate = geo.gate_up, .dec = dec, .limit = limit });
     var x2 = mlx.mlx_array_new();
     defer freeArr(x2);
     try mlx.check(mlx.mlx_reshape(&x2, x, &[_]c_int{ rows_c, xsh[2] }, 2, s));
@@ -1200,13 +1440,178 @@ pub fn moeFusedSharedRouted(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, log
 }
 const routed_logged = Global([2]bool, "root_routed_logged", .{ false, false });
 
-/// GLM's gate is upper-clamped and its up branch symmetrically clamped before SwiGLU and the down projection.
+/// DeepSeek-V4's clamped SwiGLU (inference/model.py's Expert at `swiglu_limit`; GLM's is the same) over the routed experts:
+/// `moe` with each row-slot's gate clamped from above at `limit` and its up to [-limit, limit] before the SiLU, in f32 on
+/// the projections' f16-rounded outputs (an integer limit is exact in f16, so the clamp before or after that rounding is
+/// the same). Decode rows run form 9's launches with fin7's clamped variant (`decode.text_fin7c`; forms 7 and 8 where the
+/// config names them, form 9 for forms 3, 5 and 6, whose bytes it shares), prefill rows the fused chain with the clamped
+/// mid (`prefill.text_mid_t128c` as served); `moe`'s refusals hold (prefill rows need `Config.prefill` and `Config.nax`;
+/// gate, up and down at one rate). The routing weight: the reference model multiplies the f32 activation by it before w2
+/// and rounds that product to x's dtype; here, as in `moe`, it multiplies the down projection's f16-rounded output in the
+/// score-weighted f32 sum (the same value up to rounding, the down projection being linear). No fused shared-expert entry
+/// takes a clamp (a clamped Kernels3 refuses `sharedAdmitted`): the caller runs a clamped shared expert itself.
+/// `limit` in 1..128, else error.InvalidExl3Clamp. `ref.moeRowClamped` is the reference.
 pub fn moeClamped(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array, scores: mlx.mlx_array, dec: format.Decode, limit: c_int) !mlx.mlx_array {
-    _ = s;
-    _ = dec;
     if (limit <= 0 or limit > 128) return error.InvalidExl3Clamp;
-    _ = try validateCall(x, bank, inds, scores);
-    return error.Exl3EngineNotImplemented;
+    return moeSwiglu(s, x, bank, inds, scores, dec, @intCast(limit));
+}
+const clamp_logged = Global(bool, "root_clamp_logged", false);
+
+/// The most row-slots (routed pairs) a banked call takes (`moeClampedBanked`).
+pub const banked_rows_max = decode.Kernels3.banked_rows_max;
+/// A banked call's id for a row-slot that runs no expert (`Config.banked_group` 4): no decode, its y row 0.
+pub const banked_skip_id = decode.skip_id;
+
+/// The banked gate|up's result, its down's input: `hd` f16 [rows, inter] (the down's prepared input, lane order) and `hs`
+/// f32 [rows, inter / 128] (its 128-block sums). The caller frees both.
+pub const BankedHalf = struct { hd: mlx.mlx_array, hs: mlx.mlx_array };
+
+/// `moeClamped` over an expert streamer's slot banks at decode (DeepSeek-V4.1's streamed routed experts: mlx-serve's
+/// streamed EXL3 source serves a call's routed pairs from three banks, base, ext and transient): row-slot r is one pair,
+/// x's row r through the expert at `ids[r]`, packed (bank << 24 | slot row), at weight 1, and y f32 [rows, hidden] holds
+/// each pair's output (the caller weighs and sums them). Each pair's bytes are `moeClamped`'s on its bank at top-1 with
+/// score 1 (the GPU test holds them so): `decode.Kernels3`'s banked texts, form 7's launches (prep2, gu3, fin7 clamped,
+/// down3, dfin3) on form 9's launch shape at that many row-slots, each text reading a row-slot's arrays from its bank where
+/// the base text reads them. `banks`: base, ext, transient, each its own expert (slot) count at one geometry and rate,
+/// the trellis U16 or I16 (the streamer's code arrays), every trellis one dtype; a bank no id names may repeat another's
+/// arrays. `ids` u32 or i32 [rows], rows 1..banked_rows_max; x [rows, hidden] bf16, f16 or f32; `limit` 1..128, else
+/// error.InvalidExl3Clamp. `moeClampedBankedGateUp` then `moeClampedBankedDown` are its two halves. The gate|up half ends
+/// in fin7cb, which prepares the down's input and so reads each bank's down suh as well as its gate and up arrays: a caller
+/// whose arrays land in parts (an expert streamer's gate and up, then its down) has every array in place before it, or runs
+/// the whole call at its down. With `Config.banked_group` 4 the GEMVs share a decode among up to four row-slots of one id
+/// (two at 2), and a row-slot whose id is `banked_skip_id` runs no expert: its y row is 0. Every other row-slot's bytes
+/// are the same at either.
+pub fn moeClampedBanked(s: mlx.mlx_stream, x: mlx.mlx_array, banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, limit: c_int) !mlx.mlx_array {
+    return moeClampedBankedSelV(s, x, banks, ids, dec, limit, .configured, config.get().banked_variant_gu, config.get().banked_variant_dn);
+}
+
+/// hw4b: which banked texts a call runs (`decode.Kernels3.BankedSel`): the configured ones, today's grouped texts (g4) or
+/// the grouped texts with the M = 3 member path (g4m3). Every selection gives a row-slot the same bytes.
+pub const BankedSel = decode.Kernels3.BankedSel;
+
+/// hw2: the grouped banked GEMVs' variants (`Config.banked_variant_gu`, `banked_variant_dn`; `decode.group_variants`),
+/// on whichever grouped texts a call runs (today's or hw4b's), and a variant's index by name (null: none).
+pub const group_variants = decode.group_variants;
+pub const groupVariantOf = decode.groupVariantOf;
+
+/// `moeClampedBanked` on `sel`'s texts at the configured variants (hw4b's check mode's calls, the tests).
+pub fn moeClampedBankedSel(s: mlx.mlx_stream, x: mlx.mlx_array, banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, limit: c_int, sel: BankedSel) !mlx.mlx_array {
+    return moeClampedBankedSelV(s, x, banks, ids, dec, limit, sel, config.get().banked_variant_gu, config.get().banked_variant_dn);
+}
+
+/// `moeClampedBanked` on the configured texts with the grouped gate|up GEMV of variant `vgu` and the grouped down GEMV
+/// of `vdn` (`group_variants`; 0 today's, any other needs `Config.banked_group` 4; hw2's check mode's calls): the same
+/// bytes (a variant changes a GEMV's schedule, never a decoded value or a sum).
+pub fn moeClampedBankedV(s: mlx.mlx_stream, x: mlx.mlx_array, banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, limit: c_int, vgu: u8, vdn: u8) !mlx.mlx_array {
+    return moeClampedBankedSelV(s, x, banks, ids, dec, limit, .configured, vgu, vdn);
+}
+
+/// `moeClampedBanked` on `sel`'s texts with the grouped GEMVs of variants `vgu` (gate|up) and `vdn` (down) on them: the
+/// same bytes for every selection and variant.
+pub fn moeClampedBankedSelV(s: mlx.mlx_stream, x: mlx.mlx_array, banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, limit: c_int, sel: BankedSel, vgu: u8, vdn: u8) !mlx.mlx_array {
+    const h = try moeClampedBankedGateUpSelV(s, x, banks, ids, dec, limit, sel, vgu);
+    defer freeArr(h.hd);
+    defer freeArr(h.hs);
+    return moeClampedBankedDownSelV(s, h, banks, ids, dec, limit, sel, vdn);
+}
+
+/// `moeClampedBanked`'s gate|up: prep2b, gu3b and fin7cb (`decode.Kernels3.bankedGateUp`). It reads every bank's gate and
+/// up arrays and its down suh (fin7cb prepares the down's input).
+pub fn moeClampedBankedGateUp(s: mlx.mlx_stream, x: mlx.mlx_array, banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, limit: c_int) !BankedHalf {
+    return moeClampedBankedGateUpSelV(s, x, banks, ids, dec, limit, .configured, config.get().banked_variant_gu);
+}
+
+/// `moeClampedBankedGateUp` on `sel`'s texts at the configured variant.
+pub fn moeClampedBankedGateUpSel(s: mlx.mlx_stream, x: mlx.mlx_array, banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, limit: c_int, sel: BankedSel) !BankedHalf {
+    return moeClampedBankedGateUpSelV(s, x, banks, ids, dec, limit, sel, config.get().banked_variant_gu);
+}
+
+/// `moeClampedBankedGateUp` with the grouped gate|up GEMV of `variant` (`moeClampedBankedV`).
+pub fn moeClampedBankedGateUpV(s: mlx.mlx_stream, x: mlx.mlx_array, banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, limit: c_int, variant: u8) !BankedHalf {
+    return moeClampedBankedGateUpSelV(s, x, banks, ids, dec, limit, .configured, variant);
+}
+
+/// `moeClampedBankedGateUp` on `sel`'s texts with the grouped gate|up GEMV of `variant` on them.
+pub fn moeClampedBankedGateUpSelV(s: mlx.mlx_stream, x: mlx.mlx_array, banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, limit: c_int, sel: BankedSel, variant: u8) !BankedHalf {
+    const c = try bankedCall(banks, ids, dec, limit);
+    const xs = mlx.getShape(x);
+    if (xs.len != 2 or xs[0] != @as(c_int, @intCast(c.rows)) or xs[1] != @as(c_int, @intCast(c.geo.hidden))) return error.BadExl3Shape;
+    const xd = mlx.mlx_array_dtype(x);
+    if (xd != .bfloat16 and xd != .float32 and xd != .float16) return error.BadExl3Dtype;
+    const hd = try (try kernelsFor(c.geo, .float32)).bankedGateUpSelV(s, x, ids, &c.kb, c.rows, sel, variant);
+    return .{ .hd = hd[0], .hs = hd[1] };
+}
+
+/// `moeClampedBanked`'s down: down3b and dfin3b (`decode.Kernels3.bankedDown`) over the gate|up's `h` -> y f32 [rows,
+/// hidden]; the caller frees y (and `h`).
+pub fn moeClampedBankedDown(s: mlx.mlx_stream, h: BankedHalf, banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, limit: c_int) !mlx.mlx_array {
+    return moeClampedBankedDownSelV(s, h, banks, ids, dec, limit, .configured, config.get().banked_variant_dn);
+}
+
+/// `moeClampedBankedDown` on `sel`'s texts at the configured variant.
+pub fn moeClampedBankedDownSel(s: mlx.mlx_stream, h: BankedHalf, banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, limit: c_int, sel: BankedSel) !mlx.mlx_array {
+    return moeClampedBankedDownSelV(s, h, banks, ids, dec, limit, sel, config.get().banked_variant_dn);
+}
+
+/// `moeClampedBankedDown` with the grouped down GEMV of `variant` (`moeClampedBankedV`).
+pub fn moeClampedBankedDownV(s: mlx.mlx_stream, h: BankedHalf, banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, limit: c_int, variant: u8) !mlx.mlx_array {
+    return moeClampedBankedDownSelV(s, h, banks, ids, dec, limit, .configured, variant);
+}
+
+/// `moeClampedBankedDown` on `sel`'s texts with the grouped down GEMV of `variant` on them.
+pub fn moeClampedBankedDownSelV(s: mlx.mlx_stream, h: BankedHalf, banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, limit: c_int, sel: BankedSel, variant: u8) !mlx.mlx_array {
+    const c = try bankedCall(banks, ids, dec, limit);
+    const r: c_int = @intCast(c.rows);
+    const w: c_int = @intCast(c.geo.inter);
+    if (!std.mem.eql(c_int, mlx.getShape(h.hd), &.{ r, w }) or !std.mem.eql(c_int, mlx.getShape(h.hs), &.{ r, @divExact(w, 128) })) return error.BadExl3Shape;
+    if (mlx.mlx_array_dtype(h.hd) != .float16 or mlx.mlx_array_dtype(h.hs) != .float32) return error.BadExl3Dtype;
+    return (try kernelsFor(c.geo, .float32)).bankedDownSelV(s, h.hd, h.hs, ids, &c.kb, c.rows, sel, variant);
+}
+
+/// A banked call's checked operands: the decode geometry (top-1, the clamp), its row-slots and the banks as the kernels
+/// take them.
+const BankedCall = struct { geo: decode.Geometry, rows: usize, kb: [3]decode.Kernels.Bank };
+
+fn bankedCall(banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, limit: c_int) !BankedCall {
+    if (limit <= 0 or limit > 128) return error.InvalidExl3Clamp;
+    const is = mlx.getShape(ids);
+    if (is.len != 1 or is[0] < 1 or is[0] > banked_rows_max) return error.BadExl3Shape;
+    const idd = mlx.mlx_array_dtype(ids);
+    if (idd != .uint32 and idd != .int32) return error.BadExl3Dtype;
+    const geo = try bankedGeometry(banks);
+    if (geo.gate_up.n != geo.down.n) return error.Exl3EngineNotImplemented;
+    var kb: [3]decode.Kernels.Bank = undefined;
+    for (banks, &kb) |b, *o| o.* = .{
+        .gate_t = b.gate.trellis,
+        .gate_suh = b.gate.suh,
+        .gate_svh = b.gate.svh,
+        .up_t = b.up.trellis,
+        .up_suh = b.up.suh,
+        .up_svh = b.up.svh,
+        .down_t = b.down.trellis,
+        .down_suh = b.down.suh,
+        .down_svh = b.down.svh,
+    };
+    return .{
+        .geo = .{ .hidden = @intCast(geo.hidden), .inter = @intCast(geo.width), .topk = 1, .rate = geo.gate_up, .dec = dec, .limit = @intCast(limit) },
+        .rows = @intCast(is[0]),
+        .kb = kb,
+    };
+}
+
+/// The banks' one geometry: each bank as `bankGeometry` checks it, its trellis in bank 0's gate trellis dtype (U16 or
+/// I16), every bank at bank 0's widths and rates (its own expert count).
+fn bankedGeometry(banks: *const [3]Bank) !Geometry {
+    const gs = mlx.getShape(banks[0].gate.trellis);
+    if (gs.len != 4 or gs[1] <= 0 or gs[1] > std.math.maxInt(c_int) / 16) return error.BadExl3Shape;
+    const td = mlx.mlx_array_dtype(banks[0].gate.trellis);
+    if (td != .uint16 and td != .int16) return error.BadExl3Dtype;
+    const geo = try bankGeometryAs(banks[0], gs[1] * 16, td);
+    for (banks[1..]) |b| {
+        const g = try bankGeometryAs(b, geo.hidden, td);
+        if (g.width != geo.width or g.gate_up.n != geo.gate_up.n or g.down.n != geo.down.n) return error.BadExl3Shape;
+    }
+    return geo;
 }
 
 test {
@@ -1258,6 +1663,8 @@ pub const shared_state = .{
     decode_form_override,
     dense_lock,
     dense_cache,
+    grouped_lock,
+    grouped_cache,
     unrot_failed_said,
     pf_lock,
     pf_cache,
@@ -1265,6 +1672,7 @@ pub const shared_state = .{
     PfCapture.calls,
     fused_shared_logged,
     routed_logged,
+    clamp_logged,
     attn_io.shared_state,
     config.shared_state,
     decode_merge.shared_state,

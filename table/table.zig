@@ -4,7 +4,8 @@
 //! (`mlx`, `kernel_launch`, and `quant_abi`: the quant ABI its table type comes from) and the kit's root
 //! (`mlx_serve`). It serves the blocks it claims (config.zig): a fully EXL3
 //! pack's `trunk_quant`, the trunk's dense linears (`load_tensor`; `matmul` on turboexl3's dense `linear`), and in the
-//! reordered numerics where MLX's NAX gate holds, `expert_quant`, the routed banks (`load_bank`; `swiglu` on `moe`).
+//! reordered numerics where MLX's NAX gate holds, `expert_quant`, the routed banks (`load_bank`; `swiglu` on `moe`, and
+//! on `moeClamped` for a clamped call).
 //! The server's built-in Sushi table keeps the banks otherwise. Below the gate turboexl3's NAX GEMMs stay off
 //! (`Config.nax`): a dense linear's prefill rows dequantize + run MLX's matmul. The fused paths join the table as
 //! optional members, as `swiglu` did (the GDN tail's `linear_*` parts, a gated attention layer's linears, the
@@ -200,12 +201,18 @@ fn moe(_: *const abi.Weight, _: abi.Array, _: abi.Array, _: abi.Array, _: bool, 
     return Verdict.refuse(.unsupported, "turboexl3: a layer's banks run as one routed SwiGLU (swiglu)");
 }
 
+/// A clamped SwiGLU (`limit` > 0: GLM's or DeepSeek-V4's `swiglu_limit`) runs `moeClamped`, which refuses a limit past 128
+/// by name. The claim keeps a clamped pack's banks off this table (config.zig), so only a model plugin's in-process table
+/// is asked for one.
 fn swiglu(gate: *const abi.Weight, up: *const abi.Weight, down: *const abi.Weight, x: abi.Array, inds: abi.Array, scores: abi.Array, opts: *const abi.Swiglu, s: abi.Stream, out: *abi.Array) callconv(.c) Verdict {
-    if (opts.limit > 0) return Verdict.refuse(.unsupported, "turboexl3: no clamped SwiGLU kernels");
     const dec = decodeOf(gate) orelse return Verdict.refuse(.failed, "turboexl3: a bank without its decode");
     if (!std.meta.eql(decodeOf(up), dec) or !std.meta.eql(decodeOf(down), dec)) return Verdict.refuse(.unsupported, "turboexl3: a layer's banks decode differently");
     const bank: t3.Bank = .{ .gate = projOf(gate), .up = projOf(up), .down = projOf(down) };
-    const y = t3.moe(.{ .ctx = s.ctx }, arr(x), bank, arr(inds), arr(scores), dec, opts.verify_rows) catch |e| return failed(e);
+    const st: mlx.mlx_stream = .{ .ctx = s.ctx };
+    const y = (if (opts.limit > 0)
+        t3.moeClamped(st, arr(x), bank, arr(inds), arr(scores), dec, opts.limit)
+    else
+        t3.moe(st, arr(x), bank, arr(inds), arr(scores), dec, opts.verify_rows)) catch |e| return failed(e);
     out.* = .{ .ctx = y.ctx };
     return .ok;
 }

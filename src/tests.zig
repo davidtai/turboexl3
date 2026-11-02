@@ -13,10 +13,12 @@ comptime {
     _ = @import("unfused.zig");
     _ = @import("decode.zig");
     _ = @import("dense.zig");
+    _ = @import("pgemm.zig");
     _ = @import("prefill.zig");
     _ = @import("decb.zig");
     _ = @import("attn_io.zig");
     _ = @import("gdn_out.zig");
+    _ = @import("grouped.zig");
     _ = @import("root.zig");
     _ = @import("test_support.zig");
     _ = @import("gpu_test.zig");
@@ -24,5 +26,13 @@ comptime {
     _ = @import("decb_test.zig");
     _ = @import("attn_io_test.zig");
     _ = @import("gdn_out_test.zig");
+    _ = @import("clamped_test.zig");
+    _ = @import("banked_test.zig");
+    _ = @import("banked_grp_test.zig");
+    _ = @import("banked_ilp_test.zig");
+    _ = @import("deepseek_test.zig");
+    _ = @import("deepseek_gemv_test.zig");
+    _ = @import("topk_test.zig");
     _ = @import("bench.zig");
+    _ = @import("f3_test.zig");
 }

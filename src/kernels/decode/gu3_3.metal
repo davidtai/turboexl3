@@ -1,4 +1,3 @@
-    const device uint* wbase = (const device uint*)(proj == 0u ? gate_t : up_t) + ulong(e) * ulong(IN_TILES) * ulong(OUT_TILES) * ulong(N / 2u);
     const device half* xbase = (proj == 0u ? xgp : xup) + 4u * (L & 3u);
     const device half* xrow0 = xbase + ulong(members[0]) * ulong(HIDC);
     const device half* xrow1 = xbase + ulong(members[1]) * ulong(HIDC);

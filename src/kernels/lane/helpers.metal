@@ -127,7 +127,9 @@ template <uint N, uint WMASK, uint M, int IR> inline uint exl3_tile_cw(thread co
 // EXL3_T1V (default 3, the fastest with EXL3_R64) picks how the two pair sums bs = (b0 + b1) | (b2 + b3) << 16 become t, every variant the same exact value:
 // 0 a 32-bit multiply by 0x10001 and an integer-to-float convert; 1 a shift and add instead of the multiply; 2 the
 // multiply, then the half 1024 + t (0x6400 + t: ulp 1 on [1024, 2048)) converted and 1024 subtracted; 3 shift and add,
-// then the half route (no 32-bit multiply after the hash, no integer convert)
+// then the half route (no 32-bit multiply after the hash, no integer convert); 4 (hw2) both pair sums as one half2 at
+// once (bs + 0x64006400: 1024 + each pair's sum, no carry between the halves), widened, added and 2048 subtracted (every
+// step on integers below 2^24: exact)
 #ifndef EXL3_T1V
 #define EXL3_T1V 3
 #endif
@@ -140,6 +142,9 @@ inline float exl3_mul1_t(uint cw) {
   return float(as_type<half>(ushort((bs * 0x00010001u + 0x64000000u) >> 16u))) - 1024.0f;
 #elif EXL3_T1V == 3
   return float(as_type<half>(ushort(bs + (bs >> 16u) + 0x6400u))) - 1024.0f;
+#elif EXL3_T1V == 4
+  const half2 h = as_type<half2>(bs + 0x64006400u);
+  return (float(h.x) + float(h.y)) - 2048.0f;
 #else
   return float((bs * 0x00010001u) >> 16u);
 #endif
@@ -152,7 +157,7 @@ inline half exl3_mul1_th(uint cw) {
   return static_cast<half>((bs + (bs >> 16u)) & 0xFFFFu);
 #elif EXL3_T1V == 2
   return as_type<half>(ushort((bs * 0x00010001u + 0x64000000u) >> 16u)) - half(1024.0h);
-#elif EXL3_T1V == 3
+#elif EXL3_T1V == 3 || EXL3_T1V == 4
   return as_type<half>(ushort(bs + (bs >> 16u) + 0x6400u)) - half(1024.0h);
 #else
   return static_cast<half>((bs * 0x00010001u) >> 16u);
@@ -165,7 +170,7 @@ template <int CB> inline half exl3_decode(uint cw) {
   }
   const uint rr = cw * 0x83DCD12Du;
   const uint bs = (rr & 0x00FF00FFu) + ((rr >> 8u) & 0x00FF00FFu);
-#if EXL3_T1V == 1 || EXL3_T1V == 3
+#if EXL3_T1V == 1 || EXL3_T1V == 3 || EXL3_T1V == 4
   const half hs = as_type<half>(ushort(bs + (bs >> 16u) + 0x6400u));   // the same half 1024 + t without the multiply
 #else
   const half hs = as_type<half>(ushort((bs * 0x00010001u + 0x64000000u) >> 16u));

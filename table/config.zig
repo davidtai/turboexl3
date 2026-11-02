@@ -112,7 +112,8 @@ fn profile(cfg: ?std.json.ObjectMap) bool {
     return false;
 }
 
-/// A clamped SwiGLU (GLM's `swiglu_limit`): no turboexl3 kernel serves it.
+/// A clamped SwiGLU (GLM's or DeepSeek-V4's `swiglu_limit`): `moeClamped` serves it, but no clamped pack's numerics were
+/// measured through this table, so its banks stay the built-in table's.
 fn clamped(cfg: ?std.json.ObjectMap) bool {
     for ([_]?std.json.ObjectMap{ cfg, textOf(cfg) }) |o| {
         const v = (o orelse continue).get("swiglu_limit") orelse continue;

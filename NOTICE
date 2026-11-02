@@ -26,6 +26,12 @@ src/kernels/steel_nax.metal inlines MLX's steel headers (`steel/defines.h`,
 `steel/gemm/nax.h`), each section marked with its MLX source path and copyright
 line; the prefill GEMMs build on their NAX tiles. The fused attention
 projections reproduce the roundings of MLX's `rms_single_row` and `rope_impl`.
+src/kernels/pg2/gemm_loop.metal is MLX's `gemm_loop` (`steel/gemm/gemm_nax.h`,
+MLX 0.32.3) under another name, and src/kernels/pg2/gemm_fused.metal follows the
+`gemm` kernel of `steel/gemm/kernels/steel_gemm_fused_nax.h` (MLX 0.32.3), with
+turboexl3's dense finish as its epilogue. The clamped SwiGLU in
+src/kernels/dense/swiglu_prep.metal reproduces MLX's Minimum, Maximum, Sigmoid
+and Multiply functors.
 
 --------------------------------------------------------------------------------
 ExLlamaV3

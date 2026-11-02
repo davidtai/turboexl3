@@ -29,6 +29,7 @@ const decode = @import("decode.zig");
 const unfused = @import("unfused.zig");
 const prefill = @import("prefill.zig");
 const config = @import("config.zig");
+const pgemm = @import("pgemm.zig");
 
 /// prepare for a dense linear: xp half [rows, IN] = H128(f16(x[row]) * suh) per 128-block; LANE_ORDER 1 writes the GEMV's
 /// lane order within each 16-block, 0 the natural order the matmul path needs; one simdgroup per (block, row); x any float dtype
@@ -58,20 +59,26 @@ pub const text_dequant = @embedFile("kernels/dense/dequant.metal");
 /// row's bytes do not change with how many rows share the launch.
 pub const text_dgemv = dgemv_1 ++ dgemv_x ++ dgemv_2 ++ dgemv_m ++ dgemv_3;
 /// text_dgemv's pieces: its setup, its input loads (a row's lane quad as floats, live through every codeword of the tile), its
-/// tile and codeword loads, its codeword loop, and its fold and plane store
+/// tile and codeword loads, its codeword loop, and its fold and plane store; the grouped linear's GEMV
+/// (`grouped.text_gemv_d`) runs all but the setup and the plane store verbatim
 const dgemv_1 = @embedFile("kernels/dense/dgemv_1.metal");
-const dgemv_x = @embedFile("kernels/dense/dgemv_x.metal");
-const dgemv_2 = @embedFile("kernels/dense/dgemv_2.metal");
-const dgemv_m = @embedFile("kernels/dense/dgemv_m.metal");
-const dgemv_3 = @embedFile("kernels/dense/dgemv_3.metal");
+pub const dgemv_x = @embedFile("kernels/dense/dgemv_x.metal");
+pub const dgemv_2 = @embedFile("kernels/dense/dgemv_2.metal");
+pub const dgemv_m = @embedFile("kernels/dense/dgemv_m.metal");
+const dgemv_3 = dgemv_fold ++ dgemv_store;
+/// dgemv_3's two pieces: the quad fold into the simdgroups' reduction buffers, then the plane store (the simdgroups summed
+/// in order)
+pub const dgemv_fold = @embedFile("kernels/dense/dgemv_fold.metal");
+pub const dgemv_store = @embedFile("kernels/dense/dgemv_store.metal");
 
 /// text_dgemv with its codeword loop taken by input element (the lean GEMV, the chain's chunks past 5 rows): element j of
 /// a row feeds codeword j's weight into accumulator 0 and codeword j + 4's into accumulator 1 (dgemv_j), so every
 /// accumulator takes text_dgemv's FMAs in text_dgemv's order (m = 0..3, then 4..7) on the same operands, and a row's inputs
 /// stay half until their use. A lane keeps 2 BT RB accumulators and at most 2 RB input registers (a row's four halves),
-/// 32 at RB 8 and BT 1, where text_dgemv's 4 RB input floats make 48. text_dgemv's bytes.
+/// 32 at RB 8 and BT 1, where text_dgemv's 4 RB input floats make 48 (48 at BT 2, `Dense.btLaunch`'s on a launch of many
+/// threadgroups). text_dgemv's bytes.
 pub const text_dgemv_lean = dgemv_1 ++ dgemv_2 ++ dgemv_j ++ dgemv_3;
-const dgemv_j = @embedFile("kernels/dense/dgemv_j.metal");
+pub const dgemv_j = @embedFile("kernels/dense/dgemv_j.metal");
 
 /// text_dfinish up to the 128-point butterfly (decb.zig's finish variants reuse these statements verbatim)
 pub const dfinish_v = @embedFile("kernels/dense/dfinish_v.metal");
@@ -79,6 +86,14 @@ pub const dfinish_v = @embedFile("kernels/dense/dfinish_v.metal");
 pub const dfinish_store = @embedFile("kernels/dense/dfinish_store.metal");
 /// finish of the multi-row GEMV: y OUT_T [ROWS, OUT] = f16(H128(f16(sum of the KS planes, in slice order)) * svh)
 pub const text_dfinish = dfinish_v ++ dfinish_store;
+
+/// F3 (`Dense.swigluPrep`): the shared expert's gate and up finishes (text_dfinish's statements) of one 128-wide block of
+/// their outputs, the host's clamped SwiGLU in f32 (MLX's functors), the activation dtype, then the down linear's prepare
+/// (text_prep_s, lane order) on it: xp half [ROWS, DIM] and xs f32 [ROWS, DIM / 128], the gate's and up's outputs never
+/// stored
+pub const text_swiglu_prep: [:0]const u8 = @embedFile("kernels/dense/swiglu_prep.metal");
+const swiglu_prep_in = [_][*:0]const u8{ "z1", "xs1", "svh1", "z3", "xs3", "svh3", "suh2", "lim" };
+const swiglu_prep_out = [_][*:0]const u8{ "xp", "xs" };
 
 // ---- DEC-ONE: one launch per dense linear at decode rows ----
 //
@@ -216,6 +231,16 @@ pub const Dense = struct {
     /// the finish over row pieces (`text_finish_pieces`, `finishPieces`): made on first use, so a process that never
     /// splits a call never builds it
     finish_pieces: ?mlx.mlx_fast_metal_kernel = null,
+    /// output tiles per GEMV threadgroup per decode row count (DEC-ONE's and the chain's), 0 for `btAt`'s: launch shape
+    /// only (a row's sums do not depend on it). 1, 2, 4 or 8; set before the configs of that row count are built
+    /// (`resetCfgs` drops the built ones).
+    bt_set: [decode.Kernels.max_rows + 1]u8 = @splat(0),
+    /// F3's launch on a gate's shape (`text_swiglu_prep`), made on first use, its configs per decode row count (for
+    /// `swiglu_act`, the activation dtype they were built for) and the limit's one-element array
+    swiglu_prep: ?mlx.mlx_fast_metal_kernel = null,
+    swiglu_cfg: [decode.Kernels.max_rows + 1]?mlx.mlx_fast_metal_kernel_config = @splat(null),
+    swiglu_act: ?mlx.mlx_dtype = null,
+    swiglu_lim: ?struct { v: f32, a: mlx.mlx_array } = null,
 
     /// `lean`: `gemv` is the lean GEMV text's config (text_dgemv_lean), not text_dgemv's
     pub const Cfg = struct { prep: mlx.mlx_fast_metal_kernel_config, gemv: mlx.mlx_fast_metal_kernel_config, finish: mlx.mlx_fast_metal_kernel_config, lean: bool = false };
@@ -276,6 +301,73 @@ pub const Dense = struct {
     /// output tiles per threadgroup for RB rows: 2 BT RB f32 accumulators per lane (8 at 1-2 rows, 4 RB at 3-4, 2 RB beyond)
     pub fn btFor(rb: u32) u32 {
         return if (rb == 1) 4 else if (rb <= 4) 2 else 1;
+    }
+
+    /// The threadgroups a GEMV launch of lean chunks (past max_rb rows) puts in flight at BT 1 from which BT 2 runs it
+    /// faster (M5 Max, DeepSeek-V4.1's K6 trunk on the 40-layer chain at rows 6 to 8: wq_b's 2048 threadgroups and wo_a's
+    /// 8192 take 0.18 to 0.22 and 0.30 to 0.37 ms a token less at BT 2; launches of 640 to 1024 move within 0.05 ms either
+    /// way, and BT 2 on text_dgemv's chunks of 5 rows costs 0.2 to 2.5 ms)
+    pub const lean_bt2_threadgroups: u32 = 2048;
+
+    /// whether a launch of `tgs1` threadgroups at BT 1 takes its chunks of `rb` rows on the lean text at BT 2: the lean
+    /// chunks (past max_rb rows) of a launch of at least `lean_bt2_threadgroups`, and with `Config.dense_lean5` the
+    /// chunks of max_rb rows of one too (text_dgemv's state at RB 5 and BT 2, (2 BT + 4) RB = 40 floats, would spill;
+    /// the lean text's, (2 BT + 2) RB, is 30)
+    pub fn wideLean(rb: u32, tgs1: u32) bool {
+        if (tgs1 < lean_bt2_threadgroups) return false;
+        return rb > max_rb or (rb == max_rb and config.get().dense_lean5);
+    }
+
+    /// output tiles per threadgroup for lean chunks of `rb` rows in a launch of `tgs1` threadgroups at BT 1: `btFor`'s,
+    /// but 2 where `wideLean` holds (2 BT RB = 32 accumulators at RB 8)
+    pub fn btLaunch(rb: u32, tgs1: u32) u32 {
+        return if (wideLean(rb, tgs1)) 2 else btFor(rb);
+    }
+
+    /// the GEMV's threadgroups at BT 1 for a call of `rows` rows in chunks of `rb`: its output tiles, row chunks and K
+    /// slices
+    pub fn tgs1At(self: *const Dense, rows: usize, rb: u32) u32 {
+        const chunks: u32 = (@as(u32, @intCast(rows)) + rb - 1) / rb;
+        return (self.shape.out / 16) * chunks * self.ks_split;
+    }
+
+    /// whether the chain's call of `rows` rows in chunks of `rb` runs the lean text: with `lean`, past max_rb rows, and
+    /// at max_rb rows in a launch `wideLean` takes
+    pub fn leanAt(self: *const Dense, rows: usize, rb: u32) bool {
+        return self.lean and (rb > max_rb or (rb == max_rb and wideLean(rb, self.tgs1At(rows, rb))));
+    }
+
+    /// the output tiles per threadgroup the chain's call of `rows` rows in chunks of `rb` takes: `bt_set`'s, else
+    /// `btLaunch`'s on the lean text (`leanAt`), `btFor`'s on text_dgemv
+    pub fn btAt(self: *const Dense, rows: usize, rb: u32) u32 {
+        const o = self.bt_set[rows];
+        if (o != 0) return o;
+        return if (self.leanAt(rows, rb)) btLaunch(rb, self.tgs1At(rows, rb)) else btFor(rb);
+    }
+
+    /// DEC-ONE's output tiles per threadgroup at `rows` rows in chunks of `rb` (`rbFor`'s, text_dgemv's loop): `bt_set`'s,
+    /// else `btFor`'s
+    pub fn btDec(self: *const Dense, rows: usize, rb: u32) u32 {
+        const o = self.bt_set[rows];
+        return if (o != 0) o else btFor(rb);
+    }
+
+    /// Drops every built decode config (`cfg`, `dec_cfg`), so the next call of each row count builds its launches from the
+    /// fields as they are then (`bt_set`, `dec_prep_rows`, ...)
+    pub fn resetCfgs(self: *Dense) void {
+        for (&self.swiglu_cfg) |*c| if (c.*) |cc| {
+            _ = mlx.mlx_fast_metal_kernel_config_free(cc);
+            c.* = null;
+        };
+        self.swiglu_act = null;
+        for (&self.cfg) |*c| if (c.*) |cc| {
+            inline for (.{ cc.prep, cc.gemv, cc.finish }) |k| _ = mlx.mlx_fast_metal_kernel_config_free(k);
+            c.* = null;
+        };
+        for (&self.dec_cfg) |*c| if (c.*) |cc| {
+            inline for (.{ cc.prep, cc.gemv }) |k| _ = mlx.mlx_fast_metal_kernel_config_free(k);
+            c.* = null;
+        };
     }
 
     /// the smallest K split that puts 160 threadgroups (4 per core of a 40-core GPU) in flight at one row (BT 4); fixed per
@@ -347,7 +439,7 @@ pub const Dense = struct {
         const OUT: c_int = @intCast(self.shape.out);
         const t = self.templ();
         const rb: u32 = rbFor(rows_u);
-        const bt = btFor(rb);
+        const bt = self.btDec(rows, rb);
         if (8 % bt != 0) return error.BadExl3Shape;
         const chunks: u32 = (rows_u + rb - 1) / rb;
         const ksv: c_int = @intCast(self.ks_split);
@@ -430,10 +522,7 @@ pub const Dense = struct {
     }
 
     pub fn deinit(self: *Dense) void {
-        for (&self.cfg) |*c| if (c.*) |cc| {
-            inline for (.{ cc.prep, cc.gemv, cc.finish }) |k| _ = mlx.mlx_fast_metal_kernel_config_free(k);
-            c.* = null;
-        };
+        self.resetCfgs();
         if (self.dequant_cfg) |c| _ = mlx.mlx_fast_metal_kernel_config_free(c);
         for (&self.small) |*c| if (c.*) |cc| {
             inline for (.{ cc.io.prep, cc.io.finish, cc.gemm }) |k| _ = mlx.mlx_fast_metal_kernel_config_free(k);
@@ -441,13 +530,13 @@ pub const Dense = struct {
             c.* = null;
         };
         if (self.xs_dummy.ctx != null) _ = mlx.mlx_array_free(self.xs_dummy);
-        for (&self.dec_cfg) |*c| if (c.*) |cc| {
-            inline for (.{ cc.prep, cc.gemv }) |k| _ = mlx.mlx_fast_metal_kernel_config_free(k);
-            c.* = null;
-        };
         inline for (.{ self.prep, self.gemv, self.finish, self.dequant, self.dgemv, self.dgemv_lean, self.dfinish, self.prep_s, self.gemm_pf, self.gemm_rs, self.dec0, self.dec1, self.prep_sc, self.dec_zero }) |k| decode.freeKernel(k);
         if (self.finish_pieces) |k| decode.freeKernel(k);
         self.finish_pieces = null;
+        if (self.swiglu_prep) |k| decode.freeKernel(k);
+        self.swiglu_prep = null;
+        if (self.swiglu_lim) |l| _ = mlx.mlx_array_free(l.a);
+        self.swiglu_lim = null;
     }
 
     pub fn templ(self: *const Dense) [3]ks.TemplateArg {
@@ -475,7 +564,8 @@ pub const Dense = struct {
         const OUT: c_int = @intCast(self.shape.out);
         const t = self.templ();
         const rb: u32 = self.chainRb(@intCast(rows));
-        const bt = btFor(rb);
+        const bt = self.btAt(rows, rb);
+        if (8 % bt != 0) return error.BadExl3Shape;
         const chunks: u32 = (@as(u32, @intCast(rows)) + rb - 1) / rb;
         const ksv: c_int = @intCast(self.ks_split);
         const out_t = ks.TemplateArg{ .name = "OUT_T", .value = .{ .dtype = self.shape.out_dtype } };
@@ -484,7 +574,7 @@ pub const Dense = struct {
             .prep = try ks.buildConfig(.{ .grid = .{ (self.shape.in / 128) * 32, @intCast(rows), 1 }, .threadgroup = .{ 32, 1, 1 }, .out_shapes = &.{ &[_]c_int{ r, IN }, &[_]c_int{ r, @intCast(self.shape.in / 128) } }, .out_dtypes = &.{ .float16, .float32 }, .template = &.{ .{ .name = "DIM", .value = .{ .int = IN } }, .{ .name = "LANE_ORDER", .value = .{ .int = 1 } } } }),
             .gemv = try ks.buildConfig(.{ .grid = .{ (self.shape.out / 16 / bt) * 128, chunks, self.ks_split }, .threadgroup = .{ 128, 1, 1 }, .out_shapes = &.{&[_]c_int{ ksv * r, OUT }}, .out_dtypes = &.{.float32}, .template = &.{ t[0], t[1], t[2], .{ .name = "IN", .value = .{ .int = IN } }, .{ .name = "OUT", .value = .{ .int = OUT } }, .{ .name = "KS", .value = .{ .int = ksv } }, .{ .name = "BT", .value = .{ .int = @intCast(bt) } }, .{ .name = "RB", .value = .{ .int = @intCast(rb) } }, .{ .name = "ROWS", .value = .{ .int = r } }, defer_t } }),
             .finish = try ks.buildConfig(.{ .grid = .{ (self.shape.out / 128) * 32, @intCast(rows), 1 }, .threadgroup = .{ 32, 1, 1 }, .out_shapes = &.{&[_]c_int{ r, OUT }}, .out_dtypes = &.{self.shape.out_dtype}, .template = &.{ .{ .name = "DIM", .value = .{ .int = OUT } }, out_t, .{ .name = "KS", .value = .{ .int = ksv } }, .{ .name = "ROWS", .value = .{ .int = r } }, .{ .name = "INBLK", .value = .{ .int = @intCast(self.shape.in / 128) } }, defer_t } }),
-            .lean = self.leanFor(rb),
+            .lean = self.leanAt(rows, rb),
         };
     }
 
@@ -784,6 +874,86 @@ pub const Dense = struct {
         return one(self.finish_pieces.?, cfg, &ins, s);
     }
 
+    /// F3: whether the chain's prepare / GEMV / finish serve `rows` rows on their own (`linearPrepared`, `prepareGemv`):
+    /// the multi-row GEMV chain's rows (DEC-ONE not taking them, no row-slot reference)
+    pub fn preparedTakes(self: *const Dense, rows: usize) bool {
+        return rows >= 1 and rows <= decode.Kernels.max_rows and !self.decTakes(rows) and !self.rowslot;
+    }
+
+    /// F3: `linear`'s GEMV and finish at `rows` rows (`preparedTakes`) from rows a launch before it prepared: xp half
+    /// [rows, in] in lane order and xs f32 [rows, in / 128], what the chain's prep_s makes of x, so `linear`'s bytes. y
+    /// [rows, out] in `shape.out_dtype`; the caller frees y.
+    pub fn linearPrepared(self: *Dense, s: mlx.mlx_stream, xp: mlx.mlx_array, xs: mlx.mlx_array, trellis: mlx.mlx_array, svh: mlx.mlx_array, rows: usize) !mlx.mlx_array {
+        if (!self.preparedTakes(rows)) return error.Exl3EngineNotImplemented;
+        const c = try self.cfgs(rows);
+        const z = try one(if (c.lean) self.dgemv_lean else self.dgemv, c.gemv, &.{ xp, trellis }, s);
+        defer _ = mlx.mlx_array_free(z);
+        return one(self.dfinish, c.finish, &.{ z, svh, xs }, s);
+    }
+
+    /// F3: `linear`'s prepare and GEMV at `rows` rows (`preparedTakes`): the K-slice planes z f32 [KS rows, out] and the
+    /// prepared rows' block sums xs f32 [rows, in / 128], what `linear`'s finish reads. The caller frees both.
+    pub fn prepareGemv(self: *Dense, s: mlx.mlx_stream, x: mlx.mlx_array, trellis: mlx.mlx_array, suh: mlx.mlx_array, rows: usize) ![2]mlx.mlx_array {
+        if (!self.preparedTakes(rows)) return error.Exl3EngineNotImplemented;
+        const c = try self.cfgs(rows);
+        var po: [2]mlx.mlx_array = undefined;
+        try ks.applyConfig(self.prep_s, c.prep, &.{ x, suh }, &po, s);
+        defer _ = mlx.mlx_array_free(po[0]);
+        errdefer _ = mlx.mlx_array_free(po[1]);
+        const z = try one(if (c.lean) self.dgemv_lean else self.dgemv, c.gemv, &.{ po[0], trellis }, s);
+        return .{ z, po[1] };
+    }
+
+    /// F3 on the gate's shape (the up's the same): from the gate's and up's planes and block sums (`prepareGemv`), one
+    /// launch of their finishes, the clamped SwiGLU at `limit` (> 0) in f32, `act`'s rounding and the down linear's
+    /// prepare (its suh `suh2` [out]): the down's xp half [rows, out] and xs f32 [rows, out / 128], what its prep_s makes
+    /// of the host's activation, bit for bit. The caller frees both.
+    pub fn swigluPrep(self: *Dense, s: mlx.mlx_stream, z1: mlx.mlx_array, xs1: mlx.mlx_array, svh1: mlx.mlx_array, z3: mlx.mlx_array, xs3: mlx.mlx_array, svh3: mlx.mlx_array, suh2: mlx.mlx_array, limit: f32, act: mlx.mlx_dtype, rows: usize) ![2]mlx.mlx_array {
+        if (!self.preparedTakes(rows) or !(limit > 0)) return error.Exl3EngineNotImplemented;
+        if (self.swiglu_prep == null) self.swiglu_prep = ks.newKernel("turboexl3_dense_swiglu_prep", &swiglu_prep_in, &swiglu_prep_out, text_swiglu_prep, decode.header, true) orelse return error.KernelCreateFailed;
+        if (self.swiglu_act) |a| if (a != act) {
+            for (&self.swiglu_cfg) |*c| if (c.*) |cc| {
+                _ = mlx.mlx_fast_metal_kernel_config_free(cc);
+                c.* = null;
+            };
+        };
+        self.swiglu_act = act;
+        if (self.swiglu_lim) |l| if (l.v != limit) {
+            _ = mlx.mlx_array_free(l.a);
+            self.swiglu_lim = null;
+        };
+        if (self.swiglu_lim == null) {
+            const a = mlx.mlx_array_new_data(&limit, &[_]c_int{1}, 1, .float32);
+            if (a.ctx == null) return error.MlxError;
+            self.swiglu_lim = .{ .v = limit, .a = a };
+        }
+        const cfg = self.swiglu_cfg[rows] orelse blk: {
+            const r: c_int = @intCast(rows);
+            const dim: u32 = self.shape.out;
+            const c = try ks.buildConfig(.{
+                .grid = .{ (dim / 128) * 32, @intCast(rows), 1 },
+                .threadgroup = .{ 32, 1, 1 },
+                .out_shapes = &.{ &[_]c_int{ r, @intCast(dim) }, &[_]c_int{ r, @intCast(dim / 128) } },
+                .out_dtypes = &.{ .float16, .float32 },
+                .template = &.{
+                    .{ .name = "DIM", .value = .{ .int = @intCast(dim) } },
+                    .{ .name = "KS1", .value = .{ .int = @intCast(self.ks_split) } },
+                    .{ .name = "KS3", .value = .{ .int = @intCast(self.ks_split) } },
+                    .{ .name = "ROWS", .value = .{ .int = r } },
+                    .{ .name = "INBLK", .value = .{ .int = @intCast(self.shape.in / 128) } },
+                    .{ .name = "DEFER", .value = .{ .int = if (self.defer_affine) 1 else 0 } },
+                    .{ .name = "OUT_T", .value = .{ .dtype = self.shape.out_dtype } },
+                    .{ .name = "ACT_T", .value = .{ .dtype = act } },
+                },
+            });
+            self.swiglu_cfg[rows] = c;
+            break :blk c;
+        };
+        var o: [2]mlx.mlx_array = undefined;
+        try ks.applyConfig(self.swiglu_prep.?, cfg, &.{ z1, xs1, svh1, z3, xs3, svh3, suh2, self.swiglu_lim.?.a }, &o, s);
+        return o;
+    }
+
     /// y [rows, out] in `shape.out_dtype` for x [rows, in] (any float dtype); the caller frees y.
     pub fn linear(self: *Dense, s: mlx.mlx_stream, x: mlx.mlx_array, trellis: mlx.mlx_array, suh: mlx.mlx_array, svh: mlx.mlx_array, rows: usize) !mlx.mlx_array {
         return self.linearOn(s, s, x, trellis, suh, svh, rows);
@@ -855,10 +1025,15 @@ pub const Dense = struct {
         defer _ = mlx.mlx_array_free(xp);
         const W = try self.dequantize(rs, trellis);
         defer _ = mlx.mlx_array_free(W);
+        // pg2 (the host's switch, pgemm.zig): at a tabled shape the matmul and the finish as one launch, the same words
+        if (try pgemm.fusedOn(rs, xp, W, svh, self.shape.out_dtype)) |y| return y;
         var inner = mlx.mlx_array_new();
         defer _ = mlx.mlx_array_free(inner);
         try mlx.check(mlx.mlx_matmul(&inner, xp, W, rs));
-        return one(self.finish, c.finish, &.{ inner, svh }, rs);
+        const y = try one(self.finish, c.finish, &.{ inner, svh }, rs);
+        // pg2's check: the fused launch beside the chain's y (served), compared by the host
+        pgemm.check(rs, xp, W, svh, self.shape.out_dtype, y);
+        return y;
     }
 };
 
