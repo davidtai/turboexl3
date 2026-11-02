@@ -40,6 +40,9 @@ pub const Config = struct {
     /// the grouped texts, which take up to four and skip a row-slot whose id is `skip_id` (no decode, its y row 0). The
     /// same bytes for every other row-slot.
     banked_group: u32 = 2,
+    /// hw4b: the grouped texts with an M = 3 member path (`decode.text_gu3bgm3`, `text_down3bgm3`) for a lead with three
+    /// members (today's run the M = 4 path, a fourth member's FMAs padding). The same bytes. Needs `banked_group` 4.
+    banked_m3: bool = false,
     /// A diagnostic: each routed decode call's routing read back (a sync per call), its expert multiplicities printed
     /// every 480 calls.
     slot_stats: bool = false,
@@ -52,7 +55,7 @@ pub const Config = struct {
         const spts = [_]u32{ 1, 2, 4, 5, 10, 20 };
         return std.mem.indexOfScalar(u8, &forms, c.decode_form) != null and
             std.mem.indexOfScalar(u32, &spts, c.shared_spt) != null and c.pf_alay <= 2 and
-            (c.banked_group == 2 or c.banked_group == 4);
+            (c.banked_group == 2 or c.banked_group == 4) and (!c.banked_m3 or c.banked_group == 4);
     }
 };
 
@@ -82,6 +85,9 @@ test "turboexl3 config: the defaults are valid and served; an unserved form, sli
     try t.expectEqual(@as(u32, 2), d.banked_group);
     try t.expect((Config{ .banked_group = 4 }).valid());
     for ([_]u32{ 0, 1, 3, 8 }) |g| try t.expect(!(Config{ .banked_group = g }).valid());
+    try t.expect(!d.banked_m3);
+    try t.expect((Config{ .banked_group = 4, .banked_m3 = true }).valid());
+    try t.expect(!(Config{ .banked_group = 2, .banked_m3 = true }).valid());
     try t.expect(d.dense_lean);
     try t.expect(d.fused_fin_fold);
     const saved = current.get().*;
