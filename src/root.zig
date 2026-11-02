@@ -25,6 +25,8 @@ pub const decode = @import("decode.zig");
 pub const ref = @import("ref.zig");
 pub const unfused = @import("unfused.zig");
 pub const dense = @import("dense.zig");
+/// pg2: a dense linear's prefill matmul and finish as one launch at this machine's tiles (pgemm.zig); the host sets `pgemm.mode`.
+pub const pgemm = @import("pgemm.zig");
 pub const prefill = @import("prefill.zig");
 /// The kernel texts a consumer may splice into its own Metal (MLX-free; `sources.zig`).
 pub const sources = @import("sources.zig");

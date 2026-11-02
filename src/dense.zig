@@ -29,6 +29,7 @@ const decode = @import("decode.zig");
 const unfused = @import("unfused.zig");
 const prefill = @import("prefill.zig");
 const config = @import("config.zig");
+const pgemm = @import("pgemm.zig");
 
 /// prepare for a dense linear: xp half [rows, IN] = H128(f16(x[row]) * suh) per 128-block; LANE_ORDER 1 writes the GEMV's
 /// lane order within each 16-block, 0 the natural order the matmul path needs; one simdgroup per (block, row); x any float dtype
@@ -921,10 +922,15 @@ pub const Dense = struct {
         defer _ = mlx.mlx_array_free(xp);
         const W = try self.dequantize(rs, trellis);
         defer _ = mlx.mlx_array_free(W);
+        // pg2 (the host's switch, pgemm.zig): at a tabled shape the matmul and the finish as one launch, the same words
+        if (try pgemm.fusedOn(rs, xp, W, svh, self.shape.out_dtype)) |y| return y;
         var inner = mlx.mlx_array_new();
         defer _ = mlx.mlx_array_free(inner);
         try mlx.check(mlx.mlx_matmul(&inner, xp, W, rs));
-        return one(self.finish, c.finish, &.{ inner, svh }, rs);
+        const y = try one(self.finish, c.finish, &.{ inner, svh }, rs);
+        // pg2's check: the fused launch beside the chain's y (served), compared by the host
+        pgemm.check(rs, xp, W, svh, self.shape.out_dtype, y);
+        return y;
     }
 };
 

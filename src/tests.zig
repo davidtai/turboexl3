@@ -13,6 +13,7 @@ comptime {
     _ = @import("unfused.zig");
     _ = @import("decode.zig");
     _ = @import("dense.zig");
+    _ = @import("pgemm.zig");
     _ = @import("prefill.zig");
     _ = @import("decb.zig");
     _ = @import("attn_io.zig");
