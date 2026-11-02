@@ -29,6 +29,7 @@ comptime {
     _ = @import("clamped_test.zig");
     _ = @import("banked_test.zig");
     _ = @import("banked_grp_test.zig");
+    _ = @import("banked_ilp_test.zig");
     _ = @import("deepseek_test.zig");
     _ = @import("deepseek_gemv_test.zig");
     _ = @import("topk_test.zig");

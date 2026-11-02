@@ -1418,52 +1418,90 @@ pub const BankedHalf = struct { hd: mlx.mlx_array, hs: mlx.mlx_array };
 /// (two at 2), and a row-slot whose id is `banked_skip_id` runs no expert: its y row is 0. Every other row-slot's bytes
 /// are the same at either.
 pub fn moeClampedBanked(s: mlx.mlx_stream, x: mlx.mlx_array, banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, limit: c_int) !mlx.mlx_array {
-    return moeClampedBankedSel(s, x, banks, ids, dec, limit, .configured);
+    return moeClampedBankedSelV(s, x, banks, ids, dec, limit, .configured, config.get().banked_variant_gu, config.get().banked_variant_dn);
 }
 
 /// hw4b: which banked texts a call runs (`decode.Kernels3.BankedSel`): the configured ones, today's grouped texts (g4) or
 /// the grouped texts with the M = 3 member path (g4m3). Every selection gives a row-slot the same bytes.
 pub const BankedSel = decode.Kernels3.BankedSel;
 
-/// `moeClampedBanked` on `sel`'s texts (a check mode's second call, the tests).
+/// hw2: the grouped banked GEMVs' variants (`Config.banked_variant_gu`, `banked_variant_dn`; `decode.group_variants`),
+/// on whichever grouped texts a call runs (today's or hw4b's), and a variant's index by name (null: none).
+pub const group_variants = decode.group_variants;
+pub const groupVariantOf = decode.groupVariantOf;
+
+/// `moeClampedBanked` on `sel`'s texts at the configured variants (hw4b's check mode's calls, the tests).
 pub fn moeClampedBankedSel(s: mlx.mlx_stream, x: mlx.mlx_array, banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, limit: c_int, sel: BankedSel) !mlx.mlx_array {
-    const h = try moeClampedBankedGateUpSel(s, x, banks, ids, dec, limit, sel);
+    return moeClampedBankedSelV(s, x, banks, ids, dec, limit, sel, config.get().banked_variant_gu, config.get().banked_variant_dn);
+}
+
+/// `moeClampedBanked` on the configured texts with the grouped gate|up GEMV of variant `vgu` and the grouped down GEMV
+/// of `vdn` (`group_variants`; 0 today's, any other needs `Config.banked_group` 4; hw2's check mode's calls): the same
+/// bytes (a variant changes a GEMV's schedule, never a decoded value or a sum).
+pub fn moeClampedBankedV(s: mlx.mlx_stream, x: mlx.mlx_array, banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, limit: c_int, vgu: u8, vdn: u8) !mlx.mlx_array {
+    return moeClampedBankedSelV(s, x, banks, ids, dec, limit, .configured, vgu, vdn);
+}
+
+/// `moeClampedBanked` on `sel`'s texts with the grouped GEMVs of variants `vgu` (gate|up) and `vdn` (down) on them: the
+/// same bytes for every selection and variant.
+pub fn moeClampedBankedSelV(s: mlx.mlx_stream, x: mlx.mlx_array, banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, limit: c_int, sel: BankedSel, vgu: u8, vdn: u8) !mlx.mlx_array {
+    const h = try moeClampedBankedGateUpSelV(s, x, banks, ids, dec, limit, sel, vgu);
     defer freeArr(h.hd);
     defer freeArr(h.hs);
-    return moeClampedBankedDownSel(s, h, banks, ids, dec, limit, sel);
+    return moeClampedBankedDownSelV(s, h, banks, ids, dec, limit, sel, vdn);
 }
 
 /// `moeClampedBanked`'s gate|up: prep2b, gu3b and fin7cb (`decode.Kernels3.bankedGateUp`). It reads every bank's gate and
 /// up arrays and its down suh (fin7cb prepares the down's input).
 pub fn moeClampedBankedGateUp(s: mlx.mlx_stream, x: mlx.mlx_array, banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, limit: c_int) !BankedHalf {
-    return moeClampedBankedGateUpSel(s, x, banks, ids, dec, limit, .configured);
+    return moeClampedBankedGateUpSelV(s, x, banks, ids, dec, limit, .configured, config.get().banked_variant_gu);
 }
 
-/// `moeClampedBankedGateUp` on `sel`'s texts.
+/// `moeClampedBankedGateUp` on `sel`'s texts at the configured variant.
 pub fn moeClampedBankedGateUpSel(s: mlx.mlx_stream, x: mlx.mlx_array, banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, limit: c_int, sel: BankedSel) !BankedHalf {
+    return moeClampedBankedGateUpSelV(s, x, banks, ids, dec, limit, sel, config.get().banked_variant_gu);
+}
+
+/// `moeClampedBankedGateUp` with the grouped gate|up GEMV of `variant` (`moeClampedBankedV`).
+pub fn moeClampedBankedGateUpV(s: mlx.mlx_stream, x: mlx.mlx_array, banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, limit: c_int, variant: u8) !BankedHalf {
+    return moeClampedBankedGateUpSelV(s, x, banks, ids, dec, limit, .configured, variant);
+}
+
+/// `moeClampedBankedGateUp` on `sel`'s texts with the grouped gate|up GEMV of `variant` on them.
+pub fn moeClampedBankedGateUpSelV(s: mlx.mlx_stream, x: mlx.mlx_array, banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, limit: c_int, sel: BankedSel, variant: u8) !BankedHalf {
     const c = try bankedCall(banks, ids, dec, limit);
     const xs = mlx.getShape(x);
     if (xs.len != 2 or xs[0] != @as(c_int, @intCast(c.rows)) or xs[1] != @as(c_int, @intCast(c.geo.hidden))) return error.BadExl3Shape;
     const xd = mlx.mlx_array_dtype(x);
     if (xd != .bfloat16 and xd != .float32 and xd != .float16) return error.BadExl3Dtype;
-    const hd = try (try kernelsFor(c.geo, .float32)).bankedGateUpSel(s, x, ids, &c.kb, c.rows, sel);
+    const hd = try (try kernelsFor(c.geo, .float32)).bankedGateUpSelV(s, x, ids, &c.kb, c.rows, sel, variant);
     return .{ .hd = hd[0], .hs = hd[1] };
 }
 
 /// `moeClampedBanked`'s down: down3b and dfin3b (`decode.Kernels3.bankedDown`) over the gate|up's `h` -> y f32 [rows,
 /// hidden]; the caller frees y (and `h`).
 pub fn moeClampedBankedDown(s: mlx.mlx_stream, h: BankedHalf, banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, limit: c_int) !mlx.mlx_array {
-    return moeClampedBankedDownSel(s, h, banks, ids, dec, limit, .configured);
+    return moeClampedBankedDownSelV(s, h, banks, ids, dec, limit, .configured, config.get().banked_variant_dn);
 }
 
-/// `moeClampedBankedDown` on `sel`'s texts.
+/// `moeClampedBankedDown` on `sel`'s texts at the configured variant.
 pub fn moeClampedBankedDownSel(s: mlx.mlx_stream, h: BankedHalf, banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, limit: c_int, sel: BankedSel) !mlx.mlx_array {
+    return moeClampedBankedDownSelV(s, h, banks, ids, dec, limit, sel, config.get().banked_variant_dn);
+}
+
+/// `moeClampedBankedDown` with the grouped down GEMV of `variant` (`moeClampedBankedV`).
+pub fn moeClampedBankedDownV(s: mlx.mlx_stream, h: BankedHalf, banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, limit: c_int, variant: u8) !mlx.mlx_array {
+    return moeClampedBankedDownSelV(s, h, banks, ids, dec, limit, .configured, variant);
+}
+
+/// `moeClampedBankedDown` on `sel`'s texts with the grouped down GEMV of `variant` on them.
+pub fn moeClampedBankedDownSelV(s: mlx.mlx_stream, h: BankedHalf, banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, limit: c_int, sel: BankedSel, variant: u8) !mlx.mlx_array {
     const c = try bankedCall(banks, ids, dec, limit);
     const r: c_int = @intCast(c.rows);
     const w: c_int = @intCast(c.geo.inter);
     if (!std.mem.eql(c_int, mlx.getShape(h.hd), &.{ r, w }) or !std.mem.eql(c_int, mlx.getShape(h.hs), &.{ r, @divExact(w, 128) })) return error.BadExl3Shape;
     if (mlx.mlx_array_dtype(h.hd) != .float16 or mlx.mlx_array_dtype(h.hs) != .float32) return error.BadExl3Dtype;
-    return (try kernelsFor(c.geo, .float32)).bankedDownSel(s, h.hd, h.hs, ids, &c.kb, c.rows, sel);
+    return (try kernelsFor(c.geo, .float32)).bankedDownSelV(s, h.hd, h.hs, ids, &c.kb, c.rows, sel, variant);
 }
 
 /// A banked call's checked operands: the decode geometry (top-1, the clamp), its row-slots and the banks as the kernels
