@@ -34,4 +34,5 @@ comptime {
     _ = @import("deepseek_gemv_test.zig");
     _ = @import("topk_test.zig");
     _ = @import("bench.zig");
+    _ = @import("f3_test.zig");
 }

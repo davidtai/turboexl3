@@ -277,6 +277,70 @@ pub fn denseCached(shape: dense.Shape) !*dense.Dense {
     return denseFor(shape);
 }
 
+/// F3 at x [..., in] through the gate `p1`, the up `p3` (in -> inter each) and the down `p2` (inter -> out): the rows and
+/// the two Dense when `sharedSwiglu` serves the call (decode rows the dense chain takes: 5 to DECODE_ROWS_MAX, DEC-ONE
+/// keeping up to 4; one rate and decode; the down's input in `act`); else null.
+fn swigluPlan(x: mlx.mlx_array, p1: Proj, p3: Proj, p2: Proj, act: mlx.mlx_dtype, dec: format.Decode) !?struct { rows: usize, gu: *dense.Dense, down: *dense.Dense } {
+    const xsh = mlx.getShape(x);
+    const t1 = mlx.getShape(p1.trellis);
+    const t3 = mlx.getShape(p3.trellis);
+    const t2 = mlx.getShape(p2.trellis);
+    if (xsh.len < 1 or t1.len != 3 or t3.len != 3 or t2.len != 3) return null;
+    const xd = mlx.mlx_array_dtype(x);
+    if (xd != .bfloat16 and xd != .float32 and xd != .float16) return null;
+    if (act != .bfloat16 and act != .float32 and act != .float16) return null;
+    if (!std.mem.eql(c_int, t1, t3) or t2[0] != t1[1] or t2[2] != t1[2]) return null;
+    const in_dim = t1[0] * 16;
+    const inter = t1[1] * 16;
+    const out_dim = t2[1] * 16;
+    if (xsh[xsh.len - 1] != in_dim) return null;
+    const rate = format.Rate.fromN(@intCast(t1[2])) orelse return null;
+    for ([_]Proj{ p1, p3 }) |p| if (mlx.getShape(p.suh).len != 1 or mlx.getShape(p.suh)[0] != in_dim or mlx.getShape(p.svh).len != 1 or mlx.getShape(p.svh)[0] != inter) return null;
+    if (mlx.getShape(p2.suh).len != 1 or mlx.getShape(p2.suh)[0] != inter or mlx.getShape(p2.svh).len != 1 or mlx.getShape(p2.svh)[0] != out_dim) return null;
+    var rows: usize = 1;
+    for (xsh[0 .. xsh.len - 1]) |d| rows *= @intCast(d);
+    if (rows < 1 or rows > kernels.DECODE_ROWS_MAX) return null;
+    const gu = try denseFor(.{ .in = @intCast(in_dim), .out = @intCast(inter), .rate = rate, .dec = dec, .out_dtype = xd });
+    const down = try denseFor(.{ .in = @intCast(inter), .out = @intCast(out_dim), .rate = rate, .dec = dec, .out_dtype = act });
+    if (!gu.preparedTakes(rows) or !down.preparedTakes(rows)) return null;
+    return .{ .rows = rows, .gu = gu, .down = down };
+}
+
+/// F3: whether `sharedSwiglu` serves x through `p1`, `p3` and `p2` (`swigluPlan`)
+pub fn sharedSwigluTakes(x: mlx.mlx_array, p1: Proj, p3: Proj, p2: Proj, act: mlx.mlx_dtype, dec: format.Decode) !bool {
+    return (try swigluPlan(x, p1, p3, p2, act, dec)) != null;
+}
+
+/// F3: the host's shared expert at decode rows, `linear(astype(clampedSwiGLU(astype(linear(x, p1), f32),
+/// astype(linear(x, p3), f32), limit), act), p2)` (limit > 0), in three launches fewer: the gate's and up's prepares and
+/// GEMVs, one launch of their finishes, the SwiGLU and the down's prepare (`dense.text_swiglu_prep`), then the down's GEMV
+/// and finish, bit for bit; y [..., out] in `act`. error.Exl3EngineNotImplemented where `sharedSwigluTakes` does not hold.
+pub fn sharedSwiglu(s: mlx.mlx_stream, x: mlx.mlx_array, p1: Proj, p3: Proj, p2: Proj, limit: f32, act: mlx.mlx_dtype, dec: format.Decode) !mlx.mlx_array {
+    const plan = (try swigluPlan(x, p1, p3, p2, act, dec)) orelse return error.Exl3EngineNotImplemented;
+    if (!(limit > 0)) return error.Exl3EngineNotImplemented;
+    const xsh = mlx.getShape(x);
+    const gu = plan.gu;
+    var x2 = mlx.mlx_array_new();
+    defer freeArr(x2);
+    try mlx.check(mlx.mlx_reshape(&x2, x, &[_]c_int{ @intCast(plan.rows), @intCast(gu.shape.in) }, 2, s));
+    const g = try gu.prepareGemv(s, x2, p1.trellis, p1.suh, plan.rows);
+    defer for (g) |a| freeArr(a);
+    const u = try gu.prepareGemv(s, x2, p3.trellis, p3.suh, plan.rows);
+    defer for (u) |a| freeArr(a);
+    const pre = try gu.swigluPrep(s, g[0], g[1], p1.svh, u[0], u[1], p3.svh, p2.suh, limit, act, plan.rows);
+    defer for (pre) |a| freeArr(a);
+    const y2 = try plan.down.linearPrepared(s, pre[0], pre[1], p2.trellis, p2.svh, plan.rows);
+    defer freeArr(y2);
+    var osh: [8]c_int = undefined;
+    if (xsh.len > osh.len) return error.BadExl3Shape;
+    @memcpy(osh[0..xsh.len], xsh);
+    osh[xsh.len - 1] = @intCast(plan.down.shape.out);
+    var y = mlx.mlx_array_new();
+    errdefer freeArr(y);
+    try mlx.check(mlx.mlx_reshape(&y, y2, osh[0..xsh.len].ptr, @intCast(xsh.len), s));
+    return y;
+}
+
 /// A dense EXL3 linear: y [..., out] in x's dtype for x [..., in], trellis U16/I16 [in/16, out/16, n], suh F16 [in], svh F16
 /// [out]. Rows up to `kernels.DECODE_ROWS_MAX` take the GEMV kernels (DEC-ONE's one launch up to 4 rows), rows 17 to 32
 /// the register-path GEMM (`Config.nax`), wider calls MLX's matmul against the dequantized trellis: decoded per call, or
