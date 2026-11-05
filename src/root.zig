@@ -34,6 +34,9 @@ pub const sources = @import("core/sources.zig");
 pub const gdn_out = @import("models/qwen38/gdn_out.zig");
 /// The grouped linear's decode rows (`linearGrouped`).
 pub const grouped = @import("models/deepseek_v41/grouped.zig");
+/// Ricursive Ripple-65B: two linears of one input in one launch, the value residual and the clamped SwiGLU in the
+/// prepares (`models/ricursive/ricursive.zig`)
+pub const ricursive = @import("models/ricursive/ricursive.zig");
 
 pub const Spec = spec.Spec;
 pub const parseExpertQuant = spec.parseExpertQuant;
@@ -1678,4 +1681,5 @@ pub const shared_state = .{
     decode_merge.shared_state,
     dense.shared_state,
     gdn_out.shared_state,
+    ricursive.shared_state,
 };

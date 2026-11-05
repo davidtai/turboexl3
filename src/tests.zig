@@ -18,6 +18,7 @@ comptime {
     _ = @import("models/qwen38/decb.zig");
     _ = @import("models/qwen38/attn_io.zig");
     _ = @import("models/qwen38/gdn_out.zig");
+    _ = @import("models/ricursive/ricursive.zig");
     _ = @import("models/deepseek_v41/grouped.zig");
     _ = @import("root.zig");
     _ = @import("core/test_support.zig");
@@ -36,4 +37,5 @@ comptime {
     _ = @import("core/bench.zig");
     _ = @import("models/deepseek_v41/f3_test.zig");
     _ = @import("core/chains_test.zig");
+    _ = @import("models/ricursive/ricursive_test.zig");
 }

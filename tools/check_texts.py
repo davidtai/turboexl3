@@ -1180,6 +1180,16 @@ ADDED_FILES['banked_test.zig'] = ('the banked decode\'s tests: its texts\' compo
                                   'against moeClamped on its bank byte for byte and sampled pairs against '
                                   'ref.moeRowClamped (GPU), its timing against moeClamped\'s launches '
                                   '(TURBOEXL3_BANKED_TIME)')
+# Ricursive Ripple-65B (src/models/ricursive): two linears of one input in one DEC-ONE launch, the value residual and the
+# clamped SwiGLU in dense's prepares, and their tests
+ADDED_FILES['ricursive.zig'] = ('Ripple-65B\'s joined DEC-ONE launches (turboexl3_ric_jdec1, _jdec1_blend: dense\'s DEC-ONE '
+                                'text with the member\'s suh chosen after its head) and the prepares that form v\'s value '
+                                'residual and the MLP\'s clamped SwiGLU (turboexl3_ric_blend_prep, _swiglu_prep, '
+                                '_swiglu_prep_sc: dense\'s prep and prep_sc reading x through an accessor)')
+ADDED_FILES['ricursive_test.zig'] = ('Ripple-65B\'s tests: linear against format.project at every shape (K3, the head K6); the '
+                                     'joined launches, valueLinear and mlp against the host\'s chains word for word')
+ADDED[('root.zig', 'const ricursive')] = 'Ripple-65B\'s module (models/ricursive/ricursive.zig)'
+CHANGED[('root.zig', 'const shared_state')] = 'registers ricursive.shared_state'
 
 ADDED_FILES['chains_test.zig'] = ('byte tests of the core paths no other test pinned: pg2 against dequantize + matmul + '
                                   'finish, the pieces\' finish against the one-call finish, the unfused chain against the '
