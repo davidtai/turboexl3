@@ -35,4 +35,5 @@ comptime {
     _ = @import("core/topk_test.zig");
     _ = @import("core/bench.zig");
     _ = @import("models/deepseek_v41/f3_test.zig");
+    _ = @import("core/chains_test.zig");
 }

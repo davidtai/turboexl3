@@ -2674,7 +2674,9 @@ dequantize + matmul, the finishes, F3 and the un-rotated trunk.
 - **Bits:** byte-identical to the one-call finish (`text_finish`'s statements after the piece select). With `pieceInner`
   per piece the result is `linear` of the concatenated rows bit for bit wherever MLX's matmul runs the whole call's
   kernel at every piece's row count (the caller's check, the host's `gdnOverlapGemmSame`).
-- **Pinned by:** no test in the repo launches it or pins its text.
+- **Pinned by:** `src/core/chains_test.zig` "turboexl3 gpu linear pieces: the pieces' one finish gives the one-call
+  finish's words over their joined inner products (TURBOEXL3_GPU=1)" (GPU: 2, 3 and 4 pieces at 2560 -> 6144, word for
+  word against `root.linearFinish` of the joined inner products; against `linear` of the joined rows reported).
 
 ### `turboexl3_dense_gemv`
 
@@ -3035,12 +3037,15 @@ pg2: a dense linear's prefill matmul and finish as one launch.
   BN · 2 <= 32 KB.
 - **Replaces:** MLX's f16 matmul -> `turboexl3_dense_finish` (2 launches, 2 levels; z f16 written and read): one launch,
   MLX's fused NAX GEMM body (its `gemm_loop` verbatim, MLX 0.32.3) with the finish as its epilogue.
-- **Bits:** byte-identical to that chain per the module comment: the accumulators rounded to half as MLX's store rounds
-  them, then the finish's statements (the pg2u probe w-pg2u-20261102-0609: 0 differing words over every shape, tile and
-  row count, 2048 to 16384). No GPU test in the repo checks it; `check` mode leaves the comparison to the host.
-- **Pinned by:** `src/core/pgemm.zig` "pgemm: the epilogue runs the finish's statements, the loop is MLX's gemm_loop by
-  its statements, ..." (CPU: the epilogue carries each of `finish.metal`'s 10 lines, the loop is MLX's by its
-  statements, every table tile admitted, `mlxRegular`'s cases).
+- **Bits:** byte-identical to dequantize + MLX's matmul + the finish where it takes a call (MLX's regular NAX kernel, no
+  split K): the accumulators rounded to half as MLX's store rounds them, then the finish's statements. `check` mode
+  hands both to the host to compare.
+- **Pinned by:** `src/core/chains_test.zig` "turboexl3 gpu pg2: the fused matmul and finish give dequantize + matmul +
+  finish's words at every tabled shape (TURBOEXL3_GPU=1)" (GPU: `root.linear` with `Mode.on` against `Mode.off`, word
+  for word, at every tabled (K, N) and rows 64, 100 and 2048 where MLX runs its regular kernel); `src/core/pgemm.zig`
+  "pgemm: the epilogue runs the finish's statements, the loop is MLX's gemm_loop by its statements, ..." (CPU: the
+  epilogue carries each of `finish.metal`'s 10 lines, the loop is MLX's, every table tile admitted, `mlxRegular`'s
+  cases).
 
 ## `src/core/prefill.zig`
 
@@ -4163,9 +4168,12 @@ The unfused decode chain: the separately launched steps the fused forms replace 
 - **Grid and threadgroup:** `((DIM/128) · 32, RK, 1)` / `(32, 1, 1)`.
 - **Template args:** DIM (inter for gate and up, hidden for down).
 - **Replaces:** nothing: a step of the unfused chain, the math of `decode.zig`'s form 1 split into separate launches.
-- **Bits:** `format.project`'s finish rounding points (f16 z, H128, svh, f16), output f32; no test runs it.
-- **Pinned by:** `src/core/unfused.zig` "turboexl3 unfused texts: the inputs each signature names are read, the outputs
-  written" (CPU: its inputs z, slots and svh are read).
+- **Bits:** `format.project`'s finish rounding points (f16 z, H128, svh, f16), output f32. The chain it is a step of is
+  held within 5e-3 of `ref.moeRowDec`.
+- **Pinned by:** `src/core/chains_test.zig` "turboexl3 gpu unfused: the eleven-launch chain equals the host reference
+  within the decode chain's tolerance, at form 1's cases (TURBOEXL3_GPU=1)" (GPU: the whole chain within 5e-3 of
+  `ref.moeRowDec`; its words against form 1's reported); `src/core/unfused.zig` "turboexl3 unfused texts: the inputs
+  each signature names are read, the outputs written" (CPU, the texts).
 
 ### `turboexl3_gemv`
 
@@ -4189,9 +4197,12 @@ The unfused decode chain: the separately launched steps the fused forms replace 
   row-slot).
 - **Template args:** NHW, CODEBOOK, WBITS, IN, OUT. Every rate, codebook and window.
 - **Replaces:** nothing: a step of the unfused chain (form 1's math).
-- **Bits:** its own summation order, f32 sums unrounded; no test runs it.
-- **Pinned by:** `src/core/unfused.zig` "turboexl3 unfused texts: the inputs each signature names are read, the outputs
-  written" (CPU: its inputs xp, slots and w are read; its z store).
+- **Bits:** its own summation order, f32 sums unrounded. The chain it is a step of is held within 5e-3 of
+  `ref.moeRowDec`.
+- **Pinned by:** `src/core/chains_test.zig` "turboexl3 gpu unfused: the eleven-launch chain equals the host reference
+  within the decode chain's tolerance, at form 1's cases (TURBOEXL3_GPU=1)" (GPU: the whole chain within 5e-3 of
+  `ref.moeRowDec`; its words against form 1's reported); `src/core/unfused.zig` "turboexl3 unfused texts: the inputs
+  each signature names are read, the outputs written" (CPU, the texts).
 
 ### `turboexl3_prep`
 
@@ -4215,9 +4226,12 @@ The unfused decode chain: the separately launched steps the fused forms replace 
 - **Template args:** DIM (hidden or inter), TOPK (the bank's top-k; 1 for the down's prepare, where row-slot i is its
   own row).
 - **Replaces:** nothing: a step of the unfused chain (form 1's math).
-- **Bits:** `format.project`'s prepare rounding points (f16 x, suh, H128, f16); no test runs it.
-- **Pinned by:** `src/core/unfused.zig` "turboexl3 unfused texts: the inputs each signature names are read, the outputs
-  written" (CPU: its inputs x, slots and suh are read; its xp store).
+- **Bits:** `format.project`'s prepare rounding points (f16 x, suh, H128, f16). The chain it is a step of is held within
+  5e-3 of `ref.moeRowDec`.
+- **Pinned by:** `src/core/chains_test.zig` "turboexl3 gpu unfused: the eleven-launch chain equals the host reference
+  within the decode chain's tolerance, at form 1's cases (TURBOEXL3_GPU=1)" (GPU: the whole chain within 5e-3 of
+  `ref.moeRowDec`; its words against form 1's reported); `src/core/unfused.zig` "turboexl3 unfused texts: the inputs
+  each signature names are read, the outputs written" (CPU, the texts).
 
 ### `turboexl3_reduce`
 
@@ -4239,9 +4253,12 @@ The unfused decode chain: the separately launched steps the fused forms replace 
 - **Grid and threadgroup:** `(DIM, rows, 1)` / `(256, 1, 1)`.
 - **Template args:** DIM (hidden), TOPK.
 - **Replaces:** nothing: the last step of the unfused chain.
-- **Bits:** its own: each row's slots summed in slot order with f32 fma; no test runs it.
-- **Pinned by:** `src/core/unfused.zig` "turboexl3 unfused texts: the inputs each signature names are read, the outputs
-  written" (CPU, its y store).
+- **Bits:** its own: each row's slots summed in slot order with f32 fma. The chain it is a step of is held within 5e-3
+  of `ref.moeRowDec`.
+- **Pinned by:** `src/core/chains_test.zig` "turboexl3 gpu unfused: the eleven-launch chain equals the host reference
+  within the decode chain's tolerance, at form 1's cases (TURBOEXL3_GPU=1)" (GPU: the whole chain within 5e-3 of
+  `ref.moeRowDec`; its words against form 1's reported); `src/core/unfused.zig` "turboexl3 unfused texts: the inputs
+  each signature names are read, the outputs written" (CPU, the texts).
 
 ### `turboexl3_swiglu`
 
@@ -4262,9 +4279,11 @@ The unfused decode chain: the separately launched steps the fused forms replace 
 - **Grid and threadgroup:** `(RK · inter, 1, 1)` / `(256, 1, 1)`.
 - **Template args:** none.
 - **Replaces:** nothing: a step of the unfused chain.
-- **Bits:** silu(g) · u in f32, the sigmoid through `metal::exp` (its precision follows the compiler's math mode); no
-  test runs it.
-- **Pinned by:** no test runs it or reads its text.
+- **Bits:** silu(g) · u in f32, the sigmoid through `metal::exp` (its precision follows the compiler's math mode). The
+  chain it is a step of is held within 5e-3 of `ref.moeRowDec`.
+- **Pinned by:** `src/core/chains_test.zig` "turboexl3 gpu unfused: the eleven-launch chain equals the host reference
+  within the decode chain's tolerance, at form 1's cases (TURBOEXL3_GPU=1)" (GPU: the whole chain within 5e-3 of
+  `ref.moeRowDec`; its words against form 1's reported).
 
 ## `src/core/gpu_test.zig`
 

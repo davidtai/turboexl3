@@ -1181,6 +1181,10 @@ ADDED_FILES['banked_test.zig'] = ('the banked decode\'s tests: its texts\' compo
                                   'ref.moeRowClamped (GPU), its timing against moeClamped\'s launches '
                                   '(TURBOEXL3_BANKED_TIME)')
 
+ADDED_FILES['chains_test.zig'] = ('byte tests of the core paths no other test pinned: pg2 against dequantize + matmul + '
+                                  'finish, the pieces\' finish against the one-call finish, the unfused chain against the '
+                                  'reference')
+
 
 def metal_strings(fn, toks, corpus):
     """(line, kind, value) of every literal in a .zig file that holds Metal"""
