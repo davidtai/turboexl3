@@ -56,8 +56,36 @@ pub fn build(b: *std.Build) void {
     doc_check.addArg("--check");
     doc_check.has_side_effects = true;
     b.step("doc-check", "Check that every kernel has its doc entry and every docs link resolves (python3, no GPU)").dependOn(&doc_check.step);
+    consumerCheck(b);
     // the AMD (HIP) kernels: only with -Dhip=true, so the Metal path builds as before
     if (b.option(bool, "hip", "Build the AMD (HIP) kernels and their GPU tests: Linux, hipcc") orelse false) hipSteps(b, target, optimize);
+}
+
+/// consumer-check: each consumer plugin named by -Dconsumers (comma-separated plugin folders, e.g. CommunityServe's
+/// plugins/turboexl3_qwen38 and plugins/turboexl3_ds41) built against this tree in place of its pinned turboexl3
+/// (`zig build --fork=<this repo>`), as its CI builds it: its test step (plugin.json's "test_step", else `test`), then
+/// its ReleaseFast dylib. That compiles turboexl3_table and turboexl3_kit, and every library entry a consumer reaches,
+/// where this repository's own suite (src/tests.zig) cannot: the table and the kit need the host's quant ABI and kit.
+/// Each plugin builds with its repository's toolchain (`<repo>/.zig-toolchain/zig`, two folders above it) where it has
+/// one, else this build's zig. No GPU work.
+fn consumerCheck(b: *std.Build) void {
+    const step = b.step("consumer-check", "Build the consumer plugins in -Dconsumers against this tree (zig build --fork; no GPU)");
+    const list = b.option([]const u8, "consumers", "Comma-separated consumer plugin folders for consumer-check") orelse return;
+    var it = std.mem.tokenizeScalar(u8, list, ',');
+    while (it.next()) |dir| {
+        const script =
+            \\set -eu
+            \\z=$1; [ -x ../../.zig-toolchain/zig ] && z=../../.zig-toolchain/zig
+            \\step=$(sed -n 's/.*"test_step": *"\([^"]*\)".*/\1/p' plugin.json 2>/dev/null | head -1)
+            \\"$z" build "${step:-test}" --fork="$2"
+            \\"$z" build -Doptimize=ReleaseFast --fork="$2"
+        ;
+        const run = b.addSystemCommand(&.{ "bash", "-c", script, "consumer-check", b.graph.zig_exe });
+        run.addDirectoryArg(b.path("."));
+        run.setCwd(.{ .cwd_relative = dir });
+        run.has_side_effects = true;
+        step.dependOn(&run.step);
+    }
 }
 
 /// hip-build (the code objects and the test binary, no GPU work) and hip-test (the kernels on the GPU against

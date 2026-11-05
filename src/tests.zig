@@ -40,3 +40,30 @@ comptime {
     _ = @import("core/chains_test.zig");
     _ = @import("models/ricursive/ricursive_test.zig");
 }
+
+
+// every pub declaration of the module root and of the namespaces and types it exports from this module's files, analyzed
+// the way a consumer's build reaches them (Zig analyzes only what is referenced, and the tests reference what they call)
+test "turboexl3 module: every pub declaration compiles" {
+    @setEvalBranchQuota(1_000_000);
+    refAll(@import("root.zig"), 4);
+}
+
+fn refAll(comptime T: type, comptime depth: u32) void {
+    const std = @import("std");
+    inline for (comptime std.meta.declarations(T)) |name| {
+        const v = &@field(T, name);
+        _ = v;
+        if (depth > 1 and @TypeOf(@field(T, name)) == type) {
+            const U = @field(T, name);
+            const ours = comptime blk: {
+                const n = @typeName(U);
+                break :blk std.mem.eql(u8, n, "root") or std.mem.startsWith(u8, n, "root.") or std.mem.startsWith(u8, n, "core.") or std.mem.startsWith(u8, n, "models.");
+            };
+            switch (@typeInfo(U)) {
+                .@"struct", .@"union", .@"enum", .@"opaque" => if (ours) refAll(U, depth - 1),
+                else => {},
+            }
+        }
+    }
+}

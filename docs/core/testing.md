@@ -43,3 +43,15 @@ runs only the scan for Metal.
 the docs, an entry names no kernel, an entry's generated block is not the code's, or one of its prose fields is missing.
 `python3 tools/kernel_docs.py --write` rewrites every generated block from the code and adds a skeleton entry for a new
 kernel; [the kernel catalog](kernels.md) says how an entry reads.
+
+## The consumer check
+
+`zig build consumer-check -Dconsumers=<plugin folder>[,<plugin folder>...]` builds each consumer plugin against this tree
+in place of its pinned turboexl3 (`zig build --fork=<this repo>`), as its own CI builds it: its test step (plugin.json's
+`test_step`, else `test`), then its ReleaseFast dylib, with its repository's toolchain. The consumers are
+CommunityServe's `plugins/turboexl3_qwen38` and `plugins/turboexl3_ds41`. That compiles `turboexl3_table`
+(`table/`) and `turboexl3_kit` (`kit/`), which need the host's quant ABI and plugin kit, and every library entry a
+consumer reaches. The suite's own build cannot: Zig analyzes only what is referenced, and the tests reference what they
+call. The test root also references every pub declaration of the module root and the namespaces it exports
+(`refAllDeclsRecursive`, "turboexl3 module: every pub declaration compiles"), so an entry no test calls still
+compiles. No GPU work; a change runs both checks with the suite.

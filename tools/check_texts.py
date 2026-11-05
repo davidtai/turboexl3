@@ -1417,23 +1417,12 @@ def rekey_tables(units):
 # ------------------------------------------------------------------------------------------------------------- split
 
 # --split against a base: the kernels whose texts a change means to change, the kernels it adds, and the text consts
-# whose values it changes, each with what changed (anything else that differs fails)
-SPLIT_CHANGED_KERNELS = {
-    'turboexl3_ric_jdec1': 'the joint end to end (member 0\'s trellis, then member 1\'s): jsel picks the member\'s base '
-                           'and output tiles, jtile.metal reads the tile there in place of dense.dec_tile',
-    'turboexl3_ric_jdec1_blend': 'as turboexl3_ric_jdec1',
-}
-SPLIT_ADDED_KERNELS = {
-    'turboexl3_test_ric_jdec1_interleaved': 'the joined launch before the end-to-end layout (its earlier text), the layout '
-                                            'test\'s reference',
-    'turboexl3_test_ric_jdec1_blend_interleaved': 'as turboexl3_test_ric_jdec1_interleaved, k | v\'s',
-}
-SPLIT_CHANGED_CONSTS = {
-    'jsel': 'the member choice adds the member\'s trellis base and output tiles',
-    'dec1_body': 'ricursive\'s DEC-ONE body reads the tile through jtile',
-    'text_jdec1': 'as turboexl3_ric_jdec1',
-    'text_jdec1_blend': 'as turboexl3_ric_jdec1_blend',
-}
+# whose values it changes, each with what changed (anything else that differs fails). They hold one change's entries
+# while it is checked against its base and are emptied after it lands, so a later run allows nothing by them (aa0222f's
+# joint layout used them: turboexl3_ric_jdec1 and _blend changed, the two interleaved test references added)
+SPLIT_CHANGED_KERNELS = {}
+SPLIT_ADDED_KERNELS = {}
+SPLIT_CHANGED_CONSTS = {}
 
 def split_report(oprog, nprog, ounits, nunits, orig_dir, new_dir, problems, verbose):
     """--split (declarations moved between files, not only files): checks 1 to 4 over the whole tree instead of per file.

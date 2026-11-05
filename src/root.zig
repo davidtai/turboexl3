@@ -170,7 +170,7 @@ pub const SlotStats = struct {
     const distinct_total = Global([17]u64, "root_SlotStats_distinct_total", @splat(0));
     const mult = Global([17][6]u64, "root_SlotStats_mult", @splat(@splat(0))); // [rows][multiplicity 1..4, 5+]
 
-    fn enabled() bool {
+    pub fn enabled() bool {
         return config.get().slot_stats;
     }
 
