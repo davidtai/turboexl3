@@ -351,9 +351,11 @@ test "HIP dense chain: rows 1-16 within format.project's bar per row, each row a
 
 // ---- routed experts at decode rows ------------------------------------------------------------------------------
 
-/// A bank (ref.synthBank's layout: [E, in/16, out/16, n], suh [E, in], svh [E, out]) on the device.
+/// A bank (ref.synthBank's layout: [E, in/16, out/16, n], suh [E, in], svh [E, out]) on the device, contiguous, with
+/// the u64 [E] trellis tables a contiguous host builds (entry e: the base plus e's stride).
 const DevBank = struct {
     bufs: [9]rt.Buffer,
+    tables: [3]rt.Buffer,
 
     fn init(h: *const rt.Hip, b: *const ref.Bank) !DevBank {
         var d: DevBank = undefined;
@@ -364,26 +366,87 @@ const DevBank = struct {
             d.bufs[i] = try h.upload(std.mem.sliceAsBytes(arr));
             made += 1;
         }
+        const table = try gpa.alloc(u64, b.experts);
+        defer gpa.free(table);
+        var tabled: usize = 0;
+        errdefer for (d.tables[0..tabled]) |*x| x.free();
+        for (0..3) |m| {
+            const stride_bytes = host[m].len / b.experts * 2;
+            for (table, 0..) |*a, e| a.* = d.bufs[m].addr() + @as(u64, e * stride_bytes);
+            d.tables[m] = try h.upload(std.mem.sliceAsBytes(table));
+            tabled += 1;
+        }
         return d;
     }
 
     fn deinit(d: *DevBank) void {
+        for (&d.tables) |*x| x.free();
         for (&d.bufs) |*x| x.free();
     }
 
     fn bindTo(d: *const DevBank, bind: *std.EnumArray(plan.Role, u64)) void {
-        const roles = [9]plan.Role{ .gate_t, .up_t, .down_t, .gate_suh, .up_suh, .gate_svh, .up_svh, .down_suh, .down_svh };
-        for (roles, 0..) |r, i| bind.set(r, d.bufs[i].addr());
+        const roles = [6]plan.Role{ .gate_suh, .up_suh, .gate_svh, .up_svh, .down_suh, .down_svh };
+        for (roles, 0..) |r, i| bind.set(r, d.bufs[3 + i].addr());
+        for ([3]plan.Role{ .gate_t, .up_t, .down_t }, 0..) |r, m| bind.set(r, d.tables[m].addr());
+    }
+};
+
+/// `base`'s bank with each expert's trellis in its own buffer (a loader that keeps each expert's tensor apart) and its
+/// u64 [E] tables. The experts go up last first, so no expert's trellis sits where the contiguous layout puts it.
+const PtrBank = struct {
+    base: *const DevBank,
+    parts: []rt.Buffer,
+    tables: [3]rt.Buffer,
+
+    fn init(h: *const rt.Hip, b: *const ref.Bank, base: *const DevBank) !PtrBank {
+        const E = b.experts;
+        const host = [3][]const u16{ b.gate_t, b.up_t, b.down_t };
+        const parts = try gpa.alloc(rt.Buffer, 3 * E);
+        errdefer gpa.free(parts);
+        var made: usize = 0;
+        errdefer for (parts[0..made]) |*x| x.free();
+        const table = try gpa.alloc(u64, E);
+        defer gpa.free(table);
+        var d: PtrBank = .{ .base = base, .parts = parts, .tables = undefined };
+        var tabled: usize = 0;
+        errdefer for (d.tables[0..tabled]) |*x| x.free();
+        for (host, 0..) |arr, m| {
+            const stride = arr.len / E;
+            for (0..E) |j| {
+                const e = E - 1 - j;
+                parts[m * E + j] = try h.upload(std.mem.sliceAsBytes(arr[e * stride ..][0..stride]));
+                made += 1;
+                table[e] = parts[m * E + j].addr();
+            }
+            // the case differs from DevBank's only when the table is not the contiguous layout
+            var contiguous = true;
+            for (table, 0..) |a, e| contiguous = contiguous and a == table[0] + @as(u64, e * stride * 2);
+            try expect(!contiguous, "apart bank: the experts' buffers fell in the contiguous layout", .{});
+            d.tables[m] = try h.upload(std.mem.sliceAsBytes(table));
+            tabled += 1;
+        }
+        return d;
+    }
+
+    fn deinit(d: *PtrBank) void {
+        for (&d.tables) |*x| x.free();
+        for (d.parts) |*x| x.free();
+        gpa.free(d.parts);
+    }
+
+    fn bindTo(d: *const PtrBank, bind: *std.EnumArray(plan.Role, u64)) void {
+        d.base.bindTo(bind);
+        for ([3]plan.Role{ .gate_t, .up_t, .down_t }, 0..) |r, m| bind.set(r, d.tables[m].addr());
     }
 };
 
 /// Form 3 over `d.rows` rows of x from row `first` (slots and scores from row `first` too): y's bytes (fill 0xff first).
-fn decodeRun(h: *const rt.Hip, g: *const Groups, bank: *const DevBank, x: Input, slots: []const i32, scores: []const f32, first: usize, d: plan.Decode) ![]u8 {
+fn decodeRun(h: *const rt.Hip, g: *const Groups, bank: anytype, x: Input, slots: []const i32, scores: []const f32, first: usize, d: plan.Decode) ![]u8 {
     return decodeRunForm(h, g, bank, x, slots, scores, first, d, 3);
 }
 
 /// `decodeRun` on form 3 or form 9.
-fn decodeRunForm(h: *const rt.Hip, g: *const Groups, bank: *const DevBank, x: Input, slots: []const i32, scores: []const f32, first: usize, d: plan.Decode, form: u8) ![]u8 {
+fn decodeRunForm(h: *const rt.Hip, g: *const Groups, bank: anytype, x: Input, slots: []const i32, scores: []const f32, first: usize, d: plan.Decode, form: u8) ![]u8 {
     const f3 = try plan.decodeForm3(d);
     const f9 = try plan.decodeForm9(d);
     const launches: []const plan.Launch = if (form == 9) f9.launches[0..f9.len] else &f3;
@@ -670,7 +733,7 @@ test "HIP routed decode, GLM profile: each routed slot's f32 output within the C
 // ---- routed experts at prefill rows, dense rows above 16 ---------------------------------------------------------
 
 /// The prefill chain over `d.rows` rows of x from row `first`: y's bytes (fill 0xff first).
-fn prefillRun(h: *const rt.Hip, g: *const Groups, bank: *const DevBank, x: Input, slots: []const i32, scores: []const f32, first: usize, d: plan.Prefill) ![]u8 {
+fn prefillRun(h: *const rt.Hip, g: *const Groups, bank: anytype, x: Input, slots: []const i32, scores: []const f32, first: usize, d: plan.Prefill) ![]u8 {
     const launches = try plan.prefillChain(d);
     const xsize: usize = if (d.dtype == .f32) 4 else 2;
     var xb = try h.upload(x.bytes[first * d.hidden * xsize ..][0 .. d.rows * d.hidden * xsize]);
@@ -925,4 +988,65 @@ test "HIP routed decode, form 9: the bytes of form 3 at rows 1-5, 8 and 16, both
         }
     }
     std.debug.print("RESULT HIP routed decode form 9: {d} calls byte-identical to form 3 ({d} of them through gu8)\n", .{ compared, with_gu8 });
+}
+
+test "HIP routed bank, experts' trellises apart: the bytes of the contiguous bank's tables in decode forms 3 and 9 and prefill, both profiles" {
+    var h = try rt.Hip.open();
+    defer h.close();
+    var g = try Groups.load(&h);
+    defer g.unload();
+    var prng = std.Random.DefaultPrng.init(0xB4E);
+    const rnd = prng.random();
+    const Case = struct { c: DecodeCase, profile: plan.Profile };
+    const cases = [_]Case{
+        .{ .c = .{ .hidden = 512, .inter = 256, .experts = 12, .topk = 4, .n = 64, .dec = .mcg, .dtype = .f32, .defer_map = false }, .profile = .exl3 },
+        .{ .c = .{ .hidden = 512, .inter = 256, .experts = 12, .topk = 4, .n = 36, .dec = .mul1, .dtype = .bf16, .defer_map = false }, .profile = .exl3 },
+        .{ .c = .{ .hidden = 2560, .inter = 640, .experts = 16, .topk = 10, .n = 48, .dec = .mul1, .dtype = .bf16, .defer_map = true }, .profile = .exl3 },
+        .{ .c = .{ .hidden = 4096, .inter = 2048, .experts = 9, .topk = 9, .n = 64, .dec = .mcg, .dtype = .bf16, .defer_map = false }, .profile = .glm },
+    };
+    var compared: usize = 0;
+    // the contiguous bank's outputs in call order, hashed: equal to the hash before the tables (the same calls on the
+    // base-plus-stride address) shows the tables leave the bytes alone
+    var digest: u64 = 0;
+    for (cases) |cs| {
+        const c = cs.c;
+        const rate = format.Rate.fromN(c.n).?;
+        var bank = try ref.synthBank(gpa, rnd, c.experts, c.hidden, c.inter, rate);
+        defer bank.deinit(gpa);
+        var dbank = try DevBank.init(&h, &bank);
+        defer dbank.deinit();
+        var pbank = try PtrBank.init(&h, &bank, &dbank);
+        defer pbank.deinit();
+        const max_rows = 40;
+        var x = try Input.init(rnd, max_rows * c.hidden, c.dtype);
+        defer x.deinit();
+        const glm = cs.profile == .glm;
+        const rt_ = try routing(rnd, max_rows, if (glm) c.topk - 1 else c.topk, c.experts, glm);
+        defer gpa.free(rt_.slots);
+        defer gpa.free(rt_.scores);
+        const limit: f32 = if (glm) 7.0 else 0;
+        for ([_]u32{ 1, 4, 16 }) |rows| {
+            for ([_]u8{ 3, 9 }) |form| {
+                const d: plan.Decode = .{ .hidden = c.hidden, .inter = c.inter, .topk = c.topk, .rows = rows, .experts = c.experts, .rate = rate, .dec = c.dec, .dtype = c.dtype, .defer_map = c.defer_map, .profile = cs.profile, .limit = limit };
+                const yc = try decodeRunForm(&h, &g, &dbank, x, rt_.slots, rt_.scores, 0, d, form);
+                defer gpa.free(yc);
+                const yp = try decodeRunForm(&h, &g, &pbank, x, rt_.slots, rt_.scores, 0, d, form);
+                defer gpa.free(yp);
+                try expect(std.mem.eql(u8, yc, yp), "apart bank {d}x{d} {s} form {d} rows {d}: bytes differ from the contiguous bank", .{ c.hidden, c.inter, @tagName(cs.profile), form, rows });
+                digest = std.hash.Wyhash.hash(digest, yc);
+                compared += 1;
+            }
+        }
+        for ([_]u32{ 17, 40 }) |rows| {
+            const d: plan.Prefill = .{ .hidden = c.hidden, .inter = c.inter, .topk = c.topk, .rows = rows, .experts = c.experts, .rate = rate, .dec = c.dec, .dtype = c.dtype, .defer_map = c.defer_map, .profile = cs.profile, .limit = limit };
+            const yc = try prefillRun(&h, &g, &dbank, x, rt_.slots, rt_.scores, 0, d);
+            defer gpa.free(yc);
+            const yp = try prefillRun(&h, &g, &pbank, x, rt_.slots, rt_.scores, 0, d);
+            defer gpa.free(yp);
+            try expect(std.mem.eql(u8, yc, yp), "apart bank {d}x{d} {s} prefill rows {d}: bytes differ from the contiguous bank", .{ c.hidden, c.inter, @tagName(cs.profile), rows });
+            digest = std.hash.Wyhash.hash(digest, yc);
+            compared += 1;
+        }
+    }
+    std.debug.print("RESULT HIP routed bank, trellises apart: {d} calls (decode forms 3 and 9, prefill; both profiles) byte-identical to the contiguous bank; contiguous digest 0x{x:0>16}\n", .{ compared, digest });
 }
