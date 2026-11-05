@@ -290,6 +290,9 @@ test "turboexl3 gpu ricursive mlp: gate | up, the clamped SwiGLU in the down's p
     const a = std.heap.page_allocator;
     var g = try G.init(a, s);
     defer g.deinit();
+    // one line before any call: a kernel-cache refusal (the suite's shared process can fill root's caches) then lands on a
+    // line of its own, where the box runner looks for it to run this test alone
+    std.debug.print("TURBOEXL3_RIC_MLP_START\n", .{});
     var prng = std.Random.DefaultPrng.init(0x81C1);
     const rnd = prng.random();
     const n = ric.n_linear;
@@ -310,6 +313,19 @@ test "turboexl3 gpu ricursive mlp: gate | up, the clamped SwiGLU in the down's p
             defer g.resetTo(rm);
             const x = try randX(a, &g, rnd, rows, ric.hidden, dt);
             const want = try hostMlp(&g, s, x, gate, up, down);
+            if (rows == 64) {
+                // the clamp is reached: gate outputs above the limit and up outputs beyond it either way
+                const nel: usize = 64 * ric.ffn;
+                const hv = try a.alloc(f32, nel);
+                defer a.free(hv);
+                var over: [2]usize = .{ 0, 0 };
+                for ([_]root.Proj{ gate, up }, 0..) |pr, w| {
+                    _ = try g.hostF32(try g.astype(try g.adopt(try root.linear(s, x, pr.trellis, pr.suh, pr.svh, .mul1)), .float32), hv);
+                    for (hv) |v| over[w] += @intFromBool(if (w == 0) v > ric.clamp else @abs(v) > ric.clamp);
+                }
+                std.debug.print("TURBOEXL3_RIC_MLP_CLAMP rows=64 x={s} gates_over={d}/{d} ups_over={d}/{d}\n", .{ @tagName(dt), over[0], nel, over[1], nel });
+                try testing.expect(over[0] > 0 and over[1] > 0);
+            }
             for ([_]bool{ true, false }) |joined| {
                 const y = try g.adopt(try ric.mlp(s, x, gate, up, down, if (joined) gu else null, lim, sigtab, .mul1));
                 const d = try wordsDiffer(a, &g, y, want, rows * ric.hidden);

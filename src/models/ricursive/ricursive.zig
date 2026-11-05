@@ -204,6 +204,14 @@ fn rows2(s: mlx.mlx_stream, x: mlx.mlx_array, in: u32) !struct { rows: usize, x2
     return .{ .rows = @intCast(rows), .x2 = x2 };
 }
 
+/// a one-element operand (the blend, the limit) as [1]: MLX binds a 0-d input as a scalar reference, not a pointer
+fn one1(s: mlx.mlx_stream, a: mlx.mlx_array) !mlx.mlx_array {
+    var r = mlx.mlx_array_new();
+    errdefer _ = mlx.mlx_array_free(r);
+    try mlx.check(mlx.mlx_reshape(&r, a, &[_]c_int{1}, 1, s));
+    return r;
+}
+
 fn actDtype(d: mlx.mlx_dtype) !void {
     if (d != .bfloat16 and d != .float16 and d != .float32) return error.BadExl3Dtype;
 }
@@ -268,7 +276,7 @@ pub fn jointLinear(s: mlx.mlx_stream, x: mlx.mlx_array, j: Joint, dec: format.De
 }
 
 /// `jointLinear` with member 1's input Ripple's value residual T(x0 + blend (x - x0)): x and x0 [..., in] in one dtype
-/// (bf16, f16 or f32), blend f32 [1] (sigmoid(lambda)); member 1's columns are the bytes of the host's blend then `linear`.
+/// (bf16, f16 or f32), blend f32 of one element (sigmoid(lambda), 0-d or [1]); member 1's columns are the bytes of the host's blend then `linear`.
 pub fn jointLinearBlend(s: mlx.mlx_stream, x: mlx.mlx_array, x0: mlx.mlx_array, blend: mlx.mlx_array, j: Joint, dec: format.Decode) !mlx.mlx_array {
     const xd = mlx.mlx_array_dtype(x);
     try actDtype(xd);
@@ -280,7 +288,9 @@ pub fn jointLinearBlend(s: mlx.mlx_stream, x: mlx.mlx_array, x0: mlx.mlx_array, 
     defer _ = mlx.mlx_array_free(v0.x2);
     if (v0.rows != v.rows) return error.BadExl3Shape;
     const p = jointPlan(j, dec, v.rows) orelse return error.Exl3EngineNotImplemented;
-    return jointRun(s, .jdec1_blend, &.{ v.x2, v0.x2, blend, j.suh0, j.suh1, j.trellis, j.svh }, j, dec, v.rows, xd, p);
+    const b1 = try one1(s, blend);
+    defer _ = mlx.mlx_array_free(b1);
+    return jointRun(s, .jdec1_blend, &.{ v.x2, v0.x2, b1, j.suh0, j.suh1, j.trellis, j.svh }, j, dec, v.rows, xd, p);
 }
 
 /// v at prefill rows (more than DECODE_ROWS_MAX) with Ripple's value residual formed in its prepare: y [rows, out], the
@@ -313,8 +323,10 @@ pub fn valueLinear(s: mlx.mlx_stream, x: mlx.mlx_array, x0: mlx.mlx_array, blend
         },
     });
     defer _ = mlx.mlx_fast_metal_kernel_config_free(cfg);
+    const b1 = try one1(s, blend);
+    defer _ = mlx.mlx_array_free(b1);
     var xp: [1]mlx.mlx_array = undefined;
-    try ks.applyConfig(k, cfg, &.{ v.x2, v0.x2, blend, vp.suh }, &xp, s);
+    try ks.applyConfig(k, cfg, &.{ v.x2, v0.x2, b1, vp.suh }, &xp, s);
     defer _ = mlx.mlx_array_free(xp[0]);
     return root.linearPrepared(s, xp[0], vp, dec, xd);
 }
@@ -325,7 +337,7 @@ pub fn valueLinear(s: mlx.mlx_stream, x: mlx.mlx_array, x0: mlx.mlx_array, blend
 const Gu = struct { gate: mlx.mlx_array, up: mlx.mlx_array, stride: u32, uoff: u32 };
 
 /// Ripple's MLP of x [..., hidden]: down(clampedSwiGLU(gate(x), up(x), limit)) in x's dtype (bf16 or f16), [rows, out].
-/// `gu` (optional) is gate | up joined (`join`), taken where `jointLinear` serves; `lim` x's dtype [1] (the limit, 20);
+/// `gu` (optional) is gate | up joined (`join`), taken where `jointLinear` serves; `lim` x's dtype, one element (the limit, 20; 0-d or [1]);
 /// `sigtab` x's dtype [65536] (MLX's sigmoid of every 16-bit pattern, the host's table). The bytes of `linear(gate)`,
 /// `linear(up)`, the host's clamped SwiGLU and `linear(down)`. error.Exl3EngineNotImplemented where a step does not
 /// serve (the down's prepare inside its DEC-ONE launch), before its launches.
@@ -345,6 +357,8 @@ pub fn mlp(s: mlx.mlx_stream, x: mlx.mlx_array, gate: root.Proj, up: root.Proj, 
     const v = try rows2(s, x, in);
     defer _ = mlx.mlx_array_free(v.x2);
     const rows = v.rows;
+    const lim1 = try one1(s, lim);
+    defer _ = mlx.mlx_array_free(lim1);
     const d = try root.denseCached(.{ .in = f, .out = out, .rate = rate, .dec = dec, .out_dtype = xd });
     const decode_rows = rows <= decode.Kernels.max_rows;
     // the down's DEC-ONE plan: its prepare must run in a launch of its own (ours)
@@ -384,7 +398,7 @@ pub fn mlp(s: mlx.mlx_stream, x: mlx.mlx_array, gate: root.Proj, up: root.Proj, 
         });
         defer _ = mlx.mlx_fast_metal_kernel_config_free(cfg);
         var xp: [1]mlx.mlx_array = undefined;
-        try ks.applyConfig(k, cfg, &.{ ops.gate, ops.up, sigtab, lim, down.suh }, &xp, s);
+        try ks.applyConfig(k, cfg, &.{ ops.gate, ops.up, sigtab, lim1, down.suh }, &xp, s);
         defer _ = mlx.mlx_array_free(xp[0]);
         return root.linearPrepared(s, xp[0], down, dec, xd);
     }
@@ -411,7 +425,7 @@ pub fn mlp(s: mlx.mlx_stream, x: mlx.mlx_array, gate: root.Proj, up: root.Proj, 
     });
     defer _ = mlx.mlx_fast_metal_kernel_config_free(cfg);
     var po: [3]mlx.mlx_array = undefined;
-    try ks.applyConfig(k, cfg, &.{ ops.gate, ops.up, sigtab, lim, down.suh }, &po, s);
+    try ks.applyConfig(k, cfg, &.{ ops.gate, ops.up, sigtab, lim1, down.suh }, &po, s);
     defer for (po) |a| {
         _ = mlx.mlx_array_free(a);
     };
