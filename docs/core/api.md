@@ -1,0 +1,112 @@
+# API and configuration
+
+The module root `src/root.zig`: its entry points and the one `Config` a consumer sets. Which model uses which entry point: [the docs index](../README.md).
+
+## API
+
+`src/root.zig` is the module root. The expert entry points mirror Sushi's `sushi_exl3` module, so a host switches
+engines by changing one import. An entry point that does not serve a call returns `error.Exl3EngineNotImplemented`
+before it launches anything. The caller then runs its own chain. Malformed operands return `error.BadExl3Shape` or
+`error.BadExl3Dtype`.
+
+The configuration (see [Configuration](#configuration)):
+
+| name | what it does |
+|---|---|
+| `Config`, `configure` | the choices of the process, set once before the first call; `configure` refuses a value that the library does not serve |
+
+The contract of a pack (`spec.zig`, with Sushi's names and refusals):
+
+| name | what it does |
+|---|---|
+| `Spec`, `parseExpertQuant` | read the `expert_quant` block of a pack's config: the rate, the codebook and the window |
+| `admitTopK` | refuse a top-k above `REDUCE_MAX_TOPK` (32) with `error.Exl3TopKExceedsReduceBank` |
+| `trellisAdmitted` | check a stacked trellis `[E, in/16, out/16, n]` against a bank's geometry and rate |
+| `kernels` | `DECODE_ROWS_MAX` (16), `REDUCE_MAX_TOPK` (32), `usesPrefillArm`, `rowsOfShape` |
+
+The routed experts:
+
+| name | what it does |
+|---|---|
+| `Proj`, `Bank`, `Geometry`, `bankGeometry` | one projection's arrays, a bank's gate, up and down, and the geometry that the shapes give |
+| `moe` | the routed experts of one MoE layer: decode rows through the split-K GEMV chain, prefill rows through the fused GEMM chain; its argument `verify_rows` is Sushi's and changes nothing here |
+| `moeWithShared` | `moe`, then an MLX add of a shared-expert output that the caller has already gated |
+| `moeClamped` | `moe` with DeepSeek-V4's (and GLM's) clamped SwiGLU, `swiglu_limit` 1 to 128: the gate clamped from above and up to [−limit, limit] before SwiGLU; decode rows on fin7's clamped variant, prefill rows on the clamped mid |
+| `moeClampedBanked` (`moeClampedBankedGateUp`, `moeClampedBankedDown`) | `moeClamped`'s decode launches over an expert streamer's three slot banks: up to 64 routed pairs, each a row-slot whose id is packed (bank << 24 \| slot row), each pair's output at weight 1 with `moeClamped`'s bytes on its bank at top-1; the gate\|up and the down as two calls (the gate\|up half also reads the down's suh: it prepares the down's input) |
+
+The shared expert and the router, at 1 to 4 decode rows:
+
+| name | what it does |
+|---|---|
+| `moeFusedShared` | a gated shared expert inside the decode launches of the routed experts |
+| `moeFusedSharedRouted` | the same, with the router's top-k and softmax folded into the prepare launch |
+
+The dense projections:
+
+| name | what it does |
+|---|---|
+| `linear` | one dense EXL3 projection. 1 to 4 rows: DEC-ONE. 5 to 16 rows: the multi-row GEMV chain of three launches, which decodes each weight once per row chunk: 5 rows in one chunk, 6 to 8 rows in one chunk on the lean GEMV, and 9 to 16 rows in two chunks. 17 to 32 rows: the register-path GEMM. More rows: dequantize, then MLX's matmul |
+| `linearSplit` | `linear` with the inner product and the finish of prefill rows on a second MLX stream; the same bytes |
+| `linearInnerSplit`, `linearPrepared`, `linearFinish`, `linearPrep` | `linear` in pieces, so the host can run its fused norm-gate of the GDN layers between them |
+| `linearPiecesBegin`, `linearPieceInner`, `linearPiecePrepared`, `linearPiecesFinish` | `linear` of one call cut into 2 to 4 row pieces, so the host can overlap them with its own launches |
+| `linearGrouped` | a grouped (block-diagonal) linear, DeepSeek-V4.1's `wo_a`: x `[..., G, in]` through G stacked slices. 1 to 16 rows: three launches whatever G. More rows: `linear` of each slice. Each slice has `linear`'s values |
+| `linearBias` | `linear`, then an MLX add of a bias `[out]` in x's dtype (DeepSeek-V4.1's vision tower and aligner) |
+
+The attention projections:
+
+| name | what it does |
+|---|---|
+| `attnIn` | ATTN-IN: q, k and v with QK-norm and partial RoPE in the finish, at prefill rows |
+| `attnPrep4`, `linearPreparedIdx` | ATTN-IN's prepare with the QSA indexer projection as a fourth member, and the indexer projection from its prepared copy |
+| `linearGated` | ATTN-OUT: `o_proj` over the sigmoid-gated output of the attention core, at prefill rows |
+| `decode_merge` | at decode rows: `decodeMergeGated`, `decodeMergeQmergeGated` (with the QSA merge), `decodeMergeQPlanes`, `decodeMergeIndexer` |
+
+The resident and un-rotated trunk:
+
+| name | what it does |
+|---|---|
+| `dense.residentArm` | keep the W_hat of each admitted trellis after its first call on the matmul path (more than 32 rows by default); the same bytes as a dequantize per call |
+| `dense.residentRelease`, `residentPending`, `residentStats`, `residentKeeps` | drop the kept arrays, the bytes admitted but not kept yet, the counts, and whether one trellis is kept |
+| `trunkUnrot`, `UnrotStats` | at load, put W_std in the activation dtype (`bf16` or `f16`) in place of each admitted trellis's W_hat; opt-in, with a different rounding |
+| `dense.residentUnrot`, `residentStd`, `residentJoined` | whether a trellis has a W_std, its W_std, and its joined W_std (up to 4 projections that read one x, joined along the outputs) |
+| `attnInStd`, `linearGatedStd` | ATTN-IN and ATTN-OUT over the un-rotated trunk |
+
+The namespaces are `config`, `format` (the reference), `spec`, `lane` (the codeword readers), `decode`, `dense`,
+`grouped`, `prefill`, `attn_io`, `decode_merge`, `unfused` and `ref`. The doc comment of each function states its
+shapes, its dtypes, the chain whose bytes it gives and when it refuses.
+
+## Configuration
+
+turboexl3 reads no environment. A consumer sets its choices once, before the first call, with
+`turboexl3.configure(.{ ... })`. The argument is one `Config` (`src/core/config.zig`). The default of each field is the
+served configuration.
+
+`configure` refuses a value that the library does not serve with `error.InvalidTurboexl3Config`, and then it changes
+nothing. A kernel cache keeps what it built. So a change after the first launch reaches only the geometries that later
+calls build.
+
+| field | default | what it controls | output bits |
+|---|---|---|---|
+| `decode_form` | 9 | the form of the decode chain of the routed experts: 3, 5, 6, 7, 8 or 9 | unchanged, tested: forms 5–9 give the bytes of form 3 |
+| `shared_spt` | 4 | the fused shared expert: K slices per gate and up GEMV threadgroup, of its 20: 1, 2, 4, 5, 10 or 20 | unchanged, tested |
+| `fused_fin_fold` | true | the fused shared expert from two rows: the finishes of the gate and up planes (`fin7s`) run in the gate and up launch (`turboexl3_gu3sf`), in the threadgroups that complete each block; false: `gu3s` then `fin7s` | unchanged, tested |
+| `pf_alay` | 2 | prefill: the A layout of the GEMMs: 0 natural; 1 fragment order per 32 elements; 2 fragment order per 16 elements | unchanged, tested |
+| `pf_t128` | true | prefill: each expert's full runs of 128 rows in 128-row tiles | unchanged, tested |
+| `prefill` | true | false: `moe` refuses prefill rows with `error.Exl3EngineNotImplemented` | not applicable |
+| `nax` | true | whether the device passes the NAX gate; the consumer tells. False turns off every kernel that uses the NAX: `moe` refuses prefill rows, and a dense call of 17–32 rows takes dequantize + MLX's matmul | can differ: those dense rows sum in another order |
+| `dec_one` | true | DEC-ONE for dense projections at decode rows; false: the three-launch chain | unchanged, tested |
+| `dense_lean` | true | the row chunks of the dense GEMV chain: up to 8 rows, and a chunk of 6 to 8 rows on the lean GEMV (its codeword loop by input element, so fewer live registers); false: up to 5 rows, all on the plain GEMV | unchanged, tested |
+| `slot_stats` | false | a diagnostic: it reads the routing of each decode call back to the host (a sync per call). Every 480 calls it prints how often the row-slots of a call repeat an expert. The router fold refuses while it is on | unchanged |
+| `pf_capture_dir` | null | a diagnostic: a directory; the routing of the first 512 prefill calls goes there (a sync per call) | unchanged |
+
+The "output bits" column has these values:
+
+- **unchanged, tested**: the field moves work only, and a GPU test compares the bits of the settings.
+- **unchanged**: the field moves work only, as the source states, but no GPU test compares the bits.
+- **can differ**: the setting can change the bits.
+
+Every other launch shape is a constant of the file that reads it (`root.zig`, `dense.zig`, `decode.zig`). This
+includes the prefill tiles, the GEMV tiles and K splits, the deferred MUL1 map and the dense paths. The tests also
+build other values of these constants, as variants.
+
+The plugin sets one field: `nax`, from turboexl3_kit's test of the NAX gate (`kit/nax.zig`).

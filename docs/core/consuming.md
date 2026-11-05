@@ -1,8 +1,8 @@
 # Consuming turboexl3
 
-This page tells a [consumer](docs/GLOSSARY.md#consumer) how to build turboexl3 into its own build. The first section
+This page tells a [consumer](glossary.md#consumer) how to build turboexl3 into its own build. The first section
 gives what every consumer supplies. The second section describes the recommended consumer: the mlx-serve
-[quant plugin](docs/GLOSSARY.md#quant-plugin) in the folder `plugin/`. A later section can describe another consumer
+[quant plugin](glossary.md#quant-plugin) in the folder `plugin/`. A later section can describe another consumer
 in the same way.
 
 ## What every consumer supplies
@@ -13,22 +13,90 @@ Apart from these files, they import only three modules:
 | module | who supplies it | what it holds |
 |---|---|---|
 | `std` | Zig | the standard library |
-| `sdk` | the consumer | `sdk.mlx`: mlx-c's bindings, plus `check`, `getShape` and `streamIsGpu`; `sdk.kernel_launch`: `newKernel`, `Launch`, `TemplateArg`, `buildConfig` and `applyConfig`, and optionally `mlx_fast_metal_kernel_free`; optionally `sdk.steel`, the steel headers of the consumer's MLX; optionally `sdk.shared`, a host's `Shared` (mlx-serve's `sdk/util/shared.zig`), which makes each of turboexl3's module globals the host's one copy: the host then registers `turboexl3.shared_state` and `turboexl3_table.shared_state` ([Wiring](README.md#wiring) gives the full surface) |
-| `mlx_host` | the consumer, for the tests only | the [host surface](docs/GLOSSARY.md#host-surface); the tests use only its `sushi_exl3`, where it exists, as a second reference |
+| `sdk` | the consumer | `sdk.mlx`: mlx-c's bindings, plus `check`, `getShape` and `streamIsGpu`; `sdk.kernel_launch`: `newKernel`, `Launch`, `TemplateArg`, `buildConfig` and `applyConfig`, and optionally `mlx_fast_metal_kernel_free`; optionally `sdk.steel`, the steel headers of the consumer's MLX; optionally `sdk.shared`, a host's `Shared` (mlx-serve's `sdk/util/shared.zig`), which makes each of turboexl3's module globals the host's one copy: the host then registers `turboexl3.shared_state` and `turboexl3_table.shared_state` ([Wiring](#wiring) gives the full surface) |
+| `mlx_host` | the consumer, for the tests only | the [host surface](glossary.md#host-surface); the tests use only its `sushi_exl3`, where it exists, as a second reference |
 
 The `build.zig` of the package gives a consumer two things:
 
 - The module `turboexl3`, over `src/root.zig`. The consumer adds its `sdk` to this module as an import.
-  [Wiring](README.md#wiring) shows the three lines.
+  [Wiring](#wiring) shows the three lines.
 - The function `testModule`. It creates the module of the test root, `src/tests.zig`, over the consumer's `sdk` and
   `mlx_host`.
 
 The test binary must also link MLX, the consumer's launcher and Metal. The GPU tests also need a Metal device (see
-[Tests](README.md#tests)).
+[Tests](testing.md)).
 
 The consumer sets the configuration once, before its first call, with `configure` (see
-[Configuration](README.md#configuration)). On a machine that fails the [NAX gate](docs/GLOSSARY.md#nax-gate), it
+[Configuration](api.md#configuration)). On a machine that fails the [NAX gate](glossary.md#nax-gate), it
 must set `nax` to false.
+
+## Wiring
+
+turboexl3 imports `std` and one module that its consumer supplies, named `sdk`:
+
+```zig
+// sdk
+pub const mlx = ...;            // mlx-c's bindings (mlx_array, mlx_stream, mlx_reshape, mlx_fast_metal_kernel_config_*, ...)
+                                //   plus check(c_int) !void, getShape(mlx_array) []const c_int, streamIsGpu(mlx_stream) bool
+pub const kernel_launch = struct {
+    pub const TemplateValue = union(enum) { int: i32, dtype: mlx.mlx_dtype };
+    pub const TemplateArg = struct { name: [:0]const u8, value: TemplateValue };
+    /// one launch: grid (threads), threadgroup, output shapes and dtypes, template arguments
+    pub const Launch = struct { grid: [3]u32, threadgroup: [3]u32, out_shapes: []const []const c_int, out_dtypes: []const mlx.mlx_dtype, template: []const TemplateArg };
+    /// an MLX fast Metal kernel over `source` with `header` (input / output names in signature order); null when MLX refuses it
+    pub fn newKernel(name: [*:0]const u8, inputs: []const [*:0]const u8, outputs: []const [*:0]const u8, source: [*:0]const u8, header: [*:0]const u8, ensure_row_contiguous: bool) ?mlx.mlx_fast_metal_kernel;
+    /// the MLX config of a launch (the caller frees it)
+    pub fn buildConfig(l: Launch) error{MlxError}!mlx.mlx_fast_metal_kernel_config;
+    /// one launch on `stream`; `outs` receives new arrays (the caller frees them)
+    pub fn applyConfig(kernel: mlx.mlx_fast_metal_kernel, config: mlx.mlx_fast_metal_kernel_config, inputs: []const mlx.mlx_array, outs: []mlx.mlx_array, stream: mlx.mlx_stream) error{MlxError}!void;
+};
+/// optional: MLX's steel NAX headers from the consumer's pinned MLX (each the file's text: `defines`, `type_traits`,
+/// `integral_constant`, `nax`); without it the prefill GEMMs take the vendored copy (`steel_nax.metal`, MLX 0.32.2)
+pub const steel = ...;
+```
+
+The members of `sdk`:
+
+- `mlx`: mlx-c's bindings, plus three helpers: `check`, `getShape` and `streamIsGpu`.
+- `kernel_launch`: `newKernel` makes a kernel, `buildConfig` makes the config of a launch, and `applyConfig` runs one
+  launch. An optional `mlx_fast_metal_kernel_free` drops a kernel that `newKernel` made.
+- `steel` (optional): the four steel headers of the consumer's own MLX. An MLX update that changes them then reaches
+  the kernels. Without `steel`, the GEMMs use `src/core/kernels/steel_nax.metal`.
+
+The plugin's `plugin/sdk.zig` is such a module:
+
+- Its `kernel_launch` gets each kernel from mlx-serve's kernel cache (`Host.kernel`). The cache keeps one kernel
+  object for each name and text, for the life of the process.
+- It launches each kernel through mlx-serve's launcher (`HostGpu.launch`). The launcher runs MLX's own compiled
+  pipeline, but it skips the source generation and hashing that MLX does on each launch. The results are the same.
+- Its `mlx` (`plugin/mlx.zig`) declares the mlx-c functions that turboexl3 calls, with Zig types. They resolve
+  against the server's libmlxc when the server loads the plugin.
+- It declares no `steel`, because the plugin kit has no steel headers.
+- It declares no `mlx_fast_metal_kernel_free`, because the server's kernel cache owns every kernel.
+
+turboexl3 keeps its kernels in caches, one per geometry, for the life of the process. It drops a kernel only through
+`decode.freeKernel`, on an error path or when it frees a cache. That function calls
+`kernel_launch.mlx_fast_metal_kernel_free` when the consumer declares it. mlx-stream's version removes the kernel's
+launch-cache entry, then frees the kernel. Without that member, turboexl3 frees no kernel: the consumer keeps them.
+
+A launcher can also add Metal defines to the start of each header. Each header holds the default of each define, and
+the defaults are the served values. The plugin passes each header as given. The other values are A/B variants:
+
+| define | default | what it selects | output bits |
+|---|---|---|---|
+| `EXL3_T1V` | 3 | the route from MUL1's two pair sums to t, from 0 to 3; every route is exact | unchanged |
+| `EXL3_R64` | 1 | 1: each lane reads its codewords from one 64-bit window (n ≤ 108) or from three words (n ≤ 128); 0: the reader with a per-lane extract (`IntWords`) | unchanged |
+| `EXL3_KU` | 0 | 1: the decode GEMV loads its input tiles in pairs | unchanged |
+
+To use the package, add it to the consumer's `build.zig.zon` and add these lines to its `build.zig`:
+
+```zig
+const t3 = b.dependency("turboexl3", .{ .target = target, .optimize = optimize }).module("turboexl3");
+t3.addImport("sdk", sdk);
+consumer.addImport("turboexl3", t3);
+```
+
+[The plugin's section below](#the-mlx-serve-quant-plugin-plugin) shows the wiring of the plugin.
 
 ## The mlx-serve quant plugin (`plugin/`)
 
@@ -37,7 +105,7 @@ The folder `plugin/` is turboexl3 as an outside quant plugin of mlx-serve, in th
 [`qwen38-exl3-full`](https://github.com/davidtai/mlx-serve/tree/qwen38-exl3-full) of davidtai/mlx-serve, which adds the
 host side of an outside quant plugin. That branch is the head of
 [ddalcu/mlx-serve#997](https://github.com/ddalcu/mlx-serve/pull/997) before the pull request became the host support of
-the `qwen38_exl3` model plugin, which is to replace this quant plugin. mlx-serve's [plugin kit](docs/GLOSSARY.md#plugin-kit) builds it into one dylib,
+the `qwen38_exl3` model plugin, which is to replace this quant plugin. mlx-serve's [plugin kit](glossary.md#plugin-kit) builds it into one dylib,
 `libturboexl3.dylib`. The server loads the dylib at startup and offers it the quantization blocks of each pack.
 
 | file | what it does |
@@ -55,14 +123,14 @@ validation and the bill with no MLX, and `kit/nax.zig` the test of the NAX gate,
 
 ### What it claims
 
-The plugin answers each block of a pack with a [claim](docs/GLOSSARY.md#claim):
+The plugin answers each block of a pack with a [claim](glossary.md#claim):
 
 - **A `trunk_quant` block** (the dense linears of the trunk): always `by_marker`. A trunk block has no rate `k`,
   because each linear carries its own rate. No built-in format of mlx-serve runs a dense EXL3 linear.
 - **An `expert_quant` block** (the routed banks, with a rate `k`): `by_marker` only when all of these hold. Otherwise
   the claim is `no`, and the built-in Sushi format keeps the banks.
   - The pack is a fully EXL3 Qwen3.8 pack: its config has a `trunk_quant` block, and its `model_type` is `qwen4_exp`
-    or `qwen4_exp_text`. Its [numerics](docs/GLOSSARY.md#numerics) are reordered. An expert-only pack stays Sushi's.
+    or `qwen4_exp_text`. Its [numerics](glossary.md#numerics) are reordered. An expert-only pack stays Sushi's.
   - The machine passes the NAX gate.
   - The SwiGLU is not clamped: the model's config has no `swiglu_limit` above 0.
 - **Any other block**: `no`. This includes Sushi's STQ family and the other formats.
@@ -150,4 +218,4 @@ plugin unloaded. The list `"disabled"` in `plugins.json` turns off plugins by na
 | the NAX gate of the server | `kit/nax.zig` (turboexl3_kit) finds it again from `sysctl`: an Apple M5 or later, macOS 26.2 or later, and no `FORCE_GPU_FAMILY_FALLBACK=1` | a member of the host table that gives the server's answer |
 | mlx-c bindings with Zig types: the kit's `mlx_c` comes from translate-C, with integer enums and `[*c]` pointers | `plugin/mlx.zig` declares the functions that turboexl3 calls, as mlx-serve's own bindings declare them | bindings with Zig types in the kit |
 | extra imports in `plugin()`: the builder takes only a name | `build.zig` adds `sdk` and `turboexl3` to the root module through `import_table.get("plugin")` | an option of `plugin()` for imports |
-| GPU tests: the kit runs only MLX-free tests | none | turboexl3's GPU tests still need a consumer surface of their own (see [Tests](README.md#tests)) |
+| GPU tests: the kit runs only MLX-free tests | none | turboexl3's GPU tests still need a consumer surface of their own (see [Tests](testing.md)) |

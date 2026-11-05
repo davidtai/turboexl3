@@ -1,11 +1,11 @@
 # Results
 
-Measured with mlx-serve on one Apple M5 Max (128 GB, macOS 27.0.1), serving [Qwen3.8-Flash-Next](GLOSSARY.md#qwen38)
-from the MLX repacks of [turboderp](GLOSSARY.md#turboderp)'s packs (the table in [the README](../README.md#the-packs)).
+Measured with mlx-serve on one Apple M5 Max (128 GB, macOS 27.0.1), serving [Qwen3.8-Flash-Next](../../core/glossary.md#qwen38)
+from the MLX repacks of [turboderp](../../core/glossary.md#turboderp)'s packs (the table on [the model page](README.md#the-packs)).
 The context-length tables for K2 to K5 were also in the description of
 [ddalcu/mlx-serve#997](https://github.com/ddalcu/mlx-serve/pull/997). The code that served them is the branch
 [`qwen38-exl3-full`](https://github.com/davidtai/mlx-serve/tree/qwen38-exl3-full) of davidtai/mlx-serve, which serves
-these packs through turboexl3's [quant plugin](GLOSSARY.md#quant-plugin).
+these packs through turboexl3's [quant plugin](../../core/glossary.md#quant-plugin).
 
 ## Quality: KL divergence and perplexity (turboderp's)
 
@@ -38,26 +38,26 @@ Prefill, decode, peak memory and time to first token from 1K to 256K, every pack
 the standard mlx-serve setup (the iQ-MLX 4.7 bpw pack) among them; time to first token is drawn as each series' %
 difference from that setup. Each chart carries its method in its caption and is drawn from the tables below.
 
-![Every series in one row per metric: prefill, decode, peak memory and time to first token](charts/overview_all_series.png)
+![Every series in one row per metric: prefill, decode, peak memory and time to first token](../../charts/overview_all_series.png)
 
 Every series as its difference from the standard setup at each length (0 = standard mlx-serve):
 
-![Every series against the standard mlx-serve setup](charts/overview_vs_standard_all.png)
+![Every series against the standard mlx-serve setup](../../charts/overview_vs_standard_all.png)
 
 The same data with one column per pack, the standard setup as the reference line in each:
 
-![Prefill, decode, peak memory and time to first token by prompt length, K2 to K5](charts/overview.png)
+![Prefill, decode, peak memory and time to first token by prompt length, K2 to K5](../../charts/overview.png)
 
-Each metric at full width, every series: [prefill](charts/all_prefill.png), [decode](charts/all_decode.png),
-[peak memory](charts/all_peak_memory.png), [time to first token, in seconds at each length](charts/all_ttft.png).
+Each metric at full width, every series: [prefill](../../charts/all_prefill.png), [decode](../../charts/all_decode.png),
+[peak memory](../../charts/all_peak_memory.png), [time to first token, in seconds at each length](../../charts/all_ttft.png).
 
-- [Wall time and answer length](charts/wall_time.png)
-- [MTP acceptance: per-draft hit rate and drafts accepted per round](charts/mtp_acceptance.png)
-- [K5 with MTP off](charts/mtp_off_k5.png)
-- [turboexl3 against Sushi, percent difference](charts/turbo_vs_sushi.png)
-- [K5 against the standard setup](charts/vs_standard.png)
-- [Coding evals](charts/coding_evals.png)
-- [Kernels against Sushi](#kernels-against-sushi), one MoE layer call at a time: [decode](charts/kernel_decode.png), [prefill](charts/kernel_prefill.png)
+- [Wall time and answer length](../../charts/wall_time.png)
+- [MTP acceptance: per-draft hit rate and drafts accepted per round](../../charts/mtp_acceptance.png)
+- [K5 with MTP off](../../charts/mtp_off_k5.png)
+- [turboexl3 against Sushi, percent difference](../../charts/turbo_vs_sushi.png)
+- [K5 against the standard setup](../../charts/vs_standard.png)
+- [Coding evals](../../charts/coding_evals.png)
+- [Kernels against Sushi](#kernels-against-sushi), one MoE layer call at a time: [decode](../../charts/kernel_decode.png), [prefill](../../charts/kernel_prefill.png)
 
 ## Across context lengths
 
@@ -68,10 +68,10 @@ fresh server after a warm-up boot on the same prompt and a 40 °C cool gate. Ser
 MLX_SERVE_GPU_CEILING_MB=114688 MLX_SERVE_CACHE_LIMIT=2147483648`. The rates come from the server's own request line.
 
 - **K2 to K5** are the 2.05, 3.05, 4.05 and 5.05 packs, run on mlx-serve's tree from before its rewrite (PR 978) with
-  turboexl3 inside. "Sushi" is [exact numerics](GLOSSARY.md#numerics) (`MLX_SERVE_BIT_EXACT=1`:
-  [Sushi](GLOSSARY.md#sushi)'s routed experts, every reordering path off), and "turboexl3" is the default reordered
+  turboexl3 inside. "Sushi" is [exact numerics](../../core/glossary.md#numerics) (`MLX_SERVE_BIT_EXACT=1`:
+  [Sushi](../../core/glossary.md#sushi)'s routed experts, every reordering path off), and "turboexl3" is the default reordered
   numerics, on one binary. K5 ran on build S21 (turboexl3's kernels as of 4a4ea95, with the host fixes of #997) at
-  [MTP](GLOSSARY.md#mtp) depth 4 (`--mtp-max-depth 4 --mtp-typical 0.2`), with turboderp's MTP mixer. K2 to K4 ran on
+  [MTP](../../core/glossary.md#mtp) depth 4 (`--mtp-max-depth 4 --mtp-typical 0.2`), with turboderp's MTP mixer. K2 to K4 ran on
   the earlier build PR17B at MTP depth 3 and were not re-measured.
 - **iQ-MLX 4.7 bpw** is the standard mlx-serve setup, with no turboexl3: upstream main (edebbb3) with only #997's two
   load-time switches, `MLX_SERVE_NOCACHE_LOAD` and `MLX_SERVE_NGRAM_WARM` (binary 7f41623228f7). It runs ddalcu's
@@ -181,19 +181,74 @@ noise: paired by problem against the standard pack, the smallest exact McNemar p
 standard pack are within one problem of each other on every suite. Their HumanEval answers differ (90 of 164 solutions
 identical) but fail mostly the same problems: 7 of the 9 HumanEval+ failures are shared.
 
-![EvalPlus pass@1 on HumanEval, HumanEval+, MBPP and MBPP+ for the 2.05, 3.05, 4.05 and 5.05 packs and the standard iQ-MLX 4.7 bpw pack](charts/coding_evals.png)
+![EvalPlus pass@1 on HumanEval, HumanEval+, MBPP and MBPP+ for the 2.05, 3.05, 4.05 and 5.05 packs and the standard iQ-MLX 4.7 bpw pack](../../charts/coding_evals.png)
+
+## Kernels against Sushi: the summary
+
+These charts compare turboexl3's [routed-expert](../../core/glossary.md#routed-expert) kernels with
+[Sushi](../../core/glossary.md#sushi)'s, one MoE layer call at a time, with no server. Sushi runs in the same test binary, on
+the same weights, inputs and routing. Each chart covers the [rates](../../core/glossary.md#rate) K2 to K8. The published packs
+use K2 to K5.
+
+- **Decode, 1 row**: turboexl3 runs [form](../../core/glossary.md#form) 9, its served decode form. The call times the routed
+  experts alone, as mlx-serve serves them at 1 row; its shared expert runs in the host's own chain.
+- **[MTP verify](../../core/glossary.md#mtp), 2 to 4 rows**: form 9 again, on the routed experts alone. In mlx-serve's served
+  forward these calls also run the gated [shared expert](../../core/glossary.md#shared-expert), with the router's top-k,
+  inside form 9's launches. These timings leave that work out for both engines.
+- **Prefill, 8192 rows or 1328 rows**: turboexl3 runs its served prefill path, `pfOptions` at the default configuration.
+- **Routing**: captured from mlx-serve serving the 5.05 pack on a 17,743-token coding prompt, the standard test cell,
+  which prefills as two 8192-row chunks, then a 1328-row chunk. The rows of a decode call share experts there. On
+  synthetic routing, where the rows rarely share an expert, the decode ratio is lower; the bottom row of the decode
+  chart shows it.
+
+![Decode kernels: turboexl3 against Sushi at each trellis rate](../../charts/kernel_decode.png)
+
+![Prefill kernels: turboexl3 against Sushi at each trellis rate](../../charts/kernel_prefill.png)
+
+The ratio is Sushi's median time divided by turboexl3's, on captured routing. Above 1×, turboexl3 is faster.
+
+| rate | decode, 1 row | verify, 2 rows | verify, 3 rows | verify, 4 rows | prefill, 8192 rows | prefill, 1328 rows |
+|---|---:|---:|---:|---:|---:|---:|
+| K2 (2.05 bpw pack) | 1.03× | 1.05× | 1.12× | 1.16× | 1.02× | 1.07× |
+| K3 (3.05 bpw pack) | 1.00× | 1.03× | 1.08× | 1.13× | 1.06× | 1.16× |
+| K4 (4.05 bpw pack) | 1.23× | 1.36× | 1.42× | 1.49× | 1.04× | 1.17× |
+| K5 (5.05 bpw pack) | 1.02× | 1.05× | 1.09× | 1.14× | 1.31× | 1.97× |
+| K6 | 1.01× | 1.01× | 1.04× | 1.09× | 1.32× | 1.98× |
+| K7 | 1.17× | 1.15× | 1.22× | 1.30× | 1.30× | 1.89× |
+| K8 | 1.00× | 0.97× | 1.01× | 1.03× | 1.16× | 1.30× |
+
+At the rates of the published packs (K2 to K5), on captured routing:
+
+- Decode (1 row): 1.00× to 1.23×.
+- MTP verify (2 to 4 rows): 1.03× to 1.49×.
+- Prefill, 8192 rows: 1.02× to 1.31×.
+- Prefill, 1328 rows: 1.07× to 1.97×.
+- Sushi is not faster than turboexl3 in any of these calls.
+- The two take the same median time (1.00×) at: decode K3, 1 row.
+
+On synthetic routing at K2 to K5, the ratios at 1 to 4 rows range from 0.98× to 1.30×. Sushi is faster at: verify K2, 2
+rows (0.99×); verify K3, 2 rows (0.98×); verify K3, 3 rows (0.99×); verify K5, 2 rows (0.99×).
+Across K2 to K8, Sushi is faster in 11 of the 28 synthetic cells at 1 to 4 rows.
+
+The largest ratios come from rates where Sushi's own time rises. At 1 row, Sushi takes 86.2 µs at K4, against 74.3 µs at
+K3 and 78.1 µs at K5; turboexl3 takes 69.9, 74.3 and 76.8 µs. At K7 Sushi takes 109.0 µs, against 83.1 µs at K6. At 8192
+rows, Sushi runs at 38.1 to 40.2 TFLOPS at K2 to K4, then 29.7 to 30.7 TFLOPS at K5 to K7; turboexl3 stays at 38.8 to
+40.9 TFLOPS at every rate.
+
+[The detailed section below](#kernels-against-sushi) gives every arm's median and fastest round, on both routings,
+and the commands that time the kernels again.
 
 ## Kernels against Sushi
 
-turboexl3's routed-expert kernels against [Sushi](GLOSSARY.md#sushi)'s, one MoE layer call at a time, at each
-[rate](GLOSSARY.md#rate) from K2 to K8, with no server. Sushi runs in the same test binary, on the same weights, inputs
+turboexl3's routed-expert kernels against [Sushi](../../core/glossary.md#sushi)'s, one MoE layer call at a time, at each
+[rate](../../core/glossary.md#rate) from K2 to K8, with no server. Sushi runs in the same test binary, on the same weights, inputs
 and routing. The binary is built from turboexl3 f1d82d8 (4a4ea95's library plus the commit that adds these timing arms)
 on mlx-serve's host, and its sha256 starts d5b06e858592. Measured on an Apple M5 Max (128 GB, macOS 27.0.1) on
 2026-10-28.
 
-![Decode kernels: turboexl3 against Sushi at each trellis rate](charts/kernel_decode.png)
+![Decode kernels: turboexl3 against Sushi at each trellis rate](../../charts/kernel_decode.png)
 
-![Prefill kernels: turboexl3 against Sushi at each trellis rate](charts/kernel_prefill.png)
+![Prefill kernels: turboexl3 against Sushi at each trellis rate](../../charts/kernel_prefill.png)
 
 ### What each arm runs
 
@@ -318,8 +373,8 @@ rounds; "fastest" divides their fastest rounds (the log's own `*_vs_sushi`).
 
 ### Timing the kernels again
 
-Build turboexl3's tests over a consumer's surface with `-Dtest-filter=timing` (see [the README's
-Tests](../README.md#tests)). Run the binary once for each rate, with n = 16 × K:
+Build turboexl3's tests over a consumer's surface with `-Dtest-filter=timing` (see [the tests
+page](../../core/testing.md)). Run the binary once for each rate, with n = 16 × K:
 
 ```sh
 # decode: forms 3, 7 and 9, then Sushi; rows 1 to 4; synthetic routing, then the captured routing

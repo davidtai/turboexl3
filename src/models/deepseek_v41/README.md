@@ -12,5 +12,5 @@ The code only DeepSeek-V4.1 uses, on turboexl3's core:
 | `kernels/<module>/` | the Metal texts of `grouped.zig`; `kernels/test/pins/` what the tests pin |
 
 The kernels these tests hold (the clamped fin7 and prefill mids, the banked and grouped GEMVs, F3) stay in the core
-engines that launch them (`src/core/decode.zig`, `prefill.zig`, `dense.zig`); docs/KERNELS.md names the model of every
+engines that launch them (`src/core/decode.zig`, `prefill.zig`, `dense.zig`); docs/core/kernels.md names the model of every
 kernel.

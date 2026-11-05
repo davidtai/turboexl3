@@ -1,8 +1,8 @@
-# turboexl3 kernels
+# The engines
 
-This page lists every [Metal](GLOSSARY.md#metal) kernel that turboexl3 registers with [MLX](GLOSSARY.md#mlx), by the
-name that it passes to `newKernel`. For each [fused path](GLOSSARY.md#chain), the page shows the chain of
-[launches](GLOSSARY.md#launch) that the path replaces. It also tells why the fused path is faster and how its output
+This page lists every [Metal](glossary.md#metal) kernel that turboexl3 registers with [MLX](glossary.md#mlx), by the
+name that it passes to `newKernel`. For each [fused path](glossary.md#chain), the page shows the chain of
+[launches](glossary.md#launch) that the path replaces. It also tells why the fused path is faster and how its output
 bits relate to that chain.
 
 The Metal text of each kernel is a file `<folder>/kernels/<module>/<name>.metal`, beside the Zig file that launches it:
@@ -12,39 +12,17 @@ The Metal text of each kernel is a file `<folder>/kernels/<module>/<name>.metal`
 be several numbered pieces that the Zig file joins, for example `gu3_1.metal` and `gu3_2.metal`.
 
 The file headers (`//!`) and the `///` comments in `src/` hold the full statements; this page is the map. The
-[glossary](GLOSSARY.md) defines every term, and a link marks the first use of a term on this page. The
-[Configuration](../README.md#configuration) section of the README gives the choices of a
-[consumer](GLOSSARY.md#consumer).
+[glossary](glossary.md) defines every term, and a link marks the first use of a term on this page. The
+[Configuration](api.md#configuration) section of the API page gives the choices of a
+[consumer](glossary.md#consumer).
+
+The kernels of the Qwen3.8-only paths (the shared expert and router in the decode launches, the attention projections and the decode-row merges) are described on [Qwen3.8's kernel page](../models/qwen38/kernels.md); every kernel has its own entry in [the kernel catalog](kernels.md) and the models' kernel pages.
 
 ## How to read this page
 
 ### The three stages of an EXL3 projection
 
-Every [EXL3](GLOSSARY.md#exl3) projection has three stages. [`format.project`](GLOSSARY.md#format-project) runs them for
-one [row](GLOSSARY.md#row) on the CPU, and every kernel is held to it. [H128](GLOSSARY.md#h128) includes its scale of
-1/√128.
-
-| stage | what it computes | where it rounds |
-|---|---|---|
-| [prepare](GLOSSARY.md#prepare) | `xp = H128(f16(x) · suh)`, per 128-element block of x | x to [`f16`](GLOSSARY.md#float-types), then xp to `f16` |
-| [inner product](GLOSSARY.md#inner-product) | `z = xp · W_hat`, with `f32` accumulation | z to `f16` |
-| [finish](GLOSSARY.md#finish) | `y = H128(z) · svh`, per 128-element block of z | y to `f16`, then to the output [dtype](GLOSSARY.md#dtype) |
-
-Other terms on this page:
-
-- **mid**: The work between the gate and up [GEMV](GLOSSARY.md#gemv-gemm) and the down GEMV. It is the gate and up
-  finishes, [SwiGLU](GLOSSARY.md#swiglu) in `f32`, and the prepare of the down input.
-- **planes**: The [split-K](GLOSSARY.md#split-k) partial sums, one `f32` plane per K slice. A finish adds them in slice
-  order.
-- **block sums**: The sum of each 128-element block of a row's prepared input. The [deferred MUL1
-  map](GLOSSARY.md#deferred-map) needs them for its `C × Σx` term.
-- **K span**: The part of the input dimension that one [threadgroup](GLOSSARY.md#threadgroup)'s K slices cover.
-- **quad**: Four neighboring [lanes](GLOSSARY.md#lane) that hold one output column. Two shuffles fold their partial sums
-  together.
-- **T**: The activation dtype of a call, `bf16` or `f16`.
-- **deferred MUL1 map**: The GEMVs and GEMMs multiply by [MUL1](GLOSSARY.md#mul1)'s byte sum t, and the finish applies
-  `A × acc + C × Σx` once per output. It is always on for MUL1 [packs](GLOSSARY.md#pack). The tests also run chains with
-  the map off: each weight then rounds to `f16`, as in the reference.
+The [format page](format.md#the-three-stages-of-an-exl3-projection) gives them: prepare, inner product, finish.
 
 ### Exactness classes
 
@@ -52,9 +30,9 @@ Each kernel is in one of three classes:
 
 | class | what it means | why it holds | kernels in the class |
 |---|---|---|---|
-| [byte-identical](GLOSSARY.md#byte-identical) to a chain | every output element has the bit pattern of that chain's output | the kernel runs the chain's statements, in the chain's order, on the same values; only the launch shape changes | decode [forms](GLOSSARY.md#form) 5–9 (to form 3); the heads of the [shared expert](GLOSSARY.md#shared-expert) and the [router](GLOSSARY.md#router) fold (to the [host](GLOSSARY.md#host) chain); the fin fold of the shared expert (to `gu3s` and `fin7s`); [DEC-ONE](GLOSSARY.md#dec-one) (to the three-launch chain); the lean GEMV (to `dgemv`); the prefill options that only move work, and the 128-row tiles (to the option set without them); the [resident W_hat](GLOSSARY.md#resident-trunk) (to a dequantize per call); `linearSplit` and the `linear` pieces (to `linear`); [ATTN-IN](GLOSSARY.md#attn-in-out), ATTN-OUT and the four-member prepare (to the host chain); every decode-row merge (to the host chain); the clamped variants where no value reaches the limit (to the unclamped kernels) |
-| [within tolerance](GLOSSARY.md#within-tolerance) of `format.project` | the ratio from [`ref.compare`](GLOSSARY.md#ref-compare) is at most the stated bar | the kernel rounds where `format.project` rounds, but it sums in its own order, and `f32` addition is not associative | decode forms 1 and 3; the dense GEMV chain; the inner products of the [register path](GLOSSARY.md#register-path), the fused GEMM and dequantize + matmul; the routed prefill chain; the clamped routed chains (to `ref.moeRowClamped`). The routed chains also sum in an order other than [Sushi](GLOSSARY.md#sushi)'s |
-| opt-in, its own rounding | within the stated bars | each weight rounds once to the activation dtype, and each output rounds once | the [un-rotated trunk](GLOSSARY.md#unrotated-trunk): `turboexl3_unrot_*` at load, then one plain matmul; the `_std` attention kernels |
+| [byte-identical](glossary.md#byte-identical) to a chain | every output element has the bit pattern of that chain's output | the kernel runs the chain's statements, in the chain's order, on the same values; only the launch shape changes | decode [forms](glossary.md#form) 5–9 (to form 3); the heads of the [shared expert](glossary.md#shared-expert) and the [router](glossary.md#router) fold (to the [host](glossary.md#host) chain); the fin fold of the shared expert (to `gu3s` and `fin7s`); [DEC-ONE](glossary.md#dec-one) (to the three-launch chain); the lean GEMV (to `dgemv`); the prefill options that only move work, and the 128-row tiles (to the option set without them); the [resident W_hat](glossary.md#resident-trunk) (to a dequantize per call); `linearSplit` and the `linear` pieces (to `linear`); [ATTN-IN](glossary.md#attn-in-out), ATTN-OUT and the four-member prepare (to the host chain); every decode-row merge (to the host chain); the clamped variants where no value reaches the limit (to the unclamped kernels) |
+| [within tolerance](glossary.md#within-tolerance) of `format.project` | the ratio from [`ref.compare`](glossary.md#ref-compare) is at most the stated bar | the kernel rounds where `format.project` rounds, but it sums in its own order, and `f32` addition is not associative | decode forms 1 and 3; the dense GEMV chain; the inner products of the [register path](glossary.md#register-path), the fused GEMM and dequantize + matmul; the routed prefill chain; the clamped routed chains (to `ref.moeRowClamped`). The routed chains also sum in an order other than [Sushi](glossary.md#sushi)'s |
+| opt-in, its own rounding | within the stated bars | each weight rounds once to the activation dtype, and each output rounds once | the [un-rotated trunk](glossary.md#unrotated-trunk): `turboexl3_unrot_*` at load, then one plain matmul; the `_std` attention kernels |
 
 A byte test compares bit patterns. A tolerance test uses `ref.compare`: the largest |got − ref| over the output,
 divided by the root mean square of the reference output.
@@ -65,9 +43,9 @@ The chains do not all compute the sigmoid of SwiGLU with the same function:
 |---|---|
 | the decode forms and the unfused steps | `metal::exp`, whose precision follows the math mode of the compiler |
 | the mid of the routed prefill | `metal::precise::exp` |
-| the fused shared expert (section 2) | the host's sigmoid table, in the output dtype |
+| the fused shared expert ([Qwen3.8's section 1](../models/qwen38/kernels.md#1-shared-expert-and-router-inside-the-decode-launches-rows-14)) | the host's sigmoid table, in the output dtype |
 
-So the SwiGLU of one row can round differently at [decode rows](GLOSSARY.md#decode-prefill-rows) and at prefill rows.
+So the SwiGLU of one row can round differently at [decode rows](glossary.md#decode-prefill-rows) and at prefill rows.
 
 ### Reading the diagrams
 
@@ -88,7 +66,7 @@ levels.
 
 | family | entry points | rows | Zig file (under `src/`) |
 |---|---|---|---|
-| decode GEMV of the [routed experts](GLOSSARY.md#routed-expert) | `moe`, `moeClamped` | 1–16 | `core/decode.zig` |
+| decode GEMV of the [routed experts](glossary.md#routed-expert) | `moe`, `moeClamped` | 1–16 | `core/decode.zig` |
 | the same over three expert banks, one routed pair a row-slot | `moeClampedBanked` | 1–64 pairs | `core/decode.zig` (DeepSeek-V4.1) |
 | shared expert and router in the decode launches | `moeFusedShared`, `moeFusedSharedRouted` | 1–4 (router fold: 2–4) | `core/decode.zig` (Qwen3.8) |
 | prefill GEMM of the routed experts | `moe`, `moeClamped` | 17+ | `core/prefill.zig` |
@@ -101,13 +79,13 @@ levels.
 
 ## 1. Routed experts at decode rows (1–16)
 
-For a call of up to `DECODE_ROWS_MAX` (16) rows, `moe` runs the routed experts of an [MoE](GLOSSARY.md#moe) layer as a
-chain of GEMV launches. Each [row-slot](GLOSSARY.md#row-slot) runs its expert's gate and up projections, SwiGLU and the
+For a call of up to `DECODE_ROWS_MAX` (16) rows, `moe` runs the routed experts of an [MoE](glossary.md#moe) layer as a
+chain of GEMV launches. Each [row-slot](glossary.md#row-slot) runs its expert's gate and up projections, SwiGLU and the
 down projection. A finish then sums the outputs of each row's slots, weighted by their scores.
 
 **What it replaces.** The unfused chain is `Steps` in `unfused.zig`. For each projection it runs a prepare, a raw GEMV
-of the [trellis](GLOSSARY.md#trellis) and a finish, and then SwiGLU and the score-weighted reduce. That is 11 launches
-in 8 [dependent levels](GLOSSARY.md#dependent-level). Its kernels read the same lane plan and decoders as the fused
+of the [trellis](glossary.md#trellis) and a finish, and then SwiGLU and the score-weighted reduce. That is 11 launches
+in 8 [dependent levels](glossary.md#dependent-level). Its kernels read the same lane plan and decoders as the fused
 forms, so a comparison of the two measures fusion alone. No test or benchmark runs it today.
 
 **Why it is faster.** Form 9, the served form, merges the steps that share data:
@@ -157,20 +135,20 @@ flowchart TB
 
 | kernel | what it computes | launches it replaces |
 |---|---|---|
-| `turboexl3_prep2` | the gate and up inputs, prepared in [lane order](GLOSSARY.md#lane-order), with the block sums of each | `turboexl3_prep` × 2 |
+| `turboexl3_prep2` | the gate and up inputs, prepared in [lane order](glossary.md#lane-order), with the block sums of each | `turboexl3_prep` × 2 |
 | `turboexl3_gu3` | the gate and up inner products as split-K planes, `f32` `[KS, row-slots, inter]`; from two rows up, two row-slots that chose one expert share one decode of its weights | `turboexl3_gemv` × 2 |
-| `turboexl3_gu8` | `prep2` and `gu3` in one launch: each threadgroup prepares its own K span in [threadgroup memory](GLOSSARY.md#threadgroup-memory) | `turboexl3_prep` × 2, `turboexl3_gemv` × 2 |
+| `turboexl3_gu8` | `prep2` and `gu3` in one launch: each threadgroup prepares its own K span in [threadgroup memory](glossary.md#threadgroup-memory) | `turboexl3_prep` × 2, `turboexl3_gemv` × 2 |
 | `turboexl3_fin3` | the planes added in slice order, the deferred map, the gate and up finishes, SwiGLU in `f32`, then the down input prepared, with its block sums | `turboexl3_finish` × 2, `turboexl3_swiglu`, `turboexl3_prep` |
 | `turboexl3_fin7` | the statements of `fin3`, in the order of `fin3`, with the H128s in registers (no threadgroup exchanges) | as `fin3` |
 | `turboexl3_fin7c` | `fin7` with the clamped SwiGLU (`moeClamped`): its SwiGLU line swapped for the clamp, the template int `LIMIT` | as `fin3` |
 | `turboexl3_down3` | the down inner product as split-K planes | `turboexl3_gemv` |
 | `turboexl3_dfin3` | for each (block of hidden, row): each slot's planes added, the deferred map and the finish, then an `fma` with the slot's score, in slot order; y in x's dtype | `turboexl3_finish`, `turboexl3_reduce` |
-| `turboexl3_dfin7` | `dfin3` with the slots finished side by side (one [simdgroup](GLOSSARY.md#simdgroup) each), then the same chain of score `fma`s | as `dfin3` |
+| `turboexl3_dfin7` | `dfin3` with the slots finished side by side (one [simdgroup](glossary.md#simdgroup) each), then the same chain of score `fma`s | as `dfin3` |
 | `turboexl3_prep2b`, `turboexl3_gu3b`, `turboexl3_fin7cb`, `turboexl3_down3b`, `turboexl3_dfin3b` | the banked decode (`moeClampedBanked`): `prep2`, `gu3`, `fin7c`, `down3` and `dfin3` with each row-slot's arrays read from one of three banks by its packed id (bank << 24 \| slot row) | as their base kernels |
 | `turboexl3_gu5` | form 5: the inputs of an expert group (up to 4 row-slots) prepared in threadgroup memory, then the GEMV of `gu3` for every member from one decode | `turboexl3_prep` × 2, `turboexl3_gemv` × 2 |
 | `turboexl3_dn5` | form 5: the mid of `fin3` for every member, the down GEMV in the partition of `down3`, then each slot finished up to its score (`f16`) | `turboexl3_finish` × 3, `turboexl3_swiglu`, `turboexl3_prep`, `turboexl3_gemv` |
 | `turboexl3_red5` | form 5: the chain of score `fma`s, in slot order | `turboexl3_reduce` |
-| `turboexl3_dn6` | form 6: `dn5`, then the slot that arrives last at its (row, block of hidden) runs the chain of `red5`; an integer [counter](GLOSSARY.md#arrival-counter) counts the arrivals | as `dn5`, plus `turboexl3_reduce` |
+| `turboexl3_dn6` | form 6: `dn5`, then the slot that arrives last at its (row, block of hidden) runs the chain of `red5`; an integer [counter](glossary.md#arrival-counter) counts the arrivals | as `dn5`, plus `turboexl3_reduce` |
 | `turboexl3_gu` | form 1: the inputs prepared in threadgroup memory, the gate and up GEMV, the finishes and SwiGLU; h in `f32` | `turboexl3_prep` × 2, `turboexl3_gemv` × 2, `turboexl3_finish` × 2, `turboexl3_swiglu` |
 | `turboexl3_down` | form 1: for each (block of hidden, row), each slot's down prepare, GEMV, finish and score `fma`, in slot order | `turboexl3_prep`, `turboexl3_gemv`, `turboexl3_finish`, `turboexl3_reduce` |
 | `turboexl3_prep`, `turboexl3_gemv`, `turboexl3_finish`, `turboexl3_swiglu`, `turboexl3_reduce` | the unfused steps (`unfused.Steps`) | — |
@@ -201,14 +179,14 @@ slices per threadgroup), and that launch shape changes no sum.
   - In the served setting, each partition starts at 4 slices and halves until its parts divide the input tiles
     evenly. Each down part keeps at least 2 tiles. At 2560 × 640, KS is 4 (20 input tiles per part) and KS2 is 2 (5
     tiles per part).
-  - The bars: form 1 is within 5e-3 in `f32` ([rates](GLOSSARY.md#rate) n 32–128, MUL1 and [MCG](GLOSSARY.md#mcg), a
+  - The bars: form 1 is within 5e-3 in `f32` ([rates](glossary.md#rate) n 32–128, MUL1 and [MCG](glossary.md#mcg), a
     12-bit window). `root.moe` (form 9, `bf16` x and y) is within 1.5e-2.
 - The bytes of a form-3 row do not depend on how many rows share the call. The partition belongs to the geometry
   alone. The row count sets only how many threadgroups share the slices of a row-slot. The GPU test runs each row alone
   and then rows 2–16 together. It groups row-slots by expert and runs both MUL1 decodes (the deferred map on and off).
-  This matters for [MTP](GLOSSARY.md#mtp): the number of verify rows changes, but a row's output must not.
+  This matters for [MTP](glossary.md#mtp): the number of verify rows changes, but a row's output must not.
 - Forms 5–9 are byte-identical to form 3. They keep its partition and its order of FMAs per lane (input tiles in order,
-  weights m = 0..7). They also keep its quad folds, its part sums and its [rounding points](GLOSSARY.md#rounding-point).
+  weights m = 0..7). They also keep its quad folds, its part sums and its [rounding points](glossary.md#rounding-point).
   Only the launch shape moves:
   - the tiles and slices per threadgroup;
   - the expert groups;
@@ -217,7 +195,7 @@ slices per threadgroup), and that launch shape changes no sum.
 - The GPU tests compare the bits of forms 5–9 with form 3 at rows 1–5, 8 and 16. They use several settings of tiles,
   K divisors and grouping, and both MUL1 decodes. Forms 5 and 6 run in `f32`; forms 7–9 run in `f32` and `bf16`.
 - Every form computes SwiGLU in `f32` with `metal::exp`, as the unfused `turboexl3_swiglu` does. The prefill mid uses
-  `metal::precise::exp` (section 3).
+  `metal::precise::exp` ([section 2](#2-routed-experts-at-prefill-rows-17)).
 
 **The clamped SwiGLU.** `moeClamped` is `moe` with DeepSeek-V4's (and GLM's) `swiglu_limit` L: before SwiGLU, each
 row-slot's gate is clamped from above at L and its up to [−L, L], in `f32` on the finished `f16` values (an integer L is
@@ -225,13 +203,13 @@ exact in `f16`). L is part of the geometry (`decode.Geometry.limit`), so a clamp
 fin7 changes: `turboexl3_fin7c` is `fin7` with its SwiGLU line (`fin7_swiglu.metal`) swapped for the clamp
 (`fin7_swiglu_clamp.metal`), and its launch passes `LIMIT` after fin7's constants. Every other kernel of a clamped call is
 the unclamped chain's, and every unclamped kernel's text is unchanged. A clamped call runs forms 7, 8 and 9 as
-configured, and form 9 under forms 3, 5 and 6 (their bytes); the fused shared expert (section 2) has no clamp and refuses
+configured, and form 9 under forms 3, 5 and 6 (their bytes); the fused shared expert ([Qwen3.8's section 1](../models/qwen38/kernels.md#1-shared-expert-and-router-inside-the-decode-launches-rows-14)) has no clamp and refuses
 a clamped geometry. The routing weight multiplies the down projection's `f16` output in the `f32` sum, as in `moe`;
 DeepSeek's reference scales the activation before w2 instead, the same product up to rounding.
 
 **The banked decode.** `moeClampedBanked` serves an expert streamer whose experts sit in three slot banks (mlx-serve's
 streamed DeepSeek-V4.1 bank: base, ext, transient, each its own arrays and slot count). A call is up to 64 routed pairs,
-each one [row-slot](GLOSSARY.md#row-slot) at top-1 with its id packed (bank << 24 | slot row), and it returns each pair's
+each one [row-slot](glossary.md#row-slot) at top-1 with its id packed (bank << 24 | slot row), and it returns each pair's
 output at weight 1 (`f32` `[pairs, hidden]`); the caller weighs and sums them. It runs form 7's launches with form 9's
 launch shape at that many row-slots: `turboexl3_prep2b`, `turboexl3_gu3b`, `turboexl3_fin7cb`, `turboexl3_down3b` and
 `turboexl3_dfin3b` (top-1, unit scores). Each is its base text with the lines that read a bank's arrays swapped for lines
@@ -246,167 +224,17 @@ launch. The trellis may be `I16` (the streamer's code arrays: the kernels read i
 bank's down suh, so the gate|up half needs the down's suh in place as well as the gate and up arrays: a caller whose
 arrays land in parts (an expert streamer's gate and up, then its down) runs the whole call at its down.
 
-## 2. Shared expert and router inside the decode launches (rows 1–4)
-
-`moeFusedShared` computes `y = routed + sigmoid(logit) · shared(x)` for a gated shared expert. The gate, up and down of
-the shared expert are dense EXL3 projections. The shared expert gets no launch of its own. Its GEMVs ride the gate and
-up launch and the down launch of form 9 as extra grid rows. Its finishes ride the finish launches (`fin7s`, `dfin7s`).
-
-**Why it is faster.** The host chain runs the routed chain, three `linear` calls, its table SwiGLU, and MLX's Sigmoid,
-Multiply and Add. The fused path runs only the 5 launches of form 9 (4 at one row).
-
-From two rows, the field `fused_fin_fold` (on by default) also moves `fin7s` into the gate and up launch, as
-`turboexl3_gu3sf`. In that launch, the threadgroup that completes a routed (row-slot, block) runs `fin7` for it. The
-threadgroup that completes a block of the shared expert runs the shared finish of that block for each row. A small
-launch, `turboexl3_vfold_zero`, first sets the arrival counters to zero. It reads only a weight, so it runs beside the
-prepare launch. So the path keeps 5 launches, but it is one dependent level shorter.
-
-Each `linear` call on the unfused side is drawn as its DEC-ONE GEMV launch; the diagram leaves out its launch that
-zeroes counters or prepares. Look at the right side: the shared expert adds no box, only work inside the five routed
-launches. The dotted arrows from `turboexl3_prep2` are the path with `fused_fin_fold`. The diagram leaves out its
-launch that zeroes the counters.
-
-```mermaid
-flowchart TB
-  subgraph U["unfused: moe + three linear calls + host and MLX ops"]
-    direction TB
-    ux(["x"]) --> ur1["turboexl3_prep2"]
-    ur1 --> ur2["turboexl3_gu3"]
-    ur2 --> ur3["turboexl3_fin7"]
-    ur3 --> ur4["turboexl3_down3"]
-    ur4 --> ur5["turboexl3_dfin7<br/>routed y"]
-    ux --> usg["turboexl3_dense_dec1<br/>linear: shared gate"]
-    ux --> usu["turboexl3_dense_dec1<br/>linear: shared up"]
-    usg --> usw("host table SwiGLU")
-    usu --> usw
-    usw --> usd["turboexl3_dense_dec0<br/>linear: shared down"]
-    ul(["shared gate logit"]) --> usg2("MLX Sigmoid")
-    usg2 --> umu("MLX Multiply")
-    usd --> umu
-    ur5 --> uad("MLX Add")
-    umu --> uad
-    uad --> uy(["y"])
-  end
-  subgraph F["fused: form 9 with the shared heads, 5 launches, 4 at one row"]
-    direction TB
-    fx(["x, shared gate logit"]) --> f1["turboexl3_prep2<br/>routed inputs"]
-    f1 --> f2["turboexl3_gu3s<br/>routed + shared gate, up"]
-    fx -.->|one row| f2b["turboexl3_gu8s<br/>prepare + both GEMVs"]
-    f2 --> f3["turboexl3_fin7s<br/>finishes, SwiGLUs, down inputs"]
-    f2b -.-> f3
-    f3 --> f4["turboexl3_down3s<br/>routed + shared down"]
-    f1 -.->|fused_fin_fold| f2f["turboexl3_gu3sf<br/>both GEMVs + their finishes"]
-    f2f -.-> f4
-    f4 --> f5["turboexl3_dfin7s<br/>weighted sum, gate, add"]
-    f5 --> fy(["y"])
-  end
-```
-
-`moeFusedSharedRouted` also folds the host's softmax router into the prepare launch. With `gate_vec`, it also folds
-the logit of the shared gate. It serves the rows whose prepare is a launch of its own: 2–4 rows by default. At one row
-the prepare rides `gu8s`, so there is no prepare launch to fold into, and the entry refuses.
-
-On the left, the router kernel and the MLX matmul of the logit run before the chain and beside it. On the right,
-`turboexl3_route_prepg` does both inside the prepare launch. That saves one dependent level, and one launch (two with
-the logit). The dotted arrows on the right are again the path with `fused_fin_fold`.
-
-```mermaid
-flowchart TB
-  subgraph U["unfused: router kernel + moeFusedShared, 6 launches, 7 with the gate logit"]
-    direction TB
-    ul(["router logits"]) --> ur("mlxserve_moe_router_softmax<br/>top-k + weights")
-    ux(["x"]) --> up["turboexl3_prep2<br/>routed inputs"]
-    ur --> up
-    up --> ug["turboexl3_gu3s"]
-    ug --> uf["turboexl3_fin7s"]
-    uf --> ud["turboexl3_down3s"]
-    ud --> udf["turboexl3_dfin7s"]
-    ux --> um("MLX matmul<br/>shared gate logit")
-    um --> udf
-    udf --> uy(["y"])
-  end
-  subgraph F["fused: moeFusedSharedRouted, 5 launches"]
-    direction TB
-    fl(["router logits, x, gate vector"]) --> fr["turboexl3_route_prepg<br/>top-k, weights, prepare, logit"]
-    fr --> fg["turboexl3_gu3s"]
-    fg --> ff["turboexl3_fin7s"]
-    ff --> fd["turboexl3_down3s"]
-    fr -.->|fused_fin_fold| fgf["turboexl3_gu3sf"]
-    fgf -.-> fd
-    fd --> fdf["turboexl3_dfin7s"]
-    fdf --> fy(["y"])
-  end
-```
-
-| kernel | what it computes | launches it replaces |
-|---|---|---|
-| `turboexl3_gu3s` | `gu3`, plus grid rows for the shared gate and up: each K slice (one 128-block of hidden) is prepared in the kernel (dense `prep_s`) and runs as the slice of dense `dgemv` | the prepare and GEMV of the `linear` calls for the shared gate and up |
-| `turboexl3_gu8s` | `gu8`, plus the same head (one row) | as `gu3s`, plus `turboexl3_prep2` |
-| `turboexl3_fin7s` | `fin7`, plus the shared rows: dense `dfinish` of gate and up, the host's table SwiGLU, and dense `prep_s` of the product | the gate and up finishes, the SwiGLU kernel, and the prepare of the down `linear` call |
-| `turboexl3_gu3sf` | `gu3s`, then the statements of `fin7s` in the threadgroups that complete its planes, with an arrival counter for each routed (row-slot, block) and for each shared block; in each shared block, the threadgroups of its first output tiles also publish the input sums that the deferred map needs | `gu3s` and `fin7s` |
-| `turboexl3_vfold_zero` | zeroes the counters for `gu3sf`; it reads only a weight, so it waits on nothing | — |
-| `turboexl3_down3s` | `down3`, plus the slices of the shared down GEMV | the GEMV of the down `linear` call |
-| `turboexl3_dfin7s` | `dfin7`, and the shared down's `dfinish` in one more simdgroup; then the routed y in the output dtype + sigmoid(logit) × down, with MLX's sigmoid by table | the down finish, MLX Sigmoid, Multiply and Add |
-| `turboexl3_route_prep` | the router's selection, softmax and renormalized weights, then `prep2`; one threadgroup for each (block of hidden, row) | `mlxserve_moe_router_softmax`, `turboexl3_prep2` |
-| `turboexl3_route_prepg` | `route_prep`, plus the logit of the shared gate in the order of MLX's `bf16` gemv | as `route_prep`, plus the MLX matmul of the logit |
-| `turboexl3_sgu`, `turboexl3_sfin`, `turboexl3_sdown` | the three heads in launches of their own, beside the launches of form 9 (`moeSharedSide`) | a test [variant](GLOSSARY.md#variant); the same bytes |
-| `turboexl3_gu8t`, `turboexl3_gu3t`, `turboexl3_gu3p`, `turboexl3_prep2t`, `turboexl3_fin7t`, `turboexl3_down3t`, `turboexl3_dfin7t` | the v2 heads inside the launches of form 9: one simdgroup for each (K slice, group of output tiles), with no threadgroup reduction (`moeShared2`) | a test variant; the same bytes |
-| `turboexl3_sgu2`, `turboexl3_sgu2p`, `turboexl3_sprep2`, `turboexl3_sfin2`, `turboexl3_sdown2` | the v2 heads beside the launches of form 9 (`moeSharedSide2`) | a test variant; the same bytes |
-
-**Refusals.** `moeFusedShared` serves a call only when all of these hold:
-
-- the call has at most `shared_rows_max` (4) rows;
-- the intermediate width of the shared expert is the routed width;
-- each gate and up K slice is one 128-block of hidden;
-- the down split is whole slices of 4 parts;
-- the output is `bf16` or `f16`.
-
-The router fold also needs these:
-
-- k ≤ 31, and at least k but at most 2048 experts;
-- logits in x's dtype, and `slot_stats` off;
-- with the gate vector: `bf16` at 2–4 rows, with D > 64 and D ≥ 16 × rows (D is the hidden size). MLX's matmul runs
-  that gemv only at those shapes.
-
-Both entries refuse any other call before any launch.
-
-**Exactness.**
-
-- `moeFusedShared` is byte-identical to the host chain. That chain is the routed y of form 3, the three `linear`
-  calls, the host's table SwiGLU, and MLX's Sigmoid, Multiply and Add.
-  - The heads run the decode statements of `dense.zig` (`prep_s`, `dgemv`, `dfinish`), with the shared expert's own K
-    split (`Dense.ksFor`) and its MUL1 deferral.
-  - Each slice computes exactly what a threadgroup of its own computes. So the number of K slices per threadgroup (the
-    field `shared_spt`) is launch shape only.
-  - The SwiGLU and the gate tail repeat the host's statements in the output dtype.
-  - The GPU test covers rows 1–4, both MUL1 decodes of the routed experts, and form 9's tiles 1 and 2. It also covers
-    three settings of slices per threadgroup, `fused_fin_fold` on and off, and the side and v2 variants under every
-    launch-shape knob.
-  - `turboexl3_gu3sf` runs the statements of `fin7` and of the shared finish head, in their order. They read the
-    same planes and input sums that `gu3s` writes and `fin7s` reads, but inside one launch, through coherent device
-    memory. Each value has one writer. The threadgroup that runs a finish is the last to count at its block, so every
-    writer of its inputs has counted before it (DEC-ONE's arrival idiom). So its bytes are those of `fin7s`. A CPU
-    test holds its text to the pieces of `gu3s` and `fin7s`.
-- `moeFusedSharedRouted` is byte-identical to the router kernel followed by `moeFusedShared`.
-  - `turboexl3_route_prep` is built from verbatim slices of the router's text and of the body of `prep2`. The router
-    slices (softmax mode) are the selection, the softmax tree and the renormalized weights. Each slice runs on the same
-    lanes as in its own kernel.
-  - The gate logit repeats the column order and the fold of MLX's `gemv_bfloat16_bm1_bn8_sm1_sn32_tm{1,4}_tn4`.
-  - The GPU test compares the launch's outputs with the router kernel plus `prep2`. It uses 512 experts, rows 1–4, 8
-    and 16, `bf16` and `f16` logits, and exact ties. It compares the logit with MLX's matmul. It compares the whole
-    call, with `fused_fin_fold` on and off, with the router plus `moeShared` (the fold off) at rows 2–4.
-
-## 3. Routed experts at prefill rows (17+)
+## 2. Routed experts at prefill rows (17+)
 
 Above 16 rows, `moe` runs a GEMM chain. The chain sorts the row-slots by expert and prepares the gate and up inputs in
 sorted order. Then it runs one GEMM launch for gate and up, a mid launch, the down GEMM and a finish. The finish sums
 each row's slots in slot order.
 
 **Why it is faster.** The GEMM decodes the trellis inside its weight loader. For each 64-deep stage of the input
-dimension, each simdgroup decodes its share of the stage's 16 trellis [tiles](GLOSSARY.md#tile) into threadgroup memory.
-Then the [NAX](GLOSSARY.md#nax) units multiply 64 or 128 rows by that stage, with `f32` accumulation. No `f16`
-[W_hat](GLOSSARY.md#w-hat) reaches device memory, so the GEMM reads K bits per weight and never writes or reads a 16-bit
-copy. Dequantize + matmul (section 4) is the unfused form of one such GEMM.
+dimension, each simdgroup decodes its share of the stage's 16 trellis [tiles](glossary.md#tile) into threadgroup memory.
+Then the [NAX](glossary.md#nax) units multiply 64 or 128 rows by that stage, with `f32` accumulation. No `f16`
+[W_hat](glossary.md#w-hat) reaches device memory, so the GEMM reads K bits per weight and never writes or reads a 16-bit
+copy. Dequantize + matmul ([section 3](#3-dense-projections)) is the unfused form of one such GEMM.
 
 **The two sides of the diagram.** This repository has no unfused chain for the routed prefill, and it does not hold
 Sushi's. So the left side is the base option set (`prefill.Options{}`), and the right side is the served set
@@ -451,7 +279,7 @@ the gate and up finishes, SwiGLU and the down prepare. `fin` merges the down fin
 adds these options:
 
 - 64-row tiles, with remainders of at most 32 rows on the register path in the same launch (`small = .mixed`);
-- a double-buffered weight stage in NAX [fragment](GLOSSARY.md#mma) order, with unrolled MMA sub-steps;
+- a double-buffered weight stage in NAX [fragment](glossary.md#mma) order, with unrolled MMA sub-steps;
 - the integer-rate reader where n % 16 == 0, in the register path too (`sintr`);
 - the deferred MUL1 map;
 - four output blocks per threadgroup of the down GEMM (`ncb`);
@@ -469,7 +297,7 @@ constants, except `alay` and `t128`: the fields `pf_alay` and `pf_t128` of `Conf
 | `turboexl3_pf_froute`, `turboexl3_pf_froute_m` | each expert's slots counted (threadgroup atomics), scanned and scattered: `order` and the tile table in one launch | MLX argsort, the table |
 | `turboexl3_pf_t128_route` | the count and scatter of `froute`; 128-row tiles for each expert's full runs, and for a remainder of more than `t128_cut` (64) rows; the mixed table over the rest; each expert's first remainder position | MLX argsort, the table |
 | `turboexl3_pf_prep` | the gate and up inputs, prepared in sorted order (the A layout of `alay`), `inv` and the block sums | — |
-| `turboexl3_pf_gemm2`, `turboexl3_pf_gemm1` | the gate + up GEMM (two operations) and the down GEMM, in the [shared-decode body](GLOSSARY.md#shared-decode-body): the weight stage decoded into threadgroup memory, then NAX MMAs; `bk128` and `ncb` reshape the down launch | — |
+| `turboexl3_pf_gemm2`, `turboexl3_pf_gemm1` | the gate + up GEMM (two operations) and the down GEMM, in the [shared-decode body](glossary.md#shared-decode-body): the weight stage decoded into threadgroup memory, then NAX MMAs; `bk128` and `ncb` reshape the down launch | — |
 | `turboexl3_pf_gemm2s`, `turboexl3_pf_gemm1s` | the register-path body (`small = .all`): every tile at most 32 rows; each simdgroup an independent 32 × 32 item that decodes straight into its B fragment registers, with no threadgroup memory | `_gemm2` (`_gemm1`) |
 | `turboexl3_pf_gemm2m`, `turboexl3_pf_gemm1m` | the mixed launch: the table's large tiles through the shared-decode body, and its tiles of at most 32 rows through the register path | `_gemm2` and `_gemm2s` (`_gemm1` and `_gemm1s`) as one launch |
 | `turboexl3_pf_t128_gum`, `turboexl3_pf_t128_dnm` | the mixed launch over the remainder table | `_gemm2m` (`_gemm1m`), with `_gut` (`_dnt`) beside it |
@@ -508,20 +336,21 @@ The A layouts (`alay`):
   outputs can differ in the last bits.
 - The mid computes SwiGLU in `f32` with `metal::precise::exp`. The decode forms use `metal::exp`, so the SwiGLU of
   one row can round differently at prefill rows.
-- `moeClamped` runs this chain with the clamp in the mid alone (`prefill.Geometry.limit`; section 1 gives the clamp): the
+- `moeClamped` runs this chain with the clamp in the mid alone (`prefill.Geometry.limit`; [section 1](#1-routed-experts-at-decode-rows-116) gives the clamp): the
   clamped mids (`_midc`, `_t128_midc`, `_mid_vc`) are their mids with the one line `mid_swiglu.metal` swapped for
   `mid_swiglu_clamp.metal`, and their launches pass `LIMIT` after the mid's constants. Where no value reaches the limit they give their mids' bytes (a GPU test
   compares the bits at limit 128). A second GPU test holds `moeClamped` at DeepSeek-V4.1-Flash's geometry (K2, K3, K6;
-  decode rows 1, 4, 16, prefill rows 32, 1328) to 1.5e-2 (`bf16`) and 5e-3 (`f32`) of `ref.moeRowClamped`, on inputs that
+  decode rows 1, 4, 16, prefill rows 32, 1328) to 5e-3 of `ref.moeRowClamped` (`f32` through `ref.compare`; `bf16`
+  through `ref.compareRounded`, which first allows half a `bf16` ulp of each output's own rounding), on inputs that
   clamp about a tenth of the gates and a quarter of the ups.
 
-## 4. Dense projections
+## 3. Dense projections
 
 `linear` picks a path by the row count (`Dense.pathFor`):
 
 | rows | path | launches | levels |
 |---|---|---|---|
-| 1–4 (DEC-ONE's row cap) | DEC-ONE: one GEMV launch; the threadgroup that arrives last at its (output block, [row chunk](GLOSSARY.md#row-chunk)) runs the finish. The prepare runs inside that launch at 1 row, or at up to 1024 outputs, where its buffer fits; otherwise `prep_sc` runs it in a launch of its own (both thresholds are constants) | 2 | 1 with the prepare inside, else 2 |
+| 1–4 (DEC-ONE's row cap) | DEC-ONE: one GEMV launch; the threadgroup that arrives last at its (output block, [row chunk](glossary.md#row-chunk)) runs the finish. The prepare runs inside that launch at 1 row, or at up to 1024 outputs, where its buffer fits; otherwise `prep_sc` runs it in a launch of its own (both thresholds are constants) | 2 | 1 with the prepare inside, else 2 |
 | 5–16, or `dec_one` false | `prep_s` → multi-row `dgemv` (`dgemv_lean` for chunks of 6 to 8 rows) → `dfinish` | 3 | 3 |
 | 17–32 (`small_rows`; 0 when `nax` is false) | `prep` → register-path GEMM `rs_gemm` → `finish` | 3 | 3 |
 | 33+ | `prep` and `dequant` → MLX matmul → `finish` | 4 | 3 |
@@ -560,7 +389,7 @@ flowchart TB
 ```
 
 Both fused boxes decode the trellis inside the GEMM, so no `f16` W_hat is written. The register path serves 17–32 rows
-where the [NAX gate](GLOSSARY.md#nax-gate) holds. Only the tests select the fused GEMM.
+where the [NAX gate](glossary.md#nax-gate) holds. Only the tests select the fused GEMM.
 
 ```mermaid
 flowchart TB
@@ -647,9 +476,9 @@ flowchart TB
 | `turboexl3_dense_rs_gemm` | 17–32 rows: the register-path GEMM of the routed prefill with one operation and 32-row tiles; the trellis decoded straight into the B fragment registers (`f16` weight values), `f32` accumulation, `f16` out | `turboexl3_dense_dequant`, MLX matmul |
 | `turboexl3_dense_dequant` | the `f16` W_hat `[in, out]` from the trellis | — |
 | `turboexl3_dense_pf_gemm` | tests only: the shared-decode GEMM of the routed prefill over 64-row tiles of the one "expert", with the deferred map | `turboexl3_dense_dequant`, MLX matmul |
-| `turboexl3_dense_finish_pieces` | one finish over a call cut into 2–4 row pieces (the host's overlap of the [GDN](GLOSSARY.md#gdn) layers) | — |
+| `turboexl3_dense_finish_pieces` | one finish over a call cut into 2–4 row pieces (the host's overlap of the [GDN](glossary.md#gdn) layers) | — |
 | `turboexl3_unrot_cols` | at load: the ±1 H128 along the 128-column blocks of each row of W_hat, into `f32` | — |
-| `turboexl3_unrot_rows` | at load: the ±1 H128 along the 128-row blocks of each column, × 1/128 × [suh](GLOSSARY.md#suh-svh) × svh, and one rounding to `bf16` or `f16`: `W_std = diag(suh) H W_hat H diag(svh)` | for each call: `prep`, `dequant`, MLX matmul, `finish` |
+| `turboexl3_unrot_rows` | at load: the ±1 H128 along the 128-row blocks of each column, × 1/128 × [suh](glossary.md#suh-svh) × svh, and one rounding to `bf16` or `f16`: `W_std = diag(suh) H W_hat H diag(svh)` | for each call: `prep`, `dequant`, MLX matmul, `finish` |
 
 **The row chunks of the GEMV chain.** The multi-row GEMV decodes each weight once per threadgroup, for the rows of one
 chunk. The chain cuts a call into the fewest chunks of at most 8 rows, and it spreads the rows evenly over them
@@ -664,7 +493,7 @@ chunk. The chain cuts a call into the fewest chunks of at most 8 rows, and it sp
 
 `dgemv` keeps four input floats per row live through its codeword loop. Past 5 rows a lane needs more than 32 floats
 and spills registers, so a chunk on `dgemv` has at most 5 rows. DEC-ONE keeps chunks of at most 5 rows at every row
-count (`Dense.rbFor`), because its GEMV loop is `dgemv`'s. The decode-row merges (section 6) take DEC-ONE's chunks where
+count (`Dense.rbFor`), because its GEMV loop is `dgemv`'s. The decode-row merges ([Qwen3.8's section 3](../models/qwen38/kernels.md#3-decode-row-merges-rows-116)) take DEC-ONE's chunks where
 DEC-ONE takes the call, and the chain's chunks otherwise. With `dense_lean` false, the chain also keeps chunks of at
 most 5 rows, all on `dgemv`: 6 rows run as 3 + 3, 7 as 4 + 3, 8 as 4 + 4 and 16 as 4 × 4.
 
@@ -681,7 +510,7 @@ finite.
 
 - The multi-row GEMV chain sums in its own order: K slices fixed per shape, four parts per slice, and planes in slice
   order. It applies the deferred map. It is within tolerance of `format.project` per row:
-  - within 5e-3 with `f32` x and y on the [trunk](GLOSSARY.md#trunk)'s shapes. The test uses GEMV rows (1–16),
+  - within 5e-3 with `f32` x and y on the [trunk](glossary.md#trunk)'s shapes. The test uses GEMV rows (1–16),
     register-path rows (17, 31, 32) and prefill rows (40, 129, 200);
   - within 2.5e-2 with `bf16` x and y (4 and 40 rows).
 - A row's bytes are the same alone and among 2–16 rows, whatever the chunks and the GEMV text.
@@ -693,8 +522,9 @@ finite.
   `dfinish`, and a CPU test holds them equal. The planes are still added in slice order. An integer counter counts the
   arrivals; there are no float atomics. The GPU test covers the trunk's shapes at rows 1–9, 11 and 16, and both places
   of the prepare. It also covers the MUL1 deferral on and off, `bf16` and `f32`, one MCG shape, and each row alone.
-- The register path, the fused GEMM and MLX's matmul sum in their own MMA orders. The same bars hold them to
-  `format.project` (the fused GEMM in the tests). With `nax` false, 17–32 rows take dequantize + MLX's matmul, so
+- The register path, the fused GEMM and MLX's matmul sum in their own MMA orders. The same bars hold the register path
+  and dequantize + matmul to `format.project`; the fused GEMM (tests only) is held only to dequantize + matmul, by the
+  dense timing test's bars (RMS difference at most 3.9e-3, largest ratio at most 8e-2). With `nax` false, 17–32 rows take dequantize + MLX's matmul, so
   their bytes can differ from those of the register path.
 - `linearSplit` records the same launches on two streams, so it gives the bytes of `linear`. The GPU test runs 8192,
   1328 and 40 rows on both inner products.
@@ -721,14 +551,15 @@ stacked: trellis `[G, in/16, out/16, n]`, suh `[G, in]`, svh `[G, out]`.
 
 | rows | path | launches | levels |
 |---|---|---|---|
-| 1–16 | `turboexl3_grouped_prep` → `turboexl3_grouped_gemv` → `turboexl3_grouped_finish`, every slice in each launch | 3 | 3 |
+| 1–16 | `turboexl3_grouped_prep` → `turboexl3_grouped_gemv_d` (`_gemv_dl` for chunks past 5 rows; the routed `turboexl3_grouped_gemv` when `Grouped.dense_gemv` is false, the tests' reference arm) → `turboexl3_grouped_finish`, every slice in each launch | 3 | 3 |
 | 17+ | `linear` of each slice: a copy of its columns of x, then `linear`'s launches; then one MLX concatenate (G copies) | 4 per slice at 17–32, 5 from 33, + G | 5 |
 
-The decode kernels are existing texts with their own template arguments, so there is no new Metal:
+The decode kernels are existing texts with their own template arguments (and `gemv_d`'s head and store pieces):
 
 | kernel | text | what it computes |
 |---|---|---|
 | `turboexl3_grouped_prep` | `dense.text_prep_s` | the prepare in lane order and the block sums, over each row's G slices as one row of G · in values; every 128-block lies inside one slice, so each slice's values are dense's |
+| `turboexl3_grouped_gemv_d`, `_gemv_dl` | `grouped.text_gemv_d`, `_dl` | the default step 2: dense's multi-row GEMV statements (its lean codeword loop for `_dl`) over the slices, one decode per row chunk, into the routed planes |
 | `turboexl3_grouped_gemv` | `decode.text_down3` | the gather of the routed down GEMV: row-slot r · G + g reads its own prepared row and slice g's trellis, into split-K planes; from two rows up, the row-slots of one slice share one decode (`GROUP` 2) |
 | `turboexl3_grouped_finish` | `decode.text_dfin3` | the routed down finish at top-1 with every score 1, so no sum over slots: the planes in slice order, the deferred map, the finish and the output dtype |
 
@@ -747,251 +578,10 @@ trunk's matmul has none.
   within the dense bars.
 - `linearBias` rounds twice: `linear`'s output, then the sum in x's dtype.
 
-## 5. Attention projections at prefill rows (17+)
-
-ATTN-IN (`attnIn`) computes q, k and v from one x. Each q head is `[query | gate]`. The finish applies the [QK
-RMSNorm](GLOSSARY.md#qk-norm) and partial [RoPE](GLOSSARY.md#rope). ATTN-OUT (`linearGated`) computes `o_proj` over
-`T(attn · sigmoid(gate))`, and it forms that product inside its prepare.
-
-"inner" in the diagrams is `linear`'s inner product at these rows: `turboexl3_dense_rs_gemm` (17–32 rows), or
-`turboexl3_dense_dequant` + MLX matmul (33 rows and more). With `nax` false, 17–32 rows also take dequantize + matmul.
-The entries refuse the GEMV rows and a `Dense` that runs the fused GEMM (a test setting), so the host keeps its chain
-there. They also refuse a rotary width other than 32, 64, 128 or 256, and norm weights in
-a dtype other than T.
-
-**Why it is faster.** ATTN-IN reads x once for three prepares. It runs one finish for three projections, with the norm
-and RoPE inside. That removes two prepare launches, two finish launches, and the norm and rope launches of MLX. Each
-launch that it removes also removes one pass of the activations through device memory. ATTN-OUT moves MLX's Sigmoid
-and Multiply into its prepare.
-
-On the left, each projection has its own prepare and finish, and MLX normalizes and rotates q and k afterwards. On the
-right, one prepare and one finish serve all three projections. The dotted arrows show the four-member prepare, which
-also serves the [indexer](GLOSSARY.md#qsa).
-
-```mermaid
-flowchart TB
-  subgraph U["unfused: three linear calls + MLX norms and ropes"]
-    direction TB
-    ux(["x"]) --> upq["turboexl3_dense_prep<br/>q prepare"]
-    ux --> upk["turboexl3_dense_prep<br/>k prepare"]
-    ux --> upv["turboexl3_dense_prep<br/>v prepare"]
-    upq --> uiq["inner q"]
-    upk --> uik["inner k"]
-    upv --> uiv["inner v"]
-    uiq --> ufq["turboexl3_dense_finish<br/>q finish"]
-    uik --> ufk["turboexl3_dense_finish<br/>k finish"]
-    uiv --> ufv["turboexl3_dense_finish<br/>v finish"]
-    ufq --> unq("MLX rms_norm<br/>query halves")
-    unq --> urq("MLX rope<br/>q")
-    ufk --> unk("MLX rms_norm<br/>k")
-    unk --> urk("MLX rope<br/>k")
-    urq --> uo(["q, gate, k, v"])
-    urk --> uo
-    ufv --> uo
-  end
-  subgraph F["fused"]
-    direction TB
-    subgraph F1["ATTN-IN"]
-      direction TB
-      fx(["x"]) --> fp["turboexl3_attn_prep3<br/>three prepares, one read"]
-      fx -.->|with the indexer| fp4["turboexl3_attn_prep4<br/>four prepares"]
-      fp --> fiq["inner q"]
-      fp --> fik["inner k"]
-      fp --> fiv["inner v"]
-      fp4 -.-> fiq
-      fp4 -.-> fik
-      fp4 -.-> fiv
-      fiq --> ff["turboexl3_attn_finish<br/>finishes, norm, RoPE, layouts"]
-      fik --> ff
-      fiv --> ff
-      ff --> fo(["q, gate, k, v"])
-    end
-    subgraph F2["un-rotated trunk, opt-in"]
-      direction TB
-      gx(["x"]) --> gm("MLX matmul<br/>x W_std, joined")
-      gm --> ge["turboexl3_attn_epi_std<br/>norm, RoPE, layouts"]
-      ge --> go(["q, gate, k, v"])
-    end
-  end
-```
-
-The sigmoid and the multiply move into the prepare of `o_proj`. In the un-rotated box, the gated product goes straight
-to one matmul by W_std.
-
-```mermaid
-flowchart TB
-  subgraph U["unfused: MLX gate product + linear"]
-    direction TB
-    ug(["gate"]) --> us("MLX Sigmoid")
-    ua(["attn"]) --> um("MLX Multiply<br/>transposed attn view")
-    us --> um
-    um --> up["turboexl3_dense_prep<br/>o_proj prepare"]
-    up --> ui["inner o_proj"]
-    ui --> uf["turboexl3_dense_finish"]
-    uf --> uy(["y"])
-  end
-  subgraph F["fused"]
-    direction TB
-    subgraph F1["ATTN-OUT"]
-      direction TB
-      fa(["attn, gate"]) --> fp["turboexl3_attn_prep_gate<br/>sigmoid table, product, prepare"]
-      fp --> fi["inner o_proj"]
-      fi --> ff["turboexl3_dense_finish"]
-      ff --> fy(["y"])
-    end
-    subgraph F2["un-rotated trunk, opt-in"]
-      direction TB
-      ga(["attn, gate"]) --> gg["turboexl3_attn_gate_std<br/>gated product"]
-      gg --> gm("MLX matmul<br/>by W_std")
-      gm --> gy(["y"])
-    end
-  end
-```
-
-| kernel | what it computes | launches it replaces |
-|---|---|---|
-| `turboexl3_attn_prep3` | the prepared copies of q, k and v from one read of x, in natural order | `turboexl3_dense_prep` × 3 |
-| `turboexl3_attn_prep4` | the same, with the QSA indexer projection as a fourth member (`attnPrep4`; the indexer then runs `linearPreparedIdx`) | `turboexl3_dense_prep` × 4 |
-| `turboexl3_attn_finish` | for each unit of 256 columns: the members' finishes, then RMSNorm and the NeoX rotation of the q and k heads. q, k and v come out head-major `[1, H, S, 256]`, and the gate `[1, S, H, 256]` | `turboexl3_dense_finish` × 3, MLX rms_norm × 2, MLX rope × 2 |
-| `turboexl3_attn_prep_gate` | `T(attn · sigmoid(gate))` (MLX's sigmoid by table, the product in T), then the prepare of `o_proj` | MLX Sigmoid, MLX Multiply, `turboexl3_dense_prep` |
-| `turboexl3_attn_epi_std` | the epilogue of `attn_finish`, verbatim, over products in the standard basis (one joined product, or each member's own) | `turboexl3_attn_prep3`, three inner products, `turboexl3_attn_finish` |
-| `turboexl3_attn_gate_std` | the gated product alone, for one MLX matmul by the W_std of `o_proj` | `turboexl3_attn_prep_gate`, the inner product, `turboexl3_dense_finish` |
-
-**Exactness.**
-
-- ATTN-IN and ATTN-OUT are byte-identical to the host chain.
-  - The prepare of each member runs the statements of dense `text_prep` on the same `f16` value of x. The inner
-    products are `linear`'s own launches.
-  - The finish runs the statements of `text_finish` on each 128-block. Then it runs MLX's `rms_single_row` order at
-    axis 256: `f32` squares in index order, two simd sums, and `precise::rsqrt`. Then it rotates against angle rows
-    that MLX's own rope produced.
-  - These are the statements of the host's QK-norm + RoPE kernel for [head dim](GLOSSARY.md#head-dim) 256
-    (`QK_NORM_ROPE_256_SOURCE`). The host's own test pins that kernel to the composed MLX chain.
-  - The product of ATTN-OUT is MLX's Sigmoid by table and its Multiply in T. Both are exact in `f32` before the one
-    rounding.
-  - The GPU test covers 17, 31, 32, 33, 1328 and 8192 rows, two sets of rates, and both gate layouts. It checks the
-    four-member prepare against each member's own prepare and against the indexer's `linear`.
-- The `_std` kernels repeat the epilogue and the gate product verbatim. But their inputs are products of the
-  un-rotated trunk, so the un-rotated bars of section 4 hold their outputs to `attnIn` and `linearGated`.
-
-## 6. Decode-row merges (rows 1–16)
-
-At the GEMV rows of a gated, QK-normed attention layer, four entries merge neighboring launches of the host into the
-launches of the dense projection. Each entry is byte-identical to its chain whether DEC-ONE takes the call or not. The
-diagrams draw the unfused `linear` calls with DEC-ONE's prepare in its own launch (`prep_sc` → `dec0`).
-
-| entry | what it merges | what it saves |
-|---|---|---|
-| `gatedDecode` | the host's strided gate kernel, into the prepare of `o_proj` | one launch in every DEC-ONE setting, and one dependent level where `linear` prepares in a launch of its own (`prep_sc` → `dec0`, or the three-launch chain) |
-| `mergeGatedDecode` | also the split-K merge of the QSA core | one launch and one level more than `gatedDecode` |
-| `qPlanes` | the copy of the strided query view | one launch and one level |
-| `indexerQk` | the four launches of the index queries (copy, rms_norm, copy, rope) and the three of the pooled key (copy, concatenate, kernel) | seven launches |
-
-On the left, the gate kernel runs before the prepare of `o_proj`, and in the qmerge form the merge runs before it. On
-the right, one launch runs the merge, the gate product and the prepare, and `dec0` follows.
-
-```mermaid
-flowchart TB
-  subgraph U["unfused: merge, gate kernel, linear"]
-    direction TB
-    up(["QSA split-K partials"]) --> um("host msv_attn_qsa256_qmerge<br/>qmerge form only")
-    ua(["attn, gate"]) --> ug("host strided gate kernel<br/>attn × sigmoid")
-    um --> ug
-    ug --> us["turboexl3_dense_prep_sc<br/>o_proj prepare"]
-    us --> ud["turboexl3_dense_dec0<br/>o_proj GEMV + finish"]
-    ud --> uy(["y"])
-  end
-  subgraph F["fused"]
-    direction TB
-    subgraph F1["gatedDecode"]
-      direction TB
-      fa(["attn, gate"]) --> fg["turboexl3_decb_prep_gate<br/>gate product + prepare"]
-      fg --> fd["turboexl3_dense_dec0<br/>o_proj GEMV + finish"]
-      fd --> fy(["y"])
-    end
-    subgraph F2["mergeGatedDecode"]
-      direction TB
-      ga(["QSA split-K partials, gate"]) --> gm["turboexl3_decb_merge_gate<br/>merge, gate product, prepare"]
-      gm --> gd["turboexl3_dense_dec0<br/>o_proj GEMV + finish"]
-      gd --> gy(["y"])
-    end
-  end
-```
-
-On the left, MLX copies, norms and rotations follow each projection. On the right, the finish inside the GEMV launch
-writes the two planes. For the indexer, it normalizes and rotates the index queries and builds the pooled key.
-
-```mermaid
-flowchart TB
-  subgraph U["unfused: linear + MLX copies, norms and ropes"]
-    direction TB
-    subgraph U1["q_proj"]
-      direction TB
-      ax(["x"]) --> ap["turboexl3_dense_prep_sc"]
-      ap --> ad["turboexl3_dense_dec0<br/>q_proj"]
-      ad --> ac("MLX copy<br/>strided query view")
-      ac --> ak("host hd-256 QK-norm + RoPE")
-    end
-    subgraph U2["indexer"]
-      direction TB
-      bx(["x"]) --> bp["turboexl3_dense_prep_sc"]
-      bp --> bd["turboexl3_dense_dec0<br/>indexer"]
-      bd --> bc1("MLX copy<br/>index q")
-      bc1 --> bn("MLX rms_norm")
-      bn --> bc2("MLX copy")
-      bc2 --> br("MLX rope")
-      bd --> bk1("MLX copy<br/>key rows")
-      bk1 --> bk2("MLX concatenate<br/>with ring rows")
-      bk2 --> bk3("host pooled-key kernel")
-    end
-  end
-  subgraph F["fused"]
-    direction TB
-    subgraph F1["qPlanes"]
-      direction TB
-      cx(["x"]) --> cp["turboexl3_dense_prep_sc"]
-      cp --> cd["turboexl3_decb_dec0_planes<br/>query and gate planes"]
-      cd --> ck("host hd-256 QK-norm + RoPE")
-    end
-    subgraph F2["indexerQk"]
-      direction TB
-      dx(["x"]) --> dp["turboexl3_dense_prep_sc"]
-      dp --> dd["turboexl3_decb_dec0_idx<br/>finish, q norm + RoPE, pooled key"]
-      dd --> dy(["qk, q_rope, pooled"])
-    end
-  end
-```
-
-| kernel | what it computes | launches it replaces |
-|---|---|---|
-| `turboexl3_decb_prep_gate` | the statement of the host's strided gate kernel, then the statements of `prep_sc` (lane order, block sums, DEC-ONE's counters) | the strided gate kernel, and the prepare of `linear` (`prep_sc` or `prep_s`) |
-| `turboexl3_decb_merge_gate` | the split-K merge of the QSA core (the statements of `msv_attn_qsa256_qmerge` and its rounding to T), the gate product, and the prepare of `o_proj` | `msv_attn_qsa256_qmerge`, the strided gate kernel, the prepare of `linear` |
-| `turboexl3_decb_dec0_planes`, `turboexl3_decb_dec1_planes`, `turboexl3_decb_dfinish_planes` | the finish of `q_proj` in DEC-ONE (`dec0`, `dec1`) or in the chain (`dfinish`), which stores the query and gate halves of each head as two contiguous planes | the row-contiguous copy of the strided query view |
-| `turboexl3_decb_dec0_idx`, `turboexl3_decb_dec1_idx`, `turboexl3_decb_dfinish_idx` | the finish of the indexer projection; then the norm and rotation of each index query head (the statements of the host's `QK_NORM_ROPE_SOURCE` for head dim 128); then the one pooled block key that the call completes (the statements of `QSA_POOL_ROPE_SOURCE`) | the index-q copy, rms_norm, copy and rope; the pooled-key copy, concatenate and kernel |
-
-The `dec1_*` and `dfinish_*` variants serve the other DEC-ONE settings. `dec1_*` runs when DEC-ONE prepares inside its
-launch (beside `dec_zero`). `dfinish_*` runs when DEC-ONE is off (after `prep_s` and `dgemv`).
-
-**Refusals.** All four entries refuse calls of more than 16 rows, and a `Dense` in the row-slot variant (a test
-setting). The qmerge form
-also needs 1 to 64 splits and `f32` partials. The indexer entry also needs these:
-
-- the index queries, the pooled key, or both, as its outputs;
-- a `bf16` output;
-- rotary dims that are a multiple of 8, at most 128;
-- a block ratio from 1 to 8, with fewer [ring rows](GLOSSARY.md#qsa-merge) than the ratio;
-- with the pooled key: all rows of the block in the call and, with DEC-ONE, in DEC-ONE's first row chunk.
-
-**Exactness.** The merges are byte-identical to the host's chains at every rounding point. The statements that set
-values come from `dense.zig` or from the host: the strided gate kernel, `msv_attn_qsa256_qmerge`,
-`QK_NORM_ROPE_SOURCE` and `QSA_POOL_ROPE_SOURCE`. They are spliced or copied verbatim, and CPU tests pin the texts. The
-GPU tests compare the bits at rows 1–6, 8, 9 and 16; the indexer test also uses 0 to 3 ring rows. Each test runs
-in three DEC-ONE settings: off, on with the prepare inside, and on with the prepare in its own launch.
-
-## 7. Building blocks
+## 4. Building blocks
 
 - **`lane.zig`, the codeword readers.** Lane L of a simdgroup owns code positions 8L to 8L + 7 of a 256-weight tile (the
-  [tensor-core order](GLOSSARY.md#permutation)). Its eight [codewords](GLOSSARY.md#codeword) lie in at most four
+  [tensor-core order](glossary.md#permutation)). Its eight [codewords](glossary.md#codeword) lie in at most four
   consecutive 32-bit words of the tile's circular bitstream. The readers:
   - the general funnel over four words (`exl3_lane_words`, `exl3_lane_cw`);
   - the fast path for integer rates (`IntPlan`, n % 16 == 0): one select, one shift and one mask per weight;
@@ -1001,10 +591,10 @@ in three DEC-ONE settings: off, on with the prepare inside, and on with the prep
 
   CPU tests hold the host mirrors of the lane plan and of both fast paths to `format.unpackTile`. They test every even
   n from 16 to 128, and the integer path at K1 to K8.
-- **The decoders.** The readers mask each codeword to the [window](GLOSSARY.md#codeword-window). `exl3_decode<CB>` turns
+- **The decoders.** The readers mask each codeword to the [window](glossary.md#codeword-window). `exl3_decode<CB>` turns
   it into the `f16` weight, for MUL1 and for MCG. `exl3_mul1_t` and `exl3_mul1_th` give MUL1's byte sum t for the
   deferred map. A Metal define picks one of four exact routes to t. Another define loads the input tiles of the decode
-  GEMV in pairs and keeps the sums. The [Wiring](../README.md#wiring) section of the README names these defines and
+  GEMV in pairs and keeps the sums. The [Wiring](consuming.md#wiring) section of the consuming page names these defines and
   their defaults.
 - **Shared Metal headers.** `decode.header` holds the lane helpers, `turboexl3_row_of`, and the GEMV core:
   `turboexl3_members`, `turboexl3_gemv_members`, `turboexl3_fold` and `turboexl3_h128`. Each other header adds helpers:
@@ -1021,7 +611,7 @@ in three DEC-ONE settings: off, on with the prepare inside, and on with the prep
   `steel`, `steel.zig` inlines those four headers of the consumer's MLX instead. It drops their `#pragma once` lines
   and their `#include "mlx/..."` lines.
 - **`format.zig`, the reference.** It holds the rates (even n from 16 to 128), the windows (8 to 16 bits) and the MUL1
-  and MCG [codebooks](GLOSSARY.md#codebook). It holds `tensorCorePerm`, `unpackTile`, `hadamard128`, and `prepareInput`
+  and MCG [codebooks](glossary.md#codebook). It holds `tensorCorePerm`, `unpackTile`, `hadamard128`, and `prepareInput`
   → `innerGemv` → `finishOutput` (`project`). It also holds `reconstructPublic` and a packer for the tests. It is a port
   of Sushi's `src/exl3/expert_exl3.zig`, with its pins.
 - **`ref.zig`.** It holds these functions:
@@ -1032,6 +622,6 @@ in three DEC-ONE settings: off, on with the prepare inside, and on with the prep
   - `compare`: the tolerance measure.
 - **Not kernels of the library.** `turboexl3_test_host_swiglu`, `turboexl3_test_router` and `turboexl3_test_qmerge` run
   the host's SwiGLU, router and merge texts as references in the tests. The Metal-source dump (see the
-  [README](../README.md#tests)) prints the kernels of the routed prefill chain as standalone source files. Its parts
+  [tests page](testing.md)) prints the kernels of the routed prefill chain as standalone source files. Its parts
   are in `src/core/kernels/test/dump/`. The dump's
   unit names (`turboexl3_pf_gemm2s_j`, ...) label option variants; they are not MLX kernel names.

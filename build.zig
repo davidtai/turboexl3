@@ -1,7 +1,7 @@
 //! turboexl3 as a package. Its module `turboexl3` (src/root.zig) imports `std` and one module the consumer supplies,
 //! `sdk`: a namespace with `mlx` (mlx-c's bindings plus `check`, `getShape` and `streamIsGpu`) and `kernel_launch`
 //! (MLX custom Metal kernels and their launches: `newKernel`, `Launch`, `TemplateArg`, `buildConfig`, `applyConfig`).
-//! README.md describes both; CONSUMING.md gives what every consumer supplies (the `sdk` module) and how the quant plugin
+//! docs/core/api.md describes both; docs/core/consuming.md gives what every consumer supplies (the `sdk` module) and how the quant plugin
 //! in plugin/ builds turboexl3 in.
 //!
 //!     const t3 = b.dependency("turboexl3", .{ .target = target, .optimize = optimize }).module("turboexl3");
@@ -50,6 +50,12 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
+    // the docs check: every kernel the code can build has its entry in docs/ (tools/kernel_docs.py), every link resolves
+    const doc_check = b.addSystemCommand(&.{ "python3", "-I" });
+    doc_check.addFileArg(b.path("tools/kernel_docs.py"));
+    doc_check.addArg("--check");
+    doc_check.has_side_effects = true;
+    b.step("doc-check", "Check that every kernel has its doc entry and every docs link resolves (python3, no GPU)").dependOn(&doc_check.step);
     // the AMD (HIP) kernels: only with -Dhip=true, so the Metal path builds as before
     if (b.option(bool, "hip", "Build the AMD (HIP) kernels and their GPU tests: Linux, hipcc") orelse false) hipSteps(b, target, optimize);
 }

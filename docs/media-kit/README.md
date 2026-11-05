@@ -38,7 +38,7 @@ walks through the results: accuracy per bit (turboderp's KL divergence against b
 and the time to first token, first with Sushi's exact EXL3 kernels and then with turboexl3's; decode by prompt length at
 the same MTP depth as the standard setup; coding accuracy against size on disk, with peak memory; and the K4 and K3
 trades. It was measured on an Apple M5 Max (128 GB) with mlx-serve and Qwen3.8-Flash-Next; the numbers and the method are
-in [RESULTS.md](../RESULTS.md).
+in [the Qwen3.8 results](../models/qwen38/results.md).
 
 ## Colours
 

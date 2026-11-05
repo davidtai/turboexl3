@@ -12,4 +12,4 @@ The kernels only Qwen3.8-Flash-Next's trunk uses, on turboexl3's dense linear (`
 
 Qwen3.8 also runs kernels of the core: the routed experts (`decode.zig`, `prefill.zig`), the dense linear, and the fused
 shared expert with the router fold (`decode.zig`'s `Kernels3`, `root.moeFusedShared*`), which stay in the core engines
-that launch them. docs/KERNELS.md names the model of every kernel.
+that launch them. docs/core/kernels.md and docs/models/qwen38/kernels.md name the model of every kernel.

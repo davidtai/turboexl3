@@ -1,7 +1,7 @@
 # Glossary
 
-This page defines the terms that the turboexl3 documents use: the [README](../README.md),
-[KERNELS.md](KERNELS.md), [RESULTS.md](RESULTS.md) and [CONSUMING.md](../CONSUMING.md). Each entry gives the plain
+This page defines the terms that the turboexl3 documents use: the [README](../../README.md),
+[the engines](engines.md), [the results](../models/qwen38/results.md) and [consuming](consuming.md) pages. Each entry gives the plain
 meaning first, then the precise one.
 
 ## The weight format
@@ -174,7 +174,7 @@ meaning first, then the precise one.
   The main model then checks all drafted tokens in one call, one row per token: these are verify rows. At the served MTP
   depth of 4 a verify call has up to 5 rows, and the head's draft steps have 1. The number of verify rows changes from
   call to call. So turboexl3
-  keeps the bytes of a row the same at every row count, where this README and KERNELS.md say so.
+  keeps the bytes of a row the same at every row count, where these documents say so.
 - <a id="trunk"></a>**trunk**: Every projection that is not a routed expert: attention, GDN, shared expert, `lm_head`
   and MTP. A fully EXL3 model has about a dozen trunk shapes.
 - <a id="lm-head"></a>**`lm_head`**: The last projection, from the hidden size to the logits of the vocabulary.
@@ -241,7 +241,7 @@ meaning first, then the precise one.
 - <a id="build-zig-zon"></a>**`build.zig.zon`**: The manifest of a package. It lists the paths that the package holds
   (`.paths`) and the dependencies, each with a URL and a hash. A fetched package holds only the listed paths.
 - <a id="consumer"></a>**consumer**: A package whose build includes turboexl3. It supplies the module `sdk` and, for the
-  tests, the host surface. The recommended consumer is the quant plugin in `plugin/` ([CONSUMING.md](../CONSUMING.md)).
+  tests, the host surface. The recommended consumer is the quant plugin in `plugin/` ([consuming](consuming.md)).
 - <a id="test-root"></a>**test root**: The root file of a test binary. The binary runs only the tests in its own module,
   not the tests of the modules that it imports.
 
@@ -272,4 +272,4 @@ meaning first, then the precise one.
 - <a id="variant"></a>**variant**: Another launch arrangement that gives the same bytes, kept for tests and timing
   comparisons.
 - <a id="configuration"></a>**configuration**: The choices that a consumer sets once with `configure`, as one `Config`.
-  The defaults are the served configuration ([Configuration](../README.md#configuration)).
+  The defaults are the served configuration ([Configuration](api.md#configuration)).
