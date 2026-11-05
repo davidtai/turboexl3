@@ -1196,6 +1196,8 @@ CHANGED[('root.zig', 'const shared_state')] = 'registers ricursive.shared_state'
 ADDED_FILES['f3.zig'] = 'F3 (DeepSeek-V4.1\'s shared expert at decode rows), out of dense.zig and root.zig'
 ADDED_FILES['banked.zig'] = 'DeepSeek-V4.1\'s banked decode, out of decode.zig\'s Kernels3 (`Banked` beside a geometry\'s Kernels3)'
 ADDED_FILES['shared.zig'] = 'Qwen3.8\'s gated shared expert and router in the routed decode launches, out of decode.zig\'s Kernels3 (`SharedHeads` beside a geometry\'s Kernels3)'
+ADDED_FILES['models/qwen38/api.zig'] = 'Qwen3.8\'s entry points, out of root.zig (root re-exports each by name)'
+ADDED_FILES['models/deepseek_v41/api.zig'] = 'DeepSeek-V4.1\'s entry points, out of root.zig (root re-exports each by name)'
 ADDED_FILES['chains_test.zig'] = ('byte tests of the core paths no other test pinned: pg2 against dequantize + matmul + '
                                   'finish, the pieces\' finish against the one-call finish, the unfused chain against the '
                                   'reference')
