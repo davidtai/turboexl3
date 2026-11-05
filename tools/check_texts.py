@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check that turboexl3's Metal lives only in src/kernels/**.metal and that a change to it is only what was intended.
+"""Check that turboexl3's Metal lives only in kernels/**.metal files and that a change to it is only what was intended.
 
 usage: python3 tools/check_texts.py ORIG_SRC [NEW_SRC] [-v]
 
@@ -12,6 +12,14 @@ All on the host, no Zig needed. Both trees are tokenized and their texts evaluat
 consts, `module.const`, `if` (a comptime condition: only the taken branch, as Zig analyzes it), `&.{ ... }`, labeled blocks
 and the files' own functions, with sentinel / replace / replaceOnce / spliceOnce / textSlice / textJoin / pins emulated as
 the Zig computes them, and `@hasDecl(sdk, name)` answered as the test build's sdk declares (SDK_DECLS).
+
+Both trees are read whole (every .zig under src/, each @import / @embedFile path relative to its file). Where NEW holds
+src/core and ORIG does not, the change is the move into src/core and src/models/<model> (MOVES): ORIG's files are read
+under their NEW paths, and an @import / @embedFile path compares by the file it names, so a file that names a moved file
+by its new relative path is the original token for token.
+
+0. Moves (the move only). Every ORIG file is at its NEW path (MOVES), every non-Zig file (the .metal, .hip and .hpp
+   texts) byte for byte; every NEW file is an ORIG file's image or listed in MOVE_ADDED.
 
 Equal but for comments and whitespace: the same C++ tokens (`ctoks`), with line breaks counted where the preprocessor
 sees them (a directive's end, a function-like macro's parenthesis). A kernel's source may differ in whitespace alone: MLX
@@ -38,7 +46,8 @@ comment there could change the kernel; its header may differ in comments too.
    every text const and kernel text exactly as often as before.
 5. Dumps. Every TURBOEXL3_METAL_DUMP translation unit printMetal prints is byte-identical, or equal but for comments and
    whitespace (listed; both printMetals emulated).
-6. Files. Every @embedFile path exists and every .metal file under src/kernels is embedded.
+6. Files. Every @embedFile path exists, every .metal file is embedded and lies in a kernels/ directory (beside the Zig
+   that embeds it: src/core/kernels/<module>/, src/models/<model>/kernels/<module>/).
 7. No Metal in Zig. No `\\\\` literal and no string literal holding Metal (a Metal token such as threadgroup, simd_,
    uint, half, float, device, #include, [[; or a punctuated string found verbatim in a .metal file) in any .zig under
    src/, except the ones listed by file and exact value with their reason (EXCEPTIONS).
@@ -198,8 +207,10 @@ OPEN, CLOSE = ('{', '(', '['), ('}', ')', ']')
 class Unit:
     """one .zig file: its comment-free tokens, top-level declarations, consts, functions, tests, locals and imports"""
 
-    def __init__(self, name, toks):
-        self.name = name
+    def __init__(self, name, toks, real=None):
+        self.name = name  # the file's path in the NEW tree, relative to src/ (ORIG's files under their moved path, MOVES)
+        self.real = real or name  # its path in its own tree (what its relative @import / @embedFile paths start from)
+        self.ck = None  # its tokens' keys, an @import / @embedFile path as the NEW file it names (Program.canon_keys)
         self.t = [x for x in toks if x.kind != 'comment']
         self.consts, self.fns, self.tests, self.locals, self.imports = {}, {}, {}, {}, {}
         self.decls = []  # (key, first token, past the last token)
@@ -369,8 +380,38 @@ NATIVES = {
 
 
 class Program:
-    def __init__(self, src_dir, units):
+    def __init__(self, src_dir, units, mapper=None):
         self.dir, self.units, self.cache = src_dir, units, {}
+        self.mapper = mapper or (lambda rel: rel)  # this tree's path -> the NEW tree's (MOVES for ORIG)
+        for u in units.values():
+            u.ck = self.canon_keys(u)
+
+    def real_path(self, unit, path):
+        """`path` as `unit` names it (@import / @embedFile: relative to the unit's own directory), from src/"""
+        return os.path.normpath(os.path.join(os.path.dirname(unit.real), path)).replace(os.sep, '/')
+
+    def canon(self, unit, path):
+        """the NEW tree's path of the file `unit` names by `path`"""
+        return self.mapper(self.real_path(unit, path))
+
+    def canon_keys(self, unit):
+        """the unit's token keys, each @import("x.zig") / @embedFile("...") path as the NEW file it names, so a declaration
+        that names a moved file by its new relative path is the original's token for token"""
+        t, out = unit.t, []
+        for k, x in enumerate(t):
+            if x.kind == 'str' and k >= 2 and t[k - 1].text == '(' and (t[k - 2].text == '@embedFile' or
+                                                                       (t[k - 2].text == '@import' and x.value.endswith('.zig'))):
+                out.append(('path', self.canon(unit, x.value)))
+            else:
+                out.append(x.key())
+        return out
+
+    def unit_of(self, unit, path):
+        """the unit `unit` imports by `path`"""
+        f = self.canon(unit, path)
+        if f not in self.units:
+            raise EvalError(f'no unit {f}')
+        return self.units[f]
 
     def const(self, unit, name, local_ok=False):
         key = (unit.name, name)
@@ -406,8 +447,8 @@ class Program:
             raise EvalError(f'{name}: no return')
         return r[1]
 
-    def embed(self, path):
-        full = os.path.normpath(os.path.join(self.dir, path))
+    def embed(self, unit, path):
+        full = os.path.normpath(os.path.join(self.dir, self.real_path(unit, path)))
         if not os.path.isfile(full):
             raise EvalError(f'no file {path}')
         return read_bytes(full).decode('utf-8')
@@ -510,7 +551,7 @@ class Eval:
             self.take('(')
             p = self.take()
             self.take(')')
-            return self.p.embed(p.value)
+            return self.p.embed(self.u, p.value)
         if x.kind == 'builtin' and x.text == '@hasDecl':  # @hasDecl(sdk, "name"): what the test build's sdk declares
             self.take()
             self.take('(')
@@ -528,9 +569,7 @@ class Eval:
             self.take(')')
             self.take('.')
             member = self.take().text
-            if f not in self.p.units:
-                raise EvalError(f'no unit {f}')
-            return self.member(self.p.units[f], member)
+            return self.member(self.p.unit_of(self.u, f), member)
         if x.text == '(':
             self.take()
             v = self.expr()
@@ -564,7 +603,7 @@ class Eval:
                 member = self.take().text
                 if x.text not in self.u.imports:
                     raise EvalError(f'{x.text} is not a .zig import')
-                return self.member(self.p.units[self.u.imports[x.text]], member)
+                return self.member(self.p.unit_of(self.u, self.u.imports[x.text]), member)
             if x.text in self.env:
                 return self.env[x.text]
             return self.p.const(self.u, x.text)
@@ -761,7 +800,7 @@ FREE_ORIG = [('id', '_'), ('op', '='), ('id', 'mlx'), ('op', '.'), ('id', 'mlx_f
 
 def free_new(f):
     """how NEW's file f calls the one kernel free (decode.zig's `freeKernel`)"""
-    return [('id', 'freeKernel')] if f == 'decode.zig' else [('id', 'decode'), ('op', '.'), ('id', 'freeKernel')]
+    return [('id', 'freeKernel')] if os.path.basename(f) == 'decode.zig' else [('id', 'decode'), ('op', '.'), ('id', 'freeKernel')]
 
 
 def free_rewritten(keys, f):
@@ -814,7 +853,7 @@ def align_test(oname, nname, f, ou, nu, oprog, nprog):
             j += len(fnew)
             frees += 1
             continue
-        if i <= ob and j <= nb and o[i].key() == n[j].key():
+        if i <= ob and j <= nb and ou.ck[i] == nu.ck[j]:
             i += 1
             j += 1
             continue
@@ -831,7 +870,7 @@ def align_test(oname, nname, f, ou, nu, oprog, nprog):
     return moved, frees, None
 
 
-def test_named(f, u, tname, otext, ntext):
+def test_named(f, u, tname, otext, ntext, prog):
     """{key: (ORIG value, NEW value)} of every text const test `tname` of NEW's unit u names (`x` or `module.x`)"""
     a, b = u.tests[tname]
     t, out = u.t, {}
@@ -839,7 +878,7 @@ def test_named(f, u, tname, otext, ntext):
         x = t[k]
         if x.kind == 'id' and t[k - 1].text != '.':
             if t[k + 1].text == '.' and x.text in u.imports and t[k + 2].kind == 'id':
-                key = (u.imports[x.text], t[k + 2].text)
+                key = (prog.canon(u, u.imports[x.text]), t[k + 2].text)
             else:
                 key = (f, x.text)
             if key in otext and key in ntext:
@@ -853,7 +892,7 @@ def test_literals(u, tname):
     t, lits, pins = u.t, set(), []
     for k in range(a, b):
         if t[k].kind == 'str' and t[k].value:
-            if t[k - 2].text == '@embedFile' and t[k].value.startswith('kernels/test/pins/'):
+            if t[k - 2].text == '@embedFile' and 'kernels/test/pins/' in t[k].value:
                 pins.append(t[k].value)
             elif t[k - 2].text not in ('@embedFile', '@import'):
                 lits.add(t[k].value)
@@ -1174,8 +1213,13 @@ HIP_TOKENS = ('__global__', '__device__', '__shared__', '__launch_bounds__', 'th
               '__syncthreads', '__builtin_amdgcn', 'hip_runtime')
 
 
+def hip_root(src):
+    """(flags.zig, kernels/hip) of a tree"""
+    return os.path.join(src, 'hip', 'flags.zig'), os.path.join(src, 'kernels', 'hip')
+
+
 def hip_files(src):
-    root = os.path.join(src, 'kernels', 'hip')
+    root = hip_root(src)[1]
     out = {}
     if not os.path.isdir(root):
         return out
@@ -1195,7 +1239,7 @@ def hip_entries(text):
 def hip_report(orig_dir, new_dir, problems):
     new = hip_files(new_dir)
     old = hip_files(orig_dir)
-    flags_path = os.path.join(new_dir, 'hip', 'flags.zig')
+    flags_path = hip_root(new_dir)[0]
     listed = set()
     if os.path.exists(flags_path):
         with open(flags_path, encoding='utf-8') as fh:
@@ -1230,6 +1274,124 @@ def hip_report(orig_dir, new_dir, problems):
     print(f'   {len(new)} HIP files ({same} the original, {cw} equal but for comments and whitespace); '
           f'{len(listed)} listed in flags.zig; {zig_hits} Zig strings holding HIP\n')
 
+# ------------------------------------------------------------------------------------------------------------- moves
+
+# The move of src/ into src/core and src/models/<model> (organize-by-model): each ORIG path's NEW path, the first rule
+# whose ORIG prefix matches (a rule without a trailing / is one file). Each Zig file's Metal sits in a kernels/ directory
+# beside it, so a moved file's own @embedFile paths are unchanged; an @import or @embedFile across folders names the
+# same file by a new relative path, which Program.canon_keys compares by the file it names.
+MOVES = [
+    ('root.zig', 'root.zig'),
+    ('tests.zig', 'tests.zig'),
+    # Qwen3.8-Flash-Next: the gated attention's projections (ATTN-IN / ATTN-OUT), the decode-row merges, the GDN tail
+    ('attn_io.zig', 'models/qwen38/attn_io.zig'),
+    ('attn_io_test.zig', 'models/qwen38/attn_io_test.zig'),
+    ('decb.zig', 'models/qwen38/decb.zig'),
+    ('decb_test.zig', 'models/qwen38/decb_test.zig'),
+    ('gdn_out.zig', 'models/qwen38/gdn_out.zig'),
+    ('gdn_out_test.zig', 'models/qwen38/gdn_out_test.zig'),
+    ('kernels/decb/had128.metal', 'core/kernels/sources/had128.metal'),
+    ('kernels/attn_io/', 'models/qwen38/kernels/attn_io/'),
+    ('kernels/decb/', 'models/qwen38/kernels/decb/'),
+    ('kernels/gdn_out/', 'models/qwen38/kernels/gdn_out/'),
+    ('kernels/test/pins/attn_io_', 'models/qwen38/kernels/test/pins/attn_io_'),
+    ('kernels/test/pins/decb_', 'models/qwen38/kernels/test/pins/decb_'),
+    ('kernels/test/pins/gdn_out.metal', 'models/qwen38/kernels/test/pins/gdn_out.metal'),
+    # DeepSeek-V4.1: the grouped wo_a, the trunk, F3, the clamped SwiGLU at its geometry, the banked decode
+    ('grouped.zig', 'models/deepseek_v41/grouped.zig'),
+    ('deepseek_test.zig', 'models/deepseek_v41/deepseek_test.zig'),
+    ('deepseek_gemv_test.zig', 'models/deepseek_v41/deepseek_gemv_test.zig'),
+    ('f3_test.zig', 'models/deepseek_v41/f3_test.zig'),
+    ('clamped_test.zig', 'models/deepseek_v41/clamped_test.zig'),
+    ('banked_test.zig', 'models/deepseek_v41/banked_test.zig'),
+    ('banked_grp_test.zig', 'models/deepseek_v41/banked_grp_test.zig'),
+    ('banked_ilp_test.zig', 'models/deepseek_v41/banked_ilp_test.zig'),
+    ('kernels/grouped/', 'models/deepseek_v41/kernels/grouped/'),
+    ('kernels/test/pins/grouped_gemv_d.metal', 'models/deepseek_v41/kernels/test/pins/grouped_gemv_d.metal'),
+    ('kernels/test/pins/decode_banked.metal', 'models/deepseek_v41/kernels/test/pins/decode_banked.metal'),
+    # sources.zig's texts (more than one kernel splices them)
+    ('kernels/decode/gate_gemv.metal', 'core/kernels/sources/gate_gemv.metal'),
+    ('kernels/decode/gate_sum.metal', 'core/kernels/sources/gate_sum.metal'),
+    # the AMD backend stays where it is (an outside consumer vendors these paths)
+    ('hip/', 'hip/'),
+    ('hip_tests.zig', 'hip_tests.zig'),
+    ('kernels/hip/', 'kernels/hip/'),
+    # the shared core: every other file
+    ('kernels/', 'core/kernels/'),
+    ('', 'core/'),
+]
+# files the move adds that are no ORIG file's image (not code: checked by nothing else)
+MOVE_ADDED = ('models/qwen38/README.md', 'models/deepseek_v41/README.md', 'core/README.md')
+
+
+def moved_path(rel):
+    """ORIG path `rel` (from src/) -> its NEW path, by MOVES"""
+    for (a, b) in MOVES:
+        if (a.endswith('/') or a == '') and rel.startswith(a):
+            return b + rel[len(a):]
+        if rel == a:
+            return b
+    return rel
+
+
+def tree_files(d, exts=None):
+    """every file under d (relative, '/'-separated, sorted), those ending in one of exts when given"""
+    out = []
+    for root, dirs, files in os.walk(d):
+        dirs[:] = [x for x in dirs if not x.startswith('.') and x not in ('zig-out', '.zig-cache')]
+        for f in files:
+            if f.startswith('.') or (exts and not f.endswith(exts)):
+                continue
+            out.append(os.path.relpath(os.path.join(root, f), d).replace(os.sep, '/'))
+    return sorted(out)
+
+
+def moves_report(orig_dir, new_dir, problems):
+    """every ORIG file exists at its NEW path, every non-Zig file byte for byte (a Zig file is checked by 1 to 9); every
+    NEW file is an ORIG file's image or listed in MOVE_ADDED"""
+    ofiles, nfiles = tree_files(orig_dir), set(tree_files(new_dir))
+    images, by_ext, same, kept = set(), {}, 0, 0
+    for rel in ofiles:
+        new = moved_path(rel)
+        images.add(new)
+        if new not in nfiles:
+            problems.append(f'{rel}: not at its NEW path {new}')
+            continue
+        kept += new == rel
+        if not rel.endswith('.zig'):
+            if read_bytes(os.path.join(orig_dir, rel)) == read_bytes(os.path.join(new_dir, new)):
+                same += 1
+            else:
+                problems.append(f'{rel} -> {new}: bytes differ')
+        top = new.split('/')[0] if new.split('/')[0] != 'models' else '/'.join(new.split('/')[:2])
+        by_ext.setdefault((top, os.path.splitext(rel)[1]), 0)
+        by_ext[(top, os.path.splitext(rel)[1])] += 1
+    extra = sorted(nfiles - images)
+    for f in extra:
+        if f not in MOVE_ADDED:
+            problems.append(f'{f}: in NEW, no ORIG file\'s image and not in MOVE_ADDED')
+    print(f'   {len(ofiles)} ORIG files: {kept} at the same path, {len(ofiles) - kept} moved; '
+          f'{same} non-Zig files byte for byte at their new path')
+    print('   ' + ', '.join(f'{top}/ {n} {ext}' for (top, ext), n in sorted(by_ext.items())))
+    print(f'   added: {", ".join(f for f in extra if f in MOVE_ADDED) or "none"}\n')
+
+
+def path_of(base, units):
+    """the unit path whose file name is `base` (basenames are unique in src/), else `base`"""
+    hits = [f for f in units if os.path.basename(f) == base]
+    return hits[0] if len(hits) == 1 else base
+
+
+def rekey_tables(units):
+    """the tables of earlier changes name files by their name in src/: key them by the file's path"""
+    for tbl in (RECUT, RECOMPOSED, REMOVED, ADDED, CHANGED, ADDED_KERNELS, RENAMED_TESTS):
+        items = list(tbl.items())
+        tbl.clear()
+        tbl.update({(path_of(f, units), x): v for ((f, x), v) in items})
+    items = list(ADDED_FILES.items())
+    ADDED_FILES.clear()
+    ADDED_FILES.update({path_of(f, units): v for (f, v) in items})
+
 
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith('-')]
@@ -1242,16 +1404,23 @@ def main():
     print(f'ORIG {orig_dir}\nNEW  {new_dir}\n')
     problems = []
 
-    def load(d):
+    def load(d, mapper):
+        """every .zig under d, keyed by its path in the NEW tree"""
         units = {}
-        for f in sorted(os.listdir(d)):
-            if f.endswith('.zig'):
-                with open(os.path.join(d, f), encoding='utf-8', newline='') as fh:
-                    units[f] = Unit(f, tokenize(fh.read(), f))
+        for rel in tree_files(d, ('.zig',)):
+            with open(os.path.join(d, rel), encoding='utf-8', newline='') as fh:
+                units[mapper(rel)] = Unit(mapper(rel), tokenize(fh.read(), rel), real=rel)
         return units
 
-    ounits, nunits = load(orig_dir), load(new_dir)
-    oprog, nprog = Program(orig_dir, ounits), Program(new_dir, nunits)
+    # 0. moves: ORIG's files at their NEW paths (MOVES), when the change is the move into src/core and src/models
+    moving = os.path.isdir(os.path.join(new_dir, 'core')) and not os.path.isdir(os.path.join(orig_dir, 'core'))
+    omap = moved_path if moving else (lambda rel: rel)
+    if moving:
+        print('0. moves: every file of ORIG at its NEW path (MOVES), every kernel file byte for byte')
+        moves_report(orig_dir, new_dir, problems)
+    ounits, nunits = load(orig_dir, omap), load(new_dir, lambda rel: rel)
+    oprog, nprog = Program(orig_dir, ounits, omap), Program(new_dir, nunits)
+    rekey_tables(nunits)
     added_files = []
     for f in sorted(set(ounits) ^ set(nunits)):
         if f in nunits and f in ADDED_FILES:
@@ -1409,13 +1578,13 @@ def main():
                 elif (f, key.split(' ', 1)[1]) in otext and key.startswith('const '):
                     kind = 'text'
                 else:
-                    kind = 'splice helper' if key in helpers else ('dump harness (5)' if (f, key) == ('prefill.zig', 'const MetalArg') else None)
+                    kind = 'splice helper' if key in helpers else ('dump harness (5)' if (os.path.basename(f), key) == ('prefill.zig', 'const MetalArg') else None)
                 removed.append((f, key, kind))
                 if kind is None:
                     problems.append(f'{f}: {key} removed')
                 continue
-            ot = [x.key() for x in ou.t[od[key][0]:od[key][1]]]
-            nt = [x.key() for x in nu.t[nd[key][0]:nd[key][1]]]
+            ot = ou.ck[od[key][0]:od[key][1]]
+            nt = nu.ck[nd[key][0]:nd[key][1]]
             if ot == nt:
                 n_same += 1
                 continue
@@ -1432,7 +1601,7 @@ def main():
                 changed.append((f, key, CHANGED[(f, key)]))
             elif key.startswith('test '):
                 changed.append((f, key, 'test (4, 5)' + (', renamed' if key in back.values() else '')))
-            elif key == 'fn printMetal' and f == 'prefill.zig':
+            elif key == 'fn printMetal' and os.path.basename(f) == 'prefill.zig':
                 changed.append((f, key, 'dump printer (5)'))
             elif n_rw and rw == nt:
                 changed.append((f, key, f"kernel free through the consumer's API ({n_rw}: freeKernel)"))
@@ -1499,11 +1668,11 @@ def main():
         for name in nu.tests:
             if name not in ou.tests and name not in renamed_to.values():
                 problems.append(f'{f}: test "{name[:60]}" added')
-            named = test_named(f, nu, name, otext, ntext)
+            named = test_named(f, nu, name, otext, ntext, nprog)
             lits, pin_files = test_literals(nu, name)
             needles = [(o, n, 'count', f'{k[0]} {k[1]}') for k, (o, n) in named.items()]
             for pf in pin_files:
-                needles += [(v, v, 'count', f'{pf}: {v[:50]}') for v in n_pins(nprog.embed(pf)) if v]
+                needles += [(v, v, 'count', f'{pf}: {v[:50]}') for v in n_pins(nprog.embed(nu, pf)) if v]
             needles += [(v, v, 'presence', repr(v[:50])) for v in sorted(lits)]
             for (on, nn, mode, what) in needles:
                 for key, (oh, nh) in named.items():
@@ -1523,8 +1692,8 @@ def main():
     cw_units = []
     for name in DUMP_TESTS:
         try:
-            oo = dump_outputs(oprog, ounits['prefill.zig'], name)
-            no = dump_outputs(nprog, nunits['prefill.zig'], name)
+            oo = dump_outputs(oprog, ounits[path_of('prefill.zig', nunits)], name)
+            no = dump_outputs(nprog, nunits[path_of('prefill.zig', nunits)], name)
         except (EvalError, AssertionError, KeyError) as e:
             problems.append(f'dump test "{name[:50]}": {e}')
             continue
@@ -1548,7 +1717,7 @@ def main():
     for f, u in nunits.items():
         for k in range(len(u.t) - 3):
             if u.t[k].text == '@embedFile' and u.t[k + 2].kind == 'str':
-                full = os.path.normpath(os.path.join(new_dir, u.t[k + 2].value))
+                full = os.path.normpath(os.path.join(new_dir, nprog.real_path(u, u.t[k + 2].value)))
                 embedded.setdefault(full, []).append(f'{f}:{u.t[k].line}')
                 if not os.path.isfile(full):
                     problems.append(f'{f}:{u.t[k].line}: @embedFile("{u.t[k + 2].value}"): no such file')
@@ -1561,8 +1730,8 @@ def main():
                 corpus.append(read_bytes(full).decode('utf-8'))
                 if full not in embedded:
                     problems.append(f'{os.path.relpath(full, new_dir)} is embedded nowhere')
-                if not os.path.relpath(full, new_dir).startswith('kernels' + os.sep):
-                    problems.append(f'{os.path.relpath(full, new_dir)} lies outside src/kernels')
+                if 'kernels' not in os.path.relpath(full, new_dir).split(os.sep)[:-1]:
+                    problems.append(f'{os.path.relpath(full, new_dir)} lies outside a kernels/ directory')
     dirs = {}
     for m in metal:
         d = os.path.dirname(os.path.relpath(m, new_dir))
@@ -1578,7 +1747,7 @@ def main():
             toks = tokenize(fh.read(), f)
         hits = metal_strings(f, toks, corpus_s)
         for (line, kind, v) in hits:
-            reason = EXCEPTIONS.get((f, v))
+            reason = EXCEPTIONS.get((os.path.basename(f), v))
             if reason:
                 n_exc += 1
                 print(f'   exception {f}:{line} ({"multiline" if kind == "mlstr" else "string"}): {reason}')
@@ -1612,4 +1781,5 @@ def main():
           'every removal and addition is a listed one, no Metal is left inside Zig, and every kernel free is freeKernel\'s')
 
 
-main()
+if __name__ == '__main__':
+    main()
