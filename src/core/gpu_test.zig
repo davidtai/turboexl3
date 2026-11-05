@@ -15,6 +15,7 @@ const format = @import("format.zig");
 const decode = @import("decode.zig");
 const ref = @import("ref.zig");
 const root = @import("../root.zig");
+const shared_heads = @import("../models/qwen38/shared.zig");
 
 const testing = std.testing;
 
@@ -1348,6 +1349,8 @@ test "turboexl3 gpu: the shared expert fused into form 9's launches equals the h
         kref.defer_affine = defer_affine;
         var k3 = try decode.Kernels3.initWith(geo, 1, 4, 2);
         defer k3.deinit();
+        var heads = try shared_heads.SharedHeads.init();
+        defer heads.deinit();
         k3.out_dtype = .bfloat16;
         k3.defer_affine = defer_affine;
         k3.bt9 = bt9;
@@ -1380,7 +1383,7 @@ test "turboexl3 gpu: the shared expert fused into form 9's launches equals the h
             try mlx.check(mlx.mlx_add(&want_raw, yr, gated, s));
             const want_a = try g.adopt(want_raw);
             // the fused launches
-            const sbank: decode.Kernels3.SharedBank = .{
+            const sbank: shared_heads.SharedBank = .{
                 .gate_t = sh.gate_t,
                 .gate_suh = sh.gate_suh,
                 .gate_svh = sh.gate_svh,
@@ -1398,7 +1401,7 @@ test "turboexl3 gpu: the shared expert fused into form 9's launches equals the h
                 .sigtab = sigtab,
                 .logit = try g.slice(lg, &.{ 0, 0 }, &.{ ci(@intCast(rows)), 1 }, &.{ 1, 1 }),
             };
-            if (!k3.sharedAdmitted(rows, sbank)) {
+            if (!shared_heads.SharedHeads.sharedAdmitted(&k3, rows, sbank)) {
                 std.debug.print("TURBOEXL3_SHARED_BYTES rows={d} NOT_ADMITTED FAIL\n", .{rows});
                 failed = true;
                 continue;
@@ -1418,11 +1421,11 @@ test "turboexl3 gpu: the shared expert fused into form 9's launches equals the h
             // shared arrivals per block change with it: 160, 40, 32 at bt9 2)
             for ([_][2]u32{ .{ 1, 1 }, .{ 4, 1 }, .{ 5, 5 } }) |sp| for ([_]u8{ 0, 1, 2 }) |mode| {
                 const side = mode == 2;
-                k3.sspt = sp[0];
-                k3.ssptd = sp[1];
-                k3.fused_fin_fold = mode == 0;
-                defer k3.fused_fin_fold = true;
-                const got_a = try g.adopt(if (side) try k3.moeSharedSide(s, xb, sb_, wb, arrays, rows, sb2) else try k3.moeShared(s, xb, sb_, wb, arrays, rows, sb2));
+                heads.sspt = sp[0];
+                heads.ssptd = sp[1];
+                heads.fused_fin_fold = mode == 0;
+                defer heads.fused_fin_fold = true;
+                const got_a = try g.adopt(if (side) try heads.moeSharedSide(&k3, s, xb, sb_, wb, arrays, rows, sb2) else try heads.moeShared(&k3, s, xb, sb_, wb, arrays, rows, sb2));
                 _ = try g.hostF32(try g.astype(got_a, .float32), got);
                 var diff: usize = 0;
                 for (got, want) |p, q| {
@@ -1458,21 +1461,21 @@ test "turboexl3 gpu: the shared expert fused into form 9's launches equals the h
                     if (!keep) continue;
                 }
                 std.debug.print("TURBOEXL3_SHARED_BYTES_RUN mode={s} cfg={d} rows={d} routed_defer={} bt9={d}\n", .{ if (side) "side2" else "inside2", vi, rows, defer_affine, bt9 });
-                k3.sots = @splat(v.ots);
-                k3.sotsd = @splat(v.otsd);
-                k3.sprep = v.prep;
-                k3.slm = v.lm;
-                k3.spre = @splat(v.pre);
-                k3.sfirst = v.first;
+                heads.sots = @splat(v.ots);
+                heads.sotsd = @splat(v.otsd);
+                heads.sprep = v.prep;
+                heads.slm = v.lm;
+                heads.spre = @splat(v.pre);
+                heads.sfirst = v.first;
                 k3.gu8_rows = v.gu8r;
-                const got_a = try g.adopt(if (side) try k3.moeSharedSide2(s, xb, sb_, wb, arrays, rows, sb2) else try k3.moeShared2(s, xb, sb_, wb, arrays, rows, sb2));
+                const got_a = try g.adopt(if (side) try heads.moeSharedSide2(&k3, s, xb, sb_, wb, arrays, rows, sb2) else try heads.moeShared2(&k3, s, xb, sb_, wb, arrays, rows, sb2));
                 _ = try g.hostF32(try g.astype(got_a, .float32), got);
                 var diff: usize = 0;
                 for (got, want) |p, q| {
                     if (@as(u32, @bitCast(p)) != @as(u32, @bitCast(q))) diff += 1;
                 }
                 const e = ref.compare(got, want);
-                const ran = k3.sharedTiles(rows);
+                const ran = heads.sharedTiles(&k3, rows);
                 checks += 1;
                 std.debug.print("TURBOEXL3_SHARED_BYTES mode={s} ots={d} otsd={d} ots_run={d} otsd_run={d} prep={} lm={} pre={d} first={} gu8_rows={d} routed_defer={} bt9={d} rows={d} ks_gu={d} ks_dn={d} differing={d}/{d} max_abs_over_rms={e:.2} {s}\n", .{ if (side) "side2" else "inside2", v.ots, v.otsd, ran[0], ran[1], v.prep, v.lm, v.pre, v.first, v.gu8r, defer_affine, bt9, rows, sbank.ks_gu, sbank.ks_dn, diff, got.len, e.max_ratio, if (diff == 0) "PASS" else "FAIL" });
                 if (diff != 0) failed = true;
@@ -1750,7 +1753,7 @@ fn routerDiff(g: *G, x: mlx.mlx_array, y: mlx.mlx_array) !struct { diff: usize, 
     return .{ .diff = d, .n = n };
 }
 
-/// The chain's router: the host's softmax kernel (`decode.text_router_softmax`) at the host's config
+/// The chain's router: the host's softmax kernel (`shared_heads.text_router_softmax`) at the host's config
 /// (`moeRouterTopK`: TG = moeRouterThreadGroup(E), template TOUT NE NK TG NORM); inds u32 and scores in `tout`.
 fn routerTopK(k: mlx.mlx_fast_metal_kernel, s: mlx.mlx_stream, logits: mlx.mlx_array, rows: u32, ne: u32, topk: u32, tout: mlx.mlx_dtype) ![2]mlx.mlx_array {
     const ks = @import("sdk").kernel_launch;
@@ -1796,7 +1799,7 @@ test "turboexl3 gpu: the router folded into form 9's prepare launch (and the sha
     const topk: u32 = 10;
     var prng = std.Random.DefaultPrng.init(0x4DECC5);
     const rnd = prng.random();
-    const router = ks.newKernel("turboexl3_test_router", &decode.router_inputs, &decode.router_outputs, decode.text_router_softmax, "", true) orelse return error.KernelCreateFailed;
+    const router = ks.newKernel("turboexl3_test_router", &shared_heads.router_inputs, &shared_heads.router_outputs, shared_heads.text_router_softmax, "", true) orelse return error.KernelCreateFailed;
     defer decode.freeKernel(router);
     var failed = false;
     var checks: usize = 0;
@@ -1815,6 +1818,8 @@ test "turboexl3 gpu: the router folded into form 9's prepare launch (and the sha
         const geo: decode.Geometry = .{ .hidden = hidden, .inter = inter, .topk = topk, .rate = format.Rate.fromN(80).?, .dec = .mul1 };
         var k3 = try decode.Kernels3.initWith(geo, 1, 4, 2);
         defer k3.deinit();
+        var heads = try shared_heads.SharedHeads.init();
+        defer heads.deinit();
         k3.out_dtype = .bfloat16;
         const gsuh = try routerRand(&g, rnd, &.{ ci(ne), ci(hidden) }, 0.3, 0, .float16);
         const usuh = try routerRand(&g, rnd, &.{ ci(ne), ci(hidden) }, 0.3, 0, .float16);
@@ -1832,9 +1837,9 @@ test "turboexl3 gpu: the router folded into form 9's prepare launch (and the sha
             var inds1 = mlx.mlx_array_new();
             try mlx.check(mlx.mlx_reshape(&inds1, inds, &[_]c_int{ci(rows * topk)}, 1, s));
             const slots = try g.adopt(inds1);
-            const xp = try k3.routeChainPrep(s, x, slots, kb, rows);
+            const xp = try shared_heads.SharedHeads.routeChainPrep(&k3, s, x, slots, kb, rows);
             for (xp) |o| _ = try g.adopt(o);
-            const r = try k3.routeLaunch(s, logits, x, kb, rows, if (gate) gvec else null);
+            const r = try heads.routeLaunch(&k3, s, logits, x, kb, rows, if (gate) gvec else null);
             inline for (.{ r.xg, r.xu, r.xsg, r.xsu, r.slots, r.scores }) |o| _ = try g.adopt(o);
             if (r.glogit.ctx != null) _ = try g.adopt(r.glogit);
             var sc1 = mlx.mlx_array_new();
@@ -1921,6 +1926,8 @@ test "turboexl3 gpu: the router folded into form 9's prepare launch (and the sha
             for ([_]bool{ true, false }) |defer_affine| {
                 var k3 = try decode.Kernels3.initWith(geo, 1, 4, 2);
                 defer k3.deinit();
+                var heads = try shared_heads.SharedHeads.init();
+                defer heads.deinit();
                 k3.out_dtype = .bfloat16;
                 k3.defer_affine = defer_affine;
                 for ([_]u32{ 1, 2, 3, 4 }) |rows| for ([_]bool{ false, true }) |gate| {
@@ -1935,7 +1942,7 @@ test "turboexl3 gpu: the router folded into form 9's prepare launch (and the sha
                         try mlx.check(mlx.mlx_reshape(&l1, try sharedGateLogitMlx(&g, s, x, gw1, rows, hidden), &[_]c_int{ci(rows)}, 1, s));
                         lg = try g.adopt(l1);
                     }
-                    const sb: decode.Kernels3.SharedBank = .{
+                    const sb: shared_heads.SharedBank = .{
                         .gate_t = sh.gate_t,
                         .gate_suh = sh.gate_suh,
                         .gate_svh = sh.gate_svh,
@@ -1964,11 +1971,11 @@ test "turboexl3 gpu: the router folded into form 9's prepare launch (and the sha
                     try mlx.check(mlx.mlx_reshape(&s1, scores, &[_]c_int{ci(rows * topk)}, 1, s));
                     const scores1 = try g.adopt(s1);
                     // (moeShared without the fold: gu3s + fin7s, so the folded launch below is held to the unfolded chain)
-                    k3.fused_fin_fold = false;
-                    const want = try g.adopt(try k3.moeShared(s, x, slots, scores1, arrays, rows, sb));
-                    k3.fused_fin_fold = true;
+                    heads.fused_fin_fold = false;
+                    const want = try g.adopt(try heads.moeShared(&k3, s, x, slots, scores1, arrays, rows, sb));
+                    heads.fused_fin_fold = true;
                     // the merged launch in prep2's place; one row: gu8s prepares inside the gate|up launch, so it refuses
-                    const got_e = k3.moeSharedRouted(s, x, logits, arrays, rows, sb, if (gate and rows >= 2) gvec else null);
+                    const got_e = heads.moeSharedRouted(&k3, s, x, logits, arrays, rows, sb, if (gate and rows >= 2) gvec else null);
                     if (rows == 1) {
                         const refused = if (got_e) |y| blk: {
                             _ = try g.adopt(y);
@@ -1981,9 +1988,9 @@ test "turboexl3 gpu: the router folded into form 9's prepare launch (and the sha
                     }
                     const got = try g.adopt(try got_e);
                     // and the merged launch with the fold off (gu3s + fin7s)
-                    k3.fused_fin_fold = false;
-                    const got_nf = try g.adopt(try k3.moeSharedRouted(s, x, logits, arrays, rows, sb, if (gate and rows >= 2) gvec else null));
-                    k3.fused_fin_fold = true;
+                    heads.fused_fin_fold = false;
+                    const got_nf = try g.adopt(try heads.moeSharedRouted(&k3, s, x, logits, arrays, rows, sb, if (gate and rows >= 2) gvec else null));
+                    heads.fused_fin_fold = true;
                     for ([_]mlx.mlx_array{ got, got_nf }, [_][]const u8{ "folded", "unfolded" }) |gy, fname| {
                         const d = try routerDiff(&g, gy, want);
                         checks += 1;

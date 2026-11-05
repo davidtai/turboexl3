@@ -37,6 +37,8 @@ pub const grouped = @import("models/deepseek_v41/grouped.zig");
 /// The banked decode over an expert streamer's slot banks (`moeClampedBanked`): DeepSeek-V4.1's, beside a geometry's
 /// `decode.Kernels3`.
 pub const banked = @import("models/deepseek_v41/banked.zig");
+/// Qwen3.8's gated shared expert and router inside the routed decode launches (`moeFusedShared`)
+pub const shared_heads = @import("models/qwen38/shared.zig");
 /// F3, DeepSeek-V4.1's shared expert at decode rows in three launches fewer (`sharedSwiglu`).
 pub const f3 = @import("models/deepseek_v41/f3.zig");
 pub const sharedSwigluTakes = f3.sharedSwigluTakes;
@@ -149,10 +151,6 @@ fn kernelsFor(geo: decode.Geometry, out_dtype: mlx.mlx_dtype) !*decode.Kernels3 
     // row-slots (2 per lead): the fastest at 4 and 8 rows on the M5 Max, a tie at 1 row
     var k3 = try decode.Kernels3.initWith(geo, 1, 4, 2);
     k3.out_dtype = out_dtype;
-    k3.fused_fin_fold = config.get().fused_fin_fold;
-    // the shared expert's gate|up K slices per GEMV threadgroup in `moeFusedShared` (of its 20; a value that does not divide
-    // them runs 1). Launch shape only: the planes, so the bytes, stay.
-    k3.sspt = config.get().shared_spt;
     cache.get().*[i] = k3;
     return &cache.get().*[i].?;
 }
@@ -1205,20 +1203,20 @@ pub fn moeWithShared(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx.
     return y;
 }
 
-/// Decode / verify rows (up to `decode.Kernels3.shared_rows_max`) of a MoE with a gated shared expert, both in form 9's
-/// launches (`decode.Kernels3.moeShared`): y [x's shape, x's dtype] = routed + sigmoid(logit) * shared(x), the bytes of the
+/// Decode / verify rows (up to `shared_heads.shared_rows_max`) of a MoE with a gated shared expert, both in form 9's
+/// launches (`shared_heads.SharedHeads.moeShared`): y [x's shape, x's dtype] = routed + sigmoid(logit) * shared(x), the bytes of the
 /// host's chain over `moe` (form 3), three `linear`s (dense.zig), its table SwiGLU (`sigtab` OUT_T [65536]: MLX's sigmoid of
 /// every 16-bit pattern) and MLX's Sigmoid, Multiply and Add. `shared`: the dense linears (trellis [in/16, out/16, n], suh,
 /// svh), `logit` the shared gate's logit per row ([rows] or [.., rows, 1]). error.Exl3EngineNotImplemented for a call the
 /// fused launches do not carry (the caller keeps its chain). The shared expert's heads run on the routed kernels
-/// (`moeShared`); `decode.Kernels3`'s side launches and v2 heads give the same bytes.
+/// (`moeShared`); `shared_heads.SharedHeads`' side launches and v2 heads give the same bytes.
 pub fn moeFusedShared(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array, scores: mlx.mlx_array, dec: format.Decode, shared: Bank, sigtab: mlx.mlx_array, logit: mlx.mlx_array) !mlx.mlx_array {
     const geo = try validateCall(x, bank, inds, scores);
     if (geo.gate_up.n != geo.down.n) return error.Exl3EngineNotImplemented;
     const xsh = mlx.getShape(x);
     const rows_c: c_int = xsh[0] * xsh[1];
     const rows: usize = @intCast(rows_c);
-    if (rows > decode.Kernels3.shared_rows_max) return error.Exl3EngineNotImplemented;
+    if (rows > shared_heads.shared_rows_max) return error.Exl3EngineNotImplemented;
     const K: c_int = mlx.getShape(inds)[2];
     const xd = mlx.mlx_array_dtype(x);
     if (mlx.mlx_array_dtype(sigtab) != xd or mlx.mlx_array_size(sigtab) != 65536 or mlx.mlx_array_dtype(logit) != xd or mlx.mlx_array_size(logit) != rows) return error.Exl3EngineNotImplemented;
@@ -1226,7 +1224,7 @@ pub fn moeFusedShared(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx
     const dsh = mlx.getShape(shared.down.trellis);
     if (gsh.len != 3 or dsh.len != 3) return error.Exl3EngineNotImplemented;
     const inter_s: u32 = @intCast(gsh[1] * 16);
-    const sb: decode.Kernels3.SharedBank = .{
+    const sb: shared_heads.SharedBank = .{
         .gate_t = shared.gate.trellis,
         .gate_suh = shared.gate.suh,
         .gate_svh = shared.gate.svh,
@@ -1246,7 +1244,8 @@ pub fn moeFusedShared(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx
     };
     const dgeo: decode.Geometry = .{ .hidden = @intCast(geo.hidden), .inter = @intCast(geo.width), .topk = @intCast(K), .rate = geo.gate_up, .dec = dec };
     const k3 = try kernelsFor(dgeo, xd);
-    if (!k3.sharedAdmitted(rows, sb)) return error.Exl3EngineNotImplemented;
+    if (!shared_heads.SharedHeads.sharedAdmitted(k3, rows, sb)) return error.Exl3EngineNotImplemented;
+    const heads = try shared_heads.forKernels(k3);
     var x2 = mlx.mlx_array_new();
     defer freeArr(x2);
     try mlx.check(mlx.mlx_reshape(&x2, x, &[_]c_int{ rows_c, xsh[2] }, 2, s));
@@ -1272,7 +1271,7 @@ pub fn moeFusedShared(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx
         .down_suh = bank.down.suh,
         .down_svh = bank.down.svh,
     };
-    const y0 = try k3.moeShared(s, x2, inds1, s1, kb, rows, sbr);
+    const y0 = try heads.moeShared(k3, s, x2, inds1, s1, kb, rows, sbr);
     defer freeArr(y0);
     if (!fused_shared_logged.get().*) {
         fused_shared_logged.get().* = true;
@@ -1285,10 +1284,10 @@ pub fn moeFusedShared(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx
 }
 const fused_shared_logged = Global(bool, "root_fused_shared_logged", false);
 
-/// `moeFusedShared` with the routing folded into form 9's routed prepare launch (`decode.Kernels3.moeSharedRouted`).
+/// `moeFusedShared` with the routing folded into form 9's routed prepare launch (`shared_heads.SharedHeads.moeSharedRouted`).
 /// `logits` [.., rows, E] is the router
 /// gemv's output in x's dtype and `k` the experts per token: the top-k and the renormalized softmax weights are the host's
-/// fused router kernel's (softmax mode, `mlxserve_moe_router_softmax`, `decode.text_router_softmax`), computed inside
+/// fused router kernel's (softmax mode, `mlxserve_moe_router_softmax`, `shared_heads.text_router_softmax`), computed inside
 /// the launch. `logit` is the shared gate's logit per row as `moeFusedShared` takes it, or null with `gate_vec` the gate's
 /// weight vector [hidden] (the logit computed in the same launch in MLX's gemv order, bf16 at 2..4 rows). The bytes of the
 /// router kernel + `moeFusedShared`, one dispatch and one dependent level fewer. error.Exl3EngineNotImplemented, before any
@@ -1301,7 +1300,7 @@ pub fn moeFusedSharedRouted(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, log
     if ((logit == null) == (gate_vec == null)) return error.BadExl3Shape;
     const rows_c: c_int = xsh[0] * xsh[1];
     const rows: usize = @intCast(rows_c);
-    if (rows > decode.Kernels3.shared_rows_max or k == 0 or k > 31) return error.Exl3EngineNotImplemented;
+    if (rows > shared_heads.shared_rows_max or k == 0 or k > 31) return error.Exl3EngineNotImplemented;
     const xd = mlx.mlx_array_dtype(x);
     if (mlx.mlx_array_dtype(logits) != xd) return error.Exl3EngineNotImplemented;
     const geo = try bankGeometry(bank, xsh[2]);
@@ -1320,7 +1319,7 @@ pub fn moeFusedSharedRouted(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, log
     const dsh = mlx.getShape(shared.down.trellis);
     if (gsh.len != 3 or dsh.len != 3) return error.Exl3EngineNotImplemented;
     const inter_s: u32 = @intCast(gsh[1] * 16);
-    const sb: decode.Kernels3.SharedBank = .{
+    const sb: shared_heads.SharedBank = .{
         .gate_t = shared.gate.trellis,
         .gate_suh = shared.gate.suh,
         .gate_svh = shared.gate.svh,
@@ -1341,7 +1340,8 @@ pub fn moeFusedSharedRouted(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, log
     };
     const dgeo: decode.Geometry = .{ .hidden = @intCast(geo.hidden), .inter = @intCast(geo.width), .topk = k, .rate = geo.gate_up, .dec = dec };
     const k3 = try kernelsFor(dgeo, xd);
-    if (!k3.sharedAdmitted(rows, sb)) return error.Exl3EngineNotImplemented;
+    if (!shared_heads.SharedHeads.sharedAdmitted(k3, rows, sb)) return error.Exl3EngineNotImplemented;
+    const heads = try shared_heads.forKernels(k3);
     // the prepare in a launch of its own (form 9 above gu8_rows), no slot stats
     if (rows <= k3.gu8_rows and k3.gu8Admitted(rows, k3.kdiv9)) return error.Exl3EngineNotImplemented;
     if (SlotStats.enabled()) return error.Exl3EngineNotImplemented;
@@ -1369,7 +1369,7 @@ pub fn moeFusedSharedRouted(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, log
         .down_suh = bank.down.suh,
         .down_svh = bank.down.svh,
     };
-    const y0 = try k3.moeSharedRouted(s, x2, l2, kb, rows, sbr, gate_vec);
+    const y0 = try heads.moeSharedRouted(k3, s, x2, l2, kb, rows, sbr, gate_vec);
     defer freeArr(y0);
     if (!routed_logged.get().*[@intFromBool(gate_vec != null)]) {
         routed_logged.get().*[@intFromBool(gate_vec != null)] = true;
@@ -1624,5 +1624,6 @@ pub const shared_state = .{
     gdn_out.shared_state,
     banked.shared_state,
     f3.shared_state,
+    shared_heads.shared_state,
     ricursive.shared_state,
 };

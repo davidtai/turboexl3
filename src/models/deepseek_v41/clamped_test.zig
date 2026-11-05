@@ -294,8 +294,8 @@ test "turboexl3 gpu clamped: at a limit no value reaches, every clamped launch g
     const none: mlx.mlx_array = .{ .ctx = null };
     const kb: decode.Kernels.Bank = .{ .gate_t = none, .gate_suh = none, .gate_svh = none, .up_t = none, .up_suh = none, .up_svh = none, .down_t = none, .down_suh = none, .down_svh = none };
     try testing.expectError(error.Exl3EngineNotImplemented, k3.moeForm(s, none, none, none, kb, 1, 3));
-    const sb: decode.Kernels3.SharedBank = .{ .gate_t = none, .gate_suh = none, .gate_svh = none, .up_t = none, .up_suh = none, .up_svh = none, .down_t = none, .down_suh = none, .down_svh = none, .n_gu = 80, .n_dn = 80, .ks_gu = 20, .ks_dn = 5, .defer_affine = true, .sigtab = none, .logit = none };
-    try testing.expect(!k3.sharedAdmitted(1, sb));
+    const sb: root.shared_heads.SharedBank = .{ .gate_t = none, .gate_suh = none, .gate_svh = none, .up_t = none, .up_suh = none, .up_svh = none, .down_t = none, .down_suh = none, .down_svh = none, .n_gu = 80, .n_dn = 80, .ks_gu = 20, .ks_dn = 5, .defer_affine = true, .sigtab = none, .logit = none };
+    try testing.expect(!root.shared_heads.SharedHeads.sharedAdmitted(&k3, 1, sb));
     try testing.expect(!failed);
 }
 
