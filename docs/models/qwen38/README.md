@@ -9,7 +9,7 @@ What it runs on turboexl3:
 | part of the model | entry points | kernels |
 |---|---|---|
 | routed experts | `moe` | the core's routed decode (form 9) and prefill chains ([engines](../../core/engines.md)) |
-| shared expert and router at 1 to 4 decode rows | `moeFusedShared`, `moeFusedSharedRouted` | the shared and router heads in the core's decode launches ([kernels](kernels.md#1-shared-expert-and-router-inside-the-decode-launches-rows-14)) |
+| shared expert and router at 1 to 4 decode rows | `moeFusedShared`, `moeFusedSharedRouted` | the shared and router heads inside the core's routed decode launches (`src/models/qwen38/shared.zig`, [kernels](kernels.md#1-shared-expert-and-router-inside-the-decode-launches-rows-14)) |
 | trunk linears (GDN, attention, shared expert at prefill, `lm_head`, MTP) | `linear` and its pieces | the core's dense linear ([engines](../../core/engines.md#3-dense-projections)) |
 | full-attention projections at prefill rows | `attnIn`, `attnPrep4`, `linearPreparedIdx`, `linearGated` | `src/models/qwen38/attn_io.zig` ([kernels](kernels.md)) |
 | decode-row merges | `decode_merge.*` | `src/models/qwen38/decb.zig` ([kernels](kernels.md)) |

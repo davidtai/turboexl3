@@ -1,8 +1,9 @@
 # DeepSeek-V4.1 kernels
 
-The kernels made in `src/models/deepseek_v41/`: the grouped linear `wo_a` (`grouped.zig`) and the kernels its tests make.
-DeepSeek-V4.1's other kernels (the clamped routed chains, the banked decode, F3) live in the core engines that launch
-them; their entries are in [the core catalog](../../core/kernels.md), each naming DeepSeek-V4.1. How an entry reads:
+The kernels made in `src/models/deepseek_v41/`: the grouped linear `wo_a` (`grouped.zig`), the banked decode over an
+expert streamer's slot banks and its grouped GEMVs (`banked.zig`), F3 (`f3.zig`) and the kernels its tests make. The
+clamped routed chains it shares with DeepSeek-V4 and GLM live in the core engines that launch them; their entries are in
+[the core catalog](../../core/kernels.md), each naming its users. How an entry reads:
 [the core catalog's introduction](../../core/kernels.md#how-an-entry-reads).
 
 ## The grouped linear `wo_a`
@@ -215,6 +216,815 @@ The grouped linear `wo_a` at decode rows.
   "turboexl3 gpu deepseek: root.linearGrouped at wo_a (8 slices of 4096 -> 1024) equals ..." (GPU: the whole call, see
   `turboexl3_grouped_finish`); `src/models/deepseek_v41/deepseek_gemv_test.zig` "turboexl3 gpu deepseek gemv: the
   grouped linear's dense GEMV gives the routed GEMV's bytes, ..." (GPU: the whole call on either GEMV, byte for byte).
+
+## `src/models/deepseek_v41/banked.zig`
+
+The banked decode (`root.moeClampedBanked` and its halves): form 7's launches with the clamped fin7 on form 9's
+launch shape, each row-slot one routed pair read from an expert streamer's slot bank, and the grouped GEMVs that share a
+decode among the row-slots of one id (`Config.banked_group`). `Banked` keeps them beside a geometry's `decode.Kernels3`.
+
+### `turboexl3_dfin3b`
+
+<!-- kernel-facts: turboexl3_dfin3b -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/deepseek_v41/banked.zig:249` (`const Banked`) |
+| inputs | `zd`, `slots`, `scores`, `down_svh0`, `down_svh1`, `down_svh2`, `hsx` |
+| outputs | `y` |
+| source | `text_dfin3b` = `decode/dfin3_1` ++ `deepseek_v41:banked/dfin3b_expert` ++ `decode/dfin3_2` (1610 B, `7274aee7befe`) |
+| header | `header` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` (18000 B, `771237d24284`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** DeepSeek-V4.1: launch 5, the last, of `root.moeClampedBanked` (DeepSeek-V4.1's streamed routed experts:
+  each row-slot one routed pair at top-1 over an expert streamer's three slot banks, base, ext and transient; 1 to
+  `banked_rows_max` (64) row-slots), in its down half. Served by default: `Config.banked_group` 2 runs the banked texts.
+- **Shapes and dtypes:** zd f32 [KS_dn, rows, hidden] (`turboexl3_down3b`'s planes); slots the ids u32 or i32 [rows],
+  each packed (bank << 24 | slot row); scores f32 [64] (`bankedOnes`: every score 1); down_svh0/1/2 f16 [E_b, hidden];
+  hsx f32 [rows, inter/128] (`turboexl3_fin7cb`'s hs). Out: y f32 [rows, hidden], each pair's expert output at weight 1
+  (the caller weighs and sums them).
+- **Grid and threadgroup:** `((hidden/128)·128, rows, 1)` / `(128, 1, 1)`.
+- **Template args:** HID (hidden), TOPK (1), RKC (rows), KS (KS_dn), OUT_T (f32: `root` builds the banked `Kernels3` at
+  out_dtype f32), DEFER (1 for MUL1), NBI (inter/128). KS_dn is the down's K slices, the largest of 4, 2, 1 with
+  (inter/16) % (4·KS) = 0 and at least 2 tiles per part.
+- **Replaces:** `turboexl3_dfin3` (the top-1 down finish: form 9 runs `dfin3` below top-k 4), launched once per bank by
+  each bank's own `moeClamped` call: one launch over the three banks.
+- **Bits:** byte-identical to `moeClamped` on the pair's bank at top-1 with score 1: `dfin3b_expert` (the slot row and
+  the bank's down svh) replaces only the line that reads a bank's arrays, so every other statement is `dfin3`'s. The
+  streamer's sum, each full token's six pairs weighed, is held within 5e-3 of the clamped host reference's rms
+  (`ref.compare` against `ref.moeRowClamped`).
+- **Pinned by:** `src/models/deepseek_v41/banked_test.zig` "turboexl3 banked decode texts: each is its base text with
+  the bank's lines in place ..." (CPU: the text is its base text with `dfin3b_expert` in place of the base line and
+  nothing else, every input read, no shape buffer); `src/models/deepseek_v41/banked_test.zig` "turboexl3 banked decode
+  refusals: the clamp, the ids' shape and dtype, the banks' dtypes, ..." (CPU: the call's refusals, before a launch);
+  `src/models/deepseek_v41/banked_test.zig` "turboexl3 gpu banked decode: every pair of moeClampedBanked over three
+  banks is moeClamped's ..." (GPU: every pair byte for byte against `moeClamped` at rows 1, 2, 6, 7, 16, 36 and 48, x
+  bf16 and f32, trellis U16 and I16, at DeepSeek-V4.1's routed geometry (hidden 5120, width 2304, limit 10, MUL1) over
+  synthetic banks of 20, 12 and 8 experts, K3 and K2 (n 48, 32); sampled token sums to the reference by 5e-3).
+
+### `turboexl3_dfin3bg`
+
+<!-- kernel-facts: turboexl3_dfin3bg -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/deepseek_v41/banked.zig:278` (`const Banked`) |
+| inputs | `zd`, `slots`, `scores`, `down_svh0`, `down_svh1`, `down_svh2`, `hsx` |
+| outputs | `y` |
+| source | `text_dfin3bg` = `decode/dfin3_1` ++ `deepseek_v41:banked/skip_rk_next` ++ `deepseek_v41:banked/dfin3b_expert` ++ `decode/dfin3_2` (1701 B, `f4c14dd1211a`) |
+| header | `header` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` (18000 B, `771237d24284`) |
+| made at | `src/models/deepseek_v41/banked.zig:306` (`const Banked`) (the same text) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** DeepSeek-V4.1: launch 5 of `root.moeClampedBanked` (DeepSeek-V4.1's streamed routed experts: each
+  row-slot one routed pair at top-1 over an expert streamer's three slot banks, base, ext and transient; 1 to
+  `banked_rows_max` (64) row-slots) on the grouped texts, g4 and g4m3 (made at both sites). Not served by default:
+  `Config.banked_group` 4 selects the grouped texts, or a call through `moeClampedBankedSel*` with `BankedSel` g4 or
+  g4m3 (hw4b's check mode, the tests).
+- **Shapes and dtypes:** As `turboexl3_dfin3b`; `skip_id` 0xFFFFFFFF (`root.banked_skip_id`) marks a row-slot that runs
+  no expert: y f32 [rows, hidden] holds 0 in its row (DEVROUTE's pairs whose expert no bank holds; the caller replaces
+  those rows).
+- **Grid and threadgroup:** As `turboexl3_dfin3b`: `((hidden/128)·128, rows, 1)` / `(128, 1, 1)`.
+- **Template args:** HID, TOPK (1), RKC, KS (KS_dn), OUT_T (f32), DEFER, NBI (inter/128), as `turboexl3_dfin3b`.
+- **Replaces:** `turboexl3_dfin3b` in the same launch: its text with `skip_rk_next` (skip the row-slot in the slot loop)
+  before the bank lines.
+- **Bits:** byte-identical to `turboexl3_dfin3b` for every row-slot not skipped; a skipped row-slot's y row is 0, every
+  word.
+- **Pinned by:** `src/models/deepseek_v41/banked_test.zig` "turboexl3 grouped banked decode texts: prep2bg, fin7cbg and
+  dfin3bg are the banked texts ..." (CPU: the text is the banked text with the skip line before its bank lines);
+  `src/models/deepseek_v41/banked_test.zig` "turboexl3 gpu banked group: the grouped banked call's rows are the banked
+  call's ..." (GPU: the grouped call's rows equal the banked call's byte for byte, a skipped row-slot's y row 0, rows 6,
+  12, 36 and 48, x bf16, trellis I16, at DeepSeek-V4.1's routed geometry (hidden 5120, width 2304, limit 10, MUL1) over
+  synthetic banks of 20, 12 and 8 experts, K3 and K2 (n 48, 32)). It runs in every arm of
+  `src/models/deepseek_v41/banked_grp_test.zig` "turboexl3 gpu banked grp: the M = 3 texts' gate|up outputs and rows are
+  today's, ..." and `src/models/deepseek_v41/banked_ilp_test.zig` "turboexl3 gpu banked ilp: every grouped GEMV
+  variant's gate|up outputs and rows, ..." (GPU), which hold the whole call's hd, hs and y.
+
+### `turboexl3_down3b`
+
+<!-- kernel-facts: turboexl3_down3b -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/deepseek_v41/banked.zig:247` (`const Banked`) |
+| inputs | `hdp`, `slots`, `down_t0`, `down_t1`, `down_t2` |
+| outputs | `zd` |
+| source | `text_down3b` = `decode/down3_1` ++ `decode/rk_line` ++ `decode/down3_2` ++ `deepseek_v41:banked/down3b_w` ++ `decode/down3_3` (2506 B, `67a8776af847`) |
+| header | `header` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` (18000 B, `771237d24284`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** DeepSeek-V4.1: launch 4 of `root.moeClampedBanked` (DeepSeek-V4.1's streamed routed experts: each
+  row-slot one routed pair at top-1 over an expert streamer's three slot banks, base, ext and transient; 1 to
+  `banked_rows_max` (64) row-slots), the start of its down half (`moeClampedBankedDown`, `banked.Banked.bankedDown`).
+  Served by default: `Config.banked_group` 2 runs the banked texts.
+- **Shapes and dtypes:** hdp f16 [rows, inter] (`turboexl3_fin7cb`'s hd, lane order); slots the ids u32 or i32 [rows],
+  each packed (bank << 24 | slot row); down_t0/1/2 U16 or I16 [E_b, inter/16, hidden/16, n]. Out: zd f32 [KS_dn, rows,
+  hidden] (the split-K down planes). KS_dn is the down's K slices, the largest of 4, 2, 1 with (inter/16) % (4·KS) = 0
+  and at least 2 tiles per part.
+- **Grid and threadgroup:** `((hidden/(16·BT))·128, rows, z)` / `(128, 1, 1)`, z = max(1, KS_dn / kdiv[min(rows, 4) −
+  1]) with `kdiv9d` (null: `kdiv9`; 1 by default, so z = KS_dn).
+- **Template args:** NHW (n, the halfwords per tile: K = NHW/16), CODEBOOK (MUL1 0, MCG 1), WBITS (the window's bits),
+  HID (hidden), INTER (inter), RKC (rows), KS (KS_dn), SPT (KS_dn / z: 1 by default), BT (output tiles per threadgroup:
+  `bt1` at one row-slot, `bt9` from two, both 2 by default), GROUP (2 from two row-slots, so two row-slots of one packed
+  id share a decode only on one bank's one slot; 1 at one), DEFER (1 for MUL1: the GEMV sums x times the codeword's byte
+  sum). Every rate `bankedCall` admits (gate, up and down at one rate), both codebooks and every window.
+- **Replaces:** `turboexl3_down3`, launched once per bank by each bank's own `moeClamped` call: one launch over the
+  three banks.
+- **Bits:** byte-identical to `moeClamped` on the pair's bank at top-1 with score 1: `down3b_w` (the weight base: the
+  bank's down trellis at the slot row) replaces only the line that reads a bank's arrays, so every other statement is
+  `down3`'s. The streamer's sum, each full token's six pairs weighed, is held within 5e-3 of the clamped host
+  reference's rms (`ref.compare` against `ref.moeRowClamped`).
+- **Pinned by:** `src/models/deepseek_v41/banked_test.zig` "turboexl3 banked decode texts: each is its base text with
+  the bank's lines in place ..." (CPU: the text is its base text with `down3b_w` in place of the base line and nothing
+  else, every input read, no shape buffer); `src/models/deepseek_v41/banked_test.zig` "turboexl3 banked decode refusals:
+  the clamp, the ids' shape and dtype, the banks' dtypes, ..." (CPU: the call's refusals, before a launch);
+  `src/models/deepseek_v41/banked_test.zig` "turboexl3 gpu banked decode: every pair of moeClampedBanked over three
+  banks is moeClamped's ..." (GPU: every pair byte for byte against `moeClamped` at rows 1, 2, 6, 7, 16, 36 and 48, x
+  bf16 and f32, trellis U16 and I16, at DeepSeek-V4.1's routed geometry (hidden 5120, width 2304, limit 10, MUL1) over
+  synthetic banks of 20, 12 and 8 experts, K3 and K2 (n 48, 32); sampled token sums to the reference by 5e-3). The texts
+  test also pins that the members compare the packed id.
+
+### `turboexl3_down3bg`
+
+<!-- kernel-facts: turboexl3_down3bg -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/deepseek_v41/banked.zig:276` (`const Banked`) |
+| inputs | `hdp`, `slots`, `down_t0`, `down_t1`, `down_t2` |
+| outputs | `zd` |
+| source | `text_down3bg` = `decode/down3_1` ++ `decode/rk_line` ++ `deepseek_v41:banked/down3g_2` ++ `deepseek_v41:banked/down3b_w` ++ `deepseek_v41:banked/down3g_3` (2585 B, `b9686e67ab4a`) |
+| header | `header_group` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26373 B, `b7023ef0567c`) |
+| made at | `src/models/deepseek_v41/banked.zig:386` (`const Banked`) |
+| inputs | `hdp`, `slots`, `down_t0`, `down_t1`, `down_t2` |
+| outputs | `zd` |
+| source | `text_down3bg` = `decode/down3_1` ++ `decode/rk_line` ++ `deepseek_v41:banked/down3g_2` ++ `deepseek_v41:banked/down3b_w` ++ `deepseek_v41:banked/down3g_3` (2585 B, `b9686e67ab4a`) |
+| header | `group_headers[v].ptr` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26373 B, `b7023ef0567c`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** DeepSeek-V4.1: launch 4 of `root.moeClampedBanked` (DeepSeek-V4.1's streamed routed experts: each
+  row-slot one routed pair at top-1 over an expert streamer's three slot banks, base, ext and transient; 1 to
+  `banked_rows_max` (64) row-slots) on today's grouped texts (g4): `Config.banked_group` 4 with `banked_m3` false, or
+  `BankedSel` g4. Not served by default. Its name is also variant 0's in the variant table (`group_down_names[0]`;
+  `groupGemvs` makes only variants 1 and up).
+- **Shapes and dtypes:** As `turboexl3_down3b`: hdp f16 [rows, inter]; slots the packed ids u32 or i32 [rows], `skip_id`
+  0xFFFFFFFF (`root.banked_skip_id`) marks a row-slot that runs no expert (no decode, no plane rows written);
+  down_t0/1/2 U16 or I16 [E_b, inter/16, hidden/16, n]. Out: zd f32 [KS_dn, rows, hidden].
+- **Grid and threadgroup:** As `turboexl3_down3b`: `((hidden/(16·BT))·128, rows, z)` / `(128, 1, 1)`, z = KS_dn by
+  default. (`cfgsBankedG`).
+- **Template args:** NHW (n, the halfwords per tile: K = NHW/16), CODEBOOK (MUL1 0, MCG 1), WBITS (the window's bits),
+  HID (hidden), INTER (inter), RKC (rows), KS (KS_dn), SPT (KS_dn / z: 1 by default), BT (output tiles per threadgroup:
+  `bt1` at one row-slot, `bt9` from two, both 2 by default), GROUP (4 from two row-slots, 1 at one: up to four row-slots
+  of one packed id per lead threadgroup (`turboexl3_members_g`), a skipped row-slot no member), DEFER (1 for MUL1: the
+  GEMV sums x times the codeword's byte sum). Every rate `bankedCall` admits (gate, up and down at one rate), both
+  codebooks and every window. Inside: the member paths M 1, 2 and 4 of `turboexl3_gemv_group`, so a lead of three
+  members runs the M = 4 path with a fourth member's FMAs padding.
+- **Replaces:** `turboexl3_down3b` in the same launch: the members widened from two to four (`down3g_2`, `down3g_3`),
+  the banked weight base (`down3b_w`) between them.
+- **Bits:** byte-identical to the banked text `turboexl3_down3b` (the grouped call's rows are the banked call's): every
+  weight is read and decoded once and fed to each member in the one-member order.
+- **Pinned by:** `src/models/deepseek_v41/banked_test.zig` "turboexl3 grouped banked decode texts: prep2bg, fin7cbg and
+  dfin3bg are the banked texts ..." (CPU: the banked text's constants and grid line, then the four-member head, the
+  banked weight base, the four-member tail); `src/models/deepseek_v41/banked_test.zig` "turboexl3 gpu banked group: the
+  grouped banked call's rows are the banked call's ..." (GPU: the grouped call against the banked call, byte for byte, a
+  skipped row-slot's y row 0, rows 6, 12, 36 and 48, x bf16, trellis I16, at DeepSeek-V4.1's routed geometry (hidden
+  5120, width 2304, limit 10, MUL1) over synthetic banks of 20, 12 and 8 experts, K3 and K2 (n 48, 32); up to eight
+  row-slots of one id: two leads); `src/models/deepseek_v41/banked_ilp_test.zig` "turboexl3 banked ilp: variant 0 is
+  today's (no defines, the stock kernel names), ..." (CPU: variant 0 keeps the stock name and no defines). It is the
+  reference arm (g4, variant 0) of `src/models/deepseek_v41/banked_grp_test.zig` "turboexl3 gpu banked grp: the M = 3
+  texts' gate|up outputs and rows are today's, ..." and `src/models/deepseek_v41/banked_ilp_test.zig` "turboexl3 gpu
+  banked ilp: every grouped GEMV variant's gate|up outputs and rows, ..." (GPU).
+
+### `turboexl3_down3bg_<variant>`
+
+<!-- kernel-facts: turboexl3_down3bg_<variant> -->
+
+| fact | from the code |
+|---|---|
+| names | `turboexl3_down3bg_ku`, `turboexl3_down3bg_pf`, `turboexl3_down3bg_xh`, `turboexl3_down3bg_m2`, `turboexl3_down3bg_sh`, `turboexl3_down3bg_t4`, `turboexl3_down3bg_t1`, `turboexl3_down3bg_t0`, `turboexl3_down3bg_pfxh`, `turboexl3_down3bg_pfsh`, `turboexl3_down3bg_xhm2` |
+| made at | `src/models/deepseek_v41/banked.zig:386` (`const Banked`) |
+| inputs | `hdp`, `slots`, `down_t0`, `down_t1`, `down_t2` |
+| outputs | `zd` |
+| source | `text_down3bg` = `decode/down3_1` ++ `decode/rk_line` ++ `deepseek_v41:banked/down3g_2` ++ `deepseek_v41:banked/down3b_w` ++ `deepseek_v41:banked/down3g_3` (2585 B, `b9686e67ab4a`) |
+| header | `group_headers[v].ptr`: a variant's defines ++ the base header, one per name |
+| header of `turboexl3_down3bg_ku` | text '#define EXL3_KU 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26391 B, `893d0732e30e`) |
+| header of `turboexl3_down3bg_pf` | text '#define EXL3_GPF 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26392 B, `719802404fb5`) |
+| header of `turboexl3_down3bg_xh` | text '#define EXL3_GXH 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26392 B, `35cacdcfb1d7`) |
+| header of `turboexl3_down3bg_m2` | text '#define EXL3_GM2 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26392 B, `d28773b43d18`) |
+| header of `turboexl3_down3bg_sh` | text '#define EXL3_GSH 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26392 B, `1eaa64821218`) |
+| header of `turboexl3_down3bg_t4` | text '#define EXL3_T1V 4\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26392 B, `acaeb8fa61e1`) |
+| header of `turboexl3_down3bg_t1` | text '#define EXL3_T1V 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26392 B, `b0622147baad`) |
+| header of `turboexl3_down3bg_t0` | text '#define EXL3_T1V 0\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26392 B, `9be4db5164be`) |
+| header of `turboexl3_down3bg_pfxh` | text '#define EXL3_GPF 1\n#define EXL3_GXH 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26411 B, `c5b9183f1adc`) |
+| header of `turboexl3_down3bg_pfsh` | text '#define EXL3_GPF 1\n#define EXL3_GSH 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26411 B, `2478957c5a9f`) |
+| header of `turboexl3_down3bg_xhm2` | text '#define EXL3_GXH 1\n#define EXL3_GM2 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26411 B, `a43b1425ae6c`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** DeepSeek-V4.1: launch 4 of `root.moeClampedBanked` (DeepSeek-V4.1's streamed routed experts: each
+  row-slot one routed pair at top-1 over an expert streamer's three slot banks, base, ext and transient; 1 to
+  `banked_rows_max` (64) row-slots) at `Config.banked_variant_dn` v (1 to 11, needs `Config.banked_group` 4) on today's
+  grouped texts (`banked_m3` false), or `moeClampedBankedDownV` / `...SelV` with that variant; `Banked.groupGemvs`
+  makes each on first use (`banked_gv`). hw2's ILP retune; not served by default (variant 0).
+- **Shapes and dtypes:** As `turboexl3_down3bg`.
+- **Grid and threadgroup:** As `turboexl3_down3bg` (`cfgsBankedG`).
+- **Template args:** As `turboexl3_down3bg`. The variant is the header: its Metal defines before `header_group`, under a
+  kernel name of its own: `ku` EXL3_KU 1 (input tiles in pairs, both tiles' words loaded before either decodes); `pf`
+  EXL3_GPF 1 (a rolling prefetch: the next input tile's words loaded before this tile decodes); `xh` EXL3_GXH 1 (each
+  member's x quad held as half4 and widened at its FMA); `m2` EXL3_GM2 1 (the four-member path as two passes of two
+  members, the second reading and decoding the tile again); `sh` EXL3_GSH 1 (the one-64-bit-window reader with each tile
+  word loaded by one lane and taken by the others through `simd_shuffle`); `t4`, `t1`, `t0` EXL3_T1V 4, 1, 0 (the route
+  from a MUL1 codeword to t, default 3: 4 both pair sums as one half2, 1 a shift and add for the 32-bit multiply, 0 the
+  multiply by 0x10001 and an integer convert; MUL1 only); `pfxh`, `pfsh`, `xhm2` two of those defines together.
+- **Replaces:** `turboexl3_down3bg` in the same launch.
+- **Bits:** byte-identical to `turboexl3_down3bg` (variant 0): each variant reads, decodes and sums every weight as
+  variant 0 does (the same codewords, decoded values, FMA sequence into the same f32 accumulators, and folds); they
+  differ only in when the tile words load, how many lanes load them, the registers the loop holds, the passes over a
+  tile and the instructions from a codeword to t.
+- **Pinned by:** `src/models/deepseek_v41/banked_ilp_test.zig` "turboexl3 banked ilp: variant 0 is today's (no defines,
+  the stock kernel names), ..." (CPU: each name distinct, its defines, each define's default in `header_group`, the
+  config's count of 12); `src/models/deepseek_v41/banked_ilp_test.zig` "turboexl3 gpu banked ilp: every grouped GEMV
+  variant's gate|up outputs and rows, ..." (GPU: every variant, both GEMVs at it, on g4 and g4m3, against g4 at variant
+  0: hd, hs and y word for word, a skipped row-slot's y row 0, rows 1, 2, 3, 4, 6, 7, 12, 16, 24, 36 and 48, x bf16 and
+  f32, trellis I16 and U16, at DeepSeek-V4.1's routed geometry (hidden 5120, width 2304, limit 10, MUL1) over synthetic
+  banks of 20, 12 and 8 experts, K3 and K2 (n 48, 32)); `src/models/deepseek_v41/banked_ilp_test.zig` "turboexl3 gpu
+  banked ilp t routes: every EXL3_T1V route gives today's route's t, ..." (GPU: the t routes of `t4`, `t1`, `t0` on
+  every codeword state, through `turboexl3_t1v_probe_<route>_<dtype>`); `src/core/config.zig` "turboexl3 config: the
+  defaults are valid and served; an unserved form, slice count ..." (CPU: a variant needs `banked_group` 4).
+
+### `turboexl3_down3bgm3`
+
+<!-- kernel-facts: turboexl3_down3bgm3 -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/deepseek_v41/banked.zig:304` (`const Banked`) |
+| inputs | `hdp`, `slots`, `down_t0`, `down_t1`, `down_t2` |
+| outputs | `zd` |
+| source | `text_down3bgm3` = `decode/down3_1` ++ `decode/rk_line` ++ `deepseek_v41:banked/down3g_2` ++ `deepseek_v41:banked/down3b_w` ++ `deepseek_v41:banked/down3g_3m3` (2756 B, `3274179feb75`) |
+| header | `header_group` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26373 B, `b7023ef0567c`) |
+| made at | `src/models/deepseek_v41/banked.zig:384` (`const Banked`) |
+| inputs | `hdp`, `slots`, `down_t0`, `down_t1`, `down_t2` |
+| outputs | `zd` |
+| source | `text_down3bgm3` = `decode/down3_1` ++ `decode/rk_line` ++ `deepseek_v41:banked/down3g_2` ++ `deepseek_v41:banked/down3b_w` ++ `deepseek_v41:banked/down3g_3m3` (2756 B, `3274179feb75`) |
+| header | `group_headers[v].ptr` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26373 B, `b7023ef0567c`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** DeepSeek-V4.1: launch 4 of `root.moeClampedBanked` (DeepSeek-V4.1's streamed routed experts: each
+  row-slot one routed pair at top-1 over an expert streamer's three slot banks, base, ext and transient; 1 to
+  `banked_rows_max` (64) row-slots) on hw4b's texts (g4m3): `Config.banked_group` 4 with `Config.banked_m3`, or
+  `BankedSel` g4m3. Not served by default. Its name is also variant 0's in the M = 3 variant table
+  (`group_down_m3_names[0]`).
+- **Shapes and dtypes:** As `turboexl3_down3b`: hdp f16 [rows, inter]; slots the packed ids u32 or i32 [rows], `skip_id`
+  0xFFFFFFFF (`root.banked_skip_id`) marks a row-slot that runs no expert (no decode, no plane rows written);
+  down_t0/1/2 U16 or I16 [E_b, inter/16, hidden/16, n]. Out: zd f32 [KS_dn, rows, hidden].
+- **Grid and threadgroup:** As `turboexl3_down3b`: `((hidden/(16·BT))·128, rows, z)` / `(128, 1, 1)`, z = KS_dn by
+  default. (`cfgsBankedGM3`).
+- **Template args:** NHW (n, the halfwords per tile: K = NHW/16), CODEBOOK (MUL1 0, MCG 1), WBITS (the window's bits),
+  HID (hidden), INTER (inter), RKC (rows), KS (KS_dn), SPT (KS_dn / z: 1 by default), BT (output tiles per threadgroup:
+  `bt1` at one row-slot, `bt9` from two, both 2 by default), GROUP (4 from two row-slots, 1 at one: up to four row-slots
+  of one packed id per lead threadgroup (`turboexl3_members_g`), a skipped row-slot no member), DEFER (1 for MUL1: the
+  GEMV sums x times the codeword's byte sum). Every rate `bankedCall` admits (gate, up and down at one rate), both
+  codebooks and every window. Inside: the member paths M 1, 2, 3 and 4.
+- **Replaces:** `turboexl3_down3bg` in the same launch: its text with one line added (`down3g_3m3`), an M = 3 path for a
+  lead with three members, where `down3bg` runs the M = 4 path with a fourth member's FMAs padding.
+- **Bits:** byte-identical to `turboexl3_down3bg` (g4): every member fed in the one-member order
+  (`turboexl3_gemv_group`); the call's hd, hs and y equal today's, differing words 0, max_ulps 0, a skipped row-slot's y
+  row 0.
+- **Pinned by:** `src/models/deepseek_v41/banked_grp_test.zig` "turboexl3 banked grp: the M = 3 texts are today's
+  grouped texts with the one M = 3 line ..." (CPU: today's grouped text with the one M = 3 line added after the M = 2
+  line); `src/models/deepseek_v41/banked_grp_test.zig` "turboexl3 gpu banked grp: the M = 3 texts' gate|up outputs and
+  rows are today's, ..." (GPU: g4m3 against g4, hd, hs and y word for word, rows 1 to 9, 12, 16, 24, 36, 42, 48 and 64,
+  x bf16 and f32, trellis I16 and U16, one id on up to 16 row-slots, skipped row-slots, at DeepSeek-V4.1's routed
+  geometry (hidden 5120, width 2304, limit 10, MUL1) over synthetic banks of 20, 12 and 8 experts, K3 and K2 (n 48,
+  32)); `src/models/deepseek_v41/banked_ilp_test.zig` "turboexl3 banked ilp: variant 0 is today's (no defines, the stock
+  kernel names), ..." (CPU: the names distinct); `src/models/deepseek_v41/banked_ilp_test.zig` "turboexl3 gpu banked
+  ilp: every grouped GEMV variant's gate|up outputs and rows, ..." (GPU: variant 0 on hw4b's texts against g4's variant
+  0); `src/core/config.zig` "turboexl3 config: the defaults are valid and served; an unserved form, slice count ..."
+  (CPU: `banked_m3` needs `banked_group` 4).
+
+### `turboexl3_down3bgm3_<variant>`
+
+<!-- kernel-facts: turboexl3_down3bgm3_<variant> -->
+
+| fact | from the code |
+|---|---|
+| names | `turboexl3_down3bgm3_ku`, `turboexl3_down3bgm3_pf`, `turboexl3_down3bgm3_xh`, `turboexl3_down3bgm3_m2`, `turboexl3_down3bgm3_sh`, `turboexl3_down3bgm3_t4`, `turboexl3_down3bgm3_t1`, `turboexl3_down3bgm3_t0`, `turboexl3_down3bgm3_pfxh`, `turboexl3_down3bgm3_pfsh`, `turboexl3_down3bgm3_xhm2` |
+| made at | `src/models/deepseek_v41/banked.zig:384` (`const Banked`) |
+| inputs | `hdp`, `slots`, `down_t0`, `down_t1`, `down_t2` |
+| outputs | `zd` |
+| source | `text_down3bgm3` = `decode/down3_1` ++ `decode/rk_line` ++ `deepseek_v41:banked/down3g_2` ++ `deepseek_v41:banked/down3b_w` ++ `deepseek_v41:banked/down3g_3m3` (2756 B, `3274179feb75`) |
+| header | `group_headers[v].ptr`: a variant's defines ++ the base header, one per name |
+| header of `turboexl3_down3bgm3_ku` | text '#define EXL3_KU 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26391 B, `893d0732e30e`) |
+| header of `turboexl3_down3bgm3_pf` | text '#define EXL3_GPF 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26392 B, `719802404fb5`) |
+| header of `turboexl3_down3bgm3_xh` | text '#define EXL3_GXH 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26392 B, `35cacdcfb1d7`) |
+| header of `turboexl3_down3bgm3_m2` | text '#define EXL3_GM2 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26392 B, `d28773b43d18`) |
+| header of `turboexl3_down3bgm3_sh` | text '#define EXL3_GSH 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26392 B, `1eaa64821218`) |
+| header of `turboexl3_down3bgm3_t4` | text '#define EXL3_T1V 4\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26392 B, `acaeb8fa61e1`) |
+| header of `turboexl3_down3bgm3_t1` | text '#define EXL3_T1V 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26392 B, `b0622147baad`) |
+| header of `turboexl3_down3bgm3_t0` | text '#define EXL3_T1V 0\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26392 B, `9be4db5164be`) |
+| header of `turboexl3_down3bgm3_pfxh` | text '#define EXL3_GPF 1\n#define EXL3_GXH 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26411 B, `c5b9183f1adc`) |
+| header of `turboexl3_down3bgm3_pfsh` | text '#define EXL3_GPF 1\n#define EXL3_GSH 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26411 B, `2478957c5a9f`) |
+| header of `turboexl3_down3bgm3_xhm2` | text '#define EXL3_GXH 1\n#define EXL3_GM2 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26411 B, `a43b1425ae6c`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** DeepSeek-V4.1: launch 4 of `root.moeClampedBanked` (DeepSeek-V4.1's streamed routed experts: each
+  row-slot one routed pair at top-1 over an expert streamer's three slot banks, base, ext and transient; 1 to
+  `banked_rows_max` (64) row-slots) at `Config.banked_variant_dn` v (1 to 11, needs `Config.banked_group` 4) on hw4b's
+  texts (`banked_m3` true), or `moeClampedBankedDownV` / `...SelV` with that variant; `Banked.groupGemvs` makes each
+  on first use (`banked_gvm3`). hw2's ILP retune; not served by default (variant 0).
+- **Shapes and dtypes:** As `turboexl3_down3bgm3`.
+- **Grid and threadgroup:** As `turboexl3_down3bgm3` (`cfgsBankedGM3`).
+- **Template args:** As `turboexl3_down3bgm3`. The variant is the header: its Metal defines before `header_group`, under
+  a kernel name of its own: `ku` EXL3_KU 1 (input tiles in pairs, both tiles' words loaded before either decodes); `pf`
+  EXL3_GPF 1 (a rolling prefetch: the next input tile's words loaded before this tile decodes); `xh` EXL3_GXH 1 (each
+  member's x quad held as half4 and widened at its FMA); `m2` EXL3_GM2 1 (the four-member path as two passes of two
+  members, the second reading and decoding the tile again); `sh` EXL3_GSH 1 (the one-64-bit-window reader with each tile
+  word loaded by one lane and taken by the others through `simd_shuffle`); `t4`, `t1`, `t0` EXL3_T1V 4, 1, 0 (the route
+  from a MUL1 codeword to t, default 3: 4 both pair sums as one half2, 1 a shift and add for the 32-bit multiply, 0 the
+  multiply by 0x10001 and an integer convert; MUL1 only); `pfxh`, `pfsh`, `xhm2` two of those defines together.
+- **Replaces:** `turboexl3_down3bgm3` in the same launch.
+- **Bits:** byte-identical to `turboexl3_down3bgm3` (variant 0): each variant reads, decodes and sums every weight as
+  variant 0 does (the same codewords, decoded values, FMA sequence into the same f32 accumulators, and folds); they
+  differ only in when the tile words load, how many lanes load them, the registers the loop holds, the passes over a
+  tile and the instructions from a codeword to t. The GPU test holds each to g4's variant 0, so to `turboexl3_down3bg`.
+- **Pinned by:** `src/models/deepseek_v41/banked_ilp_test.zig` "turboexl3 banked ilp: variant 0 is today's (no defines,
+  the stock kernel names), ..." (CPU: each name distinct, its defines, each define's default in `header_group`, the
+  config's count of 12); `src/models/deepseek_v41/banked_ilp_test.zig` "turboexl3 gpu banked ilp: every grouped GEMV
+  variant's gate|up outputs and rows, ..." (GPU: every variant, both GEMVs at it, on g4 and g4m3, against g4 at variant
+  0: hd, hs and y word for word, a skipped row-slot's y row 0, rows 1, 2, 3, 4, 6, 7, 12, 16, 24, 36 and 48, x bf16 and
+  f32, trellis I16 and U16, at DeepSeek-V4.1's routed geometry (hidden 5120, width 2304, limit 10, MUL1) over synthetic
+  banks of 20, 12 and 8 experts, K3 and K2 (n 48, 32)); `src/models/deepseek_v41/banked_ilp_test.zig` "turboexl3 gpu
+  banked ilp t routes: every EXL3_T1V route gives today's route's t, ..." (GPU: the t routes of `t4`, `t1`, `t0` on
+  every codeword state, through `turboexl3_t1v_probe_<route>_<dtype>`); `src/core/config.zig` "turboexl3 config: the
+  defaults are valid and served; an unserved form, slice count ..." (CPU: a variant needs `banked_group` 4).
+
+### `turboexl3_fin7cb`
+
+<!-- kernel-facts: turboexl3_fin7cb -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/deepseek_v41/banked.zig:245` (`const Banked`) |
+| inputs | `zg`, `zu`, `slots`, `gate_svh0`, `gate_svh1`, `gate_svh2`, `up_svh0`, `up_svh1`, `up_svh2`, `down_suh0`, `down_suh1`, `down_suh2`, `xsg`, `xsu` |
+| outputs | `hd`, `hs` |
+| source | `text_fin7cb` = `decode/fin7_1` ++ `deepseek_v41:banked/fin7b_expert` ++ `decode/fin7_2` ++ `decode/fin7_planes` ++ `decode/fin7_3` ++ `decode/fin7_sums` ++ `decode/fin7_4` ++ `decode/fin7_swiglu_clamp` ++ `decode/fin7_5` (2959 B, `68747f002dd1`) |
+| header | `header5` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` (26594 B, `41efbbbbd943`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** DeepSeek-V4.1: launch 3 of `root.moeClampedBanked` (DeepSeek-V4.1's streamed routed experts: each
+  row-slot one routed pair at top-1 over an expert streamer's three slot banks, base, ext and transient; 1 to
+  `banked_rows_max` (64) row-slots), the end of its gate|up half; it prepares the down's input, so it reads every bank's
+  down suh as well as its gate and up svh. Served by default: `Config.banked_group` 2 runs the banked texts.
+- **Shapes and dtypes:** zg, zu f32 [KS_gu, rows, inter] (`turboexl3_gu3b`'s planes); slots the ids u32 or i32 [rows],
+  each packed (bank << 24 | slot row); gate_svh0/1/2 and up_svh0/1/2 f16 [E_b, inter]; down_suh0/1/2 f16 [E_b, inter];
+  xsg, xsu f32 [rows, hidden/128] (`turboexl3_prep2b`'s sg, su). Out: hd f16 [rows, inter] (the down's prepared input,
+  lane order) and hs f32 [rows, inter/128] (its 128-block sums): `root.BankedHalf`.
+- **Grid and threadgroup:** `((inter/128)·32, rows, 1)` / `(32, 1, 1)`.
+- **Template args:** INTER (inter), RKC (rows), KS (KS_gu), DEFER (1 for MUL1: the deferred affine map applied here),
+  NBH (hidden/128), LIMIT (the clamp, 1 to 128; DeepSeek-V4.1's swiglu_limit 10). A banked call needs a clamped top-1
+  geometry (`bankedKernels` refuses any other).
+- **Replaces:** `turboexl3_fin7c` (fin7 with the clamped SwiGLU), launched once per bank by each bank's own `moeClamped`
+  call: one launch over the three banks.
+- **Bits:** byte-identical to `moeClamped` on the pair's bank at top-1 with score 1: `fin7b_expert` (the slot row and
+  the bank's gate svh, up svh and down suh) replaces only the line that reads a bank's arrays, so every other statement
+  is `fin7c`'s. The streamer's sum, each full token's six pairs weighed, is held within 5e-3 of the clamped host
+  reference's rms (`ref.compare` against `ref.moeRowClamped`).
+- **Pinned by:** `src/models/deepseek_v41/banked_test.zig` "turboexl3 banked decode texts: each is its base text with
+  the bank's lines in place ..." (CPU: the text is its base text with `fin7b_expert` in place of the base line and
+  nothing else, every input read, no shape buffer); `src/models/deepseek_v41/banked_test.zig` "turboexl3 banked decode
+  refusals: the clamp, the ids' shape and dtype, the banks' dtypes, ..." (CPU: the call's refusals, before a launch);
+  `src/models/deepseek_v41/banked_test.zig` "turboexl3 gpu banked decode: every pair of moeClampedBanked over three
+  banks is moeClamped's ..." (GPU: every pair byte for byte against `moeClamped` at rows 1, 2, 6, 7, 16, 36 and 48, x
+  bf16 and f32, trellis U16 and I16, at DeepSeek-V4.1's routed geometry (hidden 5120, width 2304, limit 10, MUL1) over
+  synthetic banks of 20, 12 and 8 experts, K3 and K2 (n 48, 32); sampled token sums to the reference by 5e-3).
+
+### `turboexl3_fin7cbg`
+
+<!-- kernel-facts: turboexl3_fin7cbg -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/deepseek_v41/banked.zig:274` (`const Banked`) |
+| inputs | `zg`, `zu`, `slots`, `gate_svh0`, `gate_svh1`, `gate_svh2`, `up_svh0`, `up_svh1`, `up_svh2`, `down_suh0`, `down_suh1`, `down_suh2`, `xsg`, `xsu` |
+| outputs | `hd`, `hs` |
+| source | `text_fin7cbg` = `decode/fin7_1` ++ `deepseek_v41:banked/skip_rk` ++ `deepseek_v41:banked/fin7b_expert` ++ `decode/fin7_2` ++ `decode/fin7_planes` ++ `decode/fin7_3` ++ `decode/fin7_sums` ++ `decode/fin7_4` ++ `decode/fin7_swiglu_clamp` ++ `decode/fin7_5` (3076 B, `25e578bf80c8`) |
+| header | `header5` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` (26594 B, `41efbbbbd943`) |
+| made at | `src/models/deepseek_v41/banked.zig:302` (`const Banked`) (the same text) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** DeepSeek-V4.1: launch 3 of `root.moeClampedBanked` (DeepSeek-V4.1's streamed routed experts: each
+  row-slot one routed pair at top-1 over an expert streamer's three slot banks, base, ext and transient; 1 to
+  `banked_rows_max` (64) row-slots) on the grouped texts, g4 and g4m3 (made at both sites). Not served by default:
+  `Config.banked_group` 4 selects the grouped texts, or a call through `moeClampedBankedSel*` with `BankedSel` g4 or
+  g4m3 (hw4b's check mode, the tests).
+- **Shapes and dtypes:** As `turboexl3_fin7cb`; `skip_id` 0xFFFFFFFF (`root.banked_skip_id`) marks a row-slot that runs
+  no expert, and its hd and hs rows are left unwritten.
+- **Grid and threadgroup:** As `turboexl3_fin7cb`: `((inter/128)·32, rows, 1)` / `(32, 1, 1)`.
+- **Template args:** INTER, RKC (rows), KS (KS_gu), DEFER, NBH (hidden/128), LIMIT, as `turboexl3_fin7cb`.
+- **Replaces:** `turboexl3_fin7cb` in the same launch: its text with `skip_rk` before the bank lines.
+- **Bits:** byte-identical to `turboexl3_fin7cb` for every row-slot not skipped (hd and hs).
+- **Pinned by:** `src/models/deepseek_v41/banked_test.zig` "turboexl3 grouped banked decode texts: prep2bg, fin7cbg and
+  dfin3bg are the banked texts ..." (CPU: the text is the banked text with the skip line before its bank lines);
+  `src/models/deepseek_v41/banked_test.zig` "turboexl3 gpu banked group: the grouped banked call's rows are the banked
+  call's ..." (GPU: the grouped call's rows equal the banked call's byte for byte, a skipped row-slot's y row 0, rows 6,
+  12, 36 and 48, x bf16, trellis I16, at DeepSeek-V4.1's routed geometry (hidden 5120, width 2304, limit 10, MUL1) over
+  synthetic banks of 20, 12 and 8 experts, K3 and K2 (n 48, 32)). It runs in every arm of
+  `src/models/deepseek_v41/banked_grp_test.zig` "turboexl3 gpu banked grp: the M = 3 texts' gate|up outputs and rows are
+  today's, ..." and `src/models/deepseek_v41/banked_ilp_test.zig` "turboexl3 gpu banked ilp: every grouped GEMV
+  variant's gate|up outputs and rows, ..." (GPU), which hold the whole call's hd, hs and y.
+
+### `turboexl3_gu3b`
+
+<!-- kernel-facts: turboexl3_gu3b -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/deepseek_v41/banked.zig:243` (`const Banked`) |
+| inputs | `xgp`, `xup`, `slots`, `gate_t0`, `gate_t1`, `gate_t2`, `up_t0`, `up_t1`, `up_t2` |
+| outputs | `zg`, `zu` |
+| source | `text_gu3b` = `decode/gu3_1` ++ `decode/rk_line` ++ `decode/gu3_2` ++ `deepseek_v41:banked/gu3b_w` ++ `decode/gu3_3` ++ `decode/gu3_stores` ++ `decode/gu3_4` (2717 B, `cf09a195e002`) |
+| header | `header` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` (18000 B, `771237d24284`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** DeepSeek-V4.1: launch 2 of `root.moeClampedBanked` (DeepSeek-V4.1's streamed routed experts: each
+  row-slot one routed pair at top-1 over an expert streamer's three slot banks, base, ext and transient; 1 to
+  `banked_rows_max` (64) row-slots), in its gate|up half. Served by default: `Config.banked_group` 2 runs the banked
+  texts.
+- **Shapes and dtypes:** xgp, xup f16 [rows, hidden] (`turboexl3_prep2b`'s xg, xu, lane order); slots the ids u32 or i32
+  [rows], each packed (bank << 24 | slot row); gate_t0/1/2 and up_t0/1/2 U16 or I16 [E_b, hidden/16, inter/16, n] (bank
+  b's trellis, every bank one dtype; I16 is the streamer's code arrays). Out: zg, zu f32 [KS_gu, rows, inter] (the
+  split-K gate and up planes). KS_gu is the gate|up's K slices, the largest of 4, 2, 1 with (hidden/16) % (2·KS) = 0
+  (`Kernels3.initWith(geo, 1, 4, 2)` from `root.kernelsFor`).
+- **Grid and threadgroup:** `((inter/(16·BT))·128, rows, z)` / `(128, 1, 1)`, z = max(1, KS_gu / kdiv9[min(rows, 4) −
+  1]) threadgroups along K (`kdiv9` 1 by default, so z = KS_gu).
+- **Template args:** NHW (n, the halfwords per tile: K = NHW/16), CODEBOOK (MUL1 0, MCG 1), WBITS (the window's bits),
+  HID (hidden), INTER (inter), RKC (rows), KS (KS_gu), SPT (KS_gu / z: 1 by default), BT (output tiles per threadgroup:
+  `bt1` at one row-slot, `bt9` from two, both 2 by default), GROUP (2 from two row-slots, so two row-slots of one packed
+  id share a decode only on one bank's one slot; 1 at one), DEFER (1 for MUL1: the GEMV sums x times the codeword's byte
+  sum). Every rate `bankedCall` admits (gate, up and down at one rate), both codebooks and every window.
+- **Replaces:** `turboexl3_gu3`, launched once per bank by each bank's own `moeClamped` call: one launch over the three
+  banks.
+- **Bits:** byte-identical to `moeClamped` on the pair's bank at top-1 with score 1: `gu3b_w` (the weight base: the
+  bank's trellis at the slot row) replaces only the line that reads a bank's arrays, so every other statement is
+  `gu3`'s. The streamer's sum, each full token's six pairs weighed, is held within 5e-3 of the clamped host reference's
+  rms (`ref.compare` against `ref.moeRowClamped`).
+- **Pinned by:** `src/models/deepseek_v41/banked_test.zig` "turboexl3 banked decode texts: each is its base text with
+  the bank's lines in place ..." (CPU: the text is its base text with `gu3b_w` in place of the base line and nothing
+  else, every input read, no shape buffer); `src/models/deepseek_v41/banked_test.zig` "turboexl3 banked decode refusals:
+  the clamp, the ids' shape and dtype, the banks' dtypes, ..." (CPU: the call's refusals, before a launch);
+  `src/models/deepseek_v41/banked_test.zig` "turboexl3 gpu banked decode: every pair of moeClampedBanked over three
+  banks is moeClamped's ..." (GPU: every pair byte for byte against `moeClamped` at rows 1, 2, 6, 7, 16, 36 and 48, x
+  bf16 and f32, trellis U16 and I16, at DeepSeek-V4.1's routed geometry (hidden 5120, width 2304, limit 10, MUL1) over
+  synthetic banks of 20, 12 and 8 experts, K3 and K2 (n 48, 32); sampled token sums to the reference by 5e-3). The texts
+  test also pins that the members compare the packed id.
+
+### `turboexl3_gu3bg`
+
+<!-- kernel-facts: turboexl3_gu3bg -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/deepseek_v41/banked.zig:272` (`const Banked`) |
+| inputs | `xgp`, `xup`, `slots`, `gate_t0`, `gate_t1`, `gate_t2`, `up_t0`, `up_t1`, `up_t2` |
+| outputs | `zg`, `zu` |
+| source | `text_gu3bg` = `decode/gu3_1` ++ `decode/rk_line` ++ `deepseek_v41:banked/gu3g_2` ++ `deepseek_v41:banked/gu3b_w` ++ `deepseek_v41:banked/gu3g_3` (2796 B, `e427ea27f330`) |
+| header | `header_group` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26373 B, `b7023ef0567c`) |
+| made at | `src/models/deepseek_v41/banked.zig:381` (`const Banked`) |
+| inputs | `xgp`, `xup`, `slots`, `gate_t0`, `gate_t1`, `gate_t2`, `up_t0`, `up_t1`, `up_t2` |
+| outputs | `zg`, `zu` |
+| source | `text_gu3bg` = `decode/gu3_1` ++ `decode/rk_line` ++ `deepseek_v41:banked/gu3g_2` ++ `deepseek_v41:banked/gu3b_w` ++ `deepseek_v41:banked/gu3g_3` (2796 B, `e427ea27f330`) |
+| header | `group_headers[v].ptr` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26373 B, `b7023ef0567c`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** DeepSeek-V4.1: launch 2 of `root.moeClampedBanked` (DeepSeek-V4.1's streamed routed experts: each
+  row-slot one routed pair at top-1 over an expert streamer's three slot banks, base, ext and transient; 1 to
+  `banked_rows_max` (64) row-slots) on today's grouped texts (g4): `Config.banked_group` 4 with `banked_m3` false, or
+  `BankedSel` g4. Not served by default. Its name is also variant 0's in the variant table (`group_gu_names[0]`;
+  `groupGemvs` makes only variants 1 and up).
+- **Shapes and dtypes:** As `turboexl3_gu3b`: xgp, xup f16 [rows, hidden]; slots the packed ids u32 or i32 [rows],
+  `skip_id` 0xFFFFFFFF (`root.banked_skip_id`) marks a row-slot that runs no expert (no decode, no plane rows written);
+  gate_t0/1/2, up_t0/1/2 U16 or I16 [E_b, hidden/16, inter/16, n]. Out: zg, zu f32 [KS_gu, rows, inter].
+- **Grid and threadgroup:** As `turboexl3_gu3b`: `((inter/(16·BT))·128, rows, z)` / `(128, 1, 1)`, z = KS_gu by default.
+  (`cfgsBankedG`).
+- **Template args:** NHW (n, the halfwords per tile: K = NHW/16), CODEBOOK (MUL1 0, MCG 1), WBITS (the window's bits),
+  HID (hidden), INTER (inter), RKC (rows), KS (KS_gu), SPT (KS_gu / z: 1 by default), BT (output tiles per threadgroup:
+  `bt1` at one row-slot, `bt9` from two, both 2 by default), GROUP (4 from two row-slots, 1 at one: up to four row-slots
+  of one packed id per lead threadgroup (`turboexl3_members_g`), a skipped row-slot no member), DEFER (1 for MUL1: the
+  GEMV sums x times the codeword's byte sum). Every rate `bankedCall` admits (gate, up and down at one rate), both
+  codebooks and every window. Inside: the member paths M 1, 2 and 4 of `turboexl3_gemv_group`, so a lead of three
+  members runs the M = 4 path with a fourth member's FMAs padding.
+- **Replaces:** `turboexl3_gu3b` in the same launch: the members widened from two row-slots of one packed id to four
+  (`gu3g_2`, `gu3g_3`), the banked weight base (`gu3b_w`) between them.
+- **Bits:** byte-identical to the banked text `turboexl3_gu3b` (the grouped call's rows are the banked call's): every
+  weight is read and decoded once and fed to each member in the one-member order.
+- **Pinned by:** `src/models/deepseek_v41/banked_test.zig` "turboexl3 grouped banked decode texts: prep2bg, fin7cbg and
+  dfin3bg are the banked texts ..." (CPU: the banked text's constants and grid line, then the four-member head, the
+  banked weight base, the four-member tail); `src/models/deepseek_v41/banked_test.zig` "turboexl3 gpu banked group: the
+  grouped banked call's rows are the banked call's ..." (GPU: the grouped call against the banked call, byte for byte, a
+  skipped row-slot's y row 0, rows 6, 12, 36 and 48, x bf16, trellis I16, at DeepSeek-V4.1's routed geometry (hidden
+  5120, width 2304, limit 10, MUL1) over synthetic banks of 20, 12 and 8 experts, K3 and K2 (n 48, 32); up to eight
+  row-slots of one id: two leads); `src/models/deepseek_v41/banked_ilp_test.zig` "turboexl3 banked ilp: variant 0 is
+  today's (no defines, the stock kernel names), ..." (CPU: variant 0 keeps the stock name and no defines). It is the
+  reference arm (g4, variant 0) of `src/models/deepseek_v41/banked_grp_test.zig` "turboexl3 gpu banked grp: the M = 3
+  texts' gate|up outputs and rows are today's, ..." and `src/models/deepseek_v41/banked_ilp_test.zig` "turboexl3 gpu
+  banked ilp: every grouped GEMV variant's gate|up outputs and rows, ..." (GPU).
+
+### `turboexl3_gu3bg_<variant>`
+
+<!-- kernel-facts: turboexl3_gu3bg_<variant> -->
+
+| fact | from the code |
+|---|---|
+| names | `turboexl3_gu3bg_ku`, `turboexl3_gu3bg_pf`, `turboexl3_gu3bg_xh`, `turboexl3_gu3bg_m2`, `turboexl3_gu3bg_sh`, `turboexl3_gu3bg_t4`, `turboexl3_gu3bg_t1`, `turboexl3_gu3bg_t0`, `turboexl3_gu3bg_pfxh`, `turboexl3_gu3bg_pfsh`, `turboexl3_gu3bg_xhm2` |
+| made at | `src/models/deepseek_v41/banked.zig:381` (`const Banked`) |
+| inputs | `xgp`, `xup`, `slots`, `gate_t0`, `gate_t1`, `gate_t2`, `up_t0`, `up_t1`, `up_t2` |
+| outputs | `zg`, `zu` |
+| source | `text_gu3bg` = `decode/gu3_1` ++ `decode/rk_line` ++ `deepseek_v41:banked/gu3g_2` ++ `deepseek_v41:banked/gu3b_w` ++ `deepseek_v41:banked/gu3g_3` (2796 B, `e427ea27f330`) |
+| header | `group_headers[v].ptr`: a variant's defines ++ the base header, one per name |
+| header of `turboexl3_gu3bg_ku` | text '#define EXL3_KU 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26391 B, `893d0732e30e`) |
+| header of `turboexl3_gu3bg_pf` | text '#define EXL3_GPF 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26392 B, `719802404fb5`) |
+| header of `turboexl3_gu3bg_xh` | text '#define EXL3_GXH 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26392 B, `35cacdcfb1d7`) |
+| header of `turboexl3_gu3bg_m2` | text '#define EXL3_GM2 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26392 B, `d28773b43d18`) |
+| header of `turboexl3_gu3bg_sh` | text '#define EXL3_GSH 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26392 B, `1eaa64821218`) |
+| header of `turboexl3_gu3bg_t4` | text '#define EXL3_T1V 4\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26392 B, `acaeb8fa61e1`) |
+| header of `turboexl3_gu3bg_t1` | text '#define EXL3_T1V 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26392 B, `b0622147baad`) |
+| header of `turboexl3_gu3bg_t0` | text '#define EXL3_T1V 0\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26392 B, `9be4db5164be`) |
+| header of `turboexl3_gu3bg_pfxh` | text '#define EXL3_GPF 1\n#define EXL3_GXH 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26411 B, `c5b9183f1adc`) |
+| header of `turboexl3_gu3bg_pfsh` | text '#define EXL3_GPF 1\n#define EXL3_GSH 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26411 B, `2478957c5a9f`) |
+| header of `turboexl3_gu3bg_xhm2` | text '#define EXL3_GXH 1\n#define EXL3_GM2 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26411 B, `a43b1425ae6c`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** DeepSeek-V4.1: launch 2 of `root.moeClampedBanked` (DeepSeek-V4.1's streamed routed experts: each
+  row-slot one routed pair at top-1 over an expert streamer's three slot banks, base, ext and transient; 1 to
+  `banked_rows_max` (64) row-slots) at `Config.banked_variant_gu` v (1 to 11, needs `Config.banked_group` 4) on today's
+  grouped texts (`banked_m3` false), or `moeClampedBankedGateUpV` / `...SelV` with that variant; `Banked.groupGemvs`
+  makes each on first use (`banked_gv`). hw2's ILP retune; not served by default (variant 0).
+- **Shapes and dtypes:** As `turboexl3_gu3bg`.
+- **Grid and threadgroup:** As `turboexl3_gu3bg` (the configs of its texts, `cfgsBankedG`).
+- **Template args:** As `turboexl3_gu3bg`. The variant is the header: its Metal defines before `header_group`, under a
+  kernel name of its own (MLX keys a custom kernel's library by its name): `ku` EXL3_KU 1 (input tiles in pairs, both
+  tiles' words loaded before either decodes); `pf` EXL3_GPF 1 (a rolling prefetch: the next input tile's words loaded
+  before this tile decodes); `xh` EXL3_GXH 1 (each member's x quad held as half4 and widened at its FMA); `m2` EXL3_GM2
+  1 (the four-member path as two passes of two members, the second reading and decoding the tile again); `sh` EXL3_GSH 1
+  (the one-64-bit-window reader with each tile word loaded by one lane and taken by the others through `simd_shuffle`);
+  `t4`, `t1`, `t0` EXL3_T1V 4, 1, 0 (the route from a MUL1 codeword to t, default 3: 4 both pair sums as one half2, 1 a
+  shift and add for the 32-bit multiply, 0 the multiply by 0x10001 and an integer convert; MUL1 only); `pfxh`, `pfsh`,
+  `xhm2` two of those defines together.
+- **Replaces:** `turboexl3_gu3bg` in the same launch.
+- **Bits:** byte-identical to `turboexl3_gu3bg` (variant 0): each variant reads, decodes and sums every weight as
+  variant 0 does (the same codewords, decoded values, FMA sequence into the same f32 accumulators, and folds); they
+  differ only in when the tile words load, how many lanes load them, the registers the loop holds, the passes over a
+  tile and the instructions from a codeword to t.
+- **Pinned by:** `src/models/deepseek_v41/banked_ilp_test.zig` "turboexl3 banked ilp: variant 0 is today's (no defines,
+  the stock kernel names), ..." (CPU: each name distinct, its defines, each define's default in `header_group`, the
+  config's count of 12); `src/models/deepseek_v41/banked_ilp_test.zig` "turboexl3 gpu banked ilp: every grouped GEMV
+  variant's gate|up outputs and rows, ..." (GPU: every variant, both GEMVs at it, on g4 and g4m3, against g4 at variant
+  0: hd, hs and y word for word, a skipped row-slot's y row 0, rows 1, 2, 3, 4, 6, 7, 12, 16, 24, 36 and 48, x bf16 and
+  f32, trellis I16 and U16, at DeepSeek-V4.1's routed geometry (hidden 5120, width 2304, limit 10, MUL1) over synthetic
+  banks of 20, 12 and 8 experts, K3 and K2 (n 48, 32)); `src/models/deepseek_v41/banked_ilp_test.zig` "turboexl3 gpu
+  banked ilp t routes: every EXL3_T1V route gives today's route's t, ..." (GPU: the t routes of `t4`, `t1`, `t0` on
+  every codeword state, through `turboexl3_t1v_probe_<route>_<dtype>`); `src/core/config.zig` "turboexl3 config: the
+  defaults are valid and served; an unserved form, slice count ..." (CPU: a variant needs `banked_group` 4).
+
+### `turboexl3_gu3bgm3`
+
+<!-- kernel-facts: turboexl3_gu3bgm3 -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/deepseek_v41/banked.zig:300` (`const Banked`) |
+| inputs | `xgp`, `xup`, `slots`, `gate_t0`, `gate_t1`, `gate_t2`, `up_t0`, `up_t1`, `up_t2` |
+| outputs | `zg`, `zu` |
+| source | `text_gu3bgm3` = `decode/gu3_1` ++ `decode/rk_line` ++ `deepseek_v41:banked/gu3g_2` ++ `deepseek_v41:banked/gu3b_w` ++ `deepseek_v41:banked/gu3g_3m3` (2967 B, `5d637580686f`) |
+| header | `header_group` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26373 B, `b7023ef0567c`) |
+| made at | `src/models/deepseek_v41/banked.zig:379` (`const Banked`) |
+| inputs | `xgp`, `xup`, `slots`, `gate_t0`, `gate_t1`, `gate_t2`, `up_t0`, `up_t1`, `up_t2` |
+| outputs | `zg`, `zu` |
+| source | `text_gu3bgm3` = `decode/gu3_1` ++ `decode/rk_line` ++ `deepseek_v41:banked/gu3g_2` ++ `deepseek_v41:banked/gu3b_w` ++ `deepseek_v41:banked/gu3g_3m3` (2967 B, `5d637580686f`) |
+| header | `group_headers[v].ptr` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26373 B, `b7023ef0567c`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** DeepSeek-V4.1: launch 2 of `root.moeClampedBanked` (DeepSeek-V4.1's streamed routed experts: each
+  row-slot one routed pair at top-1 over an expert streamer's three slot banks, base, ext and transient; 1 to
+  `banked_rows_max` (64) row-slots) on hw4b's texts (g4m3): `Config.banked_group` 4 with `Config.banked_m3`, or
+  `BankedSel` g4m3. Not served by default. Its name is also variant 0's in the M = 3 variant table
+  (`group_gu_m3_names[0]`).
+- **Shapes and dtypes:** As `turboexl3_gu3b`: xgp, xup f16 [rows, hidden]; slots the packed ids u32 or i32 [rows],
+  `skip_id` 0xFFFFFFFF (`root.banked_skip_id`) marks a row-slot that runs no expert (no decode, no plane rows written);
+  gate_t0/1/2, up_t0/1/2 U16 or I16 [E_b, hidden/16, inter/16, n]. Out: zg, zu f32 [KS_gu, rows, inter].
+- **Grid and threadgroup:** As `turboexl3_gu3b`: `((inter/(16·BT))·128, rows, z)` / `(128, 1, 1)`, z = KS_gu by default.
+  (`cfgsBankedGM3`).
+- **Template args:** NHW (n, the halfwords per tile: K = NHW/16), CODEBOOK (MUL1 0, MCG 1), WBITS (the window's bits),
+  HID (hidden), INTER (inter), RKC (rows), KS (KS_gu), SPT (KS_gu / z: 1 by default), BT (output tiles per threadgroup:
+  `bt1` at one row-slot, `bt9` from two, both 2 by default), GROUP (4 from two row-slots, 1 at one: up to four row-slots
+  of one packed id per lead threadgroup (`turboexl3_members_g`), a skipped row-slot no member), DEFER (1 for MUL1: the
+  GEMV sums x times the codeword's byte sum). Every rate `bankedCall` admits (gate, up and down at one rate), both
+  codebooks and every window. Inside: the member paths M 1, 2, 3 and 4.
+- **Replaces:** `turboexl3_gu3bg` in the same launch: its text with one line added (`gu3g_3m3`), an M = 3 path for a
+  lead with three members, where `gu3bg` runs the M = 4 path with a fourth member's FMAs padding.
+- **Bits:** byte-identical to `turboexl3_gu3bg` (g4): every member fed in the one-member order (`turboexl3_gemv_group`);
+  the call's hd, hs and y equal today's, differing words 0, max_ulps 0, a skipped row-slot's y row 0.
+- **Pinned by:** `src/models/deepseek_v41/banked_grp_test.zig` "turboexl3 banked grp: the M = 3 texts are today's
+  grouped texts with the one M = 3 line ..." (CPU: today's grouped text with the one M = 3 line added after the M = 2
+  line); `src/models/deepseek_v41/banked_grp_test.zig` "turboexl3 gpu banked grp: the M = 3 texts' gate|up outputs and
+  rows are today's, ..." (GPU: g4m3 against g4, hd, hs and y word for word, rows 1 to 9, 12, 16, 24, 36, 42, 48 and 64,
+  x bf16 and f32, trellis I16 and U16, one id on up to 16 row-slots, skipped row-slots, at DeepSeek-V4.1's routed
+  geometry (hidden 5120, width 2304, limit 10, MUL1) over synthetic banks of 20, 12 and 8 experts, K3 and K2 (n 48,
+  32)); `src/models/deepseek_v41/banked_ilp_test.zig` "turboexl3 banked ilp: variant 0 is today's (no defines, the stock
+  kernel names), ..." (CPU: the names distinct); `src/models/deepseek_v41/banked_ilp_test.zig` "turboexl3 gpu banked
+  ilp: every grouped GEMV variant's gate|up outputs and rows, ..." (GPU: variant 0 on hw4b's texts against g4's variant
+  0); `src/core/config.zig` "turboexl3 config: the defaults are valid and served; an unserved form, slice count ..."
+  (CPU: `banked_m3` needs `banked_group` 4).
+
+### `turboexl3_gu3bgm3_<variant>`
+
+<!-- kernel-facts: turboexl3_gu3bgm3_<variant> -->
+
+| fact | from the code |
+|---|---|
+| names | `turboexl3_gu3bgm3_ku`, `turboexl3_gu3bgm3_pf`, `turboexl3_gu3bgm3_xh`, `turboexl3_gu3bgm3_m2`, `turboexl3_gu3bgm3_sh`, `turboexl3_gu3bgm3_t4`, `turboexl3_gu3bgm3_t1`, `turboexl3_gu3bgm3_t0`, `turboexl3_gu3bgm3_pfxh`, `turboexl3_gu3bgm3_pfsh`, `turboexl3_gu3bgm3_xhm2` |
+| made at | `src/models/deepseek_v41/banked.zig:379` (`const Banked`) |
+| inputs | `xgp`, `xup`, `slots`, `gate_t0`, `gate_t1`, `gate_t2`, `up_t0`, `up_t1`, `up_t2` |
+| outputs | `zg`, `zu` |
+| source | `text_gu3bgm3` = `decode/gu3_1` ++ `decode/rk_line` ++ `deepseek_v41:banked/gu3g_2` ++ `deepseek_v41:banked/gu3b_w` ++ `deepseek_v41:banked/gu3g_3m3` (2967 B, `5d637580686f`) |
+| header | `group_headers[v].ptr`: a variant's defines ++ the base header, one per name |
+| header of `turboexl3_gu3bgm3_ku` | text '#define EXL3_KU 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26391 B, `893d0732e30e`) |
+| header of `turboexl3_gu3bgm3_pf` | text '#define EXL3_GPF 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26392 B, `719802404fb5`) |
+| header of `turboexl3_gu3bgm3_xh` | text '#define EXL3_GXH 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26392 B, `35cacdcfb1d7`) |
+| header of `turboexl3_gu3bgm3_m2` | text '#define EXL3_GM2 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26392 B, `d28773b43d18`) |
+| header of `turboexl3_gu3bgm3_sh` | text '#define EXL3_GSH 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26392 B, `1eaa64821218`) |
+| header of `turboexl3_gu3bgm3_t4` | text '#define EXL3_T1V 4\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26392 B, `acaeb8fa61e1`) |
+| header of `turboexl3_gu3bgm3_t1` | text '#define EXL3_T1V 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26392 B, `b0622147baad`) |
+| header of `turboexl3_gu3bgm3_t0` | text '#define EXL3_T1V 0\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26392 B, `9be4db5164be`) |
+| header of `turboexl3_gu3bgm3_pfxh` | text '#define EXL3_GPF 1\n#define EXL3_GXH 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26411 B, `c5b9183f1adc`) |
+| header of `turboexl3_gu3bgm3_pfsh` | text '#define EXL3_GPF 1\n#define EXL3_GSH 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26411 B, `2478957c5a9f`) |
+| header of `turboexl3_gu3bgm3_xhm2` | text '#define EXL3_GXH 1\n#define EXL3_GM2 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26411 B, `a43b1425ae6c`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** DeepSeek-V4.1: launch 2 of `root.moeClampedBanked` (DeepSeek-V4.1's streamed routed experts: each
+  row-slot one routed pair at top-1 over an expert streamer's three slot banks, base, ext and transient; 1 to
+  `banked_rows_max` (64) row-slots) at `Config.banked_variant_gu` v (1 to 11, needs `Config.banked_group` 4) on hw4b's
+  texts (`banked_m3` true), or `moeClampedBankedGateUpV` / `...SelV` with that variant; `Banked.groupGemvs` makes each
+  on first use (`banked_gvm3`). hw2's ILP retune; not served by default (variant 0).
+- **Shapes and dtypes:** As `turboexl3_gu3bgm3`.
+- **Grid and threadgroup:** As `turboexl3_gu3bgm3` (`cfgsBankedGM3`).
+- **Template args:** As `turboexl3_gu3bgm3`. The variant is the header: its Metal defines before `header_group`, under a
+  kernel name of its own: `ku` EXL3_KU 1 (input tiles in pairs, both tiles' words loaded before either decodes); `pf`
+  EXL3_GPF 1 (a rolling prefetch: the next input tile's words loaded before this tile decodes); `xh` EXL3_GXH 1 (each
+  member's x quad held as half4 and widened at its FMA); `m2` EXL3_GM2 1 (the four-member path as two passes of two
+  members, the second reading and decoding the tile again); `sh` EXL3_GSH 1 (the one-64-bit-window reader with each tile
+  word loaded by one lane and taken by the others through `simd_shuffle`); `t4`, `t1`, `t0` EXL3_T1V 4, 1, 0 (the route
+  from a MUL1 codeword to t, default 3: 4 both pair sums as one half2, 1 a shift and add for the 32-bit multiply, 0 the
+  multiply by 0x10001 and an integer convert; MUL1 only); `pfxh`, `pfsh`, `xhm2` two of those defines together.
+- **Replaces:** `turboexl3_gu3bgm3` in the same launch.
+- **Bits:** byte-identical to `turboexl3_gu3bgm3` (variant 0): each variant reads, decodes and sums every weight as
+  variant 0 does (the same codewords, decoded values, FMA sequence into the same f32 accumulators, and folds); they
+  differ only in when the tile words load, how many lanes load them, the registers the loop holds, the passes over a
+  tile and the instructions from a codeword to t. The GPU test holds each to g4's variant 0, so to `turboexl3_gu3bg`.
+- **Pinned by:** `src/models/deepseek_v41/banked_ilp_test.zig` "turboexl3 banked ilp: variant 0 is today's (no defines,
+  the stock kernel names), ..." (CPU: each name distinct, its defines, each define's default in `header_group`, the
+  config's count of 12); `src/models/deepseek_v41/banked_ilp_test.zig` "turboexl3 gpu banked ilp: every grouped GEMV
+  variant's gate|up outputs and rows, ..." (GPU: every variant, both GEMVs at it, on g4 and g4m3, against g4 at variant
+  0: hd, hs and y word for word, a skipped row-slot's y row 0, rows 1, 2, 3, 4, 6, 7, 12, 16, 24, 36 and 48, x bf16 and
+  f32, trellis I16 and U16, at DeepSeek-V4.1's routed geometry (hidden 5120, width 2304, limit 10, MUL1) over synthetic
+  banks of 20, 12 and 8 experts, K3 and K2 (n 48, 32)); `src/models/deepseek_v41/banked_ilp_test.zig` "turboexl3 gpu
+  banked ilp t routes: every EXL3_T1V route gives today's route's t, ..." (GPU: the t routes of `t4`, `t1`, `t0` on
+  every codeword state, through `turboexl3_t1v_probe_<route>_<dtype>`); `src/core/config.zig` "turboexl3 config: the
+  defaults are valid and served; an unserved form, slice count ..." (CPU: a variant needs `banked_group` 4).
+
+### `turboexl3_prep2b`
+
+<!-- kernel-facts: turboexl3_prep2b -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/deepseek_v41/banked.zig:241` (`const Banked`) |
+| inputs | `x`, `slots`, `gate_suh0`, `gate_suh1`, `gate_suh2`, `up_suh0`, `up_suh1`, `up_suh2` |
+| outputs | `xg`, `xu`, `sg`, `su` |
+| source | `text_prep2b` = `decode/prep2_1` ++ `deepseek_v41:banked/prep2b_expert` ++ `decode/prep2_row` ++ `decode/prep2_2` (2352 B, `affd7b64e88f`) |
+| header | `header` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` (18000 B, `771237d24284`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** DeepSeek-V4.1: launch 1 of `root.moeClampedBanked` (DeepSeek-V4.1's streamed routed experts: each
+  row-slot one routed pair at top-1 over an expert streamer's three slot banks, base, ext and transient; 1 to
+  `banked_rows_max` (64) row-slots), the start of its gate|up half (`moeClampedBankedGateUp`,
+  `banked.Banked.bankedGateUp`). Served by default: `Config.banked_group` 2 runs the banked texts.
+- **Shapes and dtypes:** x T [rows, hidden] (T bf16, f16 or f32; TOPK 1, so row-slot r reads row r); slots the ids u32
+  or i32 [rows], each packed (bank << 24 | slot row); gate_suh0/1/2 and up_suh0/1/2 f16 [E_b, hidden] (bank b's suh, E_b
+  its slot count). Out: xg, xu f16 [rows, hidden] (the rotated inputs, lane order); sg, su f32 [rows, hidden/128] (each
+  128-block's sum of the rounded inputs, for the deferred MUL1 map).
+- **Grid and threadgroup:** `((hidden/128)·32, rows, 1)` / `(32, 1, 1)`.
+- **Template args:** DIM (hidden), TOPK (1). Every rate, codebook and window: the prepare reads no weight.
+- **Replaces:** `turboexl3_prep2`, launched once per bank by each bank's own `moeClamped` call at top-1: one launch over
+  the three banks. The banked chain is form 7's five launches (`prep2b` -> `gu3b` -> `fin7cb` -> `down3b` -> `dfin3b`),
+  five dependent levels, in form 9's launch shape.
+- **Bits:** byte-identical to `moeClamped` on the pair's bank at top-1 with score 1: `prep2b_expert` (the slot row and
+  the bank's gate and up suh) replaces only the line that reads a bank's arrays, so every other statement is `prep2`'s.
+  The streamer's sum, each full token's six pairs weighed, is held within 5e-3 of the clamped host reference's rms
+  (`ref.compare` against `ref.moeRowClamped`).
+- **Pinned by:** `src/models/deepseek_v41/banked_test.zig` "turboexl3 banked decode texts: each is its base text with
+  the bank's lines in place ..." (CPU: the text is its base text with `prep2b_expert` in place of the base line and
+  nothing else, every input read, no shape buffer); `src/models/deepseek_v41/banked_test.zig` "turboexl3 banked decode
+  refusals: the clamp, the ids' shape and dtype, the banks' dtypes, ..." (CPU: the call's refusals, before a launch);
+  `src/models/deepseek_v41/banked_test.zig` "turboexl3 gpu banked decode: every pair of moeClampedBanked over three
+  banks is moeClamped's ..." (GPU: every pair byte for byte against `moeClamped` at rows 1, 2, 6, 7, 16, 36 and 48, x
+  bf16 and f32, trellis U16 and I16, at DeepSeek-V4.1's routed geometry (hidden 5120, width 2304, limit 10, MUL1) over
+  synthetic banks of 20, 12 and 8 experts, K3 and K2 (n 48, 32); sampled token sums to the reference by 5e-3).
+
+### `turboexl3_prep2bg`
+
+<!-- kernel-facts: turboexl3_prep2bg -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/deepseek_v41/banked.zig:270` (`const Banked`) |
+| inputs | `x`, `slots`, `gate_suh0`, `gate_suh1`, `gate_suh2`, `up_suh0`, `up_suh1`, `up_suh2` |
+| outputs | `xg`, `xu`, `sg`, `su` |
+| source | `text_prep2bg` = `decode/prep2_1` ++ `deepseek_v41:banked/skip_rk` ++ `deepseek_v41:banked/prep2b_expert` ++ `decode/prep2_row` ++ `decode/prep2_2` (2469 B, `110fd5d50005`) |
+| header | `header` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` (18000 B, `771237d24284`) |
+| made at | `src/models/deepseek_v41/banked.zig:298` (`const Banked`) (the same text) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** DeepSeek-V4.1: launch 1 of `root.moeClampedBanked` (DeepSeek-V4.1's streamed routed experts: each
+  row-slot one routed pair at top-1 over an expert streamer's three slot banks, base, ext and transient; 1 to
+  `banked_rows_max` (64) row-slots) on the grouped texts, both today's (g4) and hw4b's (g4m3: made at both sites). Not
+  served by default: `Config.banked_group` 4 selects the grouped texts, or a call through `moeClampedBankedSel*` with
+  `BankedSel` g4 or g4m3 (hw4b's check mode, the tests).
+- **Shapes and dtypes:** As `turboexl3_prep2b`; `skip_id` 0xFFFFFFFF (`root.banked_skip_id`) marks a row-slot that runs
+  no expert, and its xg, xu, sg and su rows are left unwritten.
+- **Grid and threadgroup:** As `turboexl3_prep2b`: `((hidden/128)·32, rows, 1)` / `(32, 1, 1)` (`cfgsBankedG`,
+  `cfgsBankedGM3`).
+- **Template args:** DIM (hidden), TOPK (1).
+- **Replaces:** `turboexl3_prep2b` in the same launch: its text with `skip_rk` (return on a skipped row-slot) before the
+  bank lines.
+- **Bits:** byte-identical to `turboexl3_prep2b` for every row-slot not skipped.
+- **Pinned by:** `src/models/deepseek_v41/banked_test.zig` "turboexl3 grouped banked decode texts: prep2bg, fin7cbg and
+  dfin3bg are the banked texts ..." (CPU: the text is the banked text with the skip line before its bank lines);
+  `src/models/deepseek_v41/banked_test.zig` "turboexl3 gpu banked group: the grouped banked call's rows are the banked
+  call's ..." (GPU: the grouped call's rows equal the banked call's byte for byte, a skipped row-slot's y row 0, rows 6,
+  12, 36 and 48, x bf16, trellis I16, at DeepSeek-V4.1's routed geometry (hidden 5120, width 2304, limit 10, MUL1) over
+  synthetic banks of 20, 12 and 8 experts, K3 and K2 (n 48, 32)). It runs in every arm of
+  `src/models/deepseek_v41/banked_grp_test.zig` "turboexl3 gpu banked grp: the M = 3 texts' gate|up outputs and rows are
+  today's, ..." and `src/models/deepseek_v41/banked_ilp_test.zig` "turboexl3 gpu banked ilp: every grouped GEMV
+  variant's gate|up outputs and rows, ..." (GPU), which hold the whole call's hd, hs and y.
+
+## `src/models/deepseek_v41/f3.zig`
+
+F3 (`root.sharedSwiglu`): the shared expert's gate and up finishes, the clamped SwiGLU and the down's prepare in one
+launch. `F3` keeps it beside a `dense.Dense`.
+
+### `turboexl3_dense_swiglu_prep`
+
+<!-- kernel-facts: turboexl3_dense_swiglu_prep -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/deepseek_v41/f3.zig:43` (`const F3`) |
+| inputs | `z1`, `xs1`, `svh1`, `z3`, `xs3`, `svh3`, `suh2`, `lim` |
+| outputs | `xp`, `xs` |
+| source | `text_swiglu_prep` = `deepseek_v41:f3/swiglu_prep` (4775 B, `111d0a28a123`) |
+| header | `decode.header` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` (18000 B, `771237d24284`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** DeepSeek-V4.1 (F3): `root.sharedSwiglu` (where `root.sharedSwigluTakes` holds), its shared expert at the
+  decode rows the dense chain takes, 5 to 16 (DEC-ONE keeps 1 to 4, so F3 refuses them), one rate and decode for gate,
+  up and down, limit > 0 (`swiglu_limit` 10). Made on first use on the gate's `Dense`. Ripple's clamped SwiGLU has the
+  same shape.
+- **Shapes and dtypes:** z1, z3 f32 [KS · rows, DIM] (the gate's and up's planes, `Dense.prepareGemv`; DIM = their OUT,
+  the inter width); xs1, xs3 f32 [rows, IN/128]; svh1, svh3 f16 [DIM]; suh2 f16 [DIM] (the down's suh); lim f32 [1].
+  Out: xp f16 [rows, DIM] in lane order; xs f32 [rows, DIM/128] (the down's prepared rows and block sums).
+- **Grid and threadgroup:** `((DIM/128) · 32, rows, 1)` / `(32, 1, 1)`: one simdgroup per (128-block, row).
+- **Template args:** DIM, KS1 and KS3 (both the gate shape's `ks_split`), ROWS, INBLK (IN/128), DEFER, OUT_T (the gate's
+  and up's output dtype, x's), ACT_T (the activation dtype `act`: bf16, f16 or f32; the configs are rebuilt when it
+  changes). Every rate, codebook and window (it reads no weight).
+- **Replaces:** the gate's and up's `turboexl3_dense_dfinish`, the host's clamped SwiGLU in MLX (astype f32, minimum,
+  maximum, minimum, sigmoid, multiplies, astype to `act`) and the down's `turboexl3_dense_prep_s`: three launches fewer
+  (`root.sharedSwiglu`'s comment) plus the MLX ops, and the finish -> SwiGLU -> prepare levels become one.
+- **Bits:** byte-identical to the host's chain (gate and up `linear`, astype f32, MLX's clamped SwiGLU, astype to `act`,
+  down `linear`).
+- **Pinned by:** `src/models/deepseek_v41/f3_test.zig` "turboexl3 f3u: the fused shared-expert text is text_dfinish's
+  finishes, MLX's clamped SwiGLU and text_prep_s's prepare" (CPU, its lines); `src/models/deepseek_v41/f3_test.zig`
+  "turboexl3 gpu f3u bytes: sharedSwiglu gives the host's shared expert's words at rows 1 to 16 (TURBOEXL3_F3=1)" (GPU,
+  bytes at rows 1 to 16 in bf16 and 6 and 12 in f32, `sharedSwigluTakes` true exactly from 5 rows);
+  `src/models/deepseek_v41/f3_test.zig` "turboexl3 gpu f3u time: the 40-layer trunk chain with the host's shared expert
+  against F3 at rows 5, ..." (GPU, every run's 40-layer output the first run's words).
 
 ## `src/models/deepseek_v41/f3_test.zig`
 

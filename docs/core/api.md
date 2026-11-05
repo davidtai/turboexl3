@@ -5,7 +5,9 @@ The module root `src/root.zig`: its entry points and the one `Config` a consumer
 ## API
 
 `src/root.zig` is the module root. The expert entry points mirror Sushi's `sushi_exl3` module, so a host switches
-engines by changing one import. An entry point that does not serve a call returns `error.Exl3EngineNotImplemented`
+engines by changing one import. The entry points of one model live in its folder's `api.zig`
+(`src/models/qwen38/api.zig`, `src/models/deepseek_v41/api.zig`); root re-exports each under its own name, so a
+consumer imports root alone. An entry point that does not serve a call returns `error.Exl3EngineNotImplemented`
 before it launches anything. The caller then runs its own chain. Malformed operands return `error.BadExl3Shape` or
 `error.BadExl3Dtype`.
 
@@ -32,9 +34,9 @@ The routed experts:
 | `moe` | the routed experts of one MoE layer: decode rows through the split-K GEMV chain, prefill rows through the fused GEMM chain; its argument `verify_rows` is Sushi's and changes nothing here |
 | `moeWithShared` | `moe`, then an MLX add of a shared-expert output that the caller has already gated |
 | `moeClamped` | `moe` with DeepSeek-V4's (and GLM's) clamped SwiGLU, `swiglu_limit` 1 to 128: the gate clamped from above and up to [−limit, limit] before SwiGLU; decode rows on fin7's clamped variant, prefill rows on the clamped mid |
-| `moeClampedBanked` (`moeClampedBankedGateUp`, `moeClampedBankedDown`) | `moeClamped`'s decode launches over an expert streamer's three slot banks: up to 64 routed pairs, each a row-slot whose id is packed (bank << 24 \| slot row), each pair's output at weight 1 with `moeClamped`'s bytes on its bank at top-1; the gate\|up and the down as two calls (the gate\|up half also reads the down's suh: it prepares the down's input) |
+| `moeClampedBanked` (`moeClampedBankedGateUp`, `moeClampedBankedDown`) | DeepSeek-V4.1 (`models/deepseek_v41/api.zig`): `moeClamped`'s decode launches over an expert streamer's three slot banks: up to 64 routed pairs, each a row-slot whose id is packed (bank << 24 \| slot row), each pair's output at weight 1 with `moeClamped`'s bytes on its bank at top-1; the gate\|up and the down as two calls (the gate\|up half also reads the down's suh: it prepares the down's input) |
 
-The shared expert and the router, at 1 to 4 decode rows:
+Qwen3.8's shared expert and router, at 1 to 4 decode rows (`models/qwen38/api.zig`):
 
 | name | what it does |
 |---|---|
@@ -47,12 +49,14 @@ The dense projections:
 |---|---|
 | `linear` | one dense EXL3 projection. 1 to 4 rows: DEC-ONE. 5 to 16 rows: the multi-row GEMV chain of three launches, which decodes each weight once per row chunk: 5 rows in one chunk, 6 to 8 rows in one chunk on the lean GEMV, and 9 to 16 rows in two chunks. 17 to 32 rows: the register-path GEMM. More rows: dequantize, then MLX's matmul |
 | `linearSplit` | `linear` with the inner product and the finish of prefill rows on a second MLX stream; the same bytes |
-| `linearInnerSplit`, `linearPrepared`, `linearFinish`, `linearPrep` | `linear` in pieces, so the host can run its fused norm-gate of the GDN layers between them |
-| `linearPiecesBegin`, `linearPieceInner`, `linearPiecePrepared`, `linearPiecesFinish` | `linear` of one call cut into 2 to 4 row pieces, so the host can overlap them with its own launches |
-| `linearGrouped` | a grouped (block-diagonal) linear, DeepSeek-V4.1's `wo_a`: x `[..., G, in]` through G stacked slices. 1 to 16 rows: three launches whatever G. More rows: `linear` of each slice. Each slice has `linear`'s values |
-| `linearBias` | `linear`, then an MLX add of a bias `[out]` in x's dtype (DeepSeek-V4.1's vision tower and aligner) |
+| `linearInnerSplit`, `linearPrepared`, `linearFinish`, `linearPrep` | `linear` in pieces, so the host can run its fused norm-gate of the GDN layers between them (users: Qwen3.8's GDN layers) |
+| `gdnOutPrep` | Qwen3.8 (`models/qwen38/api.zig`): the GDN layer's tail at prefill rows, z's finish, the gated norm and out_proj's prepare in one launch |
+| `linearPiecesBegin`, `linearPieceInner`, `linearPiecePrepared`, `linearPiecesFinish` | `linear` of one call cut into 2 to 4 row pieces, so the host can overlap them with its own launches (users: Qwen3.8's GDN layers, after the fused tail) |
+| `linearGrouped` | DeepSeek-V4.1 (`models/deepseek_v41/api.zig`): a grouped (block-diagonal) linear, its `wo_a`: x `[..., G, in]` through G stacked slices. 1 to 16 rows: three launches whatever G. More rows: `linear` of each slice. Each slice has `linear`'s values |
+| `linearBias` | `linear`, then an MLX add of a bias `[out]` in x's dtype (users: DeepSeek-V4.1's vision tower and aligner) |
+| `sharedSwigluTakes`, `sharedSwiglu` | DeepSeek-V4.1 (`models/deepseek_v41/api.zig`, F3): its shared expert at decode rows, the clamped SwiGLU and the down's prepare in one launch, the bytes of three `linear`s and the host's SwiGLU |
 
-The attention projections:
+Qwen3.8's attention projections (`models/qwen38/api.zig`):
 
 | name | what it does |
 |---|---|
@@ -72,7 +76,9 @@ The resident and un-rotated trunk:
 | `attnInStd`, `linearGatedStd` | ATTN-IN and ATTN-OUT over the un-rotated trunk |
 
 The namespaces are `config`, `format` (the reference), `spec`, `lane` (the codeword readers), `decode`, `dense`,
-`grouped`, `prefill`, `attn_io`, `decode_merge`, `unfused` and `ref`. The doc comment of each function states its
+`pgemm`, `prefill`, `sources`, `unfused` and `ref` (the core); `qwen38` (its entries), `attn_io`, `decode_merge`,
+`gdn_out` and `shared_heads` (Qwen3.8); `deepseek_v41` (its entries), `grouped`, `banked` and `f3` (DeepSeek-V4.1);
+and `ricursive` (Ripple). The doc comment of each function states its
 shapes, its dtypes, the chain whose bytes it gives and when it refuses.
 
 ## Configuration

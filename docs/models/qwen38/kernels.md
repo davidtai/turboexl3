@@ -1,8 +1,8 @@
 # Qwen3.8-Flash-Next kernels
 
-The paths only Qwen3.8 uses. The shared expert and router heads live in the core's decode launches
-(`src/core/decode.zig`); their entries are in [the core catalog](../../core/kernels.md). The attention projections, the
-decode-row merges and the GDN tail live in `src/models/qwen38/`; their entries close this page. How to read the diagrams
+The paths only Qwen3.8 uses, all in `src/models/qwen38/`: the shared expert and router heads inside the core's routed
+decode launches (`shared.zig`, on `src/core/decode.zig`'s `Kernels3`), the attention projections, the decode-row merges
+and the GDN tail. Their entries close this page. How to read the diagrams
 and the exactness classes: [the engines page](../../core/engines.md#how-to-read-this-page).
 
 ## 1. Shared expert and router inside the decode launches (rows 1–4)
@@ -1051,3 +1051,974 @@ Kernels the decode-row merges' tests make as references (test only).
   and inside the QSA merge equals the ..." (GPU, as the reference at rows 1 to 6, 8, 9 and 16, rates 112 and 80);
   `src/models/qwen38/decb.zig` "turboexl3 decode merges texts: dense's split finishes are its old texts, and every
   variant carries the ..." (CPU: the qmerge form keeps `merge_store`'s line).
+
+## `src/models/qwen38/shared.zig`
+
+The gated shared expert and the router fold inside form 9's routed decode launches (`root.moeFusedShared`,
+`moeFusedSharedRouted`; [section 1](#1-shared-expert-and-router-inside-the-decode-launches-rows-14) above). `SharedHeads`
+keeps them beside a geometry's `decode.Kernels3`.
+
+### `turboexl3_dfin7s`
+
+<!-- kernel-facts: turboexl3_dfin7s -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/qwen38/shared.zig:470` (`const SharedHeads`) |
+| inputs | `zd`, `slots`, `scores`, `down_svh`, `hsx`, `szd`, `sxsd`, `sh_down_svh`, `sigtab`, `slogit` |
+| outputs | `y` |
+| source | `text_dfin7s` = `qwen38:shared/dfin7s` (2344 B, `651b59911525`) |
+| header | `header_s` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` ++ `qwen38:shared/shared` (30584 B, `af3e3f8b3d2f`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** Qwen3.8-Flash-Next (`src/models/qwen38/shared.zig`), served for its gated shared expert (y = routed +
+  sigmoid(logit) · shared(x)) through `root.moeFusedShared` and `root.moeFusedSharedRouted`, which the table's
+  `swiglu_shared` member calls (`table/table.zig` `swigluShared`) at 1 to 4 decode / verify rows
+  (`shared.shared_rows_max`) when `SharedHeads.sharedAdmitted` holds. Launch 5 of every served call:
+  `SharedHeads.moeShared` (and its fold `sharedFold`) and `moeSharedRouted`; also the reduce of `moeSharedSide` (not
+  served). No Config field selects it.
+- **Shapes and dtypes:** Notation: RK = rows · TOPK; E experts; H hidden; I the routed (= shared) intermediate; NBH =
+  H/128, NBI = I/128; T = x's dtype, bf16 or f16 (`sharedAdmitted`); slots u32 [RK] (`moeFusedShared` also admits i32
+  inds); the routed trellises U16 [E, H/16, I/16, NHW] (gate, up) and [E, I/16, H/16, NHW] (down); the shared trellises
+  [H/16, I/16, SNG] and [I/16, H/16, SND] (U16 in the tests; the entries check their shapes, not their dtype). In: zd
+  f32 [KS, RK, H] (the routed down planes); slots; scores [RK] f32, bf16 or f16 (from `route_prep`: the logits' dtype);
+  down_svh f16 [E, H]; hsx f32 [RK, NBI] (the routed down inputs' block sums, `hs`); szd f32 [SKSD, rows, H] (the shared
+  down planes); sxsd f32 [rows, NBI]; sh_down_svh f16 [H]; sigtab T [65536] (MLX's sigmoid of every 16-bit pattern);
+  slogit T [rows] (the shared gate's logit; bf16 from `route_prepg`). Out: y T [rows, H].
+- **Grid and threadgroup:** `((H/128) · 32 · (TOPK + 1), rows, 1)` / `(32 · (TOPK + 1), 1, 1)`: one threadgroup per
+  (128-block of hidden, row); simdgroup k < TOPK finishes slot k, simdgroup TOPK the shared down.
+- **Template args:** HID, TOPK, RKC (= RK), KS (the routed down's K slices), OUT_T (T), DEFER (the routed MUL1
+  deferral), NBI, SKSD (the shared down's K split), SRS (rows), SDEF (the shared MUL1 deferral). Rows 1 to 4; TOPK >= 4
+  (`sharedAdmitted`: it writes each block from its first 128 threads, as dfin7 does). It decodes no weight.
+- **Replaces:** `turboexl3_dfin7` (form 9's launch 5), the shared down `linear`'s finish (dense `dfinish`; inside
+  DEC-ONE's launch where served) and MLX's Sigmoid, Multiply and Add of the gate tail, as one launch.
+- **Bits:** byte-identical to the host's chain (form 3's routed y, the three dense `linear`s, the table SwiGLU, MLX's
+  Sigmoid, Multiply and Add): dfin7's slot sums, dense dfinish's statements for the shared down, then the routed sum in
+  OUT_T plus sigmoid(logit) (MLX's, by table) times down in OUT_T, MLX's Multiply then Add (`moeSharedGateTail`'s
+  bytes).
+- **Pinned by:** `src/core/gpu_test.zig` "turboexl3 gpu: the shared expert fused into form 9's launches equals the
+  host's chain byte for byte (TURBOEXL3_GPU=1)" (GPU: y bit for bit, modes inside, inside_nofold and side, rows 1 to 4,
+  shared slices per threadgroup 1/1, 4/1, 5/5, routed deferral on and off, `bt9` 1 and 2); `src/core/gpu_test.zig`
+  "turboexl3 gpu: the router folded into form 9's prepare launch (and the shared gate's logit with it) ..." (GPU,
+  part=moe: `moeSharedRouted` against the router kernel + `moeShared`, rows 2 to 4); `src/models/qwen38/shared.zig`
+  "turboexl3 decode shared-expert texts: every template constant read is passed, every signature name is used" (CPU: its
+  template constants and signature names).
+
+### `turboexl3_dfin7t`
+
+<!-- kernel-facts: turboexl3_dfin7t -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/qwen38/shared.zig:480` (`const SharedHeads`) |
+| inputs | `zd`, `slots`, `scores`, `down_svh`, `hsx`, `szd`, `sxsd`, `sh_down_svh`, `sigtab`, `slogit` |
+| outputs | `y` |
+| source | `text_dfin7t` = `qwen38:shared/dfin7t` (2356 B, `1841a4fdda80`) |
+| header | `header_t` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` ++ `qwen38:shared/shared` ++ `qwen38:shared/shared2` (39410 B, `435a7ae9ef8e`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** Qwen3.8 (`src/models/qwen38/shared.zig`), not served: launched only by `SharedHeads.moeShared2` /
+  `moeSharedSide2` (the v2 heads), which nothing in the library calls (`SharedHeads.sheads` documents the choice; no
+  code reads it); `SharedHeads.init` makes it with the other shared heads and the GPU test runs it. Launch 5 of both v2
+  paths.
+- **Shapes and dtypes:** As `turboexl3_dfin7s`: zd f32 [KS, RK, H]; slots u32 [RK]; scores [RK]; down_svh f16 [E, H];
+  hsx f32 [RK, NBI]; szd f32 [SKSD, rows, H] in layout SLM; sxsd f32 [rows, NBI]; sh_down_svh f16 [H]; sigtab T [65536];
+  slogit T [rows]. Out: y T [rows, H] (T bf16 or f16).
+- **Grid and threadgroup:** `((H/128) · 32 · (TOPK + 1), rows, 1)` / `(32 · (TOPK + 1), 1, 1)`, as `dfin7s`.
+- **Template args:** `dfin7s`'s (HID, TOPK, RKC, KS, OUT_T, DEFER, NBI, SKSD, SRS, SDEF) and SLM (the shared down
+  planes' layout). Rows 1 to 4.
+- **Replaces:** Nothing served: a variant of `turboexl3_dfin7s` whose shared down finish reads the planes in layout SLM
+  (`turboexl3_sfinish2`'s read); the same launch role.
+- **Bits:** the same bytes as its v1 counterpart, so byte-identical to the host's chain: one simdgroup per (K slice,
+  SOTS tiles) computes dense dgemv's plane values in dgemv's order (the four parts from zero, folded over the quads, the
+  slice the left sum of its parts) with no threadgroup reduction, and every codeword taken from the window's 32-bit
+  words.
+- **Pinned by:** `src/core/gpu_test.zig` "turboexl3 gpu: the shared expert fused into form 9's launches equals the
+  host's chain byte for byte (TURBOEXL3_GPU=1)" (GPU: y against the host's chain bit for bit, modes inside2 and side2
+  over five v2 knob settings, rows 1 to 4, routed deferral on and off, `bt9` 1 and 2); `src/models/qwen38/shared.zig`
+  "turboexl3 decode v2 shared-head texts: every template constant read is passed, every signature name is used" (CPU:
+  template constants and signature names).
+
+### `turboexl3_down3s`
+
+<!-- kernel-facts: turboexl3_down3s -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/qwen38/shared.zig:469` (`const SharedHeads`) |
+| inputs | `hdp`, `slots`, `down_t`, `sxpd`, `sh_down_t` |
+| outputs | `zd`, `szd` |
+| source | `text_down3s` = `qwen38:shared/shared_down_head` ++ `decode/down3_1` ++ `decode/rk_line` ++ `decode/down3_2` ++ `decode/down3_w` ++ `decode/down3_3` (4053 B, `e3483f634b9f`) |
+| header | `header_s` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` ++ `qwen38:shared/shared` (30584 B, `af3e3f8b3d2f`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** Qwen3.8-Flash-Next (`src/models/qwen38/shared.zig`), served for its gated shared expert (y = routed +
+  sigmoid(logit) · shared(x)) through `root.moeFusedShared` and `root.moeFusedSharedRouted`, which the table's
+  `swiglu_shared` member calls (`table/table.zig` `swigluShared`) at 1 to 4 decode / verify rows
+  (`shared.shared_rows_max`) when `SharedHeads.sharedAdmitted` holds. Launch 4 of every served call (`moeShared`,
+  `sharedFold`, `moeSharedRouted`). No Config field selects it.
+- **Shapes and dtypes:** Notation: RK = rows · TOPK; E experts; H hidden; I the routed (= shared) intermediate; NBH =
+  H/128, NBI = I/128; T = x's dtype, bf16 or f16 (`sharedAdmitted`); slots u32 [RK] (`moeFusedShared` also admits i32
+  inds); the routed trellises U16 [E, H/16, I/16, NHW] (gate, up) and [E, I/16, H/16, NHW] (down); the shared trellises
+  [H/16, I/16, SNG] and [I/16, H/16, SND] (U16 in the tests; the entries check their shapes, not their dtype). In: hdp
+  f16 [RK, I] (the routed down inputs in lane order, `hd` of `fin7s` / `gu3sf`); slots; down_t U16 [E, I/16, H/16, NHW];
+  sxpd f16 [rows, I] (the shared down's prepared input, lane order); sh_down_t [I/16, H/16, SND]. Out: zd f32 [KS, RK,
+  H] (routed planes); szd f32 [SKSD, rows, H] (shared planes).
+- **Grid and threadgroup:** `((H/(16·BT)) · 128, RK + ceil((SKSD/SSPTD) / SZ), SZ)` / `(128, 1, 1)`, SZ =
+  `kThreadgroups(KS, rows, kdiv9d orelse kdiv9)`; from grid row RKC on, shared threadgroup j = (y - RKC) · SZ + z runs
+  the SSPTD slices from j · SSPTD.
+- **Template args:** NHW (the routed rate, K = NHW/16; gate, up and down at one rate), CODEBOOK and WBITS (the routed
+  decode's, shared by the shared heads), HID, INTER, RKC (= RK: the first shared grid row), KS (the routed K slices of
+  `Kernels3.initWith` at `ks_max` 4: 4 for gate|up, 2 for down at Qwen3.8's 2560 x 640), SPT (KS / SZ: 1 under the
+  default `kdiv9` {1, 1, 1, 1}), BT (output tiles per GEMV threadgroup: `bt1` at one row, `bt9` from two, 2 each), GROUP
+  (row-slots per lead threadgroup: 2 from two rows, 1 at one), DEFER (the routed MUL1 deferral); SND (the shared down
+  rate), SKSD (`Dense.ksFor(I, H)`: 5 at Qwen3.8), SRS, SDEF, SZ, SSPTD (`SharedHeads.ssptd` through `sharedSpt`, 1 by
+  default; no Config field sets it). Every routed rate, codebook and window form 9 serves; the shared down rate must be
+  a `format.Rate`; rows 1 to 4.
+- **Replaces:** `turboexl3_down3` plus the shared down `linear`'s GEMV (dense `dgemv`; DEC-ONE's `turboexl3_dense_dec0`
+  / `dec1` where served) as extra grid rows: the shared down adds no launch.
+- **Bits:** byte-identical to the host's chain (form 3's routed y, the three dense `linear`s, the table SwiGLU, MLX's
+  Sigmoid, Multiply and Add): the routed rows are down3's planes, the shared rows dense dgemv's (each slice computed as
+  a threadgroup of its own computes it, so SSPTD is launch shape only).
+- **Pinned by:** `src/core/gpu_test.zig` "turboexl3 gpu: the shared expert fused into form 9's launches equals the
+  host's chain byte for byte (TURBOEXL3_GPU=1)" (GPU: y bit for bit, inside modes, rows 1 to 4, down slices per
+  threadgroup 1 and 5); `src/core/gpu_test.zig` "turboexl3 gpu: the router folded into form 9's prepare launch (and the
+  shared gate's logit with it) ..." (GPU, part=moe); `src/models/qwen38/shared.zig` "turboexl3 decode shared-expert
+  texts: every template constant read is passed, every signature name is used" (CPU: the down head's template constants,
+  `text_down3s`'s signature); `src/models/qwen38/shared.zig` "turboexl3 decode v2 shared-head texts: every template
+  constant read is passed, every signature name is used" (CPU: `text_down3s`'s and `shared_down_head`'s signatures).
+
+### `turboexl3_down3t`
+
+<!-- kernel-facts: turboexl3_down3t -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/qwen38/shared.zig:479` (`const SharedHeads`) |
+| inputs | `hdp`, `slots`, `down_t`, `sxpd`, `sh_down_t` |
+| outputs | `zd`, `szd` |
+| source | `text_down3t` = `qwen38:shared/shared2_prologue` ++ `qwen38:shared/shared_down2_head` ++ `decode/down3_1` ++ `qwen38:shared/rk_line_y` ++ `decode/down3_2` ++ `decode/down3_w` ++ `decode/down3_3` (5236 B, `ed4888986554`) |
+| header | `header_t` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` ++ `qwen38:shared/shared` ++ `qwen38:shared/shared2` (39410 B, `435a7ae9ef8e`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** Qwen3.8 (`src/models/qwen38/shared.zig`), not served: launched only by `SharedHeads.moeShared2` /
+  `moeSharedSide2` (the v2 heads), which nothing in the library calls (`SharedHeads.sheads` documents the choice; no
+  code reads it); `SharedHeads.init` makes it with the other shared heads and the GPU test runs it. Launch 4 of
+  `moeShared2`.
+- **Shapes and dtypes:** As `turboexl3_down3s`: hdp f16 [RK, I]; slots u32 [RK]; down_t U16 [E, I/16, H/16, NHW]; sxpd
+  f16 [rows, I]; sh_down_t [I/16, H/16, SND]. Out: zd f32 [KS, RK, H]; szd f32 [SKSD, rows, H] in layout SLM.
+- **Grid and threadgroup:** `((H/(16·BT)) · 128, RK + SYS, SZ)` / `(128, 1, 1)`, SYS = ceil(nt / ((H/(16·BT)) · SZ)), nt
+  = SKSD · ((H/16) / (4 · SOTS)) shared threadgroups (`sharedTgs2`), SZ as for `down3s`.
+- **Template args:** NHW (the routed rate, K = NHW/16; gate, up and down at one rate), CODEBOOK and WBITS (the routed
+  decode's, shared by the shared heads), HID, INTER, RKC (= RK: the first shared grid row), KS (the routed K slices of
+  `Kernels3.initWith` at `ks_max` 4: 4 for gate|up, 2 for down at Qwen3.8's 2560 x 640), SPT (KS / SZ: 1 under the
+  default `kdiv9` {1, 1, 1, 1}), BT (output tiles per GEMV threadgroup: `bt1` at one row, `bt9` from two, 2 each), GROUP
+  (row-slots per lead threadgroup: 2 from two rows, 1 at one), DEFER (the routed MUL1 deferral); SND, SKSD, SRS, SDEF;
+  SLM (1: the planes lane-major, a float4 per plane and lane; `SharedHeads.slm`), SPRE (a simdgroup's weight prefetch
+  distance in input tiles, `spre` per row count, whole parts, at most 3 parts and 16 tiles), SOTS (output tiles per
+  simdgroup, `sots` / `sotsd` through `sharedOts`), SX, SYS, SYOFF (the shared threadgroups' slots: id = (z · SYS + row)
+  · SX + x; SYOFF 0 puts the SYS shared rows after the routed ones, SYOFF = SYS before them with `sfirst`, the routed
+  body then taking rk = y - SYOFF); here SOTS from `sotsd` and SX = H/(16·BT). Rows 1 to 4.
+- **Replaces:** Nothing served: a variant of `turboexl3_down3s` (one simdgroup per (K slice, SOTS tiles) of the shared
+  down over sxpd in device memory, no threadgroup memory, no barrier).
+- **Bits:** the same bytes as its v1 counterpart, so byte-identical to the host's chain: one simdgroup per (K slice,
+  SOTS tiles) computes dense dgemv's plane values in dgemv's order (the four parts from zero, folded over the quads, the
+  slice the left sum of its parts) with no threadgroup reduction, and every codeword taken from the window's 32-bit
+  words.
+- **Pinned by:** `src/core/gpu_test.zig` "turboexl3 gpu: the shared expert fused into form 9's launches equals the
+  host's chain byte for byte (TURBOEXL3_GPU=1)" (GPU: y bit for bit, mode inside2, five knob settings including SOTS 1,
+  2, 4, 5, 8 and both grid orders, rows 1 to 4); `src/models/qwen38/shared.zig` "turboexl3 decode v2 shared-head texts:
+  every template constant read is passed, every signature name is used" (CPU: template constants, signature names, the
+  rk = y
+  - SYOFF splice).
+
+### `turboexl3_fin7s`
+
+<!-- kernel-facts: turboexl3_fin7s -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/qwen38/shared.zig:468` (`const SharedHeads`) |
+| inputs | `zg`, `zu`, `slots`, `gate_svh`, `up_svh`, `down_suh`, `xsg`, `xsu`, `szg`, `szu`, `sxsg`, `sxsu`, `sh_gate_svh`, `sh_up_svh`, `sh_down_suh`, `sigtab` |
+| outputs | `hd`, `hs`, `sxpd`, `sxsd` |
+| source | `text_fin7s` = `qwen38:shared/shared_fin_head_1` ++ `qwen38:shared/shared_fin_head_2` ++ `qwen38:shared/shared_fin_head_xg` ++ `qwen38:shared/shared_fin_head_xu` ++ `qwen38:shared/shared_fin_head_3` ++ `qwen38:shared/shared_fin_head_g` ++ `qwen38:shared/shared_fin_head_u` ++ `qwen38:shared/shared_fin_head_4` ++ `qwen38:shared/shared_fin_head_end` ++ `decode/fin7_1` ++ `decode/expert_line` ++ `decode/fin7_2` ++ `decode/fin7_planes` ++ `decode/fin7_3` ++ `decode/fin7_sums` ++ `decode/fin7_4` ++ `decode/fin7_swiglu` ++ `decode/fin7_5` (3541 B, `d3a1e73e7d7d`) |
+| header | `header_s` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` ++ `qwen38:shared/shared` (30584 B, `af3e3f8b3d2f`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** Qwen3.8-Flash-Next (`src/models/qwen38/shared.zig`), served for its gated shared expert (y = routed +
+  sigmoid(logit) · shared(x)) through `root.moeFusedShared` and `root.moeFusedSharedRouted`, which the table's
+  `swiglu_shared` member calls (`table/table.zig` `swigluShared`) at 1 to 4 decode / verify rows
+  (`shared.shared_rows_max`) when `SharedHeads.sharedAdmitted` holds. Launch 3 of `moeShared` at one row (after `gu8s`),
+  and at 2 to 4 rows of both entries with `Config.fused_fin_fold` false; with the default (true) `turboexl3_gu3sf` runs
+  its statements there.
+- **Shapes and dtypes:** Notation: RK = rows · TOPK; E experts; H hidden; I the routed (= shared) intermediate; NBH =
+  H/128, NBI = I/128; T = x's dtype, bf16 or f16 (`sharedAdmitted`); slots u32 [RK] (`moeFusedShared` also admits i32
+  inds); the routed trellises U16 [E, H/16, I/16, NHW] (gate, up) and [E, I/16, H/16, NHW] (down); the shared trellises
+  [H/16, I/16, SNG] and [I/16, H/16, SND] (U16 in the tests; the entries check their shapes, not their dtype). In: zg,
+  zu f32 [KS, RK, I] (routed planes); slots; gate_svh, up_svh f16 [E, I]; down_suh f16 [E, I]; xsg, xsu f32 [RK, NBH]
+  (the routed inputs' block sums); szg, szu f32 [SKSG, rows, I] (shared planes); sxsg, sxsu f32 [rows, NBH];
+  sh_gate_svh, sh_up_svh f16 [I]; sh_down_suh f16 [I]; sigtab T [65536]. Out: hd f16 [RK, I] (the routed down inputs,
+  lane order); hs f32 [RK, NBI]; sxpd f16 [rows, I] (the shared down's input, lane order); sxsd f32 [rows, NBI].
+- **Grid and threadgroup:** `((I/128) · 32, RK + rows, 1)` / `(32, 1, 1)`: one simdgroup per (128-block of the
+  intermediate, row-slot), and from grid row RKC one per (block, shared row).
+- **Template args:** INTER, RKC (= RK), KS (the routed gate|up K slices), DEFER, NBH, OUT_T (T), SKSG, SRS (rows), SDEF.
+  No LIMIT: `sharedAdmitted` refuses a clamped geometry. Rows 1 to 4; it decodes no weight.
+- **Replaces:** `turboexl3_fin7` plus the shared gate and up `linear`s' finishes (dense `dfinish`), the host's table
+  SwiGLU kernel and the shared down `linear`'s prepare (dense `prep_s`), as one launch.
+- **Bits:** byte-identical to the host's chain (form 3's routed y, the three dense `linear`s, the table SwiGLU, MLX's
+  Sigmoid, Multiply and Add): fin7's routed statements; the shared rows run dense dfinish to OUT_T, the host's table
+  SwiGLU (`T act = g * sigtab[g]; act * up`) and dense prep_s of the product.
+- **Pinned by:** `src/core/gpu_test.zig` "turboexl3 gpu: the shared expert fused into form 9's launches equals the
+  host's chain byte for byte (TURBOEXL3_GPU=1)" (GPU: y bit for bit, mode inside at one row and inside_nofold at rows 1
+  to 4); `src/core/gpu_test.zig` "turboexl3 gpu: the router folded into form 9's prepare launch (and the shared gate's
+  logit with it) ..." (GPU, part=moe fold=unfolded, and its reference chain `moeShared` with the fold off);
+  `src/models/qwen38/shared.zig` "turboexl3 decode shared-expert texts: every template constant read is passed, every
+  signature name is used" (CPU: the fin head's template constants, `text_fin7s`'s signature);
+  `src/models/qwen38/shared.zig` "turboexl3 decode fused fin fold texts: gu3sf is gu3s but its plane and sums stores,
+  ..." (CPU: `text_fin7s` is its pieces).
+
+### `turboexl3_fin7t`
+
+<!-- kernel-facts: turboexl3_fin7t -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/qwen38/shared.zig:478` (`const SharedHeads`) |
+| inputs | `zg`, `zu`, `slots`, `gate_svh`, `up_svh`, `down_suh`, `xsg`, `xsu`, `szg`, `szu`, `sxsg`, `sxsu`, `sh_gate_svh`, `sh_up_svh`, `sh_down_suh`, `sigtab` |
+| outputs | `hd`, `hs`, `sxpd`, `sxsd` |
+| source | `text_fin7t` = `qwen38:shared/shared_fin2_head` ++ `decode/fin7_1` ++ `decode/expert_line` ++ `decode/fin7_2` ++ `decode/fin7_planes` ++ `decode/fin7_3` ++ `decode/fin7_sums` ++ `decode/fin7_4` ++ `decode/fin7_swiglu` ++ `decode/fin7_5` (3565 B, `5e1018b542e5`) |
+| header | `header_t` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` ++ `qwen38:shared/shared` ++ `qwen38:shared/shared2` (39410 B, `435a7ae9ef8e`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** Qwen3.8 (`src/models/qwen38/shared.zig`), not served: launched only by `SharedHeads.moeShared2` /
+  `moeSharedSide2` (the v2 heads), which nothing in the library calls (`SharedHeads.sheads` documents the choice; no
+  code reads it); `SharedHeads.init` makes it with the other shared heads and the GPU test runs it. Launch 3 of
+  `moeShared2`.
+- **Shapes and dtypes:** As `turboexl3_fin7s`: zg, zu f32 [KS, RK, I]; slots u32 [RK]; gate_svh, up_svh, down_suh f16
+  [E, I]; xsg, xsu f32 [RK, NBH]; szg, szu f32 [SKSG, rows, I] in layout SLM; sxsg, sxsu f32 [rows, NBH]; sh_gate_svh,
+  sh_up_svh, sh_down_suh f16 [I]; sigtab T [65536]. Out: hd f16 [RK, I]; hs f32 [RK, NBI]; sxpd f16 [rows, I]; sxsd f32
+  [rows, NBI].
+- **Grid and threadgroup:** `((I/128) · 32, RK + rows, 1)` / `(32, 1, 1)`, as `fin7s`.
+- **Template args:** `fin7s`'s (INTER, RKC, KS, DEFER, NBH, OUT_T, SKSG, SRS, SDEF) and SLM. Rows 1 to 4.
+- **Replaces:** Nothing served: a variant of `turboexl3_fin7s` whose shared head reads the planes in layout SLM
+  (`turboexl3_sfinish2`).
+- **Bits:** the same bytes as its v1 counterpart, so byte-identical to the host's chain: one simdgroup per (K slice,
+  SOTS tiles) computes dense dgemv's plane values in dgemv's order (the four parts from zero, folded over the quads, the
+  slice the left sum of its parts) with no threadgroup reduction, and every codeword taken from the window's 32-bit
+  words.
+- **Pinned by:** `src/core/gpu_test.zig` "turboexl3 gpu: the shared expert fused into form 9's launches equals the
+  host's chain byte for byte (TURBOEXL3_GPU=1)" (GPU: y against the host's chain bit for bit, modes inside2 and side2
+  over five v2 knob settings, rows 1 to 4, routed deferral on and off, `bt9` 1 and 2); `src/models/qwen38/shared.zig`
+  "turboexl3 decode v2 shared-head texts: every template constant read is passed, every signature name is used" (CPU:
+  template constants and signature names).
+
+### `turboexl3_gu3p`
+
+<!-- kernel-facts: turboexl3_gu3p -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/qwen38/shared.zig:476` (`const SharedHeads`) |
+| inputs | `xgp`, `xup`, `slots`, `gate_t`, `up_t`, `sxg`, `sxu`, `sh_gate_t`, `sh_up_t` |
+| outputs | `zg`, `zu`, `szg`, `szu` |
+| source | `text_gu3p` = `qwen38:shared/shared2_prologue` ++ `qwen38:shared/shared_gu2p_head` ++ `decode/gu3_1` ++ `qwen38:shared/rk_line_y` ++ `decode/gu3_2` ++ `decode/gu3_w` ++ `decode/gu3_3` ++ `decode/gu3_stores` ++ `decode/gu3_4` (5569 B, `04fc0ad4b1bd`) |
+| header | `header_t` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` ++ `qwen38:shared/shared` ++ `qwen38:shared/shared2` (39410 B, `435a7ae9ef8e`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** Qwen3.8 (`src/models/qwen38/shared.zig`), not served: launched only by `SharedHeads.moeShared2` /
+  `moeSharedSide2` (the v2 heads), which nothing in the library calls (`SharedHeads.sheads` documents the choice; no
+  code reads it); `SharedHeads.init` makes it with the other shared heads and the GPU test runs it. Launch 2 of
+  `moeShared2` at the rows above `gu8_rows` with `SharedHeads.sprep` (true by default), after `turboexl3_prep2t`.
+- **Shapes and dtypes:** In: xgp, xup f16 [RK, H] (`prep2t`'s routed xg, xu, lane order); slots u32 [RK]; gate_t, up_t
+  U16 [E, H/16, I/16, NHW]; sxg, sxu f16 [rows, H] (`prep2t`'s shared prepared input, lane order); sh_gate_t, sh_up_t
+  [H/16, I/16, SNG]. Out: zg, zu f32 [KS, RK, I]; szg, szu f32 [SKSG, rows, I] in layout SLM.
+- **Grid and threadgroup:** `((I/(16·BT)) · 128, RK + SYS, SZ)` / `(128, 1, 1)`, SYS = ceil(nt / ((I/(16·BT)) · SZ)), nt
+  = `sharedTgs2`'s SKSG · ((2 · I/16) / (4 · SOTS)) shared threadgroups (one per K slice and group of 4 SOTS tiles over
+  both projections), SZ as for `gu3s`.
+- **Template args:** NHW (the routed rate, K = NHW/16; gate, up and down at one rate), CODEBOOK and WBITS (the routed
+  decode's, shared by the shared heads), HID, INTER, RKC (= RK: the first shared grid row), KS (the routed K slices of
+  `Kernels3.initWith` at `ks_max` 4: 4 for gate|up, 2 for down at Qwen3.8's 2560 x 640), SPT (KS / SZ: 1 under the
+  default `kdiv9` {1, 1, 1, 1}), BT (output tiles per GEMV threadgroup: `bt1` at one row, `bt9` from two, 2 each), GROUP
+  (row-slots per lead threadgroup: 2 from two rows, 1 at one), DEFER (the routed MUL1 deferral); SNG, SKSG, SRS, SDEF;
+  SLM (1: the planes lane-major, a float4 per plane and lane; `SharedHeads.slm`), SPRE (a simdgroup's weight prefetch
+  distance in input tiles, `spre` per row count, whole parts, at most 3 parts and 16 tiles), SOTS (output tiles per
+  simdgroup, `sots` / `sotsd` through `sharedOts`), SX, SYS, SYOFF (the shared threadgroups' slots: id = (z · SYS + row)
+  · SX + x; SYOFF 0 puts the SYS shared rows after the routed ones, SYOFF = SYS before them with `sfirst`, the routed
+  body then taking rk = y - SYOFF); SNP (1, or 2 when a threadgroup's 4 · SOTS tiles cross from the gate into the up and
+  it rotates both); here SOTS from `sots` and SX = I/(16·BT). Rows 2 to 4 by default.
+- **Replaces:** Nothing served: a variant of `turboexl3_gu3s` whose shared head reads the input `prep2t` prepared: no
+  rotation, no threadgroup memory and no barrier in the head.
+- **Bits:** the same bytes as its v1 counterpart, so byte-identical to the host's chain: one simdgroup per (K slice,
+  SOTS tiles) computes dense dgemv's plane values in dgemv's order (the four parts from zero, folded over the quads, the
+  slice the left sum of its parts) with no threadgroup reduction, and every codeword taken from the window's 32-bit
+  words.
+- **Pinned by:** `src/core/gpu_test.zig` "turboexl3 gpu: the shared expert fused into form 9's launches equals the
+  host's chain byte for byte (TURBOEXL3_GPU=1)" (GPU: y bit for bit, mode inside2, the settings with `sprep` on at rows
+  2 to 4); `src/models/qwen38/shared.zig` "turboexl3 decode v2 shared-head texts: every template constant read is
+  passed, every signature name is used" (CPU: template constants, signature names, the rk splice).
+
+### `turboexl3_gu3s`
+
+<!-- kernel-facts: turboexl3_gu3s -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/qwen38/shared.zig:466` (`const SharedHeads`) |
+| inputs | `xgp`, `xup`, `slots`, `gate_t`, `up_t`, `xr`, `sh_gate_t`, `sh_up_t`, `sh_gate_suh`, `sh_up_suh` |
+| outputs | `zg`, `zu`, `szg`, `szu`, `sxsg`, `sxsu` |
+| source | `text_gu3s` = `qwen38:shared/shared_gu_head_1` ++ `qwen38:shared/shared_gu_head_2` ++ `qwen38:shared/shared_gu_head_3` ++ `qwen38:shared/shared_gu_head_z` ++ `qwen38:shared/shared_gu_head_4` ++ `qwen38:shared/shared_gu_head_sums` ++ `qwen38:shared/shared_gu_head_5` ++ `qwen38:shared/shared_gu_head_end` ++ `decode/gu3_1` ++ `decode/rk_line` ++ `decode/gu3_2` ++ `decode/gu3_w` ++ `decode/gu3_3` ++ `decode/gu3_stores` ++ `decode/gu3_4` (5170 B, `63599022e938`) |
+| header | `header_s` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` ++ `qwen38:shared/shared` (30584 B, `af3e3f8b3d2f`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** Qwen3.8-Flash-Next (`src/models/qwen38/shared.zig`), served for its gated shared expert (y = routed +
+  sigmoid(logit) · shared(x)) through `root.moeFusedShared` and `root.moeFusedSharedRouted`, which the table's
+  `swiglu_shared` member calls (`table/table.zig` `swigluShared`) at 1 to 4 decode / verify rows
+  (`shared.shared_rows_max`) when `SharedHeads.sharedAdmitted` holds. Launch 2 at the rows above `gu8_rows` (2 to 4 by
+  default) of both entries with `Config.fused_fin_fold` false; with the default (true) `turboexl3_gu3sf` runs in its
+  place.
+- **Shapes and dtypes:** Notation: RK = rows · TOPK; E experts; H hidden; I the routed (= shared) intermediate; NBH =
+  H/128, NBI = I/128; T = x's dtype, bf16 or f16 (`sharedAdmitted`); slots u32 [RK] (`moeFusedShared` also admits i32
+  inds); the routed trellises U16 [E, H/16, I/16, NHW] (gate, up) and [E, I/16, H/16, NHW] (down); the shared trellises
+  [H/16, I/16, SNG] and [I/16, H/16, SND] (U16 in the tests; the entries check their shapes, not their dtype). In: xgp,
+  xup f16 [RK, H] (`prep2`'s or `route_prep`'s xg, xu, lane order); slots; gate_t, up_t U16 [E, H/16, I/16, NHW]; xr T
+  [rows, H] (x, rotated in-kernel per 128-block: dense prep_s); sh_gate_t, sh_up_t [H/16, I/16, SNG]; sh_gate_suh,
+  sh_up_suh f16 [H]. Out: zg, zu f32 [KS, RK, I] (routed planes); szg, szu f32 [SKSG, rows, I] (shared planes); sxsg,
+  sxsu f32 [rows, NBH] (the shared inputs' block sums).
+- **Grid and threadgroup:** `((I/(16·BT)) · 128, RK + ceil(2 · (SKSG/SSPT) / SZ), SZ)` / `(128, 1, 1)`, BT = `bt9`; SZ =
+  `kThreadgroups(KS, rows, kdiv9)` (KS under the defaults). Grid rows below RKC are gu3's routed threadgroups; from RKC
+  on, shared threadgroup j = (y - RKC) · SZ + z takes projection j / (SKSG/SSPT) and the SSPT slices from (j %
+  (SKSG/SSPT)) · SSPT, each slice one 128-block of hidden.
+- **Template args:** NHW (the routed rate, K = NHW/16; gate, up and down at one rate), CODEBOOK and WBITS (the routed
+  decode's, shared by the shared heads), HID, INTER, RKC (= RK: the first shared grid row), KS (the routed K slices of
+  `Kernels3.initWith` at `ks_max` 4: 4 for gate|up, 2 for down at Qwen3.8's 2560 x 640), SPT (KS / SZ: 1 under the
+  default `kdiv9` {1, 1, 1, 1}), BT (output tiles per GEMV threadgroup: `bt1` at one row, `bt9` from two, 2 each), GROUP
+  (row-slots per lead threadgroup: 2 from two rows, 1 at one), DEFER (the routed MUL1 deferral); SNG (the shared gate|up
+  rate), SKSG (the shared gate|up K split, `Dense.ksFor(H, I)`; admitted only as H/128: 20 at Qwen3.8), SRS (rows), SDEF
+  (the shared MUL1 deferral, `Dense.deferFor`), SZ (the grid's z extent, so shared threadgroup j = (y - RKC) · SZ + z),
+  SSPT (shared K slices per threadgroup: `Config.shared_spt` 4 through `sharedSpt`, 1 when it does not divide SKSG;
+  launch shape only). Every routed rate, codebook and window form 9 serves; the shared rates must be `format.Rate`s.
+- **Replaces:** `turboexl3_gu3` plus the shared gate and up `linear`s' prepare and GEMV (dense `prep_s` + `dgemv`;
+  DEC-ONE's `turboexl3_dense_dec1` where served) as extra grid rows: the shared gate and up add no launch.
+- **Bits:** byte-identical to the host's chain (form 3's routed y, the three dense `linear`s, the table SwiGLU, MLX's
+  Sigmoid, Multiply and Add): the routed rows are gu3's planes, the shared rows dense prep_s + dgemv's (each slice
+  computed as a threadgroup of its own computes it, so SSPT is launch shape only).
+- **Pinned by:** `src/core/gpu_test.zig` "turboexl3 gpu: the shared expert fused into form 9's launches equals the
+  host's chain byte for byte (TURBOEXL3_GPU=1)" (GPU: y bit for bit, mode inside_nofold at rows 2 to 4, gate|up slices
+  per threadgroup 1, 4 and 5); `src/core/gpu_test.zig` "turboexl3 gpu: the router folded into form 9's prepare launch
+  (and the shared gate's logit with it) ..." (GPU, part=moe fold=unfolded, and the reference chain);
+  `src/models/qwen38/shared.zig` "turboexl3 decode shared-expert texts: every template constant read is passed, every
+  signature name is used" (CPU: the head's template constants, the signature); `src/models/qwen38/shared.zig` "turboexl3
+  decode fused fin fold texts: gu3sf is gu3s but its plane and sums stores, ..." (CPU: `text_gu3s` is its pieces).
+
+### `turboexl3_gu3sf`
+
+<!-- kernel-facts: turboexl3_gu3sf -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/qwen38/shared.zig:648` (`const SharedHeads`) |
+| inputs | `xgp`, `xup`, `slots`, `gate_t`, `up_t`, `xr`, `sh_gate_t`, `sh_up_t`, `sh_gate_suh`, `sh_up_suh`, `gate_svh`, `up_svh`, `down_suh`, `xsg`, `xsu`, `sh_gate_svh`, `sh_up_svh`, `sh_down_suh`, `sigtab`, `cnt` |
+| outputs | `hd`, `hs`, `sxpd`, `sxsd`, `zg`, `zu`, `szg`, `szu`, `sxsx` |
+| source | `text_gu3sf` = `qwen38:shared/shared_gu_head_1` ++ `qwen38:shared/vf_head_tg` ++ `qwen38:shared/shared_gu_head_2` ++ `qwen38:shared/vf_head_decls` ++ `qwen38:shared/shared_gu_head_3` ++ `qwen38:shared/vf_head_zc` ++ `qwen38:shared/shared_gu_head_4` ++ `qwen38:shared/vf_head_sumsc` ++ `qwen38:shared/shared_gu_head_5` ++ `qwen38:shared/vf_head_arrive` ++ `qwen38:shared/shared_fin_head_2` ++ `qwen38:shared/vf_sfin_xgc` ++ `qwen38:shared/vf_sfin_xuc` ++ `qwen38:shared/shared_fin_head_3` ++ `qwen38:shared/vf_sfin_g` ++ `qwen38:shared/vf_sfin_u` ++ `qwen38:shared/shared_fin_head_4` ++ `qwen38:shared/vf_head_close` ++ `qwen38:shared/shared_gu_head_end` ++ `decode/gu3_1` ++ `decode/rk_line` ++ `decode/gu3_2` ++ `qwen38:shared/vf_gu3_decls` ++ `decode/gu3_w` ++ `decode/gu3_3` ++ `qwen38:shared/vf_gu3_stores` ++ `decode/gu3_4` ++ `qwen38:shared/vf_arrive` ++ `decode/expert_line` ++ `decode/fin7_2` ++ `qwen38:shared/vf_fin7_planes` ++ `decode/fin7_3` ++ `decode/fin7_sums` ++ `decode/fin7_4` ++ `decode/fin7_swiglu` ++ `decode/fin7_5` ++ `qwen38:shared/vf_fin7_close` (12748 B, `4ebe61618415`) |
+| header | `header_s` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` ++ `qwen38:shared/shared` (30584 B, `af3e3f8b3d2f`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** Qwen3.8-Flash-Next (`src/models/qwen38/shared.zig`), served for its gated shared expert (y = routed +
+  sigmoid(logit) · shared(x)) through `root.moeFusedShared` and `root.moeFusedSharedRouted`, which the table's
+  `swiglu_shared` member calls (`table/table.zig` `swigluShared`) at 1 to 4 decode / verify rows
+  (`shared.shared_rows_max`) when `SharedHeads.sharedAdmitted` holds. Launch 2 at the rows above `gu8_rows` (2 to 4 by
+  default) of both entries with `Config.fused_fin_fold` true (the default): `SharedHeads.sharedFold`, after
+  `turboexl3_vfold_zero`; made on first use in `sharedCfgs`.
+- **Shapes and dtypes:** Notation: RK = rows · TOPK; E experts; H hidden; I the routed (= shared) intermediate; NBH =
+  H/128, NBI = I/128; T = x's dtype, bf16 or f16 (`sharedAdmitted`); slots u32 [RK] (`moeFusedShared` also admits i32
+  inds); the routed trellises U16 [E, H/16, I/16, NHW] (gate, up) and [E, I/16, H/16, NHW] (down); the shared trellises
+  [H/16, I/16, SNG] and [I/16, H/16, SND] (U16 in the tests; the entries check their shapes, not their dtype). In:
+  `gu3s`'s (xgp, xup f16 [RK, H]; slots; gate_t, up_t; xr T [rows, H]; sh_gate_t, sh_up_t; sh_gate_suh, sh_up_suh f16
+  [H]), then gate_svh, up_svh, down_suh f16 [E, I]; xsg, xsu f32 [RK, NBH] (the routed prepare's block sums);
+  sh_gate_svh, sh_up_svh, sh_down_suh f16 [I]; sigtab T [65536]; cnt u32 [max(RK · NBI + NBI, 8)] (zeroed arrival
+  counters: routed [RK, NBI], then shared [NBI]). Out: `fin7s`'s hd f16 [RK, I], hs f32 [RK, NBI], sxpd f16 [rows, I],
+  sxsd f32 [rows, NBI]; scratch: zg, zu f32 [KS, RK, I], szg, szu f32 [SKSG, rows, I], sxsx f32 [max(NBI · rows · 2 ·
+  NBH, 8)] with SDEF, else [8] (the shared input sums' per-block copies, [NBI, SRS, 2, NBH]).
+- **Grid and threadgroup:** `((I/(16·BT)) · 128, RK + ceil(2 · (SKSG/SSPT) / SZ), SZ)` / `(128, 1, 1)`, BT = `bt9`
+  (`gu3s`'s grid); SZ = `kThreadgroups(KS, rows, kdiv9)` (KS under the defaults). Grid rows below RKC are gu3's routed
+  threadgroups; from RKC on, shared threadgroup j = (y - RKC) · SZ + z takes projection j / (SKSG/SSPT) and the SSPT
+  slices from (j % (SKSG/SSPT)) · SSPT, each slice one 128-block of hidden.
+- **Template args:** `gu3s`'s: NHW (the routed rate, K = NHW/16; gate, up and down at one rate), CODEBOOK and WBITS (the
+  routed decode's, shared by the shared heads), HID, INTER, RKC (= RK: the first shared grid row), KS (the routed K
+  slices of `Kernels3.initWith` at `ks_max` 4: 4 for gate|up, 2 for down at Qwen3.8's 2560 x 640), SPT (KS / SZ: 1 under
+  the default `kdiv9` {1, 1, 1, 1}), BT (output tiles per GEMV threadgroup: `bt1` at one row, `bt9` from two, 2 each),
+  GROUP (row-slots per lead threadgroup: 2 from two rows, 1 at one), DEFER (the routed MUL1 deferral); SNG (the shared
+  gate|up rate), SKSG (the shared gate|up K split, `Dense.ksFor(H, I)`; admitted only as H/128: 20 at Qwen3.8), SRS
+  (rows), SDEF (the shared MUL1 deferral, `Dense.deferFor`), SZ (the grid's z extent, so shared threadgroup j = (y -
+  RKC) · SZ + z), SSPT (shared K slices per threadgroup: `Config.shared_spt` 4 through `sharedSpt`, 1 when it does not
+  divide SKSG; launch shape only); and OUT_T (T, for `fin7s`'s statements). Rows 2 to 4.
+- **Replaces:** `turboexl3_gu3s` -> `turboexl3_fin7s` (2 launches, 2 dependent levels) in one launch, plus
+  `turboexl3_vfold_zero`, which waits on nothing: the call keeps 5 launches and is one dependent level shorter.
+- **Bits:** byte-identical to `gu3s` + `fin7s` (so to the host's chain): the threadgroup that brings a counter to its
+  arrivals (ARR for a routed (row-slot, 128-block), S_ARR for a shared block) runs fin7's or the shared fin head's
+  statements in their order over the planes and input sums read through coherent device memory; each value has one
+  writer (DEC-ONE's arrival idiom: device-scope seq_cst fences around one relaxed fetch_add, nothing waits).
+- **Pinned by:** `src/core/gpu_test.zig` "turboexl3 gpu: the shared expert fused into form 9's launches equals the
+  host's chain byte for byte (TURBOEXL3_GPU=1)" (GPU: y bit for bit, mode inside (folded) at rows 2 to 4, gate|up slices
+  per threadgroup 1, 4 and 5, routed deferral on and off, `bt9` 1 and 2); `src/core/gpu_test.zig` "turboexl3 gpu: the
+  router folded into form 9's prepare launch (and the shared gate's logit with it) ..." (GPU, part=moe fold=folded
+  against the unfolded chain); `src/models/qwen38/shared.zig` "turboexl3 decode fused fin fold texts: gu3sf is gu3s but
+  its plane and sums stores, ..." (CPU: every kept piece of `gu3s` and `fin7s` is in it line for line, every replaced
+  piece gone and its replacement there once, the inline `turboexl3_sfinish` blocks 14 lines each, every template
+  constant and name used).
+
+### `turboexl3_gu3t`
+
+<!-- kernel-facts: turboexl3_gu3t -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/qwen38/shared.zig:475` (`const SharedHeads`) |
+| inputs | `xgp`, `xup`, `slots`, `gate_t`, `up_t`, `xr`, `sh_gate_t`, `sh_up_t`, `sh_gate_suh`, `sh_up_suh` |
+| outputs | `zg`, `zu`, `szg`, `szu`, `sxsg`, `sxsu` |
+| source | `text_gu3t` = `qwen38:shared/shared_gu2_head_1` ++ `qwen38:shared/shared2_prologue` ++ `qwen38:shared/shared_gu2_head_2` ++ `decode/gu3_1` ++ `qwen38:shared/rk_line_y` ++ `decode/gu3_2` ++ `decode/gu3_w` ++ `decode/gu3_3` ++ `decode/gu3_stores` ++ `decode/gu3_4` (6927 B, `302de0e89dc2`) |
+| header | `header_t` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` ++ `qwen38:shared/shared` ++ `qwen38:shared/shared2` (39410 B, `435a7ae9ef8e`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** Qwen3.8 (`src/models/qwen38/shared.zig`), not served: launched only by `SharedHeads.moeShared2` /
+  `moeSharedSide2` (the v2 heads), which nothing in the library calls (`SharedHeads.sheads` documents the choice; no
+  code reads it); `SharedHeads.init` makes it with the other shared heads and the GPU test runs it. Launch 2 of
+  `moeShared2` at the rows above `gu8_rows` with `SharedHeads.sprep` false (after `prep2`).
+- **Shapes and dtypes:** As `turboexl3_gu3s`: xgp, xup f16 [RK, H]; slots u32 [RK]; gate_t, up_t U16 [E, H/16, I/16,
+  NHW]; xr T [rows, H]; sh_gate_t, sh_up_t [H/16, I/16, SNG]; sh_gate_suh, sh_up_suh f16 [H]. Out: zg, zu f32 [KS, RK,
+  I]; szg, szu f32 [SKSG, rows, I] in layout SLM; sxsg, sxsu f32 [rows, NBH].
+- **Grid and threadgroup:** `((I/(16·BT)) · 128, RK + SYS, SZ)` / `(128, 1, 1)`, SYS = ceil(nt / ((I/(16·BT)) · SZ)), nt
+  = `sharedTgs2`'s SKSG · ((2 · I/16) / (4 · SOTS)) shared threadgroups (one per K slice and group of 4 SOTS tiles over
+  both projections), SZ as for `gu3s`.
+- **Template args:** NHW (the routed rate, K = NHW/16; gate, up and down at one rate), CODEBOOK and WBITS (the routed
+  decode's, shared by the shared heads), HID, INTER, RKC (= RK: the first shared grid row), KS (the routed K slices of
+  `Kernels3.initWith` at `ks_max` 4: 4 for gate|up, 2 for down at Qwen3.8's 2560 x 640), SPT (KS / SZ: 1 under the
+  default `kdiv9` {1, 1, 1, 1}), BT (output tiles per GEMV threadgroup: `bt1` at one row, `bt9` from two, 2 each), GROUP
+  (row-slots per lead threadgroup: 2 from two rows, 1 at one), DEFER (the routed MUL1 deferral); SNG, SKSG, SRS, SDEF;
+  SLM (1: the planes lane-major, a float4 per plane and lane; `SharedHeads.slm`), SPRE (a simdgroup's weight prefetch
+  distance in input tiles, `spre` per row count, whole parts, at most 3 parts and 16 tiles), SOTS (output tiles per
+  simdgroup, `sots` / `sotsd` through `sharedOts`), SX, SYS, SYOFF (the shared threadgroups' slots: id = (z · SYS + row)
+  · SX + x; SYOFF 0 puts the SYS shared rows after the routed ones, SYOFF = SYS before them with `sfirst`, the routed
+  body then taking rk = y - SYOFF); SNP (1, or 2 when a threadgroup's 4 · SOTS tiles cross from the gate into the up and
+  it rotates both); here SOTS from `sots` and SX = I/(16·BT). Rows 2 to 4 by default.
+- **Replaces:** Nothing served: a variant of `turboexl3_gu3s` (the v2 gate|up head rotating the slice's 128-block
+  in-kernel).
+- **Bits:** the same bytes as its v1 counterpart, so byte-identical to the host's chain: one simdgroup per (K slice,
+  SOTS tiles) computes dense dgemv's plane values in dgemv's order (the four parts from zero, folded over the quads, the
+  slice the left sum of its parts) with no threadgroup reduction, and every codeword taken from the window's 32-bit
+  words.
+- **Pinned by:** `src/core/gpu_test.zig` "turboexl3 gpu: the shared expert fused into form 9's launches equals the
+  host's chain byte for byte (TURBOEXL3_GPU=1)" (GPU: y bit for bit, mode inside2, the settings with `sprep` off at rows
+  2 to 4); `src/models/qwen38/shared.zig` "turboexl3 decode v2 shared-head texts: every template constant read is
+  passed, every signature name is used" (CPU: template constants, signature names, the rk splice).
+
+### `turboexl3_gu8s`
+
+<!-- kernel-facts: turboexl3_gu8s -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/qwen38/shared.zig:467` (`const SharedHeads`) |
+| inputs | `x`, `slots`, `gate_suh`, `up_suh`, `gate_t`, `up_t`, `xr`, `sh_gate_t`, `sh_up_t`, `sh_gate_suh`, `sh_up_suh` |
+| outputs | `zg`, `zu`, `xsg`, `xsu`, `szg`, `szu`, `sxsg`, `sxsu` |
+| source | `text_gu8s` = `qwen38:shared/shared_gu_head_1` ++ `qwen38:shared/shared_gu_head_2` ++ `qwen38:shared/shared_gu_head_3` ++ `qwen38:shared/shared_gu_head_z` ++ `qwen38:shared/shared_gu_head_4` ++ `qwen38:shared/shared_gu_head_sums` ++ `qwen38:shared/shared_gu_head_5` ++ `qwen38:shared/shared_gu_head_end` ++ `decode/gu8_1` ++ `decode/rk_line` ++ `decode/gu8_2` (6725 B, `c721426dac35`) |
+| header | `header_s` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` ++ `qwen38:shared/shared` (30584 B, `af3e3f8b3d2f`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** Qwen3.8-Flash-Next (`src/models/qwen38/shared.zig`), served for its gated shared expert (y = routed +
+  sigmoid(logit) · shared(x)) through `root.moeFusedShared` and `root.moeFusedSharedRouted`, which the table's
+  `swiglu_shared` member calls (`table/table.zig` `swigluShared`) at 1 to 4 decode / verify rows
+  (`shared.shared_rows_max`) when `SharedHeads.sharedAdmitted` holds. Launch 1 of `moeShared` at the rows up to
+  `gu8_rows` (1) where `gu8Admitted` holds, followed by `fin7s`, `down3s` and `dfin7s` (4 launches).
+  `moeFusedSharedRouted` refuses those rows (no prepare launch to fold into).
+- **Shapes and dtypes:** Notation: RK = rows · TOPK; E experts; H hidden; I the routed (= shared) intermediate; NBH =
+  H/128, NBI = I/128; T = x's dtype, bf16 or f16 (`sharedAdmitted`); slots u32 [RK] (`moeFusedShared` also admits i32
+  inds); the routed trellises U16 [E, H/16, I/16, NHW] (gate, up) and [E, I/16, H/16, NHW] (down); the shared trellises
+  [H/16, I/16, SNG] and [I/16, H/16, SND] (U16 in the tests; the entries check their shapes, not their dtype). In: x T
+  [rows, H]; slots; gate_suh, up_suh f16 [E, H]; gate_t, up_t U16 [E, H/16, I/16, NHW]; xr T [rows, H] (the same x, for
+  the shared head); sh_gate_t, sh_up_t [H/16, I/16, SNG]; sh_gate_suh, sh_up_suh f16 [H]. Out: zg, zu f32 [KS, RK, I];
+  xsg, xsu f32 [RK, NBH] (the routed inputs' block sums); szg, szu f32 [SKSG, rows, I]; sxsg, sxsu f32 [rows, NBH].
+- **Grid and threadgroup:** `((I/(16·BT)) · 128, RK + ceil(2 · (SKSG/SSPT) / SZ), SZ)` / `(128, 1, 1)`, BT = `bt1`; SZ =
+  `kThreadgroups(KS, rows, kdiv9)` (KS under the defaults). Grid rows below RKC are gu3's routed threadgroups; from RKC
+  on, shared threadgroup j = (y - RKC) · SZ + z takes projection j / (SKSG/SSPT) and the SSPT slices from (j %
+  (SKSG/SSPT)) · SSPT, each slice one 128-block of hidden.
+- **Template args:** NHW (the routed rate, K = NHW/16; gate, up and down at one rate), CODEBOOK and WBITS (the routed
+  decode's, shared by the shared heads), HID, INTER, RKC (= RK: the first shared grid row), KS (the routed K slices of
+  `Kernels3.initWith` at `ks_max` 4: 4 for gate|up, 2 for down at Qwen3.8's 2560 x 640), SPT (KS / SZ: 1 under the
+  default `kdiv9` {1, 1, 1, 1}), BT (output tiles per GEMV threadgroup: `bt1` at one row, `bt9` from two, 2 each), GROUP
+  (row-slots per lead threadgroup: 2 from two rows, 1 at one), DEFER (the routed MUL1 deferral) (GROUP 1 at its one
+  row); TOPK; SNG (the shared gate|up rate), SKSG (the shared gate|up K split, `Dense.ksFor(H, I)`; admitted only as
+  H/128: 20 at Qwen3.8), SRS (rows), SDEF (the shared MUL1 deferral, `Dense.deferFor`), SZ (the grid's z extent, so
+  shared threadgroup j = (y - RKC) · SZ + z), SSPT (shared K slices per threadgroup: `Config.shared_spt` 4 through
+  `sharedSpt`, 1 when it does not divide SKSG; launch shape only). Every routed rate, codebook and window form 9 serves
+  where `gu8Admitted` (the threadgroup's span 128-aligned and its threadgroup memory within 32 KB).
+- **Replaces:** `turboexl3_gu8` (itself `turboexl3_prep2` + `turboexl3_gu3`) plus the shared gate and up `linear`s'
+  prepare and GEMV (dense `prep_s` + `dgemv`; DEC-ONE's `turboexl3_dense_dec1` where served) as extra grid rows.
+- **Bits:** byte-identical to the host's chain (form 3's routed y, the three dense `linear`s, the table SwiGLU, MLX's
+  Sigmoid, Multiply and Add): the routed rows are gu8's (form 3's planes), the shared rows dense prep_s + dgemv's
+  planes.
+- **Pinned by:** `src/core/gpu_test.zig` "turboexl3 gpu: the shared expert fused into form 9's launches equals the
+  host's chain byte for byte (TURBOEXL3_GPU=1)" (GPU: y bit for bit at one row, modes inside and inside_nofold, gate|up
+  slices per threadgroup 1, 4 and 5); `src/models/qwen38/shared.zig` "turboexl3 decode shared-expert texts: every
+  template constant read is passed, every signature name is used" (CPU: the head's template constants, `text_gu8s`'s
+  signature).
+
+### `turboexl3_gu8t`
+
+<!-- kernel-facts: turboexl3_gu8t -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/qwen38/shared.zig:474` (`const SharedHeads`) |
+| inputs | `x`, `slots`, `gate_suh`, `up_suh`, `gate_t`, `up_t`, `xr`, `sh_gate_t`, `sh_up_t`, `sh_gate_suh`, `sh_up_suh` |
+| outputs | `zg`, `zu`, `xsg`, `xsu`, `szg`, `szu`, `sxsg`, `sxsu` |
+| source | `text_gu8t` = `qwen38:shared/shared_gu2_head_1` ++ `qwen38:shared/shared2_prologue` ++ `qwen38:shared/shared_gu2_head_2` ++ `decode/gu8_1` ++ `qwen38:shared/rk_line_y` ++ `decode/gu8_2` (8482 B, `59f117562ca3`) |
+| header | `header_t` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` ++ `qwen38:shared/shared` ++ `qwen38:shared/shared2` (39410 B, `435a7ae9ef8e`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** Qwen3.8 (`src/models/qwen38/shared.zig`), not served: launched only by `SharedHeads.moeShared2` /
+  `moeSharedSide2` (the v2 heads), which nothing in the library calls (`SharedHeads.sheads` documents the choice; no
+  code reads it); `SharedHeads.init` makes it with the other shared heads and the GPU test runs it. Launch 1 of
+  `moeShared2` at the rows up to `gu8_rows` where `gu8Admitted` holds.
+- **Shapes and dtypes:** As `turboexl3_gu8s`: x T [rows, H]; slots u32 [RK]; gate_suh, up_suh f16 [E, H]; gate_t, up_t
+  U16 [E, H/16, I/16, NHW]; xr T [rows, H]; sh_gate_t, sh_up_t [H/16, I/16, SNG]; sh_gate_suh, sh_up_suh f16 [H]. Out:
+  zg, zu f32 [KS, RK, I]; xsg, xsu f32 [RK, NBH]; szg, szu f32 [SKSG, rows, I] in layout SLM; sxsg, sxsu f32 [rows,
+  NBH].
+- **Grid and threadgroup:** `((I/(16·BT)) · 128, RK + SYS, SZ)` / `(128, 1, 1)`, SYS = ceil(nt / ((I/(16·BT)) · SZ)), nt
+  = `sharedTgs2`'s SKSG · ((2 · I/16) / (4 · SOTS)) shared threadgroups (one per K slice and group of 4 SOTS tiles over
+  both projections), SZ as for `gu3s`. BT = `bt1` at one row, `bt9` above.
+- **Template args:** NHW (the routed rate, K = NHW/16; gate, up and down at one rate), CODEBOOK and WBITS (the routed
+  decode's, shared by the shared heads), HID, INTER, RKC (= RK: the first shared grid row), KS (the routed K slices of
+  `Kernels3.initWith` at `ks_max` 4: 4 for gate|up, 2 for down at Qwen3.8's 2560 x 640), SPT (KS / SZ: 1 under the
+  default `kdiv9` {1, 1, 1, 1}), BT (output tiles per GEMV threadgroup: `bt1` at one row, `bt9` from two, 2 each), GROUP
+  (row-slots per lead threadgroup: 2 from two rows, 1 at one), DEFER (the routed MUL1 deferral); TOPK; SNG, SKSG, SRS,
+  SDEF; SLM (1: the planes lane-major, a float4 per plane and lane; `SharedHeads.slm`), SPRE (a simdgroup's weight
+  prefetch distance in input tiles, `spre` per row count, whole parts, at most 3 parts and 16 tiles), SOTS (output tiles
+  per simdgroup, `sots` / `sotsd` through `sharedOts`), SX, SYS, SYOFF (the shared threadgroups' slots: id = (z · SYS +
+  row) · SX + x; SYOFF 0 puts the SYS shared rows after the routed ones, SYOFF = SYS before them with `sfirst`, the
+  routed body then taking rk = y - SYOFF); SNP (1, or 2 when a threadgroup's 4 · SOTS tiles cross from the gate into the
+  up and it rotates both); here SOTS from `sots` and SX = I/(16·BT).
+- **Replaces:** Nothing served: a variant of `turboexl3_gu8s` (the v2 gate|up head rotating the slice's 128-block
+  in-kernel, on `gu8`).
+- **Bits:** the same bytes as its v1 counterpart, so byte-identical to the host's chain: one simdgroup per (K slice,
+  SOTS tiles) computes dense dgemv's plane values in dgemv's order (the four parts from zero, folded over the quads, the
+  slice the left sum of its parts) with no threadgroup reduction, and every codeword taken from the window's 32-bit
+  words.
+- **Pinned by:** `src/core/gpu_test.zig` "turboexl3 gpu: the shared expert fused into form 9's launches equals the
+  host's chain byte for byte (TURBOEXL3_GPU=1)" (GPU: y bit for bit, mode inside2, at one row for every setting and at
+  rows 1 to 4 with `gu8_rows` 4); `src/models/qwen38/shared.zig` "turboexl3 decode v2 shared-head texts: every template
+  constant read is passed, every signature name is used" (CPU: template constants, signature names, the rk splice).
+
+### `turboexl3_prep2t`
+
+<!-- kernel-facts: turboexl3_prep2t -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/qwen38/shared.zig:477` (`const SharedHeads`) |
+| inputs | `x`, `slots`, `gate_suh`, `up_suh`, `sh_gate_suh`, `sh_up_suh` |
+| outputs | `xg`, `xu`, `sg`, `su`, `sxg`, `sxu`, `sxsg`, `sxsu` |
+| source | `text_prep2t` = `qwen38:shared/shared_prep_head` ++ `decode/prep2_1` ++ `decode/expert_line` ++ `decode/prep2_row` ++ `decode/prep2_2` (2895 B, `7c55f77981ed`) |
+| header | `header_t` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` ++ `qwen38:shared/shared` ++ `qwen38:shared/shared2` (39410 B, `435a7ae9ef8e`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** Qwen3.8 (`src/models/qwen38/shared.zig`), not served: launched only by `SharedHeads.moeShared2` /
+  `moeSharedSide2` (the v2 heads), which nothing in the library calls (`SharedHeads.sheads` documents the choice; no
+  code reads it); `SharedHeads.init` makes it with the other shared heads and the GPU test runs it. Launch 1 of
+  `moeShared2` at the rows above `gu8_rows` with `SharedHeads.sprep` (true by default), before `turboexl3_gu3p`.
+- **Shapes and dtypes:** In: x T [rows, H]; slots u32 [RK]; gate_suh, up_suh f16 [E, H]; sh_gate_suh, sh_up_suh f16 [H].
+  Out: xg, xu f16 [RK, H] (lane order); sg, su f32 [RK, NBH] (block sums); sxg, sxu f16 [rows, H] (the shared gate|up
+  input, lane order); sxsg, sxsu f32 [rows, NBH].
+- **Grid and threadgroup:** `((H/128) · 32, RK + rows, 1)` / `(32, 1, 1)`: one simdgroup per (128-block of hidden,
+  row-slot) running prep2, and from grid row RKC one per (block, row) running dense prep_s for the shared gate and up.
+- **Template args:** DIM (H), TOPK, RKC (= RK). Rows 2 to 4 by default; it decodes no weight.
+- **Replaces:** Nothing served: `turboexl3_prep2` with the shared gate and up `linear`s' prepare (dense `prep_s`) as
+  extra grid rows, so `gu3p` reads a prepared input.
+- **Bits:** its routed rows run prep2's statements and its shared rows dense prep_s's (the prepare `gu3s`'s head runs
+  in-kernel), so the call is byte-identical to the host's chain.
+- **Pinned by:** `src/core/gpu_test.zig` "turboexl3 gpu: the shared expert fused into form 9's launches equals the
+  host's chain byte for byte (TURBOEXL3_GPU=1)" (GPU: y bit for bit, mode inside2, the settings with `sprep` on at rows
+  2 to 4); `src/models/qwen38/shared.zig` "turboexl3 decode v2 shared-head texts: every template constant read is
+  passed, every signature name is used" (CPU: the prepare head's template constants, `text_prep2t`'s signature).
+
+### `turboexl3_route_prep`
+
+<!-- kernel-facts: turboexl3_route_prep -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/qwen38/shared.zig:767` (`const SharedHeads`) |
+| inputs | `logits`, `x`, `gate_suh`, `up_suh` |
+| outputs | `xg`, `xu`, `sg`, `su`, `inds`, `scores` |
+| source | `text_route_prep` = `qwen38:shared/route_prep_1` ++ `qwen38:shared/route_prep_2` ++ `qwen38:shared/router_softmax_3` ++ `qwen38:shared/route_prep_3` ++ `qwen38:shared/router_softmax_2` ++ `qwen38:shared/route_prep_4` ++ `qwen38:shared/route_prep_close` ++ `qwen38:shared/route_prep_5` ++ `decode/prep2_2` ++ `qwen38:shared/route_prep_6` ++ `qwen38:shared/router_softmax_5` ++ `qwen38:shared/route_prep_7` (5178 B, `d54acdbfdc6d`) |
+| header | `""` = (empty) (0 B, `e3b0c44298fc`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** Qwen3.8-Flash-Next (`src/models/qwen38/shared.zig`), served: launch 1 of `root.moeFusedSharedRouted` when
+  the caller gives the shared gate's `logit` (no `gate_vec`), through `SharedHeads.routeLaunch` / `moeSharedRouted`,
+  reached from the table's `swiglu_shared` member when the host passes the router logits. Rows above `gu8_rows` up to 4
+  (2 to 4 by default; the entry refuses the rows `gu8s` prepares, and refuses with `Config.slot_stats`). Made on first
+  use, one config per row count keyed on the experts, the scores' dtype and the gate width (`RouteKey`).
+- **Shapes and dtypes:** In: logits TOUT [rows, NE] (the router gemv's output; TOUT bf16, f16 or f32 in `routeLaunch`,
+  x's dtype in the entry; NE the bank's experts, TOPK to 2048); x T [rows, H]; gate_suh, up_suh f16 [E, H]. Out: xg, xu
+  f16 [RK, H] (prep2's, lane order); sg, su f32 [RK, NBH] (block sums); inds u32 [RK] (the slots); scores TOUT [RK] (the
+  renormalized softmax weights). RK = rows · TOPK.
+- **Grid and threadgroup:** `((H/128) · TG, rows, 1)` / `(TG, 1, 1)`, TG = 32 · `routeSimdgroups(TOPK, false)` = 32 ·
+  (TOPK + 1): one threadgroup per (128-block of hidden, row), one simdgroup per row-slot plus one for the softmax and
+  weights.
+- **Template args:** NE (experts), NK (TOPK, the router's k), TG, TOUT, DIM (H), TOPK. `routeLaunch` takes 1 to 16 rows,
+  TOPK <= 31, NE <= 2048; it decodes no weight.
+- **Replaces:** `mlxserve_moe_router_softmax` (the host's router kernel, softmax mode) -> `turboexl3_prep2` (2 launches,
+  2 dependent levels) in one launch.
+- **Bits:** byte-identical to the router kernel + prep2: verbatim slices of the router's text (selection, softmax tree,
+  renormalized weights) and of prep2's body, each on the lanes its own kernel runs it on.
+- **Pinned by:** `src/core/gpu_test.zig` "turboexl3 gpu: the router folded into form 9's prepare launch (and the shared
+  gate's logit with it) ..." (GPU, part=launch: every output against the router kernel + `routeChainPrep` at 512
+  experts, rows 1 to 4, 8 and 16, bf16 and f16 logits, exact ties; part=moe: `moeSharedRouted` end to end against the
+  router kernel + `moeShared`, rows 2 to 4, 64 and 512 experts, fold on and off; part=refuse_gu8: one row refused);
+  `src/models/qwen38/shared.zig` "turboexl3 decode router-folded prepare texts: the merged launch carries the router's
+  ..." (CPU: each router and prep2 piece once, the pinned value lines, every name and constant, `routeSimdgroups`).
+
+### `turboexl3_route_prepg`
+
+<!-- kernel-facts: turboexl3_route_prepg -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/qwen38/shared.zig:765` (`const SharedHeads`) |
+| inputs | `logits`, `x`, `gate_suh`, `up_suh`, `gx`, `gw` |
+| outputs | `xg`, `xu`, `sg`, `su`, `inds`, `scores`, `glogit` |
+| source | `text_route_prepg` = `qwen38:shared/route_prep_1` ++ `qwen38:shared/route_prep_gp` ++ `qwen38:shared/route_prep_2` ++ `qwen38:shared/router_softmax_3` ++ `qwen38:shared/route_prep_3` ++ `qwen38:shared/router_softmax_2` ++ `qwen38:shared/route_prep_4` ++ `qwen38:shared/route_prep_close_gate` ++ `sources/gate_gemv` ++ `qwen38:shared/route_prep_5` ++ `decode/prep2_2` ++ `qwen38:shared/route_prep_6` ++ `qwen38:shared/router_softmax_5` ++ `qwen38:shared/route_prep_gsum_open` ++ `sources/gate_sum` ++ `qwen38:shared/route_prep_gsum_close` ++ `qwen38:shared/route_prep_7` (6770 B, `b6ad7f1f1a6f`) |
+| header | `""` = (empty) (0 B, `e3b0c44298fc`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** Qwen3.8-Flash-Next (`src/models/qwen38/shared.zig`), served: launch 1 of `root.moeFusedSharedRouted` when
+  the caller passes `gate_vec` (the shared gate's weight vector) instead of `logit`: bf16 at 2 to 4 rows with D > 64 and
+  D >= 16 · rows (D = H), the shapes at which MLX's matmul runs the gemv it repeats. Otherwise as
+  `turboexl3_route_prep`.
+- **Shapes and dtypes:** As `turboexl3_route_prep` (logits bf16 [rows, NE]; x bf16 [rows, H]; gate_suh, up_suh f16 [E,
+  H]; out xg, xu f16 [RK, H], sg, su f32 [RK, NBH], inds u32 [RK], scores bf16 [RK]), plus gx bf16 [rows, H] (x again)
+  and gw bf16 [H] (the gate vector) in, and glogit bf16 [rows] (the shared gate's logit, which `dfin7s` reads as slogit)
+  out.
+- **Grid and threadgroup:** `((H/128) · TG, rows, 1)` / `(TG, 1, 1)`, TG = 32 · `routeSimdgroups(TOPK, true)` = 32 ·
+  (max(TOPK, 9) + 1): simdgroup 0 selects while simdgroups 1 to 8 take the gate's dot.
+- **Template args:** `route_prep`'s (NE, NK, TG, TOUT, DIM, TOPK) and GK (H, the gate's width).
+- **Replaces:** `mlxserve_moe_router_softmax` -> `turboexl3_prep2`, plus MLX's matmul of x and the gate vector for the
+  logit (3 launches, the matmul beside the chain) in one launch.
+- **Bits:** byte-identical to the router kernel + prep2, and the logit to MLX 0.32's matmul: the column order and the
+  fold of `gemv_bfloat16_bm1_bn8_sm1_sn32_tm{1,4}_tn4` (`sources.gate_gemv`, `sources.gate_sum`).
+- **Pinned by:** `src/core/gpu_test.zig` "turboexl3 gpu: the router folded into form 9's prepare launch (and the shared
+  gate's logit with it) ..." (GPU, part=launch with the gate at rows 2 to 4 bf16, part=gate_logit against MLX's matmul,
+  part=moe with gate=launch); `src/models/qwen38/shared.zig` "turboexl3 decode router-folded prepare texts: the merged
+  launch carries the router's ..." (CPU: the gate's dot and sum once each and only in this text, GK, `routeSimdgroups`).
+
+### `turboexl3_sdown`
+
+<!-- kernel-facts: turboexl3_sdown -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/qwen38/shared.zig:473` (`const SharedHeads`) |
+| inputs | `sxpd`, `sh_down_t` |
+| outputs | `szd` |
+| source | `shared_down_head` = `qwen38:shared/shared_down_head` (1713 B, `a2ed9e21e286`) |
+| header | `header_s` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` ++ `qwen38:shared/shared` (30584 B, `af3e3f8b3d2f`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** Qwen3.8 (`src/models/qwen38/shared.zig`), not served: launched only by `SharedHeads.moeSharedSide` (the
+  three v1 heads standalone, RKC 0, beside form 9's untouched routed launches), which nothing in the library calls;
+  `SharedHeads.init` makes it and the GPU test runs it. Its shared down beside form 9's `down3`.
+- **Shapes and dtypes:** In: sxpd f16 [rows, I] (`sfin`'s, lane order); sh_down_t [I/16, H/16, SND]. Out: szd f32 [SKSD,
+  rows, H].
+- **Grid and threadgroup:** `((H/(16·BT)) · 128, 1, SKSD/SSPTD)` / `(128, 1, 1)`: each z threadgroup runs SSPTD
+  consecutive slices; BT = `bt1` at one row, `bt9` above.
+- **Template args:** SRS (rows), BT, RKC (0: every grid row is the shared expert's), WBITS, SKSD, INTER, SZ
+  (SKSD/SSPTD), SND, CODEBOOK, HID, SDEF, SSPTD. Rows 1 to 4.
+- **Replaces:** Nothing served: `down3s`'s shared head as a launch of its own (the shared down `linear`'s GEMV), the
+  routed `down3` untouched.
+- **Bits:** the same bytes as `down3s`'s shared rows (dense dgemv's planes), so the call is byte-identical to the host's
+  chain.
+- **Pinned by:** `src/core/gpu_test.zig` "turboexl3 gpu: the shared expert fused into form 9's launches equals the
+  host's chain byte for byte (TURBOEXL3_GPU=1)" (GPU: y bit for bit, mode side, rows 1 to 4, down slices per threadgroup
+  1 and 5); `src/models/qwen38/shared.zig` "turboexl3 decode shared-expert texts: every template constant read is
+  passed, every signature name is used" (CPU: `shared_down_head`'s template constants); `src/models/qwen38/shared.zig`
+  "turboexl3 decode v2 shared-head texts: every template constant read is passed, every signature name is used" (CPU:
+  `shared_down_head`'s signature).
+
+### `turboexl3_sdown2`
+
+<!-- kernel-facts: turboexl3_sdown2 -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/qwen38/shared.zig:485` (`const SharedHeads`) |
+| inputs | `sxpd`, `sh_down_t` |
+| outputs | `szd` |
+| source | `shared_down2_head` = `qwen38:shared/shared2_prologue` ++ `qwen38:shared/shared_down2_head` (2882 B, `469d087ac9dd`) |
+| header | `header_t` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` ++ `qwen38:shared/shared` ++ `qwen38:shared/shared2` (39410 B, `435a7ae9ef8e`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** Qwen3.8 (`src/models/qwen38/shared.zig`), not served: launched only by `SharedHeads.moeShared2` /
+  `moeSharedSide2` (the v2 heads), which nothing in the library calls (`SharedHeads.sheads` documents the choice; no
+  code reads it); `SharedHeads.init` makes it with the other shared heads and the GPU test runs it. The shared down of
+  `moeSharedSide2`, beside form 9's `down3`.
+- **Shapes and dtypes:** In: sxpd f16 [rows, I]; sh_down_t [I/16, H/16, SND]. Out: szd f32 [SKSD, rows, H] in layout
+  SLM.
+- **Grid and threadgroup:** `(nt · 128, 1, 1)` / `(128, 1, 1)`, nt = SKSD · ((H/16) / (4 · SOTS)) (`sharedTgs2`).
+- **Template args:** WBITS, HID, INTER, CODEBOOK, RKC (0), SND, SKSD, SRS, SDEF, SLM, SPRE, SOTS (from `sotsd`), SX
+  (nt), SYS (1), SYOFF (0). Rows 1 to 4.
+- **Replaces:** Nothing served: `down3t`'s shared head as a launch of its own.
+- **Bits:** the same bytes as its v1 counterpart, so byte-identical to the host's chain: one simdgroup per (K slice,
+  SOTS tiles) computes dense dgemv's plane values in dgemv's order (the four parts from zero, folded over the quads, the
+  slice the left sum of its parts) with no threadgroup reduction, and every codeword taken from the window's 32-bit
+  words.
+- **Pinned by:** `src/core/gpu_test.zig` "turboexl3 gpu: the shared expert fused into form 9's launches equals the
+  host's chain byte for byte (TURBOEXL3_GPU=1)" (GPU: y bit for bit, mode side2, five knob settings, rows 1 to 4);
+  `src/models/qwen38/shared.zig` "turboexl3 decode v2 shared-head texts: every template constant read is passed, every
+  signature name is used" (CPU: template constants and signature names).
+
+### `turboexl3_sfin`
+
+<!-- kernel-facts: turboexl3_sfin -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/qwen38/shared.zig:472` (`const SharedHeads`) |
+| inputs | `szg`, `szu`, `sxsg`, `sxsu`, `sh_gate_svh`, `sh_up_svh`, `sh_down_suh`, `sigtab` |
+| outputs | `sxpd`, `sxsd` |
+| source | `shared_fin_head` = `qwen38:shared/shared_fin_head_1` ++ `qwen38:shared/shared_fin_head_2` ++ `qwen38:shared/shared_fin_head_xg` ++ `qwen38:shared/shared_fin_head_xu` ++ `qwen38:shared/shared_fin_head_3` ++ `qwen38:shared/shared_fin_head_g` ++ `qwen38:shared/shared_fin_head_u` ++ `qwen38:shared/shared_fin_head_4` ++ `qwen38:shared/shared_fin_head_end` (1389 B, `831bb8e653a6`) |
+| header | `header_s` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` ++ `qwen38:shared/shared` (30584 B, `af3e3f8b3d2f`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** Qwen3.8 (`src/models/qwen38/shared.zig`), not served: launched only by `SharedHeads.moeSharedSide` (the
+  three v1 heads standalone, RKC 0, beside form 9's untouched routed launches), which nothing in the library calls;
+  `SharedHeads.init` makes it and the GPU test runs it. Its shared finish beside form 9's `fin7`.
+- **Shapes and dtypes:** In: szg, szu f32 [SKSG, rows, I]; sxsg, sxsu f32 [rows, NBH]; sh_gate_svh, sh_up_svh f16 [I];
+  sh_down_suh f16 [I]; sigtab T [65536]. Out: sxpd f16 [rows, I] (lane order); sxsd f32 [rows, NBI].
+- **Grid and threadgroup:** `((I/128) · 32, rows, 1)` / `(32, 1, 1)`: one simdgroup per (128-block of the intermediate,
+  row).
+- **Template args:** INTER, RKC (0), NBH, SDEF, SKSG, SRS (rows), OUT_T (T). Rows 1 to 4.
+- **Replaces:** Nothing served: `fin7s`'s shared head as a launch of its own (dense `dfinish` of gate and up, the table
+  SwiGLU, dense `prep_s` for the down).
+- **Bits:** the same bytes as `fin7s`'s shared rows, so the call is byte-identical to the host's chain.
+- **Pinned by:** `src/core/gpu_test.zig` "turboexl3 gpu: the shared expert fused into form 9's launches equals the
+  host's chain byte for byte (TURBOEXL3_GPU=1)" (GPU: y bit for bit, mode side, rows 1 to 4);
+  `src/models/qwen38/shared.zig` "turboexl3 decode shared-expert texts: every template constant read is passed, every
+  signature name is used" (CPU: `shared_fin_head`'s template constants).
+
+### `turboexl3_sfin2`
+
+<!-- kernel-facts: turboexl3_sfin2 -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/qwen38/shared.zig:484` (`const SharedHeads`) |
+| inputs | `szg`, `szu`, `sxsg`, `sxsu`, `sh_gate_svh`, `sh_up_svh`, `sh_down_suh`, `sigtab` |
+| outputs | `sxpd`, `sxsd` |
+| source | `shared_fin2_head` = `qwen38:shared/shared_fin2_head` (1413 B, `5fdf9f46eab1`) |
+| header | `header_t` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` ++ `qwen38:shared/shared` ++ `qwen38:shared/shared2` (39410 B, `435a7ae9ef8e`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** Qwen3.8 (`src/models/qwen38/shared.zig`), not served: launched only by `SharedHeads.moeShared2` /
+  `moeSharedSide2` (the v2 heads), which nothing in the library calls (`SharedHeads.sheads` documents the choice; no
+  code reads it); `SharedHeads.init` makes it with the other shared heads and the GPU test runs it. The shared finish of
+  `moeSharedSide2`.
+- **Shapes and dtypes:** As `turboexl3_sfin`, the planes szg, szu read in layout SLM: In szg, szu f32 [SKSG, rows, I];
+  sxsg, sxsu f32 [rows, NBH]; sh_gate_svh, sh_up_svh, sh_down_suh f16 [I]; sigtab T [65536]. Out: sxpd f16 [rows, I];
+  sxsd f32 [rows, NBI].
+- **Grid and threadgroup:** `((I/128) · 32, rows, 1)` / `(32, 1, 1)`.
+- **Template args:** INTER, RKC (0), NBH, SDEF, SKSG, SRS, OUT_T, SLM. Rows 1 to 4.
+- **Replaces:** Nothing served: `fin7t`'s shared head as a launch of its own.
+- **Bits:** the same bytes as its v1 counterpart, so byte-identical to the host's chain: one simdgroup per (K slice,
+  SOTS tiles) computes dense dgemv's plane values in dgemv's order (the four parts from zero, folded over the quads, the
+  slice the left sum of its parts) with no threadgroup reduction, and every codeword taken from the window's 32-bit
+  words.
+- **Pinned by:** `src/core/gpu_test.zig` "turboexl3 gpu: the shared expert fused into form 9's launches equals the
+  host's chain byte for byte (TURBOEXL3_GPU=1)" (GPU: y bit for bit, mode side2, five knob settings, rows 1 to 4);
+  `src/models/qwen38/shared.zig` "turboexl3 decode v2 shared-head texts: every template constant read is passed, every
+  signature name is used" (CPU: template constants and signature names).
+
+### `turboexl3_sgu`
+
+<!-- kernel-facts: turboexl3_sgu -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/qwen38/shared.zig:471` (`const SharedHeads`) |
+| inputs | `xr`, `sh_gate_t`, `sh_up_t`, `sh_gate_suh`, `sh_up_suh` |
+| outputs | `szg`, `szu`, `sxsg`, `sxsu` |
+| source | `shared_gu_head` = `qwen38:shared/shared_gu_head_1` ++ `qwen38:shared/shared_gu_head_2` ++ `qwen38:shared/shared_gu_head_3` ++ `qwen38:shared/shared_gu_head_z` ++ `qwen38:shared/shared_gu_head_4` ++ `qwen38:shared/shared_gu_head_sums` ++ `qwen38:shared/shared_gu_head_5` ++ `qwen38:shared/shared_gu_head_end` (2664 B, `c16ccf11f78a`) |
+| header | `header_s` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` ++ `qwen38:shared/shared` (30584 B, `af3e3f8b3d2f`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** Qwen3.8 (`src/models/qwen38/shared.zig`), not served: launched only by `SharedHeads.moeSharedSide` (the
+  three v1 heads standalone, RKC 0, beside form 9's untouched routed launches), which nothing in the library calls;
+  `SharedHeads.init` makes it and the GPU test runs it. Its shared gate|up beside form 9's gate|up launch.
+- **Shapes and dtypes:** In: xr T [rows, H] (x, rotated in-kernel); sh_gate_t, sh_up_t [H/16, I/16, SNG]; sh_gate_suh,
+  sh_up_suh f16 [H]. Out: szg, szu f32 [SKSG, rows, I]; sxsg, sxsu f32 [rows, NBH].
+- **Grid and threadgroup:** `((I/(16·BT)) · 128, 1, 2 · (SKSG/SSPT))` / `(128, 1, 1)`: every (slice group, projection)
+  its own threadgroup along z; BT = `bt1` at one row, `bt9` above.
+- **Template args:** SRS (rows), BT, RKC (0), WBITS, SKSG, SZ (2 · (SKSG/SSPT)), HID, SNG, CODEBOOK, SDEF, INTER, SSPT.
+  Rows 1 to 4.
+- **Replaces:** Nothing served: `gu3s`'s shared head as a launch of its own (the shared gate and up `linear`s' prepare
+  and GEMV).
+- **Bits:** the same bytes as `gu3s`'s shared rows (dense prep_s + dgemv's planes), so the call is byte-identical to the
+  host's chain.
+- **Pinned by:** `src/core/gpu_test.zig` "turboexl3 gpu: the shared expert fused into form 9's launches equals the
+  host's chain byte for byte (TURBOEXL3_GPU=1)" (GPU: y bit for bit, mode side, rows 1 to 4, gate|up slices per
+  threadgroup 1, 4 and 5); `src/models/qwen38/shared.zig` "turboexl3 decode shared-expert texts: every template constant
+  read is passed, every signature name is used" (CPU: `shared_gu_head`'s template constants).
+
+### `turboexl3_sgu2`
+
+<!-- kernel-facts: turboexl3_sgu2 -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/qwen38/shared.zig:481` (`const SharedHeads`) |
+| inputs | `xr`, `sh_gate_t`, `sh_up_t`, `sh_gate_suh`, `sh_up_suh` |
+| outputs | `szg`, `szu`, `sxsg`, `sxsu` |
+| source | `shared_gu2_head` = `qwen38:shared/shared_gu2_head_1` ++ `qwen38:shared/shared2_prologue` ++ `qwen38:shared/shared_gu2_head_2` (4407 B, `375e6dd27619`) |
+| header | `header_t` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` ++ `qwen38:shared/shared` ++ `qwen38:shared/shared2` (39410 B, `435a7ae9ef8e`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** Qwen3.8 (`src/models/qwen38/shared.zig`), not served: launched only by `SharedHeads.moeShared2` /
+  `moeSharedSide2` (the v2 heads), which nothing in the library calls (`SharedHeads.sheads` documents the choice; no
+  code reads it); `SharedHeads.init` makes it with the other shared heads and the GPU test runs it. The shared gate|up
+  of `moeSharedSide2` where it has no standalone prepare: the rows up to `gu8_rows` where `gu8Admitted`, or
+  `SharedHeads.sprep` false.
+- **Shapes and dtypes:** In: xr T [rows, H]; sh_gate_t, sh_up_t [H/16, I/16, SNG]; sh_gate_suh, sh_up_suh f16 [H]. Out:
+  szg, szu f32 [SKSG, rows, I] in layout SLM; sxsg, sxsu f32 [rows, NBH].
+- **Grid and threadgroup:** `(nt · 128, 1, 1)` / `(128, 1, 1)`, nt = SKSG · ((2 · I/16) / (4 · SOTS)) (`sharedTgs2`).
+- **Template args:** WBITS, HID, INTER, CODEBOOK, RKC (0), SNG, SKSG, SRS, SDEF, SLM, SPRE, SNP (1, or 2 when a
+  threadgroup's 4 · SOTS tiles cross from the gate into the up and it rotates both), SOTS (from `sots`), SX (nt), SYS
+  (1), SYOFF (0). Rows 1 to 4.
+- **Replaces:** Nothing served: `gu3t`'s / `gu8t`'s shared head as a launch of its own.
+- **Bits:** the same bytes as its v1 counterpart, so byte-identical to the host's chain: one simdgroup per (K slice,
+  SOTS tiles) computes dense dgemv's plane values in dgemv's order (the four parts from zero, folded over the quads, the
+  slice the left sum of its parts) with no threadgroup reduction, and every codeword taken from the window's 32-bit
+  words.
+- **Pinned by:** `src/core/gpu_test.zig` "turboexl3 gpu: the shared expert fused into form 9's launches equals the
+  host's chain byte for byte (TURBOEXL3_GPU=1)" (GPU: y bit for bit, mode side2, rows 1 to 4);
+  `src/models/qwen38/shared.zig` "turboexl3 decode v2 shared-head texts: every template constant read is passed, every
+  signature name is used" (CPU: template constants and signature names).
+
+### `turboexl3_sgu2p`
+
+<!-- kernel-facts: turboexl3_sgu2p -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/qwen38/shared.zig:482` (`const SharedHeads`) |
+| inputs | `sxg`, `sxu`, `sh_gate_t`, `sh_up_t` |
+| outputs | `szg`, `szu` |
+| source | `shared_gu2p_head` = `qwen38:shared/shared2_prologue` ++ `qwen38:shared/shared_gu2p_head` (3049 B, `1890c994922b`) |
+| header | `header_t` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` ++ `qwen38:shared/shared` ++ `qwen38:shared/shared2` (39410 B, `435a7ae9ef8e`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** Qwen3.8 (`src/models/qwen38/shared.zig`), not served: launched only by `SharedHeads.moeShared2` /
+  `moeSharedSide2` (the v2 heads), which nothing in the library calls (`SharedHeads.sheads` documents the choice; no
+  code reads it); `SharedHeads.init` makes it with the other shared heads and the GPU test runs it. The shared gate|up
+  of `moeSharedSide2` after `turboexl3_sprep2` (rows above `gu8_rows` with `sprep`).
+- **Shapes and dtypes:** In: sxg, sxu f16 [rows, H] (`sprep2`'s, lane order); sh_gate_t, sh_up_t [H/16, I/16, SNG]. Out:
+  szg, szu f32 [SKSG, rows, I] in layout SLM.
+- **Grid and threadgroup:** `(nt · 128, 1, 1)` / `(128, 1, 1)`, nt as for `sgu2`.
+- **Template args:** `sgu2`'s: WBITS, HID, INTER, CODEBOOK, RKC (0), SNG, SKSG, SRS, SDEF, SLM, SPRE, SNP, SOTS, SX
+  (nt), SYS (1), SYOFF (0). Rows 2 to 4 by default.
+- **Replaces:** Nothing served: `gu3p`'s shared head as a launch of its own (no rotation, no threadgroup memory, no
+  barrier).
+- **Bits:** the same bytes as its v1 counterpart, so byte-identical to the host's chain: one simdgroup per (K slice,
+  SOTS tiles) computes dense dgemv's plane values in dgemv's order (the four parts from zero, folded over the quads, the
+  slice the left sum of its parts) with no threadgroup reduction, and every codeword taken from the window's 32-bit
+  words.
+- **Pinned by:** `src/core/gpu_test.zig` "turboexl3 gpu: the shared expert fused into form 9's launches equals the
+  host's chain byte for byte (TURBOEXL3_GPU=1)" (GPU: y bit for bit, mode side2, the settings with `sprep` on at rows 2
+  to 4); `src/models/qwen38/shared.zig` "turboexl3 decode v2 shared-head texts: every template constant read is passed,
+  every signature name is used" (CPU: template constants and signature names).
+
+### `turboexl3_sprep2`
+
+<!-- kernel-facts: turboexl3_sprep2 -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/qwen38/shared.zig:483` (`const SharedHeads`) |
+| inputs | `x`, `sh_gate_suh`, `sh_up_suh` |
+| outputs | `sxg`, `sxu`, `sxsg`, `sxsu` |
+| source | `shared_prep_head` = `qwen38:shared/shared_prep_head` (904 B, `362b0ba3ca72`) |
+| header | `header_t` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` ++ `qwen38:shared/shared` ++ `qwen38:shared/shared2` (39410 B, `435a7ae9ef8e`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** Qwen3.8 (`src/models/qwen38/shared.zig`), not served: launched only by `SharedHeads.moeShared2` /
+  `moeSharedSide2` (the v2 heads), which nothing in the library calls (`SharedHeads.sheads` documents the choice; no
+  code reads it); `SharedHeads.init` makes it with the other shared heads and the GPU test runs it. The standalone
+  shared prepare of `moeSharedSide2` at the rows above `gu8_rows` with `sprep`, before `turboexl3_sgu2p`.
+- **Shapes and dtypes:** In: x T [rows, H]; sh_gate_suh, sh_up_suh f16 [H]. Out: sxg, sxu f16 [rows, H] (lane order);
+  sxsg, sxsu f32 [rows, NBH].
+- **Grid and threadgroup:** `((H/128) · 32, rows, 1)` / `(32, 1, 1)`: one simdgroup per (128-block of hidden, row)
+  running dense prep_s for gate and up.
+- **Template args:** DIM (H), RKC (0). Rows 2 to 4 by default; it decodes no weight.
+- **Replaces:** Nothing served: `prep2t`'s shared head as a launch of its own (the shared gate and up `linear`s'
+  prepare, dense `prep_s`).
+- **Bits:** dense prep_s's statements; the call is byte-identical to the host's chain.
+- **Pinned by:** `src/core/gpu_test.zig` "turboexl3 gpu: the shared expert fused into form 9's launches equals the
+  host's chain byte for byte (TURBOEXL3_GPU=1)" (GPU: y bit for bit, mode side2, the settings with `sprep` on at rows 2
+  to 4); `src/models/qwen38/shared.zig` "turboexl3 decode v2 shared-head texts: every template constant read is passed,
+  every signature name is used" (CPU: template constants and signature names).
+
+### `turboexl3_vfold_zero`
+
+<!-- kernel-facts: turboexl3_vfold_zero -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/qwen38/shared.zig:649` (`const SharedHeads`) |
+| inputs | `gate_svh` |
+| outputs | `cnt` |
+| source | `text_vfold_zero` = `dense/dec_zero` (83 B, `c4a6f024bb78`) |
+| header | `header` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` (18000 B, `771237d24284`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** Qwen3.8-Flash-Next (`src/models/qwen38/shared.zig`), served for its gated shared expert (y = routed +
+  sigmoid(logit) · shared(x)) through `root.moeFusedShared` and `root.moeFusedSharedRouted`, which the table's
+  `swiglu_shared` member calls (`table/table.zig` `swigluShared`) at 1 to 4 decode / verify rows
+  (`shared.shared_rows_max`) when `SharedHeads.sharedAdmitted` holds. Beside `turboexl3_gu3sf` in
+  `SharedHeads.sharedFold` (rows above `gu8_rows`, 2 to 4 by default, with `Config.fused_fin_fold` true), both entries;
+  made on first use in `sharedCfgs`.
+- **Shapes and dtypes:** In: gate_svh f16 [E, I] (the routed gate's svh: a weight, bound only so the launch depends on
+  nothing; not read). Out: cnt u32 [NCNT], NCNT = max(RK · NBI + NBI, 8) (at least 8: MLX binds an input of fewer than 8
+  elements in the constant address space, where there are no atomics).
+- **Grid and threadgroup:** `(ceil(NCNT/128) · 128, 1, 1)` / `(128, 1, 1)`.
+- **Template args:** NCNT. Every geometry `gu3sf` serves.
+- **Replaces:** Nothing: it is the counter zeroing of the fold (DEC-ONE's zeroing text, `dense/dec_zero`); it reads only
+  a weight, so it runs beside the prepare launch and adds no dependent level.
+- **Bits:** writes zeros; nothing rounded.
+- **Pinned by:** `src/models/qwen38/shared.zig` "turboexl3 decode fused fin fold texts: gu3sf is gu3s but its plane and
+  sums stores, ..." (CPU: its text reads NCNT); `src/core/gpu_test.zig` "turboexl3 gpu: the shared expert fused into
+  form 9's launches equals the host's chain byte for byte (TURBOEXL3_GPU=1)" (GPU, mode inside at rows 2 to 4) and
+  `src/core/gpu_test.zig` "turboexl3 gpu: the router folded into form 9's prepare launch (and the shared gate's logit
+  with it) ..." (GPU, part=moe fold=folded): every `gu3sf` run there counts on its zeros.

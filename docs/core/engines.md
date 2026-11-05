@@ -67,8 +67,8 @@ levels.
 | family | entry points | rows | Zig file (under `src/`) |
 |---|---|---|---|
 | decode GEMV of the [routed experts](glossary.md#routed-expert) | `moe`, `moeClamped` | 1–16 | `core/decode.zig` |
-| the same over three expert banks, one routed pair a row-slot | `moeClampedBanked` | 1–64 pairs | `core/decode.zig` (DeepSeek-V4.1) |
-| shared expert and router in the decode launches | `moeFusedShared`, `moeFusedSharedRouted` | 1–4 (router fold: 2–4) | `core/decode.zig` (Qwen3.8) |
+| the same over three expert banks, one routed pair a row-slot | `moeClampedBanked` | 1–64 pairs | `models/deepseek_v41/banked.zig` on `core/decode.zig` |
+| shared expert and router in the decode launches | `moeFusedShared`, `moeFusedSharedRouted` | 1–4 (router fold: 2–4) | `models/qwen38/shared.zig` on `core/decode.zig` |
 | prefill GEMM of the routed experts | `moe`, `moeClamped` | 17+ | `core/prefill.zig` |
 | dense projections | `linear`, `linearSplit`, the `linear` pieces, `trunkUnrot`, `linearBias` | any | `core/dense.zig` |
 | attention projections | `attnIn`, `attnPrep4`, `linearPreparedIdx`, `linearGated`, `attnInStd`, `linearGatedStd` | 17+ | `models/qwen38/attn_io.zig` |

@@ -25,9 +25,11 @@ code's, or a prose field is missing.
 ## `src/core/decode.zig`
 
 The routed experts at decode rows (1 to 16): form 1 (`Kernels`, not served), form 3's split-K chain and its variants 7,
-8 and 9 (`Kernels3`; form 9 served), forms 5 and 6 (`Kernels5`); the clamped fin7 (DeepSeek-V4.1, `moeClamped`); the
-fused shared expert and the router fold in those launches (Qwen3.8, `moeFusedShared*`); the banked decode over an
-expert streamer's slot banks and its grouped variants (DeepSeek-V4.1, `moeClampedBanked`).
+8 and 9 (`Kernels3`; form 9 served), forms 5 and 6 (`Kernels5`); the clamped fin7 (DeepSeek-V4 and V4.1 and GLM,
+`moeClamped`). The fused shared expert and the router fold in those launches are Qwen3.8's
+([its catalog](../models/qwen38/kernels.md), `src/models/qwen38/shared.zig`); the banked decode over an expert
+streamer's slot banks and its grouped variants DeepSeek-V4.1's ([its catalog](../models/deepseek_v41/kernels.md),
+`src/models/deepseek_v41/banked.zig`).
 
 ### `turboexl3_dfin3`
 
@@ -35,7 +37,7 @@ expert streamer's slot banks and its grouped variants (DeepSeek-V4.1, `moeClampe
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/decode.zig:638` (`const Kernels3`) |
+| made at | `src/core/decode.zig:342` (`const Kernels3`) |
 | inputs | `zd`, `slots`, `scores`, `down_svh`, `hsx` |
 | outputs | `y` |
 | source | `text_dfin3` = `decode/dfin3_1` ++ `decode/dfin3_expert` ++ `decode/dfin3_2` (1324 B, `f7c3494d91f8`) |
@@ -80,7 +82,7 @@ expert streamer's slot banks and its grouped variants (DeepSeek-V4.1, `moeClampe
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/decode.zig:644` (`const Kernels3`) |
+| made at | `src/core/decode.zig:348` (`const Kernels3`) |
 | inputs | `zd`, `slots`, `scores`, `down_svh`, `hsx` |
 | outputs | `y` |
 | source | `text_dfin7` = `decode/dfin7` (1771 B, `8412c8c0b289`) |
@@ -117,7 +119,7 @@ expert streamer's slot banks and its grouped variants (DeepSeek-V4.1, `moeClampe
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/decode.zig:2294` (`const Kernels5`) |
+| made at | `src/core/decode.zig:637` (`const Kernels5`) |
 | inputs | `zg`, `zu`, `xsg`, `xsu`, `slots`, `gate_svh`, `up_svh`, `down_suh`, `down_t`, `down_svh` |
 | outputs | `wv` |
 | source | `text_dn5` = `decode/dn5_head` ++ `decode/dn5_tail` (5054 B, `58b2ca539f44`) |
@@ -158,7 +160,7 @@ expert streamer's slot banks and its grouped variants (DeepSeek-V4.1, `moeClampe
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/decode.zig:2296` (`const Kernels5`) |
+| made at | `src/core/decode.zig:639` (`const Kernels5`) |
 | inputs | `zg`, `zu`, `xsg`, `xsu`, `slots`, `gate_svh`, `up_svh`, `down_suh`, `down_t`, `down_svh`, `cnt`, `scores` |
 | outputs | `wv`, `y` |
 | source | `text_dn6` = `decode/dn5_head` ++ `decode/dn6_tail` (6350 B, `020e3537b6a1`) |
@@ -227,7 +229,7 @@ expert streamer's slot banks and its grouped variants (DeepSeek-V4.1, `moeClampe
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/decode.zig:637` (`const Kernels3`) |
+| made at | `src/core/decode.zig:341` (`const Kernels3`) |
 | inputs | `hdp`, `slots`, `down_t` |
 | outputs | `zd` |
 | source | `text_down3` = `decode/down3_1` ++ `decode/rk_line` ++ `decode/down3_2` ++ `decode/down3_w` ++ `decode/down3_3` (2340 B, `873aac06a4a9`) |
@@ -271,7 +273,7 @@ expert streamer's slot banks and its grouped variants (DeepSeek-V4.1, `moeClampe
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/decode.zig:636` (`const Kernels3`) |
+| made at | `src/core/decode.zig:340` (`const Kernels3`) |
 | inputs | `zg`, `zu`, `slots`, `gate_svh`, `up_svh`, `down_suh`, `xsg`, `xsu` |
 | outputs | `hd`, `hs` |
 | source | `text_fin3` = `decode/fin3` (2206 B, `187e822beba3`) |
@@ -313,7 +315,7 @@ expert streamer's slot banks and its grouped variants (DeepSeek-V4.1, `moeClampe
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/decode.zig:641` (`const Kernels3`) |
+| made at | `src/core/decode.zig:345` (`const Kernels3`) |
 | inputs | `zg`, `zu`, `slots`, `gate_svh`, `up_svh`, `down_suh`, `xsg`, `xsu` |
 | outputs | `hd`, `hs` |
 | source | `text_fin7` = `decode/fin7_1` ++ `decode/expert_line` ++ `decode/fin7_2` ++ `decode/fin7_planes` ++ `decode/fin7_3` ++ `decode/fin7_sums` ++ `decode/fin7_4` ++ `decode/fin7_swiglu` ++ `decode/fin7_5` (2152 B, `7360fcbe736a`) |
@@ -352,7 +354,7 @@ expert streamer's slot banks and its grouped variants (DeepSeek-V4.1, `moeClampe
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/decode.zig:643` (`const Kernels3`) |
+| made at | `src/core/decode.zig:347` (`const Kernels3`) |
 | inputs | `zg`, `zu`, `slots`, `gate_svh`, `up_svh`, `down_suh`, `xsg`, `xsu` |
 | outputs | `hd`, `hs` |
 | source | `text_fin7c` = `decode/fin7_1` ++ `decode/expert_line` ++ `decode/fin7_2` ++ `decode/fin7_planes` ++ `decode/fin7_3` ++ `decode/fin7_sums` ++ `decode/fin7_4` ++ `decode/fin7_swiglu_clamp` ++ `decode/fin7_5` (2505 B, `a82ad5c1492b`) |
@@ -364,7 +366,9 @@ expert streamer's slot banks and its grouped variants (DeepSeek-V4.1, `moeClampe
   when `Config.decode_form` is 3, 5 or 6 (those forms have no clamp; form 9 shares their bytes). A clamped geometry
   (`Geometry.limit` 1 to 128) builds it in `fin7`'s place, so every fin7 launch of that `Kernels3` clamps. DeepSeek-V4.1
   (swiglu_limit 10) through `moeClamped`; its streamed decode runs `turboexl3_fin7cb` (this text with the bank's expert
-  line) instead.
+  line) instead. The clamp's users: DeepSeek-V4 and V4.1 (swiglu_limit 10) and GLM (the same clamp), each through
+  `root.moeClamped`; Ripple's clamped SwiGLU is its own (`turboexl3_ric_swiglu_prep_sc` / `_prep`,
+  `src/models/ricursive/`).
 - **Shapes and dtypes:** as `turboexl3_fin7`: zg, zu f32 [KS, RK, INTER]; slots i32 or u32 [RK]; gate_svh, up_svh,
   down_suh f16 [E, INTER]; xsg, xsu f32 [RK, HID/128]. Out: hd f16 [RK, INTER]; hs f32 [RK, INTER/128].
 - **Grid and threadgroup:** as `fin7`: `((INTER/128)·32, RK, 1)` / `(32, 1, 1)`.
@@ -425,7 +429,7 @@ expert streamer's slot banks and its grouped variants (DeepSeek-V4.1, `moeClampe
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/decode.zig:635` (`const Kernels3`) |
+| made at | `src/core/decode.zig:339` (`const Kernels3`) |
 | inputs | `xgp`, `xup`, `slots`, `gate_t`, `up_t` |
 | outputs | `zg`, `zu` |
 | source | `text_gu3` = `decode/gu3_1` ++ `decode/rk_line` ++ `decode/gu3_2` ++ `decode/gu3_w` ++ `decode/gu3_3` ++ `decode/gu3_stores` ++ `decode/gu3_4` (2506 B, `89eae969537a`) |
@@ -475,7 +479,7 @@ expert streamer's slot banks and its grouped variants (DeepSeek-V4.1, `moeClampe
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/decode.zig:2293` (`const Kernels5`) |
+| made at | `src/core/decode.zig:636` (`const Kernels5`) |
 | inputs | `x`, `slots`, `gate_suh`, `up_suh`, `gate_t`, `up_t` |
 | outputs | `zg`, `zu`, `xsg`, `xsu`, `cnt` |
 | source | `text_gu5` = `decode/gu5` (4502 B, `fc4946388503`) |
@@ -513,7 +517,7 @@ expert streamer's slot banks and its grouped variants (DeepSeek-V4.1, `moeClampe
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/decode.zig:645` (`const Kernels3`) |
+| made at | `src/core/decode.zig:349` (`const Kernels3`) |
 | inputs | `x`, `slots`, `gate_suh`, `up_suh`, `gate_t`, `up_t` |
 | outputs | `zg`, `zu`, `xsg`, `xsu` |
 | source | `text_gu8` = `decode/gu8_1` ++ `decode/rk_line` ++ `decode/gu8_2` (4061 B, `b1354b8afc06`) |
@@ -551,7 +555,7 @@ expert streamer's slot banks and its grouped variants (DeepSeek-V4.1, `moeClampe
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/decode.zig:634` (`const Kernels3`) |
+| made at | `src/core/decode.zig:338` (`const Kernels3`) |
 | inputs | `x`, `slots`, `gate_suh`, `up_suh` |
 | outputs | `xg`, `xu`, `sg`, `su` |
 | source | `text_prep2` = `decode/prep2_1` ++ `decode/expert_line` ++ `decode/prep2_row` ++ `decode/prep2_2` (1991 B, `b0711f523a54`) |
@@ -604,7 +608,7 @@ expert streamer's slot banks and its grouped variants (DeepSeek-V4.1, `moeClampe
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/decode.zig:2295` (`const Kernels5`) |
+| made at | `src/core/decode.zig:638` (`const Kernels5`) |
 | inputs | `wv`, `scores` |
 | outputs | `y` |
 | source | `text_red5` = `decode/red5` (391 B, `71b235db1931`) |
@@ -625,1722 +629,11 @@ expert streamer's slot banks and its grouped variants (DeepSeek-V4.1, `moeClampe
   row, bf16); `src/core/decode.zig` "turboexl3 decode form 5 texts: every template constant read is passed, every
   signature name is used" (CPU: names).
 
-### `turboexl3_dfin7s`
-
-<!-- kernel-facts: turboexl3_dfin7s -->
-
-| fact | from the code |
-|---|---|
-| made at | `src/core/decode.zig:650` (`const Kernels3`) |
-| inputs | `zd`, `slots`, `scores`, `down_svh`, `hsx`, `szd`, `sxsd`, `sh_down_svh`, `sigtab`, `slogit` |
-| outputs | `y` |
-| source | `text_dfin7s` = `decode/dfin7s` (2344 B, `651b59911525`) |
-| header | `header_s` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` ++ `decode/shared` (30584 B, `af3e3f8b3d2f`) |
-
-<!-- /kernel-facts -->
-
-- **Used by:** core, served for Qwen3.8-Flash-Next's gated shared expert (y = routed + sigmoid(logit) · shared(x))
-  through `root.moeFusedShared` and `root.moeFusedSharedRouted`, which the table's `swiglu_shared` member calls
-  (`table/table.zig` `swigluShared`) at 1 to 4 decode / verify rows (`Kernels3.shared_rows_max`) when
-  `Kernels3.sharedAdmitted` holds. Launch 5 of every served call: `Kernels3.moeShared` (and its fold `sharedFold`) and
-  `moeSharedRouted`; also the reduce of `moeSharedSide` (not served). No Config field selects it.
-- **Shapes and dtypes:** Notation: RK = rows · TOPK; E experts; H hidden; I the routed (= shared) intermediate; NBH =
-  H/128, NBI = I/128; T = x's dtype, bf16 or f16 (`sharedAdmitted`); slots u32 [RK] (`moeFusedShared` also admits i32
-  inds); the routed trellises U16 [E, H/16, I/16, NHW] (gate, up) and [E, I/16, H/16, NHW] (down); the shared trellises
-  [H/16, I/16, SNG] and [I/16, H/16, SND] (U16 in the tests; the entries check their shapes, not their dtype). In: zd
-  f32 [KS, RK, H] (the routed down planes); slots; scores [RK] f32, bf16 or f16 (from `route_prep`: the logits' dtype);
-  down_svh f16 [E, H]; hsx f32 [RK, NBI] (the routed down inputs' block sums, `hs`); szd f32 [SKSD, rows, H] (the shared
-  down planes); sxsd f32 [rows, NBI]; sh_down_svh f16 [H]; sigtab T [65536] (MLX's sigmoid of every 16-bit pattern);
-  slogit T [rows] (the shared gate's logit; bf16 from `route_prepg`). Out: y T [rows, H].
-- **Grid and threadgroup:** `((H/128) · 32 · (TOPK + 1), rows, 1)` / `(32 · (TOPK + 1), 1, 1)`: one threadgroup per
-  (128-block of hidden, row); simdgroup k < TOPK finishes slot k, simdgroup TOPK the shared down.
-- **Template args:** HID, TOPK, RKC (= RK), KS (the routed down's K slices), OUT_T (T), DEFER (the routed MUL1
-  deferral), NBI, SKSD (the shared down's K split), SRS (rows), SDEF (the shared MUL1 deferral). Rows 1 to 4; TOPK >= 4
-  (`sharedAdmitted`: it writes each block from its first 128 threads, as dfin7 does). It decodes no weight.
-- **Replaces:** `turboexl3_dfin7` (form 9's launch 5), the shared down `linear`'s finish (dense `dfinish`; inside
-  DEC-ONE's launch where served) and MLX's Sigmoid, Multiply and Add of the gate tail, as one launch.
-- **Bits:** byte-identical to the host's chain (form 3's routed y, the three dense `linear`s, the table SwiGLU, MLX's
-  Sigmoid, Multiply and Add): dfin7's slot sums, dense dfinish's statements for the shared down, then the routed sum in
-  OUT_T plus sigmoid(logit) (MLX's, by table) times down in OUT_T, MLX's Multiply then Add (`moeSharedGateTail`'s
-  bytes).
-- **Pinned by:** `src/core/gpu_test.zig` "turboexl3 gpu: the shared expert fused into form 9's launches equals the
-  host's chain byte for byte (TURBOEXL3_GPU=1)" (GPU: y bit for bit, modes inside, inside_nofold and side, rows 1 to 4,
-  shared slices per threadgroup 1/1, 4/1, 5/5, routed deferral on and off, `bt9` 1 and 2); `src/core/gpu_test.zig`
-  "turboexl3 gpu: the router folded into form 9's prepare launch (and the shared gate's logit with it) ..." (GPU,
-  part=moe: `moeSharedRouted` against the router kernel + `moeShared`, rows 2 to 4); `src/core/decode.zig` "turboexl3
-  decode shared-expert texts: every template constant read is passed, every signature name is used" (CPU: its template
-  constants and signature names).
-
-### `turboexl3_dfin7t`
-
-<!-- kernel-facts: turboexl3_dfin7t -->
-
-| fact | from the code |
-|---|---|
-| made at | `src/core/decode.zig:660` (`const Kernels3`) |
-| inputs | `zd`, `slots`, `scores`, `down_svh`, `hsx`, `szd`, `sxsd`, `sh_down_svh`, `sigtab`, `slogit` |
-| outputs | `y` |
-| source | `text_dfin7t` = `decode/dfin7t` (2356 B, `1841a4fdda80`) |
-| header | `header_t` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` ++ `decode/shared` ++ `decode/shared2` (39410 B, `435a7ae9ef8e`) |
-
-<!-- /kernel-facts -->
-
-- **Used by:** core, not served: launched only by `Kernels3.moeShared2` / `moeSharedSide2` (the v2 heads), which nothing
-  in the library calls (`Kernels3.sheads` documents the choice; no code reads it); `Kernels3.initWith` makes it with the
-  other `Kernels3` kernels and the GPU test runs it. Launch 5 of both v2 paths.
-- **Shapes and dtypes:** As `turboexl3_dfin7s`: zd f32 [KS, RK, H]; slots u32 [RK]; scores [RK]; down_svh f16 [E, H];
-  hsx f32 [RK, NBI]; szd f32 [SKSD, rows, H] in layout SLM; sxsd f32 [rows, NBI]; sh_down_svh f16 [H]; sigtab T [65536];
-  slogit T [rows]. Out: y T [rows, H] (T bf16 or f16).
-- **Grid and threadgroup:** `((H/128) · 32 · (TOPK + 1), rows, 1)` / `(32 · (TOPK + 1), 1, 1)`, as `dfin7s`.
-- **Template args:** `dfin7s`'s (HID, TOPK, RKC, KS, OUT_T, DEFER, NBI, SKSD, SRS, SDEF) and SLM (the shared down
-  planes' layout). Rows 1 to 4.
-- **Replaces:** Nothing served: a variant of `turboexl3_dfin7s` whose shared down finish reads the planes in layout SLM
-  (`turboexl3_sfinish2`'s read); the same launch role.
-- **Bits:** the same bytes as its v1 counterpart, so byte-identical to the host's chain: one simdgroup per (K slice,
-  SOTS tiles) computes dense dgemv's plane values in dgemv's order (the four parts from zero, folded over the quads, the
-  slice the left sum of its parts) with no threadgroup reduction, and every codeword taken from the window's 32-bit
-  words.
-- **Pinned by:** `src/core/gpu_test.zig` "turboexl3 gpu: the shared expert fused into form 9's launches equals the
-  host's chain byte for byte (TURBOEXL3_GPU=1)" (GPU: y against the host's chain bit for bit, modes inside2 and side2
-  over five v2 knob settings, rows 1 to 4, routed deferral on and off, `bt9` 1 and 2); `src/core/decode.zig` "turboexl3
-  decode v2 shared-head texts: every template constant read is passed, every signature name is used" (CPU: template
-  constants and signature names).
-
-### `turboexl3_down3s`
-
-<!-- kernel-facts: turboexl3_down3s -->
-
-| fact | from the code |
-|---|---|
-| made at | `src/core/decode.zig:649` (`const Kernels3`) |
-| inputs | `hdp`, `slots`, `down_t`, `sxpd`, `sh_down_t` |
-| outputs | `zd`, `szd` |
-| source | `text_down3s` = `decode/shared_down_head` ++ `decode/down3_1` ++ `decode/rk_line` ++ `decode/down3_2` ++ `decode/down3_w` ++ `decode/down3_3` (4053 B, `e3483f634b9f`) |
-| header | `header_s` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` ++ `decode/shared` (30584 B, `af3e3f8b3d2f`) |
-
-<!-- /kernel-facts -->
-
-- **Used by:** core, served for Qwen3.8-Flash-Next's gated shared expert (y = routed + sigmoid(logit) · shared(x))
-  through `root.moeFusedShared` and `root.moeFusedSharedRouted`, which the table's `swiglu_shared` member calls
-  (`table/table.zig` `swigluShared`) at 1 to 4 decode / verify rows (`Kernels3.shared_rows_max`) when
-  `Kernels3.sharedAdmitted` holds. Launch 4 of every served call (`moeShared`, `sharedFold`, `moeSharedRouted`). No
-  Config field selects it.
-- **Shapes and dtypes:** Notation: RK = rows · TOPK; E experts; H hidden; I the routed (= shared) intermediate; NBH =
-  H/128, NBI = I/128; T = x's dtype, bf16 or f16 (`sharedAdmitted`); slots u32 [RK] (`moeFusedShared` also admits i32
-  inds); the routed trellises U16 [E, H/16, I/16, NHW] (gate, up) and [E, I/16, H/16, NHW] (down); the shared trellises
-  [H/16, I/16, SNG] and [I/16, H/16, SND] (U16 in the tests; the entries check their shapes, not their dtype). In: hdp
-  f16 [RK, I] (the routed down inputs in lane order, `hd` of `fin7s` / `gu3sf`); slots; down_t U16 [E, I/16, H/16, NHW];
-  sxpd f16 [rows, I] (the shared down's prepared input, lane order); sh_down_t [I/16, H/16, SND]. Out: zd f32 [KS, RK,
-  H] (routed planes); szd f32 [SKSD, rows, H] (shared planes).
-- **Grid and threadgroup:** `((H/(16·BT)) · 128, RK + ceil((SKSD/SSPTD) / SZ), SZ)` / `(128, 1, 1)`, SZ =
-  `kThreadgroups(KS, rows, kdiv9d orelse kdiv9)`; from grid row RKC on, shared threadgroup j = (y - RKC) · SZ + z runs
-  the SSPTD slices from j · SSPTD.
-- **Template args:** NHW (the routed rate, K = NHW/16; gate, up and down at one rate), CODEBOOK and WBITS (the routed
-  decode's, shared by the shared heads), HID, INTER, RKC (= RK: the first shared grid row), KS (the routed K slices of
-  `Kernels3.initWith` at `ks_max` 4: 4 for gate|up, 2 for down at Qwen3.8's 2560 x 640), SPT (KS / SZ: 1 under the
-  default `kdiv9` {1, 1, 1, 1}), BT (output tiles per GEMV threadgroup: `bt1` at one row, `bt9` from two, 2 each), GROUP
-  (row-slots per lead threadgroup: 2 from two rows, 1 at one), DEFER (the routed MUL1 deferral); SND (the shared down
-  rate), SKSD (`Dense.ksFor(I, H)`: 5 at Qwen3.8), SRS, SDEF, SZ, SSPTD (`Kernels3.ssptd` through `sharedSpt`, 1 by
-  default; no Config field sets it). Every routed rate, codebook and window form 9 serves; the shared down rate must be
-  a `format.Rate`; rows 1 to 4.
-- **Replaces:** `turboexl3_down3` plus the shared down `linear`'s GEMV (dense `dgemv`; DEC-ONE's `turboexl3_dense_dec0`
-  / `dec1` where served) as extra grid rows: the shared down adds no launch.
-- **Bits:** byte-identical to the host's chain (form 3's routed y, the three dense `linear`s, the table SwiGLU, MLX's
-  Sigmoid, Multiply and Add): the routed rows are down3's planes, the shared rows dense dgemv's (each slice computed as
-  a threadgroup of its own computes it, so SSPTD is launch shape only).
-- **Pinned by:** `src/core/gpu_test.zig` "turboexl3 gpu: the shared expert fused into form 9's launches equals the
-  host's chain byte for byte (TURBOEXL3_GPU=1)" (GPU: y bit for bit, inside modes, rows 1 to 4, down slices per
-  threadgroup 1 and 5); `src/core/gpu_test.zig` "turboexl3 gpu: the router folded into form 9's prepare launch (and the
-  shared gate's logit with it) ..." (GPU, part=moe); `src/core/decode.zig` "turboexl3 decode shared-expert texts: every
-  template constant read is passed, every signature name is used" (CPU: the down head's template constants,
-  `text_down3s`'s signature); `src/core/decode.zig` "turboexl3 decode v2 shared-head texts: every template constant read
-  is passed, every signature name is used" (CPU: `text_down3s`'s and `shared_down_head`'s signatures).
-
-### `turboexl3_down3t`
-
-<!-- kernel-facts: turboexl3_down3t -->
-
-| fact | from the code |
-|---|---|
-| made at | `src/core/decode.zig:659` (`const Kernels3`) |
-| inputs | `hdp`, `slots`, `down_t`, `sxpd`, `sh_down_t` |
-| outputs | `zd`, `szd` |
-| source | `text_down3t` = `decode/shared2_prologue` ++ `decode/shared_down2_head` ++ `decode/down3_1` ++ `decode/rk_line_y` ++ `decode/down3_2` ++ `decode/down3_w` ++ `decode/down3_3` (5236 B, `ed4888986554`) |
-| header | `header_t` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` ++ `decode/shared` ++ `decode/shared2` (39410 B, `435a7ae9ef8e`) |
-
-<!-- /kernel-facts -->
-
-- **Used by:** core, not served: launched only by `Kernels3.moeShared2` / `moeSharedSide2` (the v2 heads), which nothing
-  in the library calls (`Kernels3.sheads` documents the choice; no code reads it); `Kernels3.initWith` makes it with the
-  other `Kernels3` kernels and the GPU test runs it. Launch 4 of `moeShared2`.
-- **Shapes and dtypes:** As `turboexl3_down3s`: hdp f16 [RK, I]; slots u32 [RK]; down_t U16 [E, I/16, H/16, NHW]; sxpd
-  f16 [rows, I]; sh_down_t [I/16, H/16, SND]. Out: zd f32 [KS, RK, H]; szd f32 [SKSD, rows, H] in layout SLM.
-- **Grid and threadgroup:** `((H/(16·BT)) · 128, RK + SYS, SZ)` / `(128, 1, 1)`, SYS = ceil(nt / ((H/(16·BT)) · SZ)), nt
-  = SKSD · ((H/16) / (4 · SOTS)) shared threadgroups (`sharedTgs2`), SZ as for `down3s`.
-- **Template args:** NHW (the routed rate, K = NHW/16; gate, up and down at one rate), CODEBOOK and WBITS (the routed
-  decode's, shared by the shared heads), HID, INTER, RKC (= RK: the first shared grid row), KS (the routed K slices of
-  `Kernels3.initWith` at `ks_max` 4: 4 for gate|up, 2 for down at Qwen3.8's 2560 x 640), SPT (KS / SZ: 1 under the
-  default `kdiv9` {1, 1, 1, 1}), BT (output tiles per GEMV threadgroup: `bt1` at one row, `bt9` from two, 2 each), GROUP
-  (row-slots per lead threadgroup: 2 from two rows, 1 at one), DEFER (the routed MUL1 deferral); SND, SKSD, SRS, SDEF;
-  SLM (1: the planes lane-major, a float4 per plane and lane; `Kernels3.slm`), SPRE (a simdgroup's weight prefetch
-  distance in input tiles, `spre` per row count, whole parts, at most 3 parts and 16 tiles), SOTS (output tiles per
-  simdgroup, `sots` / `sotsd` through `sharedOts`), SX, SYS, SYOFF (the shared threadgroups' slots: id = (z · SYS + row)
-  · SX + x; SYOFF 0 puts the SYS shared rows after the routed ones, SYOFF = SYS before them with `sfirst`, the routed
-  body then taking rk = y - SYOFF); here SOTS from `sotsd` and SX = H/(16·BT). Rows 1 to 4.
-- **Replaces:** Nothing served: a variant of `turboexl3_down3s` (one simdgroup per (K slice, SOTS tiles) of the shared
-  down over sxpd in device memory, no threadgroup memory, no barrier).
-- **Bits:** the same bytes as its v1 counterpart, so byte-identical to the host's chain: one simdgroup per (K slice,
-  SOTS tiles) computes dense dgemv's plane values in dgemv's order (the four parts from zero, folded over the quads, the
-  slice the left sum of its parts) with no threadgroup reduction, and every codeword taken from the window's 32-bit
-  words.
-- **Pinned by:** `src/core/gpu_test.zig` "turboexl3 gpu: the shared expert fused into form 9's launches equals the
-  host's chain byte for byte (TURBOEXL3_GPU=1)" (GPU: y bit for bit, mode inside2, five knob settings including SOTS 1,
-  2, 4, 5, 8 and both grid orders, rows 1 to 4); `src/core/decode.zig` "turboexl3 decode v2 shared-head texts: every
-  template constant read is passed, every signature name is used" (CPU: template constants, signature names, the rk = y
-  - SYOFF splice).
-
-### `turboexl3_fin7s`
-
-<!-- kernel-facts: turboexl3_fin7s -->
-
-| fact | from the code |
-|---|---|
-| made at | `src/core/decode.zig:648` (`const Kernels3`) |
-| inputs | `zg`, `zu`, `slots`, `gate_svh`, `up_svh`, `down_suh`, `xsg`, `xsu`, `szg`, `szu`, `sxsg`, `sxsu`, `sh_gate_svh`, `sh_up_svh`, `sh_down_suh`, `sigtab` |
-| outputs | `hd`, `hs`, `sxpd`, `sxsd` |
-| source | `text_fin7s` = `decode/shared_fin_head_1` ++ `decode/shared_fin_head_2` ++ `decode/shared_fin_head_xg` ++ `decode/shared_fin_head_xu` ++ `decode/shared_fin_head_3` ++ `decode/shared_fin_head_g` ++ `decode/shared_fin_head_u` ++ `decode/shared_fin_head_4` ++ `decode/shared_fin_head_end` ++ `decode/fin7_1` ++ `decode/expert_line` ++ `decode/fin7_2` ++ `decode/fin7_planes` ++ `decode/fin7_3` ++ `decode/fin7_sums` ++ `decode/fin7_4` ++ `decode/fin7_swiglu` ++ `decode/fin7_5` (3541 B, `d3a1e73e7d7d`) |
-| header | `header_s` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` ++ `decode/shared` (30584 B, `af3e3f8b3d2f`) |
-
-<!-- /kernel-facts -->
-
-- **Used by:** core, served for Qwen3.8-Flash-Next's gated shared expert (y = routed + sigmoid(logit) · shared(x))
-  through `root.moeFusedShared` and `root.moeFusedSharedRouted`, which the table's `swiglu_shared` member calls
-  (`table/table.zig` `swigluShared`) at 1 to 4 decode / verify rows (`Kernels3.shared_rows_max`) when
-  `Kernels3.sharedAdmitted` holds. Launch 3 of `moeShared` at one row (after `gu8s`), and at 2 to 4 rows of both entries
-  with `Config.fused_fin_fold` false; with the default (true) `turboexl3_gu3sf` runs its statements there.
-- **Shapes and dtypes:** Notation: RK = rows · TOPK; E experts; H hidden; I the routed (= shared) intermediate; NBH =
-  H/128, NBI = I/128; T = x's dtype, bf16 or f16 (`sharedAdmitted`); slots u32 [RK] (`moeFusedShared` also admits i32
-  inds); the routed trellises U16 [E, H/16, I/16, NHW] (gate, up) and [E, I/16, H/16, NHW] (down); the shared trellises
-  [H/16, I/16, SNG] and [I/16, H/16, SND] (U16 in the tests; the entries check their shapes, not their dtype). In: zg,
-  zu f32 [KS, RK, I] (routed planes); slots; gate_svh, up_svh f16 [E, I]; down_suh f16 [E, I]; xsg, xsu f32 [RK, NBH]
-  (the routed inputs' block sums); szg, szu f32 [SKSG, rows, I] (shared planes); sxsg, sxsu f32 [rows, NBH];
-  sh_gate_svh, sh_up_svh f16 [I]; sh_down_suh f16 [I]; sigtab T [65536]. Out: hd f16 [RK, I] (the routed down inputs,
-  lane order); hs f32 [RK, NBI]; sxpd f16 [rows, I] (the shared down's input, lane order); sxsd f32 [rows, NBI].
-- **Grid and threadgroup:** `((I/128) · 32, RK + rows, 1)` / `(32, 1, 1)`: one simdgroup per (128-block of the
-  intermediate, row-slot), and from grid row RKC one per (block, shared row).
-- **Template args:** INTER, RKC (= RK), KS (the routed gate|up K slices), DEFER, NBH, OUT_T (T), SKSG, SRS (rows), SDEF.
-  No LIMIT: `sharedAdmitted` refuses a clamped geometry. Rows 1 to 4; it decodes no weight.
-- **Replaces:** `turboexl3_fin7` plus the shared gate and up `linear`s' finishes (dense `dfinish`), the host's table
-  SwiGLU kernel and the shared down `linear`'s prepare (dense `prep_s`), as one launch.
-- **Bits:** byte-identical to the host's chain (form 3's routed y, the three dense `linear`s, the table SwiGLU, MLX's
-  Sigmoid, Multiply and Add): fin7's routed statements; the shared rows run dense dfinish to OUT_T, the host's table
-  SwiGLU (`T act = g * sigtab[g]; act * up`) and dense prep_s of the product.
-- **Pinned by:** `src/core/gpu_test.zig` "turboexl3 gpu: the shared expert fused into form 9's launches equals the
-  host's chain byte for byte (TURBOEXL3_GPU=1)" (GPU: y bit for bit, mode inside at one row and inside_nofold at rows 1
-  to 4); `src/core/gpu_test.zig` "turboexl3 gpu: the router folded into form 9's prepare launch (and the shared gate's
-  logit with it) ..." (GPU, part=moe fold=unfolded, and its reference chain `moeShared` with the fold off);
-  `src/core/decode.zig` "turboexl3 decode shared-expert texts: every template constant read is passed, every signature
-  name is used" (CPU: the fin head's template constants, `text_fin7s`'s signature); `src/core/decode.zig` "turboexl3
-  decode fused fin fold texts: gu3sf is gu3s but its plane and sums stores, ..." (CPU: `text_fin7s` is its pieces).
-
-### `turboexl3_fin7t`
-
-<!-- kernel-facts: turboexl3_fin7t -->
-
-| fact | from the code |
-|---|---|
-| made at | `src/core/decode.zig:658` (`const Kernels3`) |
-| inputs | `zg`, `zu`, `slots`, `gate_svh`, `up_svh`, `down_suh`, `xsg`, `xsu`, `szg`, `szu`, `sxsg`, `sxsu`, `sh_gate_svh`, `sh_up_svh`, `sh_down_suh`, `sigtab` |
-| outputs | `hd`, `hs`, `sxpd`, `sxsd` |
-| source | `text_fin7t` = `decode/shared_fin2_head` ++ `decode/fin7_1` ++ `decode/expert_line` ++ `decode/fin7_2` ++ `decode/fin7_planes` ++ `decode/fin7_3` ++ `decode/fin7_sums` ++ `decode/fin7_4` ++ `decode/fin7_swiglu` ++ `decode/fin7_5` (3565 B, `5e1018b542e5`) |
-| header | `header_t` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` ++ `decode/shared` ++ `decode/shared2` (39410 B, `435a7ae9ef8e`) |
-
-<!-- /kernel-facts -->
-
-- **Used by:** core, not served: launched only by `Kernels3.moeShared2` / `moeSharedSide2` (the v2 heads), which nothing
-  in the library calls (`Kernels3.sheads` documents the choice; no code reads it); `Kernels3.initWith` makes it with the
-  other `Kernels3` kernels and the GPU test runs it. Launch 3 of `moeShared2`.
-- **Shapes and dtypes:** As `turboexl3_fin7s`: zg, zu f32 [KS, RK, I]; slots u32 [RK]; gate_svh, up_svh, down_suh f16
-  [E, I]; xsg, xsu f32 [RK, NBH]; szg, szu f32 [SKSG, rows, I] in layout SLM; sxsg, sxsu f32 [rows, NBH]; sh_gate_svh,
-  sh_up_svh, sh_down_suh f16 [I]; sigtab T [65536]. Out: hd f16 [RK, I]; hs f32 [RK, NBI]; sxpd f16 [rows, I]; sxsd f32
-  [rows, NBI].
-- **Grid and threadgroup:** `((I/128) · 32, RK + rows, 1)` / `(32, 1, 1)`, as `fin7s`.
-- **Template args:** `fin7s`'s (INTER, RKC, KS, DEFER, NBH, OUT_T, SKSG, SRS, SDEF) and SLM. Rows 1 to 4.
-- **Replaces:** Nothing served: a variant of `turboexl3_fin7s` whose shared head reads the planes in layout SLM
-  (`turboexl3_sfinish2`).
-- **Bits:** the same bytes as its v1 counterpart, so byte-identical to the host's chain: one simdgroup per (K slice,
-  SOTS tiles) computes dense dgemv's plane values in dgemv's order (the four parts from zero, folded over the quads, the
-  slice the left sum of its parts) with no threadgroup reduction, and every codeword taken from the window's 32-bit
-  words.
-- **Pinned by:** `src/core/gpu_test.zig` "turboexl3 gpu: the shared expert fused into form 9's launches equals the
-  host's chain byte for byte (TURBOEXL3_GPU=1)" (GPU: y against the host's chain bit for bit, modes inside2 and side2
-  over five v2 knob settings, rows 1 to 4, routed deferral on and off, `bt9` 1 and 2); `src/core/decode.zig` "turboexl3
-  decode v2 shared-head texts: every template constant read is passed, every signature name is used" (CPU: template
-  constants and signature names).
-
-### `turboexl3_gu3p`
-
-<!-- kernel-facts: turboexl3_gu3p -->
-
-| fact | from the code |
-|---|---|
-| made at | `src/core/decode.zig:656` (`const Kernels3`) |
-| inputs | `xgp`, `xup`, `slots`, `gate_t`, `up_t`, `sxg`, `sxu`, `sh_gate_t`, `sh_up_t` |
-| outputs | `zg`, `zu`, `szg`, `szu` |
-| source | `text_gu3p` = `decode/shared2_prologue` ++ `decode/shared_gu2p_head` ++ `decode/gu3_1` ++ `decode/rk_line_y` ++ `decode/gu3_2` ++ `decode/gu3_w` ++ `decode/gu3_3` ++ `decode/gu3_stores` ++ `decode/gu3_4` (5569 B, `04fc0ad4b1bd`) |
-| header | `header_t` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` ++ `decode/shared` ++ `decode/shared2` (39410 B, `435a7ae9ef8e`) |
-
-<!-- /kernel-facts -->
-
-- **Used by:** core, not served: launched only by `Kernels3.moeShared2` / `moeSharedSide2` (the v2 heads), which nothing
-  in the library calls (`Kernels3.sheads` documents the choice; no code reads it); `Kernels3.initWith` makes it with the
-  other `Kernels3` kernels and the GPU test runs it. Launch 2 of `moeShared2` at the rows above `gu8_rows` with
-  `Kernels3.sprep` (true by default), after `turboexl3_prep2t`.
-- **Shapes and dtypes:** In: xgp, xup f16 [RK, H] (`prep2t`'s routed xg, xu, lane order); slots u32 [RK]; gate_t, up_t
-  U16 [E, H/16, I/16, NHW]; sxg, sxu f16 [rows, H] (`prep2t`'s shared prepared input, lane order); sh_gate_t, sh_up_t
-  [H/16, I/16, SNG]. Out: zg, zu f32 [KS, RK, I]; szg, szu f32 [SKSG, rows, I] in layout SLM.
-- **Grid and threadgroup:** `((I/(16·BT)) · 128, RK + SYS, SZ)` / `(128, 1, 1)`, SYS = ceil(nt / ((I/(16·BT)) · SZ)), nt
-  = `sharedTgs2`'s SKSG · ((2 · I/16) / (4 · SOTS)) shared threadgroups (one per K slice and group of 4 SOTS tiles over
-  both projections), SZ as for `gu3s`.
-- **Template args:** NHW (the routed rate, K = NHW/16; gate, up and down at one rate), CODEBOOK and WBITS (the routed
-  decode's, shared by the shared heads), HID, INTER, RKC (= RK: the first shared grid row), KS (the routed K slices of
-  `Kernels3.initWith` at `ks_max` 4: 4 for gate|up, 2 for down at Qwen3.8's 2560 x 640), SPT (KS / SZ: 1 under the
-  default `kdiv9` {1, 1, 1, 1}), BT (output tiles per GEMV threadgroup: `bt1` at one row, `bt9` from two, 2 each), GROUP
-  (row-slots per lead threadgroup: 2 from two rows, 1 at one), DEFER (the routed MUL1 deferral); SNG, SKSG, SRS, SDEF;
-  SLM (1: the planes lane-major, a float4 per plane and lane; `Kernels3.slm`), SPRE (a simdgroup's weight prefetch
-  distance in input tiles, `spre` per row count, whole parts, at most 3 parts and 16 tiles), SOTS (output tiles per
-  simdgroup, `sots` / `sotsd` through `sharedOts`), SX, SYS, SYOFF (the shared threadgroups' slots: id = (z · SYS + row)
-  · SX + x; SYOFF 0 puts the SYS shared rows after the routed ones, SYOFF = SYS before them with `sfirst`, the routed
-  body then taking rk = y - SYOFF); SNP (1, or 2 when a threadgroup's 4 · SOTS tiles cross from the gate into the up and
-  it rotates both); here SOTS from `sots` and SX = I/(16·BT). Rows 2 to 4 by default.
-- **Replaces:** Nothing served: a variant of `turboexl3_gu3s` whose shared head reads the input `prep2t` prepared: no
-  rotation, no threadgroup memory and no barrier in the head.
-- **Bits:** the same bytes as its v1 counterpart, so byte-identical to the host's chain: one simdgroup per (K slice,
-  SOTS tiles) computes dense dgemv's plane values in dgemv's order (the four parts from zero, folded over the quads, the
-  slice the left sum of its parts) with no threadgroup reduction, and every codeword taken from the window's 32-bit
-  words.
-- **Pinned by:** `src/core/gpu_test.zig` "turboexl3 gpu: the shared expert fused into form 9's launches equals the
-  host's chain byte for byte (TURBOEXL3_GPU=1)" (GPU: y bit for bit, mode inside2, the settings with `sprep` on at rows
-  2 to 4); `src/core/decode.zig` "turboexl3 decode v2 shared-head texts: every template constant read is passed, every
-  signature name is used" (CPU: template constants, signature names, the rk splice).
-
-### `turboexl3_gu3s`
-
-<!-- kernel-facts: turboexl3_gu3s -->
-
-| fact | from the code |
-|---|---|
-| made at | `src/core/decode.zig:646` (`const Kernels3`) |
-| inputs | `xgp`, `xup`, `slots`, `gate_t`, `up_t`, `xr`, `sh_gate_t`, `sh_up_t`, `sh_gate_suh`, `sh_up_suh` |
-| outputs | `zg`, `zu`, `szg`, `szu`, `sxsg`, `sxsu` |
-| source | `text_gu3s` = `decode/shared_gu_head_1` ++ `decode/shared_gu_head_2` ++ `decode/shared_gu_head_3` ++ `decode/shared_gu_head_z` ++ `decode/shared_gu_head_4` ++ `decode/shared_gu_head_sums` ++ `decode/shared_gu_head_5` ++ `decode/shared_gu_head_end` ++ `decode/gu3_1` ++ `decode/rk_line` ++ `decode/gu3_2` ++ `decode/gu3_w` ++ `decode/gu3_3` ++ `decode/gu3_stores` ++ `decode/gu3_4` (5170 B, `63599022e938`) |
-| header | `header_s` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` ++ `decode/shared` (30584 B, `af3e3f8b3d2f`) |
-
-<!-- /kernel-facts -->
-
-- **Used by:** core, served for Qwen3.8-Flash-Next's gated shared expert (y = routed + sigmoid(logit) · shared(x))
-  through `root.moeFusedShared` and `root.moeFusedSharedRouted`, which the table's `swiglu_shared` member calls
-  (`table/table.zig` `swigluShared`) at 1 to 4 decode / verify rows (`Kernels3.shared_rows_max`) when
-  `Kernels3.sharedAdmitted` holds. Launch 2 at the rows above `gu8_rows` (2 to 4 by default) of both entries with
-  `Config.fused_fin_fold` false; with the default (true) `turboexl3_gu3sf` runs in its place.
-- **Shapes and dtypes:** Notation: RK = rows · TOPK; E experts; H hidden; I the routed (= shared) intermediate; NBH =
-  H/128, NBI = I/128; T = x's dtype, bf16 or f16 (`sharedAdmitted`); slots u32 [RK] (`moeFusedShared` also admits i32
-  inds); the routed trellises U16 [E, H/16, I/16, NHW] (gate, up) and [E, I/16, H/16, NHW] (down); the shared trellises
-  [H/16, I/16, SNG] and [I/16, H/16, SND] (U16 in the tests; the entries check their shapes, not their dtype). In: xgp,
-  xup f16 [RK, H] (`prep2`'s or `route_prep`'s xg, xu, lane order); slots; gate_t, up_t U16 [E, H/16, I/16, NHW]; xr T
-  [rows, H] (x, rotated in-kernel per 128-block: dense prep_s); sh_gate_t, sh_up_t [H/16, I/16, SNG]; sh_gate_suh,
-  sh_up_suh f16 [H]. Out: zg, zu f32 [KS, RK, I] (routed planes); szg, szu f32 [SKSG, rows, I] (shared planes); sxsg,
-  sxsu f32 [rows, NBH] (the shared inputs' block sums).
-- **Grid and threadgroup:** `((I/(16·BT)) · 128, RK + ceil(2 · (SKSG/SSPT) / SZ), SZ)` / `(128, 1, 1)`, BT = `bt9`; SZ =
-  `kThreadgroups(KS, rows, kdiv9)` (KS under the defaults). Grid rows below RKC are gu3's routed threadgroups; from RKC
-  on, shared threadgroup j = (y - RKC) · SZ + z takes projection j / (SKSG/SSPT) and the SSPT slices from (j %
-  (SKSG/SSPT)) · SSPT, each slice one 128-block of hidden.
-- **Template args:** NHW (the routed rate, K = NHW/16; gate, up and down at one rate), CODEBOOK and WBITS (the routed
-  decode's, shared by the shared heads), HID, INTER, RKC (= RK: the first shared grid row), KS (the routed K slices of
-  `Kernels3.initWith` at `ks_max` 4: 4 for gate|up, 2 for down at Qwen3.8's 2560 x 640), SPT (KS / SZ: 1 under the
-  default `kdiv9` {1, 1, 1, 1}), BT (output tiles per GEMV threadgroup: `bt1` at one row, `bt9` from two, 2 each), GROUP
-  (row-slots per lead threadgroup: 2 from two rows, 1 at one), DEFER (the routed MUL1 deferral); SNG (the shared gate|up
-  rate), SKSG (the shared gate|up K split, `Dense.ksFor(H, I)`; admitted only as H/128: 20 at Qwen3.8), SRS (rows), SDEF
-  (the shared MUL1 deferral, `Dense.deferFor`), SZ (the grid's z extent, so shared threadgroup j = (y - RKC) · SZ + z),
-  SSPT (shared K slices per threadgroup: `Config.shared_spt` 4 through `sharedSpt`, 1 when it does not divide SKSG;
-  launch shape only). Every routed rate, codebook and window form 9 serves; the shared rates must be `format.Rate`s.
-- **Replaces:** `turboexl3_gu3` plus the shared gate and up `linear`s' prepare and GEMV (dense `prep_s` + `dgemv`;
-  DEC-ONE's `turboexl3_dense_dec1` where served) as extra grid rows: the shared gate and up add no launch.
-- **Bits:** byte-identical to the host's chain (form 3's routed y, the three dense `linear`s, the table SwiGLU, MLX's
-  Sigmoid, Multiply and Add): the routed rows are gu3's planes, the shared rows dense prep_s + dgemv's (each slice
-  computed as a threadgroup of its own computes it, so SSPT is launch shape only).
-- **Pinned by:** `src/core/gpu_test.zig` "turboexl3 gpu: the shared expert fused into form 9's launches equals the
-  host's chain byte for byte (TURBOEXL3_GPU=1)" (GPU: y bit for bit, mode inside_nofold at rows 2 to 4, gate|up slices
-  per threadgroup 1, 4 and 5); `src/core/gpu_test.zig` "turboexl3 gpu: the router folded into form 9's prepare launch
-  (and the shared gate's logit with it) ..." (GPU, part=moe fold=unfolded, and the reference chain);
-  `src/core/decode.zig` "turboexl3 decode shared-expert texts: every template constant read is passed, every signature
-  name is used" (CPU: the head's template constants, the signature); `src/core/decode.zig` "turboexl3 decode fused fin
-  fold texts: gu3sf is gu3s but its plane and sums stores, ..." (CPU: `text_gu3s` is its pieces).
-
-### `turboexl3_gu3sf`
-
-<!-- kernel-facts: turboexl3_gu3sf -->
-
-| fact | from the code |
-|---|---|
-| made at | `src/core/decode.zig:1237` (`const Kernels3`) |
-| inputs | `xgp`, `xup`, `slots`, `gate_t`, `up_t`, `xr`, `sh_gate_t`, `sh_up_t`, `sh_gate_suh`, `sh_up_suh`, `gate_svh`, `up_svh`, `down_suh`, `xsg`, `xsu`, `sh_gate_svh`, `sh_up_svh`, `sh_down_suh`, `sigtab`, `cnt` |
-| outputs | `hd`, `hs`, `sxpd`, `sxsd`, `zg`, `zu`, `szg`, `szu`, `sxsx` |
-| source | `text_gu3sf` = `decode/shared_gu_head_1` ++ `decode/vf_head_tg` ++ `decode/shared_gu_head_2` ++ `decode/vf_head_decls` ++ `decode/shared_gu_head_3` ++ `decode/vf_head_zc` ++ `decode/shared_gu_head_4` ++ `decode/vf_head_sumsc` ++ `decode/shared_gu_head_5` ++ `decode/vf_head_arrive` ++ `decode/shared_fin_head_2` ++ `decode/vf_sfin_xgc` ++ `decode/vf_sfin_xuc` ++ `decode/shared_fin_head_3` ++ `decode/vf_sfin_g` ++ `decode/vf_sfin_u` ++ `decode/shared_fin_head_4` ++ `decode/vf_head_close` ++ `decode/shared_gu_head_end` ++ `decode/gu3_1` ++ `decode/rk_line` ++ `decode/gu3_2` ++ `decode/vf_gu3_decls` ++ `decode/gu3_w` ++ `decode/gu3_3` ++ `decode/vf_gu3_stores` ++ `decode/gu3_4` ++ `decode/vf_arrive` ++ `decode/expert_line` ++ `decode/fin7_2` ++ `decode/vf_fin7_planes` ++ `decode/fin7_3` ++ `decode/fin7_sums` ++ `decode/fin7_4` ++ `decode/fin7_swiglu` ++ `decode/fin7_5` ++ `decode/vf_fin7_close` (12748 B, `4ebe61618415`) |
-| header | `header_s` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` ++ `decode/shared` (30584 B, `af3e3f8b3d2f`) |
-
-<!-- /kernel-facts -->
-
-- **Used by:** core, served for Qwen3.8-Flash-Next's gated shared expert (y = routed + sigmoid(logit) · shared(x))
-  through `root.moeFusedShared` and `root.moeFusedSharedRouted`, which the table's `swiglu_shared` member calls
-  (`table/table.zig` `swigluShared`) at 1 to 4 decode / verify rows (`Kernels3.shared_rows_max`) when
-  `Kernels3.sharedAdmitted` holds. Launch 2 at the rows above `gu8_rows` (2 to 4 by default) of both entries with
-  `Config.fused_fin_fold` true (the default): `Kernels3.sharedFold`, after `turboexl3_vfold_zero`; made on first use in
-  `sharedCfgs`.
-- **Shapes and dtypes:** Notation: RK = rows · TOPK; E experts; H hidden; I the routed (= shared) intermediate; NBH =
-  H/128, NBI = I/128; T = x's dtype, bf16 or f16 (`sharedAdmitted`); slots u32 [RK] (`moeFusedShared` also admits i32
-  inds); the routed trellises U16 [E, H/16, I/16, NHW] (gate, up) and [E, I/16, H/16, NHW] (down); the shared trellises
-  [H/16, I/16, SNG] and [I/16, H/16, SND] (U16 in the tests; the entries check their shapes, not their dtype). In:
-  `gu3s`'s (xgp, xup f16 [RK, H]; slots; gate_t, up_t; xr T [rows, H]; sh_gate_t, sh_up_t; sh_gate_suh, sh_up_suh f16
-  [H]), then gate_svh, up_svh, down_suh f16 [E, I]; xsg, xsu f32 [RK, NBH] (the routed prepare's block sums);
-  sh_gate_svh, sh_up_svh, sh_down_suh f16 [I]; sigtab T [65536]; cnt u32 [max(RK · NBI + NBI, 8)] (zeroed arrival
-  counters: routed [RK, NBI], then shared [NBI]). Out: `fin7s`'s hd f16 [RK, I], hs f32 [RK, NBI], sxpd f16 [rows, I],
-  sxsd f32 [rows, NBI]; scratch: zg, zu f32 [KS, RK, I], szg, szu f32 [SKSG, rows, I], sxsx f32 [max(NBI · rows · 2 ·
-  NBH, 8)] with SDEF, else [8] (the shared input sums' per-block copies, [NBI, SRS, 2, NBH]).
-- **Grid and threadgroup:** `((I/(16·BT)) · 128, RK + ceil(2 · (SKSG/SSPT) / SZ), SZ)` / `(128, 1, 1)`, BT = `bt9`
-  (`gu3s`'s grid); SZ = `kThreadgroups(KS, rows, kdiv9)` (KS under the defaults). Grid rows below RKC are gu3's routed
-  threadgroups; from RKC on, shared threadgroup j = (y - RKC) · SZ + z takes projection j / (SKSG/SSPT) and the SSPT
-  slices from (j % (SKSG/SSPT)) · SSPT, each slice one 128-block of hidden.
-- **Template args:** `gu3s`'s: NHW (the routed rate, K = NHW/16; gate, up and down at one rate), CODEBOOK and WBITS (the
-  routed decode's, shared by the shared heads), HID, INTER, RKC (= RK: the first shared grid row), KS (the routed K
-  slices of `Kernels3.initWith` at `ks_max` 4: 4 for gate|up, 2 for down at Qwen3.8's 2560 x 640), SPT (KS / SZ: 1 under
-  the default `kdiv9` {1, 1, 1, 1}), BT (output tiles per GEMV threadgroup: `bt1` at one row, `bt9` from two, 2 each),
-  GROUP (row-slots per lead threadgroup: 2 from two rows, 1 at one), DEFER (the routed MUL1 deferral); SNG (the shared
-  gate|up rate), SKSG (the shared gate|up K split, `Dense.ksFor(H, I)`; admitted only as H/128: 20 at Qwen3.8), SRS
-  (rows), SDEF (the shared MUL1 deferral, `Dense.deferFor`), SZ (the grid's z extent, so shared threadgroup j = (y -
-  RKC) · SZ + z), SSPT (shared K slices per threadgroup: `Config.shared_spt` 4 through `sharedSpt`, 1 when it does not
-  divide SKSG; launch shape only); and OUT_T (T, for `fin7s`'s statements). Rows 2 to 4.
-- **Replaces:** `turboexl3_gu3s` -> `turboexl3_fin7s` (2 launches, 2 dependent levels) in one launch, plus
-  `turboexl3_vfold_zero`, which waits on nothing: the call keeps 5 launches and is one dependent level shorter.
-- **Bits:** byte-identical to `gu3s` + `fin7s` (so to the host's chain): the threadgroup that brings a counter to its
-  arrivals (ARR for a routed (row-slot, 128-block), S_ARR for a shared block) runs fin7's or the shared fin head's
-  statements in their order over the planes and input sums read through coherent device memory; each value has one
-  writer (DEC-ONE's arrival idiom: device-scope seq_cst fences around one relaxed fetch_add, nothing waits).
-- **Pinned by:** `src/core/gpu_test.zig` "turboexl3 gpu: the shared expert fused into form 9's launches equals the
-  host's chain byte for byte (TURBOEXL3_GPU=1)" (GPU: y bit for bit, mode inside (folded) at rows 2 to 4, gate|up slices
-  per threadgroup 1, 4 and 5, routed deferral on and off, `bt9` 1 and 2); `src/core/gpu_test.zig` "turboexl3 gpu: the
-  router folded into form 9's prepare launch (and the shared gate's logit with it) ..." (GPU, part=moe fold=folded
-  against the unfolded chain); `src/core/decode.zig` "turboexl3 decode fused fin fold texts: gu3sf is gu3s but its plane
-  and sums stores, ..." (CPU: every kept piece of `gu3s` and `fin7s` is in it line for line, every replaced piece gone
-  and its replacement there once, the inline `turboexl3_sfinish` blocks 14 lines each, every template constant and name
-  used).
-
-### `turboexl3_gu3t`
-
-<!-- kernel-facts: turboexl3_gu3t -->
-
-| fact | from the code |
-|---|---|
-| made at | `src/core/decode.zig:655` (`const Kernels3`) |
-| inputs | `xgp`, `xup`, `slots`, `gate_t`, `up_t`, `xr`, `sh_gate_t`, `sh_up_t`, `sh_gate_suh`, `sh_up_suh` |
-| outputs | `zg`, `zu`, `szg`, `szu`, `sxsg`, `sxsu` |
-| source | `text_gu3t` = `decode/shared_gu2_head_1` ++ `decode/shared2_prologue` ++ `decode/shared_gu2_head_2` ++ `decode/gu3_1` ++ `decode/rk_line_y` ++ `decode/gu3_2` ++ `decode/gu3_w` ++ `decode/gu3_3` ++ `decode/gu3_stores` ++ `decode/gu3_4` (6927 B, `302de0e89dc2`) |
-| header | `header_t` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` ++ `decode/shared` ++ `decode/shared2` (39410 B, `435a7ae9ef8e`) |
-
-<!-- /kernel-facts -->
-
-- **Used by:** core, not served: launched only by `Kernels3.moeShared2` / `moeSharedSide2` (the v2 heads), which nothing
-  in the library calls (`Kernels3.sheads` documents the choice; no code reads it); `Kernels3.initWith` makes it with the
-  other `Kernels3` kernels and the GPU test runs it. Launch 2 of `moeShared2` at the rows above `gu8_rows` with
-  `Kernels3.sprep` false (after `prep2`).
-- **Shapes and dtypes:** As `turboexl3_gu3s`: xgp, xup f16 [RK, H]; slots u32 [RK]; gate_t, up_t U16 [E, H/16, I/16,
-  NHW]; xr T [rows, H]; sh_gate_t, sh_up_t [H/16, I/16, SNG]; sh_gate_suh, sh_up_suh f16 [H]. Out: zg, zu f32 [KS, RK,
-  I]; szg, szu f32 [SKSG, rows, I] in layout SLM; sxsg, sxsu f32 [rows, NBH].
-- **Grid and threadgroup:** `((I/(16·BT)) · 128, RK + SYS, SZ)` / `(128, 1, 1)`, SYS = ceil(nt / ((I/(16·BT)) · SZ)), nt
-  = `sharedTgs2`'s SKSG · ((2 · I/16) / (4 · SOTS)) shared threadgroups (one per K slice and group of 4 SOTS tiles over
-  both projections), SZ as for `gu3s`.
-- **Template args:** NHW (the routed rate, K = NHW/16; gate, up and down at one rate), CODEBOOK and WBITS (the routed
-  decode's, shared by the shared heads), HID, INTER, RKC (= RK: the first shared grid row), KS (the routed K slices of
-  `Kernels3.initWith` at `ks_max` 4: 4 for gate|up, 2 for down at Qwen3.8's 2560 x 640), SPT (KS / SZ: 1 under the
-  default `kdiv9` {1, 1, 1, 1}), BT (output tiles per GEMV threadgroup: `bt1` at one row, `bt9` from two, 2 each), GROUP
-  (row-slots per lead threadgroup: 2 from two rows, 1 at one), DEFER (the routed MUL1 deferral); SNG, SKSG, SRS, SDEF;
-  SLM (1: the planes lane-major, a float4 per plane and lane; `Kernels3.slm`), SPRE (a simdgroup's weight prefetch
-  distance in input tiles, `spre` per row count, whole parts, at most 3 parts and 16 tiles), SOTS (output tiles per
-  simdgroup, `sots` / `sotsd` through `sharedOts`), SX, SYS, SYOFF (the shared threadgroups' slots: id = (z · SYS + row)
-  · SX + x; SYOFF 0 puts the SYS shared rows after the routed ones, SYOFF = SYS before them with `sfirst`, the routed
-  body then taking rk = y - SYOFF); SNP (1, or 2 when a threadgroup's 4 · SOTS tiles cross from the gate into the up and
-  it rotates both); here SOTS from `sots` and SX = I/(16·BT). Rows 2 to 4 by default.
-- **Replaces:** Nothing served: a variant of `turboexl3_gu3s` (the v2 gate|up head rotating the slice's 128-block
-  in-kernel).
-- **Bits:** the same bytes as its v1 counterpart, so byte-identical to the host's chain: one simdgroup per (K slice,
-  SOTS tiles) computes dense dgemv's plane values in dgemv's order (the four parts from zero, folded over the quads, the
-  slice the left sum of its parts) with no threadgroup reduction, and every codeword taken from the window's 32-bit
-  words.
-- **Pinned by:** `src/core/gpu_test.zig` "turboexl3 gpu: the shared expert fused into form 9's launches equals the
-  host's chain byte for byte (TURBOEXL3_GPU=1)" (GPU: y bit for bit, mode inside2, the settings with `sprep` off at rows
-  2 to 4); `src/core/decode.zig` "turboexl3 decode v2 shared-head texts: every template constant read is passed, every
-  signature name is used" (CPU: template constants, signature names, the rk splice).
-
-### `turboexl3_gu8s`
-
-<!-- kernel-facts: turboexl3_gu8s -->
-
-| fact | from the code |
-|---|---|
-| made at | `src/core/decode.zig:647` (`const Kernels3`) |
-| inputs | `x`, `slots`, `gate_suh`, `up_suh`, `gate_t`, `up_t`, `xr`, `sh_gate_t`, `sh_up_t`, `sh_gate_suh`, `sh_up_suh` |
-| outputs | `zg`, `zu`, `xsg`, `xsu`, `szg`, `szu`, `sxsg`, `sxsu` |
-| source | `text_gu8s` = `decode/shared_gu_head_1` ++ `decode/shared_gu_head_2` ++ `decode/shared_gu_head_3` ++ `decode/shared_gu_head_z` ++ `decode/shared_gu_head_4` ++ `decode/shared_gu_head_sums` ++ `decode/shared_gu_head_5` ++ `decode/shared_gu_head_end` ++ `decode/gu8_1` ++ `decode/rk_line` ++ `decode/gu8_2` (6725 B, `c721426dac35`) |
-| header | `header_s` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` ++ `decode/shared` (30584 B, `af3e3f8b3d2f`) |
-
-<!-- /kernel-facts -->
-
-- **Used by:** core, served for Qwen3.8-Flash-Next's gated shared expert (y = routed + sigmoid(logit) · shared(x))
-  through `root.moeFusedShared` and `root.moeFusedSharedRouted`, which the table's `swiglu_shared` member calls
-  (`table/table.zig` `swigluShared`) at 1 to 4 decode / verify rows (`Kernels3.shared_rows_max`) when
-  `Kernels3.sharedAdmitted` holds. Launch 1 of `moeShared` at the rows up to `gu8_rows` (1) where `gu8Admitted` holds,
-  followed by `fin7s`, `down3s` and `dfin7s` (4 launches). `moeFusedSharedRouted` refuses those rows (no prepare launch
-  to fold into).
-- **Shapes and dtypes:** Notation: RK = rows · TOPK; E experts; H hidden; I the routed (= shared) intermediate; NBH =
-  H/128, NBI = I/128; T = x's dtype, bf16 or f16 (`sharedAdmitted`); slots u32 [RK] (`moeFusedShared` also admits i32
-  inds); the routed trellises U16 [E, H/16, I/16, NHW] (gate, up) and [E, I/16, H/16, NHW] (down); the shared trellises
-  [H/16, I/16, SNG] and [I/16, H/16, SND] (U16 in the tests; the entries check their shapes, not their dtype). In: x T
-  [rows, H]; slots; gate_suh, up_suh f16 [E, H]; gate_t, up_t U16 [E, H/16, I/16, NHW]; xr T [rows, H] (the same x, for
-  the shared head); sh_gate_t, sh_up_t [H/16, I/16, SNG]; sh_gate_suh, sh_up_suh f16 [H]. Out: zg, zu f32 [KS, RK, I];
-  xsg, xsu f32 [RK, NBH] (the routed inputs' block sums); szg, szu f32 [SKSG, rows, I]; sxsg, sxsu f32 [rows, NBH].
-- **Grid and threadgroup:** `((I/(16·BT)) · 128, RK + ceil(2 · (SKSG/SSPT) / SZ), SZ)` / `(128, 1, 1)`, BT = `bt1`; SZ =
-  `kThreadgroups(KS, rows, kdiv9)` (KS under the defaults). Grid rows below RKC are gu3's routed threadgroups; from RKC
-  on, shared threadgroup j = (y - RKC) · SZ + z takes projection j / (SKSG/SSPT) and the SSPT slices from (j %
-  (SKSG/SSPT)) · SSPT, each slice one 128-block of hidden.
-- **Template args:** NHW (the routed rate, K = NHW/16; gate, up and down at one rate), CODEBOOK and WBITS (the routed
-  decode's, shared by the shared heads), HID, INTER, RKC (= RK: the first shared grid row), KS (the routed K slices of
-  `Kernels3.initWith` at `ks_max` 4: 4 for gate|up, 2 for down at Qwen3.8's 2560 x 640), SPT (KS / SZ: 1 under the
-  default `kdiv9` {1, 1, 1, 1}), BT (output tiles per GEMV threadgroup: `bt1` at one row, `bt9` from two, 2 each), GROUP
-  (row-slots per lead threadgroup: 2 from two rows, 1 at one), DEFER (the routed MUL1 deferral) (GROUP 1 at its one
-  row); TOPK; SNG (the shared gate|up rate), SKSG (the shared gate|up K split, `Dense.ksFor(H, I)`; admitted only as
-  H/128: 20 at Qwen3.8), SRS (rows), SDEF (the shared MUL1 deferral, `Dense.deferFor`), SZ (the grid's z extent, so
-  shared threadgroup j = (y - RKC) · SZ + z), SSPT (shared K slices per threadgroup: `Config.shared_spt` 4 through
-  `sharedSpt`, 1 when it does not divide SKSG; launch shape only). Every routed rate, codebook and window form 9 serves
-  where `gu8Admitted` (the threadgroup's span 128-aligned and its threadgroup memory within 32 KB).
-- **Replaces:** `turboexl3_gu8` (itself `turboexl3_prep2` + `turboexl3_gu3`) plus the shared gate and up `linear`s'
-  prepare and GEMV (dense `prep_s` + `dgemv`; DEC-ONE's `turboexl3_dense_dec1` where served) as extra grid rows.
-- **Bits:** byte-identical to the host's chain (form 3's routed y, the three dense `linear`s, the table SwiGLU, MLX's
-  Sigmoid, Multiply and Add): the routed rows are gu8's (form 3's planes), the shared rows dense prep_s + dgemv's
-  planes.
-- **Pinned by:** `src/core/gpu_test.zig` "turboexl3 gpu: the shared expert fused into form 9's launches equals the
-  host's chain byte for byte (TURBOEXL3_GPU=1)" (GPU: y bit for bit at one row, modes inside and inside_nofold, gate|up
-  slices per threadgroup 1, 4 and 5); `src/core/decode.zig` "turboexl3 decode shared-expert texts: every template
-  constant read is passed, every signature name is used" (CPU: the head's template constants, `text_gu8s`'s signature).
-
-### `turboexl3_gu8t`
-
-<!-- kernel-facts: turboexl3_gu8t -->
-
-| fact | from the code |
-|---|---|
-| made at | `src/core/decode.zig:654` (`const Kernels3`) |
-| inputs | `x`, `slots`, `gate_suh`, `up_suh`, `gate_t`, `up_t`, `xr`, `sh_gate_t`, `sh_up_t`, `sh_gate_suh`, `sh_up_suh` |
-| outputs | `zg`, `zu`, `xsg`, `xsu`, `szg`, `szu`, `sxsg`, `sxsu` |
-| source | `text_gu8t` = `decode/shared_gu2_head_1` ++ `decode/shared2_prologue` ++ `decode/shared_gu2_head_2` ++ `decode/gu8_1` ++ `decode/rk_line_y` ++ `decode/gu8_2` (8482 B, `59f117562ca3`) |
-| header | `header_t` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` ++ `decode/shared` ++ `decode/shared2` (39410 B, `435a7ae9ef8e`) |
-
-<!-- /kernel-facts -->
-
-- **Used by:** core, not served: launched only by `Kernels3.moeShared2` / `moeSharedSide2` (the v2 heads), which nothing
-  in the library calls (`Kernels3.sheads` documents the choice; no code reads it); `Kernels3.initWith` makes it with the
-  other `Kernels3` kernels and the GPU test runs it. Launch 1 of `moeShared2` at the rows up to `gu8_rows` where
-  `gu8Admitted` holds.
-- **Shapes and dtypes:** As `turboexl3_gu8s`: x T [rows, H]; slots u32 [RK]; gate_suh, up_suh f16 [E, H]; gate_t, up_t
-  U16 [E, H/16, I/16, NHW]; xr T [rows, H]; sh_gate_t, sh_up_t [H/16, I/16, SNG]; sh_gate_suh, sh_up_suh f16 [H]. Out:
-  zg, zu f32 [KS, RK, I]; xsg, xsu f32 [RK, NBH]; szg, szu f32 [SKSG, rows, I] in layout SLM; sxsg, sxsu f32 [rows,
-  NBH].
-- **Grid and threadgroup:** `((I/(16·BT)) · 128, RK + SYS, SZ)` / `(128, 1, 1)`, SYS = ceil(nt / ((I/(16·BT)) · SZ)), nt
-  = `sharedTgs2`'s SKSG · ((2 · I/16) / (4 · SOTS)) shared threadgroups (one per K slice and group of 4 SOTS tiles over
-  both projections), SZ as for `gu3s`. BT = `bt1` at one row, `bt9` above.
-- **Template args:** NHW (the routed rate, K = NHW/16; gate, up and down at one rate), CODEBOOK and WBITS (the routed
-  decode's, shared by the shared heads), HID, INTER, RKC (= RK: the first shared grid row), KS (the routed K slices of
-  `Kernels3.initWith` at `ks_max` 4: 4 for gate|up, 2 for down at Qwen3.8's 2560 x 640), SPT (KS / SZ: 1 under the
-  default `kdiv9` {1, 1, 1, 1}), BT (output tiles per GEMV threadgroup: `bt1` at one row, `bt9` from two, 2 each), GROUP
-  (row-slots per lead threadgroup: 2 from two rows, 1 at one), DEFER (the routed MUL1 deferral); TOPK; SNG, SKSG, SRS,
-  SDEF; SLM (1: the planes lane-major, a float4 per plane and lane; `Kernels3.slm`), SPRE (a simdgroup's weight prefetch
-  distance in input tiles, `spre` per row count, whole parts, at most 3 parts and 16 tiles), SOTS (output tiles per
-  simdgroup, `sots` / `sotsd` through `sharedOts`), SX, SYS, SYOFF (the shared threadgroups' slots: id = (z · SYS + row)
-  · SX + x; SYOFF 0 puts the SYS shared rows after the routed ones, SYOFF = SYS before them with `sfirst`, the routed
-  body then taking rk = y - SYOFF); SNP (1, or 2 when a threadgroup's 4 · SOTS tiles cross from the gate into the up and
-  it rotates both); here SOTS from `sots` and SX = I/(16·BT).
-- **Replaces:** Nothing served: a variant of `turboexl3_gu8s` (the v2 gate|up head rotating the slice's 128-block
-  in-kernel, on `gu8`).
-- **Bits:** the same bytes as its v1 counterpart, so byte-identical to the host's chain: one simdgroup per (K slice,
-  SOTS tiles) computes dense dgemv's plane values in dgemv's order (the four parts from zero, folded over the quads, the
-  slice the left sum of its parts) with no threadgroup reduction, and every codeword taken from the window's 32-bit
-  words.
-- **Pinned by:** `src/core/gpu_test.zig` "turboexl3 gpu: the shared expert fused into form 9's launches equals the
-  host's chain byte for byte (TURBOEXL3_GPU=1)" (GPU: y bit for bit, mode inside2, at one row for every setting and at
-  rows 1 to 4 with `gu8_rows` 4); `src/core/decode.zig` "turboexl3 decode v2 shared-head texts: every template constant
-  read is passed, every signature name is used" (CPU: template constants, signature names, the rk splice).
-
-### `turboexl3_prep2t`
-
-<!-- kernel-facts: turboexl3_prep2t -->
-
-| fact | from the code |
-|---|---|
-| made at | `src/core/decode.zig:657` (`const Kernels3`) |
-| inputs | `x`, `slots`, `gate_suh`, `up_suh`, `sh_gate_suh`, `sh_up_suh` |
-| outputs | `xg`, `xu`, `sg`, `su`, `sxg`, `sxu`, `sxsg`, `sxsu` |
-| source | `text_prep2t` = `decode/shared_prep_head` ++ `decode/prep2_1` ++ `decode/expert_line` ++ `decode/prep2_row` ++ `decode/prep2_2` (2895 B, `7c55f77981ed`) |
-| header | `header_t` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` ++ `decode/shared` ++ `decode/shared2` (39410 B, `435a7ae9ef8e`) |
-
-<!-- /kernel-facts -->
-
-- **Used by:** core, not served: launched only by `Kernels3.moeShared2` / `moeSharedSide2` (the v2 heads), which nothing
-  in the library calls (`Kernels3.sheads` documents the choice; no code reads it); `Kernels3.initWith` makes it with the
-  other `Kernels3` kernels and the GPU test runs it. Launch 1 of `moeShared2` at the rows above `gu8_rows` with
-  `Kernels3.sprep` (true by default), before `turboexl3_gu3p`.
-- **Shapes and dtypes:** In: x T [rows, H]; slots u32 [RK]; gate_suh, up_suh f16 [E, H]; sh_gate_suh, sh_up_suh f16 [H].
-  Out: xg, xu f16 [RK, H] (lane order); sg, su f32 [RK, NBH] (block sums); sxg, sxu f16 [rows, H] (the shared gate|up
-  input, lane order); sxsg, sxsu f32 [rows, NBH].
-- **Grid and threadgroup:** `((H/128) · 32, RK + rows, 1)` / `(32, 1, 1)`: one simdgroup per (128-block of hidden,
-  row-slot) running prep2, and from grid row RKC one per (block, row) running dense prep_s for the shared gate and up.
-- **Template args:** DIM (H), TOPK, RKC (= RK). Rows 2 to 4 by default; it decodes no weight.
-- **Replaces:** Nothing served: `turboexl3_prep2` with the shared gate and up `linear`s' prepare (dense `prep_s`) as
-  extra grid rows, so `gu3p` reads a prepared input.
-- **Bits:** its routed rows run prep2's statements and its shared rows dense prep_s's (the prepare `gu3s`'s head runs
-  in-kernel), so the call is byte-identical to the host's chain.
-- **Pinned by:** `src/core/gpu_test.zig` "turboexl3 gpu: the shared expert fused into form 9's launches equals the
-  host's chain byte for byte (TURBOEXL3_GPU=1)" (GPU: y bit for bit, mode inside2, the settings with `sprep` on at rows
-  2 to 4); `src/core/decode.zig` "turboexl3 decode v2 shared-head texts: every template constant read is passed, every
-  signature name is used" (CPU: the prepare head's template constants, `text_prep2t`'s signature).
-
-### `turboexl3_route_prep`
-
-<!-- kernel-facts: turboexl3_route_prep -->
-
-| fact | from the code |
-|---|---|
-| made at | `src/core/decode.zig:1356` (`const Kernels3`) |
-| inputs | `logits`, `x`, `gate_suh`, `up_suh` |
-| outputs | `xg`, `xu`, `sg`, `su`, `inds`, `scores` |
-| source | `text_route_prep` = `decode/route_prep_1` ++ `decode/route_prep_2` ++ `decode/router_softmax_3` ++ `decode/route_prep_3` ++ `decode/router_softmax_2` ++ `decode/route_prep_4` ++ `decode/route_prep_close` ++ `decode/route_prep_5` ++ `decode/prep2_2` ++ `decode/route_prep_6` ++ `decode/router_softmax_5` ++ `decode/route_prep_7` (5178 B, `d54acdbfdc6d`) |
-| header | `""` = (empty) (0 B, `e3b0c44298fc`) |
-
-<!-- /kernel-facts -->
-
-- **Used by:** core, served for Qwen3.8-Flash-Next: launch 1 of `root.moeFusedSharedRouted` when the caller gives the
-  shared gate's `logit` (no `gate_vec`), through `Kernels3.routeLaunch` / `moeSharedRouted`, reached from the table's
-  `swiglu_shared` member when the host passes the router logits. Rows above `gu8_rows` up to 4 (2 to 4 by default; the
-  entry refuses the rows `gu8s` prepares, and refuses with `Config.slot_stats`). Made on first use, one config per row
-  count keyed on the experts, the scores' dtype and the gate width (`RouteKey`).
-- **Shapes and dtypes:** In: logits TOUT [rows, NE] (the router gemv's output; TOUT bf16, f16 or f32 in `routeLaunch`,
-  x's dtype in the entry; NE the bank's experts, TOPK to 2048); x T [rows, H]; gate_suh, up_suh f16 [E, H]. Out: xg, xu
-  f16 [RK, H] (prep2's, lane order); sg, su f32 [RK, NBH] (block sums); inds u32 [RK] (the slots); scores TOUT [RK] (the
-  renormalized softmax weights). RK = rows · TOPK.
-- **Grid and threadgroup:** `((H/128) · TG, rows, 1)` / `(TG, 1, 1)`, TG = 32 · `routeSimdgroups(TOPK, false)` = 32 ·
-  (TOPK + 1): one threadgroup per (128-block of hidden, row), one simdgroup per row-slot plus one for the softmax and
-  weights.
-- **Template args:** NE (experts), NK (TOPK, the router's k), TG, TOUT, DIM (H), TOPK. `routeLaunch` takes 1 to 16 rows,
-  TOPK <= 31, NE <= 2048; it decodes no weight.
-- **Replaces:** `mlxserve_moe_router_softmax` (the host's router kernel, softmax mode) -> `turboexl3_prep2` (2 launches,
-  2 dependent levels) in one launch.
-- **Bits:** byte-identical to the router kernel + prep2: verbatim slices of the router's text (selection, softmax tree,
-  renormalized weights) and of prep2's body, each on the lanes its own kernel runs it on.
-- **Pinned by:** `src/core/gpu_test.zig` "turboexl3 gpu: the router folded into form 9's prepare launch (and the shared
-  gate's logit with it) ..." (GPU, part=launch: every output against the router kernel + `routeChainPrep` at 512
-  experts, rows 1 to 4, 8 and 16, bf16 and f16 logits, exact ties; part=moe: `moeSharedRouted` end to end against the
-  router kernel + `moeShared`, rows 2 to 4, 64 and 512 experts, fold on and off; part=refuse_gu8: one row refused);
-  `src/core/decode.zig` "turboexl3 decode router-folded prepare texts: the merged launch carries the router's ..." (CPU:
-  each router and prep2 piece once, the pinned value lines, every name and constant, `routeSimdgroups`).
-
-### `turboexl3_route_prepg`
-
-<!-- kernel-facts: turboexl3_route_prepg -->
-
-| fact | from the code |
-|---|---|
-| made at | `src/core/decode.zig:1354` (`const Kernels3`) |
-| inputs | `logits`, `x`, `gate_suh`, `up_suh`, `gx`, `gw` |
-| outputs | `xg`, `xu`, `sg`, `su`, `inds`, `scores`, `glogit` |
-| source | `text_route_prepg` = `decode/route_prep_1` ++ `decode/route_prep_gp` ++ `decode/route_prep_2` ++ `decode/router_softmax_3` ++ `decode/route_prep_3` ++ `decode/router_softmax_2` ++ `decode/route_prep_4` ++ `decode/route_prep_close_gate` ++ `sources/gate_gemv` ++ `decode/route_prep_5` ++ `decode/prep2_2` ++ `decode/route_prep_6` ++ `decode/router_softmax_5` ++ `decode/route_prep_gsum_open` ++ `sources/gate_sum` ++ `decode/route_prep_gsum_close` ++ `decode/route_prep_7` (6770 B, `b6ad7f1f1a6f`) |
-| header | `""` = (empty) (0 B, `e3b0c44298fc`) |
-
-<!-- /kernel-facts -->
-
-- **Used by:** core, served for Qwen3.8-Flash-Next: launch 1 of `root.moeFusedSharedRouted` when the caller passes
-  `gate_vec` (the shared gate's weight vector) instead of `logit`: bf16 at 2 to 4 rows with D > 64 and D >= 16 · rows (D
-  = H), the shapes at which MLX's matmul runs the gemv it repeats. Otherwise as `turboexl3_route_prep`.
-- **Shapes and dtypes:** As `turboexl3_route_prep` (logits bf16 [rows, NE]; x bf16 [rows, H]; gate_suh, up_suh f16 [E,
-  H]; out xg, xu f16 [RK, H], sg, su f32 [RK, NBH], inds u32 [RK], scores bf16 [RK]), plus gx bf16 [rows, H] (x again)
-  and gw bf16 [H] (the gate vector) in, and glogit bf16 [rows] (the shared gate's logit, which `dfin7s` reads as slogit)
-  out.
-- **Grid and threadgroup:** `((H/128) · TG, rows, 1)` / `(TG, 1, 1)`, TG = 32 · `routeSimdgroups(TOPK, true)` = 32 ·
-  (max(TOPK, 9) + 1): simdgroup 0 selects while simdgroups 1 to 8 take the gate's dot.
-- **Template args:** `route_prep`'s (NE, NK, TG, TOUT, DIM, TOPK) and GK (H, the gate's width).
-- **Replaces:** `mlxserve_moe_router_softmax` -> `turboexl3_prep2`, plus MLX's matmul of x and the gate vector for the
-  logit (3 launches, the matmul beside the chain) in one launch.
-- **Bits:** byte-identical to the router kernel + prep2, and the logit to MLX 0.32's matmul: the column order and the
-  fold of `gemv_bfloat16_bm1_bn8_sm1_sn32_tm{1,4}_tn4` (`sources.gate_gemv`, `sources.gate_sum`).
-- **Pinned by:** `src/core/gpu_test.zig` "turboexl3 gpu: the router folded into form 9's prepare launch (and the shared
-  gate's logit with it) ..." (GPU, part=launch with the gate at rows 2 to 4 bf16, part=gate_logit against MLX's matmul,
-  part=moe with gate=launch); `src/core/decode.zig` "turboexl3 decode router-folded prepare texts: the merged launch
-  carries the router's ..." (CPU: the gate's dot and sum once each and only in this text, GK, `routeSimdgroups`).
-
-### `turboexl3_sdown`
-
-<!-- kernel-facts: turboexl3_sdown -->
-
-| fact | from the code |
-|---|---|
-| made at | `src/core/decode.zig:653` (`const Kernels3`) |
-| inputs | `sxpd`, `sh_down_t` |
-| outputs | `szd` |
-| source | `shared_down_head` = `decode/shared_down_head` (1713 B, `a2ed9e21e286`) |
-| header | `header_s` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` ++ `decode/shared` (30584 B, `af3e3f8b3d2f`) |
-
-<!-- /kernel-facts -->
-
-- **Used by:** core, not served: launched only by `Kernels3.moeSharedSide` (the three v1 heads standalone, RKC 0, beside
-  form 9's untouched routed launches), which nothing in the library calls; `Kernels3.initWith` makes it and the GPU test
-  runs it. Its shared down beside form 9's `down3`.
-- **Shapes and dtypes:** In: sxpd f16 [rows, I] (`sfin`'s, lane order); sh_down_t [I/16, H/16, SND]. Out: szd f32 [SKSD,
-  rows, H].
-- **Grid and threadgroup:** `((H/(16·BT)) · 128, 1, SKSD/SSPTD)` / `(128, 1, 1)`: each z threadgroup runs SSPTD
-  consecutive slices; BT = `bt1` at one row, `bt9` above.
-- **Template args:** SRS (rows), BT, RKC (0: every grid row is the shared expert's), WBITS, SKSD, INTER, SZ
-  (SKSD/SSPTD), SND, CODEBOOK, HID, SDEF, SSPTD. Rows 1 to 4.
-- **Replaces:** Nothing served: `down3s`'s shared head as a launch of its own (the shared down `linear`'s GEMV), the
-  routed `down3` untouched.
-- **Bits:** the same bytes as `down3s`'s shared rows (dense dgemv's planes), so the call is byte-identical to the host's
-  chain.
-- **Pinned by:** `src/core/gpu_test.zig` "turboexl3 gpu: the shared expert fused into form 9's launches equals the
-  host's chain byte for byte (TURBOEXL3_GPU=1)" (GPU: y bit for bit, mode side, rows 1 to 4, down slices per threadgroup
-  1 and 5); `src/core/decode.zig` "turboexl3 decode shared-expert texts: every template constant read is passed, every
-  signature name is used" (CPU: `shared_down_head`'s template constants); `src/core/decode.zig` "turboexl3 decode v2
-  shared-head texts: every template constant read is passed, every signature name is used" (CPU: `shared_down_head`'s
-  signature).
-
-### `turboexl3_sdown2`
-
-<!-- kernel-facts: turboexl3_sdown2 -->
-
-| fact | from the code |
-|---|---|
-| made at | `src/core/decode.zig:665` (`const Kernels3`) |
-| inputs | `sxpd`, `sh_down_t` |
-| outputs | `szd` |
-| source | `shared_down2_head` = `decode/shared2_prologue` ++ `decode/shared_down2_head` (2882 B, `469d087ac9dd`) |
-| header | `header_t` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` ++ `decode/shared` ++ `decode/shared2` (39410 B, `435a7ae9ef8e`) |
-
-<!-- /kernel-facts -->
-
-- **Used by:** core, not served: launched only by `Kernels3.moeShared2` / `moeSharedSide2` (the v2 heads), which nothing
-  in the library calls (`Kernels3.sheads` documents the choice; no code reads it); `Kernels3.initWith` makes it with the
-  other `Kernels3` kernels and the GPU test runs it. The shared down of `moeSharedSide2`, beside form 9's `down3`.
-- **Shapes and dtypes:** In: sxpd f16 [rows, I]; sh_down_t [I/16, H/16, SND]. Out: szd f32 [SKSD, rows, H] in layout
-  SLM.
-- **Grid and threadgroup:** `(nt · 128, 1, 1)` / `(128, 1, 1)`, nt = SKSD · ((H/16) / (4 · SOTS)) (`sharedTgs2`).
-- **Template args:** WBITS, HID, INTER, CODEBOOK, RKC (0), SND, SKSD, SRS, SDEF, SLM, SPRE, SOTS (from `sotsd`), SX
-  (nt), SYS (1), SYOFF (0). Rows 1 to 4.
-- **Replaces:** Nothing served: `down3t`'s shared head as a launch of its own.
-- **Bits:** the same bytes as its v1 counterpart, so byte-identical to the host's chain: one simdgroup per (K slice,
-  SOTS tiles) computes dense dgemv's plane values in dgemv's order (the four parts from zero, folded over the quads, the
-  slice the left sum of its parts) with no threadgroup reduction, and every codeword taken from the window's 32-bit
-  words.
-- **Pinned by:** `src/core/gpu_test.zig` "turboexl3 gpu: the shared expert fused into form 9's launches equals the
-  host's chain byte for byte (TURBOEXL3_GPU=1)" (GPU: y bit for bit, mode side2, five knob settings, rows 1 to 4);
-  `src/core/decode.zig` "turboexl3 decode v2 shared-head texts: every template constant read is passed, every signature
-  name is used" (CPU: template constants and signature names).
-
-### `turboexl3_sfin`
-
-<!-- kernel-facts: turboexl3_sfin -->
-
-| fact | from the code |
-|---|---|
-| made at | `src/core/decode.zig:652` (`const Kernels3`) |
-| inputs | `szg`, `szu`, `sxsg`, `sxsu`, `sh_gate_svh`, `sh_up_svh`, `sh_down_suh`, `sigtab` |
-| outputs | `sxpd`, `sxsd` |
-| source | `shared_fin_head` = `decode/shared_fin_head_1` ++ `decode/shared_fin_head_2` ++ `decode/shared_fin_head_xg` ++ `decode/shared_fin_head_xu` ++ `decode/shared_fin_head_3` ++ `decode/shared_fin_head_g` ++ `decode/shared_fin_head_u` ++ `decode/shared_fin_head_4` ++ `decode/shared_fin_head_end` (1389 B, `831bb8e653a6`) |
-| header | `header_s` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` ++ `decode/shared` (30584 B, `af3e3f8b3d2f`) |
-
-<!-- /kernel-facts -->
-
-- **Used by:** core, not served: launched only by `Kernels3.moeSharedSide` (the three v1 heads standalone, RKC 0, beside
-  form 9's untouched routed launches), which nothing in the library calls; `Kernels3.initWith` makes it and the GPU test
-  runs it. Its shared finish beside form 9's `fin7`.
-- **Shapes and dtypes:** In: szg, szu f32 [SKSG, rows, I]; sxsg, sxsu f32 [rows, NBH]; sh_gate_svh, sh_up_svh f16 [I];
-  sh_down_suh f16 [I]; sigtab T [65536]. Out: sxpd f16 [rows, I] (lane order); sxsd f32 [rows, NBI].
-- **Grid and threadgroup:** `((I/128) · 32, rows, 1)` / `(32, 1, 1)`: one simdgroup per (128-block of the intermediate,
-  row).
-- **Template args:** INTER, RKC (0), NBH, SDEF, SKSG, SRS (rows), OUT_T (T). Rows 1 to 4.
-- **Replaces:** Nothing served: `fin7s`'s shared head as a launch of its own (dense `dfinish` of gate and up, the table
-  SwiGLU, dense `prep_s` for the down).
-- **Bits:** the same bytes as `fin7s`'s shared rows, so the call is byte-identical to the host's chain.
-- **Pinned by:** `src/core/gpu_test.zig` "turboexl3 gpu: the shared expert fused into form 9's launches equals the
-  host's chain byte for byte (TURBOEXL3_GPU=1)" (GPU: y bit for bit, mode side, rows 1 to 4); `src/core/decode.zig`
-  "turboexl3 decode shared-expert texts: every template constant read is passed, every signature name is used" (CPU:
-  `shared_fin_head`'s template constants).
-
-### `turboexl3_sfin2`
-
-<!-- kernel-facts: turboexl3_sfin2 -->
-
-| fact | from the code |
-|---|---|
-| made at | `src/core/decode.zig:664` (`const Kernels3`) |
-| inputs | `szg`, `szu`, `sxsg`, `sxsu`, `sh_gate_svh`, `sh_up_svh`, `sh_down_suh`, `sigtab` |
-| outputs | `sxpd`, `sxsd` |
-| source | `shared_fin2_head` = `decode/shared_fin2_head` (1413 B, `5fdf9f46eab1`) |
-| header | `header_t` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` ++ `decode/shared` ++ `decode/shared2` (39410 B, `435a7ae9ef8e`) |
-
-<!-- /kernel-facts -->
-
-- **Used by:** core, not served: launched only by `Kernels3.moeShared2` / `moeSharedSide2` (the v2 heads), which nothing
-  in the library calls (`Kernels3.sheads` documents the choice; no code reads it); `Kernels3.initWith` makes it with the
-  other `Kernels3` kernels and the GPU test runs it. The shared finish of `moeSharedSide2`.
-- **Shapes and dtypes:** As `turboexl3_sfin`, the planes szg, szu read in layout SLM: In szg, szu f32 [SKSG, rows, I];
-  sxsg, sxsu f32 [rows, NBH]; sh_gate_svh, sh_up_svh, sh_down_suh f16 [I]; sigtab T [65536]. Out: sxpd f16 [rows, I];
-  sxsd f32 [rows, NBI].
-- **Grid and threadgroup:** `((I/128) · 32, rows, 1)` / `(32, 1, 1)`.
-- **Template args:** INTER, RKC (0), NBH, SDEF, SKSG, SRS, OUT_T, SLM. Rows 1 to 4.
-- **Replaces:** Nothing served: `fin7t`'s shared head as a launch of its own.
-- **Bits:** the same bytes as its v1 counterpart, so byte-identical to the host's chain: one simdgroup per (K slice,
-  SOTS tiles) computes dense dgemv's plane values in dgemv's order (the four parts from zero, folded over the quads, the
-  slice the left sum of its parts) with no threadgroup reduction, and every codeword taken from the window's 32-bit
-  words.
-- **Pinned by:** `src/core/gpu_test.zig` "turboexl3 gpu: the shared expert fused into form 9's launches equals the
-  host's chain byte for byte (TURBOEXL3_GPU=1)" (GPU: y bit for bit, mode side2, five knob settings, rows 1 to 4);
-  `src/core/decode.zig` "turboexl3 decode v2 shared-head texts: every template constant read is passed, every signature
-  name is used" (CPU: template constants and signature names).
-
-### `turboexl3_sgu`
-
-<!-- kernel-facts: turboexl3_sgu -->
-
-| fact | from the code |
-|---|---|
-| made at | `src/core/decode.zig:651` (`const Kernels3`) |
-| inputs | `xr`, `sh_gate_t`, `sh_up_t`, `sh_gate_suh`, `sh_up_suh` |
-| outputs | `szg`, `szu`, `sxsg`, `sxsu` |
-| source | `shared_gu_head` = `decode/shared_gu_head_1` ++ `decode/shared_gu_head_2` ++ `decode/shared_gu_head_3` ++ `decode/shared_gu_head_z` ++ `decode/shared_gu_head_4` ++ `decode/shared_gu_head_sums` ++ `decode/shared_gu_head_5` ++ `decode/shared_gu_head_end` (2664 B, `c16ccf11f78a`) |
-| header | `header_s` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` ++ `decode/shared` (30584 B, `af3e3f8b3d2f`) |
-
-<!-- /kernel-facts -->
-
-- **Used by:** core, not served: launched only by `Kernels3.moeSharedSide` (the three v1 heads standalone, RKC 0, beside
-  form 9's untouched routed launches), which nothing in the library calls; `Kernels3.initWith` makes it and the GPU test
-  runs it. Its shared gate|up beside form 9's gate|up launch.
-- **Shapes and dtypes:** In: xr T [rows, H] (x, rotated in-kernel); sh_gate_t, sh_up_t [H/16, I/16, SNG]; sh_gate_suh,
-  sh_up_suh f16 [H]. Out: szg, szu f32 [SKSG, rows, I]; sxsg, sxsu f32 [rows, NBH].
-- **Grid and threadgroup:** `((I/(16·BT)) · 128, 1, 2 · (SKSG/SSPT))` / `(128, 1, 1)`: every (slice group, projection)
-  its own threadgroup along z; BT = `bt1` at one row, `bt9` above.
-- **Template args:** SRS (rows), BT, RKC (0), WBITS, SKSG, SZ (2 · (SKSG/SSPT)), HID, SNG, CODEBOOK, SDEF, INTER, SSPT.
-  Rows 1 to 4.
-- **Replaces:** Nothing served: `gu3s`'s shared head as a launch of its own (the shared gate and up `linear`s' prepare
-  and GEMV).
-- **Bits:** the same bytes as `gu3s`'s shared rows (dense prep_s + dgemv's planes), so the call is byte-identical to the
-  host's chain.
-- **Pinned by:** `src/core/gpu_test.zig` "turboexl3 gpu: the shared expert fused into form 9's launches equals the
-  host's chain byte for byte (TURBOEXL3_GPU=1)" (GPU: y bit for bit, mode side, rows 1 to 4, gate|up slices per
-  threadgroup 1, 4 and 5); `src/core/decode.zig` "turboexl3 decode shared-expert texts: every template constant read is
-  passed, every signature name is used" (CPU: `shared_gu_head`'s template constants).
-
-### `turboexl3_sgu2`
-
-<!-- kernel-facts: turboexl3_sgu2 -->
-
-| fact | from the code |
-|---|---|
-| made at | `src/core/decode.zig:661` (`const Kernels3`) |
-| inputs | `xr`, `sh_gate_t`, `sh_up_t`, `sh_gate_suh`, `sh_up_suh` |
-| outputs | `szg`, `szu`, `sxsg`, `sxsu` |
-| source | `shared_gu2_head` = `decode/shared_gu2_head_1` ++ `decode/shared2_prologue` ++ `decode/shared_gu2_head_2` (4407 B, `375e6dd27619`) |
-| header | `header_t` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` ++ `decode/shared` ++ `decode/shared2` (39410 B, `435a7ae9ef8e`) |
-
-<!-- /kernel-facts -->
-
-- **Used by:** core, not served: launched only by `Kernels3.moeShared2` / `moeSharedSide2` (the v2 heads), which nothing
-  in the library calls (`Kernels3.sheads` documents the choice; no code reads it); `Kernels3.initWith` makes it with the
-  other `Kernels3` kernels and the GPU test runs it. The shared gate|up of `moeSharedSide2` where it has no standalone
-  prepare: the rows up to `gu8_rows` where `gu8Admitted`, or `Kernels3.sprep` false.
-- **Shapes and dtypes:** In: xr T [rows, H]; sh_gate_t, sh_up_t [H/16, I/16, SNG]; sh_gate_suh, sh_up_suh f16 [H]. Out:
-  szg, szu f32 [SKSG, rows, I] in layout SLM; sxsg, sxsu f32 [rows, NBH].
-- **Grid and threadgroup:** `(nt · 128, 1, 1)` / `(128, 1, 1)`, nt = SKSG · ((2 · I/16) / (4 · SOTS)) (`sharedTgs2`).
-- **Template args:** WBITS, HID, INTER, CODEBOOK, RKC (0), SNG, SKSG, SRS, SDEF, SLM, SPRE, SNP (1, or 2 when a
-  threadgroup's 4 · SOTS tiles cross from the gate into the up and it rotates both), SOTS (from `sots`), SX (nt), SYS
-  (1), SYOFF (0). Rows 1 to 4.
-- **Replaces:** Nothing served: `gu3t`'s / `gu8t`'s shared head as a launch of its own.
-- **Bits:** the same bytes as its v1 counterpart, so byte-identical to the host's chain: one simdgroup per (K slice,
-  SOTS tiles) computes dense dgemv's plane values in dgemv's order (the four parts from zero, folded over the quads, the
-  slice the left sum of its parts) with no threadgroup reduction, and every codeword taken from the window's 32-bit
-  words.
-- **Pinned by:** `src/core/gpu_test.zig` "turboexl3 gpu: the shared expert fused into form 9's launches equals the
-  host's chain byte for byte (TURBOEXL3_GPU=1)" (GPU: y bit for bit, mode side2, rows 1 to 4); `src/core/decode.zig`
-  "turboexl3 decode v2 shared-head texts: every template constant read is passed, every signature name is used" (CPU:
-  template constants and signature names).
-
-### `turboexl3_sgu2p`
-
-<!-- kernel-facts: turboexl3_sgu2p -->
-
-| fact | from the code |
-|---|---|
-| made at | `src/core/decode.zig:662` (`const Kernels3`) |
-| inputs | `sxg`, `sxu`, `sh_gate_t`, `sh_up_t` |
-| outputs | `szg`, `szu` |
-| source | `shared_gu2p_head` = `decode/shared2_prologue` ++ `decode/shared_gu2p_head` (3049 B, `1890c994922b`) |
-| header | `header_t` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` ++ `decode/shared` ++ `decode/shared2` (39410 B, `435a7ae9ef8e`) |
-
-<!-- /kernel-facts -->
-
-- **Used by:** core, not served: launched only by `Kernels3.moeShared2` / `moeSharedSide2` (the v2 heads), which nothing
-  in the library calls (`Kernels3.sheads` documents the choice; no code reads it); `Kernels3.initWith` makes it with the
-  other `Kernels3` kernels and the GPU test runs it. The shared gate|up of `moeSharedSide2` after `turboexl3_sprep2`
-  (rows above `gu8_rows` with `sprep`).
-- **Shapes and dtypes:** In: sxg, sxu f16 [rows, H] (`sprep2`'s, lane order); sh_gate_t, sh_up_t [H/16, I/16, SNG]. Out:
-  szg, szu f32 [SKSG, rows, I] in layout SLM.
-- **Grid and threadgroup:** `(nt · 128, 1, 1)` / `(128, 1, 1)`, nt as for `sgu2`.
-- **Template args:** `sgu2`'s: WBITS, HID, INTER, CODEBOOK, RKC (0), SNG, SKSG, SRS, SDEF, SLM, SPRE, SNP, SOTS, SX
-  (nt), SYS (1), SYOFF (0). Rows 2 to 4 by default.
-- **Replaces:** Nothing served: `gu3p`'s shared head as a launch of its own (no rotation, no threadgroup memory, no
-  barrier).
-- **Bits:** the same bytes as its v1 counterpart, so byte-identical to the host's chain: one simdgroup per (K slice,
-  SOTS tiles) computes dense dgemv's plane values in dgemv's order (the four parts from zero, folded over the quads, the
-  slice the left sum of its parts) with no threadgroup reduction, and every codeword taken from the window's 32-bit
-  words.
-- **Pinned by:** `src/core/gpu_test.zig` "turboexl3 gpu: the shared expert fused into form 9's launches equals the
-  host's chain byte for byte (TURBOEXL3_GPU=1)" (GPU: y bit for bit, mode side2, the settings with `sprep` on at rows 2
-  to 4); `src/core/decode.zig` "turboexl3 decode v2 shared-head texts: every template constant read is passed, every
-  signature name is used" (CPU: template constants and signature names).
-
-### `turboexl3_sprep2`
-
-<!-- kernel-facts: turboexl3_sprep2 -->
-
-| fact | from the code |
-|---|---|
-| made at | `src/core/decode.zig:663` (`const Kernels3`) |
-| inputs | `x`, `sh_gate_suh`, `sh_up_suh` |
-| outputs | `sxg`, `sxu`, `sxsg`, `sxsu` |
-| source | `shared_prep_head` = `decode/shared_prep_head` (904 B, `362b0ba3ca72`) |
-| header | `header_t` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` ++ `decode/shared` ++ `decode/shared2` (39410 B, `435a7ae9ef8e`) |
-
-<!-- /kernel-facts -->
-
-- **Used by:** core, not served: launched only by `Kernels3.moeShared2` / `moeSharedSide2` (the v2 heads), which nothing
-  in the library calls (`Kernels3.sheads` documents the choice; no code reads it); `Kernels3.initWith` makes it with the
-  other `Kernels3` kernels and the GPU test runs it. The standalone shared prepare of `moeSharedSide2` at the rows above
-  `gu8_rows` with `sprep`, before `turboexl3_sgu2p`.
-- **Shapes and dtypes:** In: x T [rows, H]; sh_gate_suh, sh_up_suh f16 [H]. Out: sxg, sxu f16 [rows, H] (lane order);
-  sxsg, sxsu f32 [rows, NBH].
-- **Grid and threadgroup:** `((H/128) · 32, rows, 1)` / `(32, 1, 1)`: one simdgroup per (128-block of hidden, row)
-  running dense prep_s for gate and up.
-- **Template args:** DIM (H), RKC (0). Rows 2 to 4 by default; it decodes no weight.
-- **Replaces:** Nothing served: `prep2t`'s shared head as a launch of its own (the shared gate and up `linear`s'
-  prepare, dense `prep_s`).
-- **Bits:** dense prep_s's statements; the call is byte-identical to the host's chain.
-- **Pinned by:** `src/core/gpu_test.zig` "turboexl3 gpu: the shared expert fused into form 9's launches equals the
-  host's chain byte for byte (TURBOEXL3_GPU=1)" (GPU: y bit for bit, mode side2, the settings with `sprep` on at rows 2
-  to 4); `src/core/decode.zig` "turboexl3 decode v2 shared-head texts: every template constant read is passed, every
-  signature name is used" (CPU: template constants and signature names).
-
-### `turboexl3_vfold_zero`
-
-<!-- kernel-facts: turboexl3_vfold_zero -->
-
-| fact | from the code |
-|---|---|
-| made at | `src/core/decode.zig:1238` (`const Kernels3`) |
-| inputs | `gate_svh` |
-| outputs | `cnt` |
-| source | `text_vfold_zero` = `dense/dec_zero` (83 B, `c4a6f024bb78`) |
-| header | `header` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` (18000 B, `771237d24284`) |
-
-<!-- /kernel-facts -->
-
-- **Used by:** core, served for Qwen3.8-Flash-Next's gated shared expert (y = routed + sigmoid(logit) · shared(x))
-  through `root.moeFusedShared` and `root.moeFusedSharedRouted`, which the table's `swiglu_shared` member calls
-  (`table/table.zig` `swigluShared`) at 1 to 4 decode / verify rows (`Kernels3.shared_rows_max`) when
-  `Kernels3.sharedAdmitted` holds. Beside `turboexl3_gu3sf` in `Kernels3.sharedFold` (rows above `gu8_rows`, 2 to 4 by
-  default, with `Config.fused_fin_fold` true), both entries; made on first use in `sharedCfgs`.
-- **Shapes and dtypes:** In: gate_svh f16 [E, I] (the routed gate's svh: a weight, bound only so the launch depends on
-  nothing; not read). Out: cnt u32 [NCNT], NCNT = max(RK · NBI + NBI, 8) (at least 8: MLX binds an input of fewer than 8
-  elements in the constant address space, where there are no atomics).
-- **Grid and threadgroup:** `(ceil(NCNT/128) · 128, 1, 1)` / `(128, 1, 1)`.
-- **Template args:** NCNT. Every geometry `gu3sf` serves.
-- **Replaces:** Nothing: it is the counter zeroing of the fold (DEC-ONE's zeroing text, `dense/dec_zero`); it reads only
-  a weight, so it runs beside the prepare launch and adds no dependent level.
-- **Bits:** writes zeros; nothing rounded.
-- **Pinned by:** `src/core/decode.zig` "turboexl3 decode fused fin fold texts: gu3sf is gu3s but its plane and sums
-  stores, ..." (CPU: its text reads NCNT); `src/core/gpu_test.zig` "turboexl3 gpu: the shared expert fused into form 9's
-  launches equals the host's chain byte for byte (TURBOEXL3_GPU=1)" (GPU, mode inside at rows 2 to 4) and
-  `src/core/gpu_test.zig` "turboexl3 gpu: the router folded into form 9's prepare launch (and the shared gate's logit
-  with it) ..." (GPU, part=moe fold=folded): every `gu3sf` run there counts on its zeros.
-
-### `turboexl3_dfin3b`
-
-<!-- kernel-facts: turboexl3_dfin3b -->
-
-| fact | from the code |
-|---|---|
-| made at | `src/core/decode.zig:890` (`const Kernels3`) |
-| inputs | `zd`, `slots`, `scores`, `down_svh0`, `down_svh1`, `down_svh2`, `hsx` |
-| outputs | `y` |
-| source | `text_dfin3b` = `decode/dfin3_1` ++ `decode/dfin3b_expert` ++ `decode/dfin3_2` (1610 B, `7274aee7befe`) |
-| header | `header` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` (18000 B, `771237d24284`) |
-
-<!-- /kernel-facts -->
-
-- **Used by:** DeepSeek-V4.1: launch 5, the last, of `root.moeClampedBanked` (DeepSeek-V4.1's streamed routed experts:
-  each row-slot one routed pair at top-1 over an expert streamer's three slot banks, base, ext and transient; 1 to
-  `banked_rows_max` (64) row-slots), in its down half. Served by default: `Config.banked_group` 2 runs the banked texts.
-- **Shapes and dtypes:** zd f32 [KS_dn, rows, hidden] (`turboexl3_down3b`'s planes); slots the ids u32 or i32 [rows],
-  each packed (bank << 24 | slot row); scores f32 [64] (`bankedOnes`: every score 1); down_svh0/1/2 f16 [E_b, hidden];
-  hsx f32 [rows, inter/128] (`turboexl3_fin7cb`'s hs). Out: y f32 [rows, hidden], each pair's expert output at weight 1
-  (the caller weighs and sums them).
-- **Grid and threadgroup:** `((hidden/128)·128, rows, 1)` / `(128, 1, 1)`.
-- **Template args:** HID (hidden), TOPK (1), RKC (rows), KS (KS_dn), OUT_T (f32: `root` builds the banked `Kernels3` at
-  out_dtype f32), DEFER (1 for MUL1), NBI (inter/128). KS_dn is the down's K slices, the largest of 4, 2, 1 with
-  (inter/16) % (4·KS) = 0 and at least 2 tiles per part.
-- **Replaces:** `turboexl3_dfin3` (the top-1 down finish: form 9 runs `dfin3` below top-k 4), launched once per bank by
-  each bank's own `moeClamped` call: one launch over the three banks.
-- **Bits:** byte-identical to `moeClamped` on the pair's bank at top-1 with score 1: `dfin3b_expert` (the slot row and
-  the bank's down svh) replaces only the line that reads a bank's arrays, so every other statement is `dfin3`'s. The
-  streamer's sum, each full token's six pairs weighed, is held within 5e-3 of the clamped host reference's rms
-  (`ref.compare` against `ref.moeRowClamped`).
-- **Pinned by:** `src/models/deepseek_v41/banked_test.zig` "turboexl3 banked decode texts: each is its base text with
-  the bank's lines in place ..." (CPU: the text is its base text with `dfin3b_expert` in place of the base line and
-  nothing else, every input read, no shape buffer); `src/models/deepseek_v41/banked_test.zig` "turboexl3 banked decode
-  refusals: the clamp, the ids' shape and dtype, the banks' dtypes, ..." (CPU: the call's refusals, before a launch);
-  `src/models/deepseek_v41/banked_test.zig` "turboexl3 gpu banked decode: every pair of moeClampedBanked over three
-  banks is moeClamped's ..." (GPU: every pair byte for byte against `moeClamped` at rows 1, 2, 6, 7, 16, 36 and 48, x
-  bf16 and f32, trellis U16 and I16, at DeepSeek-V4.1's routed geometry (hidden 5120, width 2304, limit 10, MUL1) over
-  synthetic banks of 20, 12 and 8 experts, K3 and K2 (n 48, 32); sampled token sums to the reference by 5e-3).
-
-### `turboexl3_dfin3bg`
-
-<!-- kernel-facts: turboexl3_dfin3bg -->
-
-| fact | from the code |
-|---|---|
-| made at | `src/core/decode.zig:919` (`const Kernels3`) |
-| inputs | `zd`, `slots`, `scores`, `down_svh0`, `down_svh1`, `down_svh2`, `hsx` |
-| outputs | `y` |
-| source | `text_dfin3bg` = `decode/dfin3_1` ++ `decode/skip_rk_next` ++ `decode/dfin3b_expert` ++ `decode/dfin3_2` (1701 B, `f4c14dd1211a`) |
-| header | `header` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` (18000 B, `771237d24284`) |
-| made at | `src/core/decode.zig:947` (`const Kernels3`) (the same text) |
-
-<!-- /kernel-facts -->
-
-- **Used by:** DeepSeek-V4.1: launch 5 of `root.moeClampedBanked` (DeepSeek-V4.1's streamed routed experts: each
-  row-slot one routed pair at top-1 over an expert streamer's three slot banks, base, ext and transient; 1 to
-  `banked_rows_max` (64) row-slots) on the grouped texts, g4 and g4m3 (made at both sites). Not served by default:
-  `Config.banked_group` 4 selects the grouped texts, or a call through `moeClampedBankedSel*` with `BankedSel` g4 or
-  g4m3 (hw4b's check mode, the tests).
-- **Shapes and dtypes:** As `turboexl3_dfin3b`; `skip_id` 0xFFFFFFFF (`root.banked_skip_id`) marks a row-slot that runs
-  no expert: y f32 [rows, hidden] holds 0 in its row (DEVROUTE's pairs whose expert no bank holds; the caller replaces
-  those rows).
-- **Grid and threadgroup:** As `turboexl3_dfin3b`: `((hidden/128)·128, rows, 1)` / `(128, 1, 1)`.
-- **Template args:** HID, TOPK (1), RKC, KS (KS_dn), OUT_T (f32), DEFER, NBI (inter/128), as `turboexl3_dfin3b`.
-- **Replaces:** `turboexl3_dfin3b` in the same launch: its text with `skip_rk_next` (skip the row-slot in the slot loop)
-  before the bank lines.
-- **Bits:** byte-identical to `turboexl3_dfin3b` for every row-slot not skipped; a skipped row-slot's y row is 0, every
-  word.
-- **Pinned by:** `src/models/deepseek_v41/banked_test.zig` "turboexl3 grouped banked decode texts: prep2bg, fin7cbg and
-  dfin3bg are the banked texts ..." (CPU: the text is the banked text with the skip line before its bank lines);
-  `src/models/deepseek_v41/banked_test.zig` "turboexl3 gpu banked group: the grouped banked call's rows are the banked
-  call's ..." (GPU: the grouped call's rows equal the banked call's byte for byte, a skipped row-slot's y row 0, rows 6,
-  12, 36 and 48, x bf16, trellis I16, at DeepSeek-V4.1's routed geometry (hidden 5120, width 2304, limit 10, MUL1) over
-  synthetic banks of 20, 12 and 8 experts, K3 and K2 (n 48, 32)). It runs in every arm of
-  `src/models/deepseek_v41/banked_grp_test.zig` "turboexl3 gpu banked grp: the M = 3 texts' gate|up outputs and rows are
-  today's, ..." and `src/models/deepseek_v41/banked_ilp_test.zig` "turboexl3 gpu banked ilp: every grouped GEMV
-  variant's gate|up outputs and rows, ..." (GPU), which hold the whole call's hd, hs and y.
-
-### `turboexl3_down3b`
-
-<!-- kernel-facts: turboexl3_down3b -->
-
-| fact | from the code |
-|---|---|
-| made at | `src/core/decode.zig:888` (`const Kernels3`) |
-| inputs | `hdp`, `slots`, `down_t0`, `down_t1`, `down_t2` |
-| outputs | `zd` |
-| source | `text_down3b` = `decode/down3_1` ++ `decode/rk_line` ++ `decode/down3_2` ++ `decode/down3b_w` ++ `decode/down3_3` (2506 B, `67a8776af847`) |
-| header | `header` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` (18000 B, `771237d24284`) |
-
-<!-- /kernel-facts -->
-
-- **Used by:** DeepSeek-V4.1: launch 4 of `root.moeClampedBanked` (DeepSeek-V4.1's streamed routed experts: each
-  row-slot one routed pair at top-1 over an expert streamer's three slot banks, base, ext and transient; 1 to
-  `banked_rows_max` (64) row-slots), the start of its down half (`moeClampedBankedDown`, `decode.Kernels3.bankedDown`).
-  Served by default: `Config.banked_group` 2 runs the banked texts.
-- **Shapes and dtypes:** hdp f16 [rows, inter] (`turboexl3_fin7cb`'s hd, lane order); slots the ids u32 or i32 [rows],
-  each packed (bank << 24 | slot row); down_t0/1/2 U16 or I16 [E_b, inter/16, hidden/16, n]. Out: zd f32 [KS_dn, rows,
-  hidden] (the split-K down planes). KS_dn is the down's K slices, the largest of 4, 2, 1 with (inter/16) % (4·KS) = 0
-  and at least 2 tiles per part.
-- **Grid and threadgroup:** `((hidden/(16·BT))·128, rows, z)` / `(128, 1, 1)`, z = max(1, KS_dn / kdiv[min(rows, 4) −
-  1]) with `kdiv9d` (null: `kdiv9`; 1 by default, so z = KS_dn).
-- **Template args:** NHW (n, the halfwords per tile: K = NHW/16), CODEBOOK (MUL1 0, MCG 1), WBITS (the window's bits),
-  HID (hidden), INTER (inter), RKC (rows), KS (KS_dn), SPT (KS_dn / z: 1 by default), BT (output tiles per threadgroup:
-  `bt1` at one row-slot, `bt9` from two, both 2 by default), GROUP (2 from two row-slots, so two row-slots of one packed
-  id share a decode only on one bank's one slot; 1 at one), DEFER (1 for MUL1: the GEMV sums x times the codeword's byte
-  sum). Every rate `bankedCall` admits (gate, up and down at one rate), both codebooks and every window.
-- **Replaces:** `turboexl3_down3`, launched once per bank by each bank's own `moeClamped` call: one launch over the
-  three banks.
-- **Bits:** byte-identical to `moeClamped` on the pair's bank at top-1 with score 1: `down3b_w` (the weight base: the
-  bank's down trellis at the slot row) replaces only the line that reads a bank's arrays, so every other statement is
-  `down3`'s. The streamer's sum, each full token's six pairs weighed, is held within 5e-3 of the clamped host
-  reference's rms (`ref.compare` against `ref.moeRowClamped`).
-- **Pinned by:** `src/models/deepseek_v41/banked_test.zig` "turboexl3 banked decode texts: each is its base text with
-  the bank's lines in place ..." (CPU: the text is its base text with `down3b_w` in place of the base line and nothing
-  else, every input read, no shape buffer); `src/models/deepseek_v41/banked_test.zig` "turboexl3 banked decode refusals:
-  the clamp, the ids' shape and dtype, the banks' dtypes, ..." (CPU: the call's refusals, before a launch);
-  `src/models/deepseek_v41/banked_test.zig` "turboexl3 gpu banked decode: every pair of moeClampedBanked over three
-  banks is moeClamped's ..." (GPU: every pair byte for byte against `moeClamped` at rows 1, 2, 6, 7, 16, 36 and 48, x
-  bf16 and f32, trellis U16 and I16, at DeepSeek-V4.1's routed geometry (hidden 5120, width 2304, limit 10, MUL1) over
-  synthetic banks of 20, 12 and 8 experts, K3 and K2 (n 48, 32); sampled token sums to the reference by 5e-3). The texts
-  test also pins that the members compare the packed id.
-
-### `turboexl3_down3bg`
-
-<!-- kernel-facts: turboexl3_down3bg -->
-
-| fact | from the code |
-|---|---|
-| made at | `src/core/decode.zig:917` (`const Kernels3`) |
-| inputs | `hdp`, `slots`, `down_t0`, `down_t1`, `down_t2` |
-| outputs | `zd` |
-| source | `text_down3bg` = `decode/down3_1` ++ `decode/rk_line` ++ `decode/down3g_2` ++ `decode/down3b_w` ++ `decode/down3g_3` (2585 B, `b9686e67ab4a`) |
-| header | `header_group` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/gemv_group` (26373 B, `b7023ef0567c`) |
-| made at | `src/core/decode.zig:1027` (`const Kernels3`) |
-| inputs | `hdp`, `slots`, `down_t0`, `down_t1`, `down_t2` |
-| outputs | `zd` |
-| source | `text_down3bg` = `decode/down3_1` ++ `decode/rk_line` ++ `decode/down3g_2` ++ `decode/down3b_w` ++ `decode/down3g_3` (2585 B, `b9686e67ab4a`) |
-| header | `group_headers[v].ptr` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/gemv_group` (26373 B, `b7023ef0567c`) |
-
-<!-- /kernel-facts -->
-
-- **Used by:** DeepSeek-V4.1: launch 4 of `root.moeClampedBanked` (DeepSeek-V4.1's streamed routed experts: each
-  row-slot one routed pair at top-1 over an expert streamer's three slot banks, base, ext and transient; 1 to
-  `banked_rows_max` (64) row-slots) on today's grouped texts (g4): `Config.banked_group` 4 with `banked_m3` false, or
-  `BankedSel` g4. Not served by default. Its name is also variant 0's in the variant table (`group_down_names[0]`;
-  `groupGemvs` makes only variants 1 and up).
-- **Shapes and dtypes:** As `turboexl3_down3b`: hdp f16 [rows, inter]; slots the packed ids u32 or i32 [rows], `skip_id`
-  0xFFFFFFFF (`root.banked_skip_id`) marks a row-slot that runs no expert (no decode, no plane rows written);
-  down_t0/1/2 U16 or I16 [E_b, inter/16, hidden/16, n]. Out: zd f32 [KS_dn, rows, hidden].
-- **Grid and threadgroup:** As `turboexl3_down3b`: `((hidden/(16·BT))·128, rows, z)` / `(128, 1, 1)`, z = KS_dn by
-  default. (`cfgsBankedG`).
-- **Template args:** NHW (n, the halfwords per tile: K = NHW/16), CODEBOOK (MUL1 0, MCG 1), WBITS (the window's bits),
-  HID (hidden), INTER (inter), RKC (rows), KS (KS_dn), SPT (KS_dn / z: 1 by default), BT (output tiles per threadgroup:
-  `bt1` at one row-slot, `bt9` from two, both 2 by default), GROUP (4 from two row-slots, 1 at one: up to four row-slots
-  of one packed id per lead threadgroup (`turboexl3_members_g`), a skipped row-slot no member), DEFER (1 for MUL1: the
-  GEMV sums x times the codeword's byte sum). Every rate `bankedCall` admits (gate, up and down at one rate), both
-  codebooks and every window. Inside: the member paths M 1, 2 and 4 of `turboexl3_gemv_group`, so a lead of three
-  members runs the M = 4 path with a fourth member's FMAs padding.
-- **Replaces:** `turboexl3_down3b` in the same launch: the members widened from two to four (`down3g_2`, `down3g_3`),
-  the banked weight base (`down3b_w`) between them.
-- **Bits:** byte-identical to the banked text `turboexl3_down3b` (the grouped call's rows are the banked call's): every
-  weight is read and decoded once and fed to each member in the one-member order.
-- **Pinned by:** `src/models/deepseek_v41/banked_test.zig` "turboexl3 grouped banked decode texts: prep2bg, fin7cbg and
-  dfin3bg are the banked texts ..." (CPU: the banked text's constants and grid line, then the four-member head, the
-  banked weight base, the four-member tail); `src/models/deepseek_v41/banked_test.zig` "turboexl3 gpu banked group: the
-  grouped banked call's rows are the banked call's ..." (GPU: the grouped call against the banked call, byte for byte, a
-  skipped row-slot's y row 0, rows 6, 12, 36 and 48, x bf16, trellis I16, at DeepSeek-V4.1's routed geometry (hidden
-  5120, width 2304, limit 10, MUL1) over synthetic banks of 20, 12 and 8 experts, K3 and K2 (n 48, 32); up to eight
-  row-slots of one id: two leads); `src/models/deepseek_v41/banked_ilp_test.zig` "turboexl3 banked ilp: variant 0 is
-  today's (no defines, the stock kernel names), ..." (CPU: variant 0 keeps the stock name and no defines). It is the
-  reference arm (g4, variant 0) of `src/models/deepseek_v41/banked_grp_test.zig` "turboexl3 gpu banked grp: the M = 3
-  texts' gate|up outputs and rows are today's, ..." and `src/models/deepseek_v41/banked_ilp_test.zig` "turboexl3 gpu
-  banked ilp: every grouped GEMV variant's gate|up outputs and rows, ..." (GPU).
-
-### `turboexl3_down3bg_<variant>`
-
-<!-- kernel-facts: turboexl3_down3bg_<variant> -->
-
-| fact | from the code |
-|---|---|
-| names | `turboexl3_down3bg_ku`, `turboexl3_down3bg_pf`, `turboexl3_down3bg_xh`, `turboexl3_down3bg_m2`, `turboexl3_down3bg_sh`, `turboexl3_down3bg_t4`, `turboexl3_down3bg_t1`, `turboexl3_down3bg_t0`, `turboexl3_down3bg_pfxh`, `turboexl3_down3bg_pfsh`, `turboexl3_down3bg_xhm2` |
-| made at | `src/core/decode.zig:1027` (`const Kernels3`) |
-| inputs | `hdp`, `slots`, `down_t0`, `down_t1`, `down_t2` |
-| outputs | `zd` |
-| source | `text_down3bg` = `decode/down3_1` ++ `decode/rk_line` ++ `decode/down3g_2` ++ `decode/down3b_w` ++ `decode/down3g_3` (2585 B, `b9686e67ab4a`) |
-| header | `group_headers[v].ptr`: a variant's defines ++ the base header, one per name |
-| header of `turboexl3_down3bg_ku` | text '#define EXL3_KU 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/gemv_group` (26391 B, `893d0732e30e`) |
-| header of `turboexl3_down3bg_pf` | text '#define EXL3_GPF 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/gemv_group` (26392 B, `719802404fb5`) |
-| header of `turboexl3_down3bg_xh` | text '#define EXL3_GXH 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/gemv_group` (26392 B, `35cacdcfb1d7`) |
-| header of `turboexl3_down3bg_m2` | text '#define EXL3_GM2 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/gemv_group` (26392 B, `d28773b43d18`) |
-| header of `turboexl3_down3bg_sh` | text '#define EXL3_GSH 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/gemv_group` (26392 B, `1eaa64821218`) |
-| header of `turboexl3_down3bg_t4` | text '#define EXL3_T1V 4\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/gemv_group` (26392 B, `acaeb8fa61e1`) |
-| header of `turboexl3_down3bg_t1` | text '#define EXL3_T1V 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/gemv_group` (26392 B, `b0622147baad`) |
-| header of `turboexl3_down3bg_t0` | text '#define EXL3_T1V 0\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/gemv_group` (26392 B, `9be4db5164be`) |
-| header of `turboexl3_down3bg_pfxh` | text '#define EXL3_GPF 1\n#define EXL3_GXH 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/gemv_group` (26411 B, `c5b9183f1adc`) |
-| header of `turboexl3_down3bg_pfsh` | text '#define EXL3_GPF 1\n#define EXL3_GSH 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/gemv_group` (26411 B, `2478957c5a9f`) |
-| header of `turboexl3_down3bg_xhm2` | text '#define EXL3_GXH 1\n#define EXL3_GM2 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/gemv_group` (26411 B, `a43b1425ae6c`) |
-
-<!-- /kernel-facts -->
-
-- **Used by:** DeepSeek-V4.1: launch 4 of `root.moeClampedBanked` (DeepSeek-V4.1's streamed routed experts: each
-  row-slot one routed pair at top-1 over an expert streamer's three slot banks, base, ext and transient; 1 to
-  `banked_rows_max` (64) row-slots) at `Config.banked_variant_dn` v (1 to 11, needs `Config.banked_group` 4) on today's
-  grouped texts (`banked_m3` false), or `moeClampedBankedDownV` / `...SelV` with that variant; `Kernels3.groupGemvs`
-  makes each on first use (`banked_gv`). hw2's ILP retune; not served by default (variant 0).
-- **Shapes and dtypes:** As `turboexl3_down3bg`.
-- **Grid and threadgroup:** As `turboexl3_down3bg` (`cfgsBankedG`).
-- **Template args:** As `turboexl3_down3bg`. The variant is the header: its Metal defines before `header_group`, under a
-  kernel name of its own: `ku` EXL3_KU 1 (input tiles in pairs, both tiles' words loaded before either decodes); `pf`
-  EXL3_GPF 1 (a rolling prefetch: the next input tile's words loaded before this tile decodes); `xh` EXL3_GXH 1 (each
-  member's x quad held as half4 and widened at its FMA); `m2` EXL3_GM2 1 (the four-member path as two passes of two
-  members, the second reading and decoding the tile again); `sh` EXL3_GSH 1 (the one-64-bit-window reader with each tile
-  word loaded by one lane and taken by the others through `simd_shuffle`); `t4`, `t1`, `t0` EXL3_T1V 4, 1, 0 (the route
-  from a MUL1 codeword to t, default 3: 4 both pair sums as one half2, 1 a shift and add for the 32-bit multiply, 0 the
-  multiply by 0x10001 and an integer convert; MUL1 only); `pfxh`, `pfsh`, `xhm2` two of those defines together.
-- **Replaces:** `turboexl3_down3bg` in the same launch.
-- **Bits:** byte-identical to `turboexl3_down3bg` (variant 0): each variant reads, decodes and sums every weight as
-  variant 0 does (the same codewords, decoded values, FMA sequence into the same f32 accumulators, and folds); they
-  differ only in when the tile words load, how many lanes load them, the registers the loop holds, the passes over a
-  tile and the instructions from a codeword to t.
-- **Pinned by:** `src/models/deepseek_v41/banked_ilp_test.zig` "turboexl3 banked ilp: variant 0 is today's (no defines,
-  the stock kernel names), ..." (CPU: each name distinct, its defines, each define's default in `header_group`, the
-  config's count of 12); `src/models/deepseek_v41/banked_ilp_test.zig` "turboexl3 gpu banked ilp: every grouped GEMV
-  variant's gate|up outputs and rows, ..." (GPU: every variant, both GEMVs at it, on g4 and g4m3, against g4 at variant
-  0: hd, hs and y word for word, a skipped row-slot's y row 0, rows 1, 2, 3, 4, 6, 7, 12, 16, 24, 36 and 48, x bf16 and
-  f32, trellis I16 and U16, at DeepSeek-V4.1's routed geometry (hidden 5120, width 2304, limit 10, MUL1) over synthetic
-  banks of 20, 12 and 8 experts, K3 and K2 (n 48, 32)); `src/models/deepseek_v41/banked_ilp_test.zig` "turboexl3 gpu
-  banked ilp t routes: every EXL3_T1V route gives today's route's t, ..." (GPU: the t routes of `t4`, `t1`, `t0` on
-  every codeword state, through `turboexl3_t1v_probe_<route>_<dtype>`); `src/core/config.zig` "turboexl3 config: the
-  defaults are valid and served; an unserved form, slice count ..." (CPU: a variant needs `banked_group` 4).
-
-### `turboexl3_down3bgm3`
-
-<!-- kernel-facts: turboexl3_down3bgm3 -->
-
-| fact | from the code |
-|---|---|
-| made at | `src/core/decode.zig:945` (`const Kernels3`) |
-| inputs | `hdp`, `slots`, `down_t0`, `down_t1`, `down_t2` |
-| outputs | `zd` |
-| source | `text_down3bgm3` = `decode/down3_1` ++ `decode/rk_line` ++ `decode/down3g_2` ++ `decode/down3b_w` ++ `decode/down3g_3m3` (2756 B, `3274179feb75`) |
-| header | `header_group` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/gemv_group` (26373 B, `b7023ef0567c`) |
-| made at | `src/core/decode.zig:1025` (`const Kernels3`) |
-| inputs | `hdp`, `slots`, `down_t0`, `down_t1`, `down_t2` |
-| outputs | `zd` |
-| source | `text_down3bgm3` = `decode/down3_1` ++ `decode/rk_line` ++ `decode/down3g_2` ++ `decode/down3b_w` ++ `decode/down3g_3m3` (2756 B, `3274179feb75`) |
-| header | `group_headers[v].ptr` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/gemv_group` (26373 B, `b7023ef0567c`) |
-
-<!-- /kernel-facts -->
-
-- **Used by:** DeepSeek-V4.1: launch 4 of `root.moeClampedBanked` (DeepSeek-V4.1's streamed routed experts: each
-  row-slot one routed pair at top-1 over an expert streamer's three slot banks, base, ext and transient; 1 to
-  `banked_rows_max` (64) row-slots) on hw4b's texts (g4m3): `Config.banked_group` 4 with `Config.banked_m3`, or
-  `BankedSel` g4m3. Not served by default. Its name is also variant 0's in the M = 3 variant table
-  (`group_down_m3_names[0]`).
-- **Shapes and dtypes:** As `turboexl3_down3b`: hdp f16 [rows, inter]; slots the packed ids u32 or i32 [rows], `skip_id`
-  0xFFFFFFFF (`root.banked_skip_id`) marks a row-slot that runs no expert (no decode, no plane rows written);
-  down_t0/1/2 U16 or I16 [E_b, inter/16, hidden/16, n]. Out: zd f32 [KS_dn, rows, hidden].
-- **Grid and threadgroup:** As `turboexl3_down3b`: `((hidden/(16·BT))·128, rows, z)` / `(128, 1, 1)`, z = KS_dn by
-  default. (`cfgsBankedGM3`).
-- **Template args:** NHW (n, the halfwords per tile: K = NHW/16), CODEBOOK (MUL1 0, MCG 1), WBITS (the window's bits),
-  HID (hidden), INTER (inter), RKC (rows), KS (KS_dn), SPT (KS_dn / z: 1 by default), BT (output tiles per threadgroup:
-  `bt1` at one row-slot, `bt9` from two, both 2 by default), GROUP (4 from two row-slots, 1 at one: up to four row-slots
-  of one packed id per lead threadgroup (`turboexl3_members_g`), a skipped row-slot no member), DEFER (1 for MUL1: the
-  GEMV sums x times the codeword's byte sum). Every rate `bankedCall` admits (gate, up and down at one rate), both
-  codebooks and every window. Inside: the member paths M 1, 2, 3 and 4.
-- **Replaces:** `turboexl3_down3bg` in the same launch: its text with one line added (`down3g_3m3`), an M = 3 path for a
-  lead with three members, where `down3bg` runs the M = 4 path with a fourth member's FMAs padding.
-- **Bits:** byte-identical to `turboexl3_down3bg` (g4): every member fed in the one-member order
-  (`turboexl3_gemv_group`); the call's hd, hs and y equal today's, differing words 0, max_ulps 0, a skipped row-slot's y
-  row 0.
-- **Pinned by:** `src/models/deepseek_v41/banked_grp_test.zig` "turboexl3 banked grp: the M = 3 texts are today's
-  grouped texts with the one M = 3 line ..." (CPU: today's grouped text with the one M = 3 line added after the M = 2
-  line); `src/models/deepseek_v41/banked_grp_test.zig` "turboexl3 gpu banked grp: the M = 3 texts' gate|up outputs and
-  rows are today's, ..." (GPU: g4m3 against g4, hd, hs and y word for word, rows 1 to 9, 12, 16, 24, 36, 42, 48 and 64,
-  x bf16 and f32, trellis I16 and U16, one id on up to 16 row-slots, skipped row-slots, at DeepSeek-V4.1's routed
-  geometry (hidden 5120, width 2304, limit 10, MUL1) over synthetic banks of 20, 12 and 8 experts, K3 and K2 (n 48,
-  32)); `src/models/deepseek_v41/banked_ilp_test.zig` "turboexl3 banked ilp: variant 0 is today's (no defines, the stock
-  kernel names), ..." (CPU: the names distinct); `src/models/deepseek_v41/banked_ilp_test.zig` "turboexl3 gpu banked
-  ilp: every grouped GEMV variant's gate|up outputs and rows, ..." (GPU: variant 0 on hw4b's texts against g4's variant
-  0); `src/core/config.zig` "turboexl3 config: the defaults are valid and served; an unserved form, slice count ..."
-  (CPU: `banked_m3` needs `banked_group` 4).
-
-### `turboexl3_down3bgm3_<variant>`
-
-<!-- kernel-facts: turboexl3_down3bgm3_<variant> -->
-
-| fact | from the code |
-|---|---|
-| names | `turboexl3_down3bgm3_ku`, `turboexl3_down3bgm3_pf`, `turboexl3_down3bgm3_xh`, `turboexl3_down3bgm3_m2`, `turboexl3_down3bgm3_sh`, `turboexl3_down3bgm3_t4`, `turboexl3_down3bgm3_t1`, `turboexl3_down3bgm3_t0`, `turboexl3_down3bgm3_pfxh`, `turboexl3_down3bgm3_pfsh`, `turboexl3_down3bgm3_xhm2` |
-| made at | `src/core/decode.zig:1025` (`const Kernels3`) |
-| inputs | `hdp`, `slots`, `down_t0`, `down_t1`, `down_t2` |
-| outputs | `zd` |
-| source | `text_down3bgm3` = `decode/down3_1` ++ `decode/rk_line` ++ `decode/down3g_2` ++ `decode/down3b_w` ++ `decode/down3g_3m3` (2756 B, `3274179feb75`) |
-| header | `group_headers[v].ptr`: a variant's defines ++ the base header, one per name |
-| header of `turboexl3_down3bgm3_ku` | text '#define EXL3_KU 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/gemv_group` (26391 B, `893d0732e30e`) |
-| header of `turboexl3_down3bgm3_pf` | text '#define EXL3_GPF 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/gemv_group` (26392 B, `719802404fb5`) |
-| header of `turboexl3_down3bgm3_xh` | text '#define EXL3_GXH 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/gemv_group` (26392 B, `35cacdcfb1d7`) |
-| header of `turboexl3_down3bgm3_m2` | text '#define EXL3_GM2 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/gemv_group` (26392 B, `d28773b43d18`) |
-| header of `turboexl3_down3bgm3_sh` | text '#define EXL3_GSH 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/gemv_group` (26392 B, `1eaa64821218`) |
-| header of `turboexl3_down3bgm3_t4` | text '#define EXL3_T1V 4\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/gemv_group` (26392 B, `acaeb8fa61e1`) |
-| header of `turboexl3_down3bgm3_t1` | text '#define EXL3_T1V 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/gemv_group` (26392 B, `b0622147baad`) |
-| header of `turboexl3_down3bgm3_t0` | text '#define EXL3_T1V 0\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/gemv_group` (26392 B, `9be4db5164be`) |
-| header of `turboexl3_down3bgm3_pfxh` | text '#define EXL3_GPF 1\n#define EXL3_GXH 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/gemv_group` (26411 B, `c5b9183f1adc`) |
-| header of `turboexl3_down3bgm3_pfsh` | text '#define EXL3_GPF 1\n#define EXL3_GSH 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/gemv_group` (26411 B, `2478957c5a9f`) |
-| header of `turboexl3_down3bgm3_xhm2` | text '#define EXL3_GXH 1\n#define EXL3_GM2 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/gemv_group` (26411 B, `a43b1425ae6c`) |
-
-<!-- /kernel-facts -->
-
-- **Used by:** DeepSeek-V4.1: launch 4 of `root.moeClampedBanked` (DeepSeek-V4.1's streamed routed experts: each
-  row-slot one routed pair at top-1 over an expert streamer's three slot banks, base, ext and transient; 1 to
-  `banked_rows_max` (64) row-slots) at `Config.banked_variant_dn` v (1 to 11, needs `Config.banked_group` 4) on hw4b's
-  texts (`banked_m3` true), or `moeClampedBankedDownV` / `...SelV` with that variant; `Kernels3.groupGemvs` makes each
-  on first use (`banked_gvm3`). hw2's ILP retune; not served by default (variant 0).
-- **Shapes and dtypes:** As `turboexl3_down3bgm3`.
-- **Grid and threadgroup:** As `turboexl3_down3bgm3` (`cfgsBankedGM3`).
-- **Template args:** As `turboexl3_down3bgm3`. The variant is the header: its Metal defines before `header_group`, under
-  a kernel name of its own: `ku` EXL3_KU 1 (input tiles in pairs, both tiles' words loaded before either decodes); `pf`
-  EXL3_GPF 1 (a rolling prefetch: the next input tile's words loaded before this tile decodes); `xh` EXL3_GXH 1 (each
-  member's x quad held as half4 and widened at its FMA); `m2` EXL3_GM2 1 (the four-member path as two passes of two
-  members, the second reading and decoding the tile again); `sh` EXL3_GSH 1 (the one-64-bit-window reader with each tile
-  word loaded by one lane and taken by the others through `simd_shuffle`); `t4`, `t1`, `t0` EXL3_T1V 4, 1, 0 (the route
-  from a MUL1 codeword to t, default 3: 4 both pair sums as one half2, 1 a shift and add for the 32-bit multiply, 0 the
-  multiply by 0x10001 and an integer convert; MUL1 only); `pfxh`, `pfsh`, `xhm2` two of those defines together.
-- **Replaces:** `turboexl3_down3bgm3` in the same launch.
-- **Bits:** byte-identical to `turboexl3_down3bgm3` (variant 0): each variant reads, decodes and sums every weight as
-  variant 0 does (the same codewords, decoded values, FMA sequence into the same f32 accumulators, and folds); they
-  differ only in when the tile words load, how many lanes load them, the registers the loop holds, the passes over a
-  tile and the instructions from a codeword to t. The GPU test holds each to g4's variant 0, so to `turboexl3_down3bg`.
-- **Pinned by:** `src/models/deepseek_v41/banked_ilp_test.zig` "turboexl3 banked ilp: variant 0 is today's (no defines,
-  the stock kernel names), ..." (CPU: each name distinct, its defines, each define's default in `header_group`, the
-  config's count of 12); `src/models/deepseek_v41/banked_ilp_test.zig` "turboexl3 gpu banked ilp: every grouped GEMV
-  variant's gate|up outputs and rows, ..." (GPU: every variant, both GEMVs at it, on g4 and g4m3, against g4 at variant
-  0: hd, hs and y word for word, a skipped row-slot's y row 0, rows 1, 2, 3, 4, 6, 7, 12, 16, 24, 36 and 48, x bf16 and
-  f32, trellis I16 and U16, at DeepSeek-V4.1's routed geometry (hidden 5120, width 2304, limit 10, MUL1) over synthetic
-  banks of 20, 12 and 8 experts, K3 and K2 (n 48, 32)); `src/models/deepseek_v41/banked_ilp_test.zig` "turboexl3 gpu
-  banked ilp t routes: every EXL3_T1V route gives today's route's t, ..." (GPU: the t routes of `t4`, `t1`, `t0` on
-  every codeword state, through `turboexl3_t1v_probe_<route>_<dtype>`); `src/core/config.zig` "turboexl3 config: the
-  defaults are valid and served; an unserved form, slice count ..." (CPU: a variant needs `banked_group` 4).
-
-### `turboexl3_fin7cb`
-
-<!-- kernel-facts: turboexl3_fin7cb -->
-
-| fact | from the code |
-|---|---|
-| made at | `src/core/decode.zig:886` (`const Kernels3`) |
-| inputs | `zg`, `zu`, `slots`, `gate_svh0`, `gate_svh1`, `gate_svh2`, `up_svh0`, `up_svh1`, `up_svh2`, `down_suh0`, `down_suh1`, `down_suh2`, `xsg`, `xsu` |
-| outputs | `hd`, `hs` |
-| source | `text_fin7cb` = `decode/fin7_1` ++ `decode/fin7b_expert` ++ `decode/fin7_2` ++ `decode/fin7_planes` ++ `decode/fin7_3` ++ `decode/fin7_sums` ++ `decode/fin7_4` ++ `decode/fin7_swiglu_clamp` ++ `decode/fin7_5` (2959 B, `68747f002dd1`) |
-| header | `header5` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` (26594 B, `41efbbbbd943`) |
-
-<!-- /kernel-facts -->
-
-- **Used by:** DeepSeek-V4.1: launch 3 of `root.moeClampedBanked` (DeepSeek-V4.1's streamed routed experts: each
-  row-slot one routed pair at top-1 over an expert streamer's three slot banks, base, ext and transient; 1 to
-  `banked_rows_max` (64) row-slots), the end of its gate|up half; it prepares the down's input, so it reads every bank's
-  down suh as well as its gate and up svh. Served by default: `Config.banked_group` 2 runs the banked texts.
-- **Shapes and dtypes:** zg, zu f32 [KS_gu, rows, inter] (`turboexl3_gu3b`'s planes); slots the ids u32 or i32 [rows],
-  each packed (bank << 24 | slot row); gate_svh0/1/2 and up_svh0/1/2 f16 [E_b, inter]; down_suh0/1/2 f16 [E_b, inter];
-  xsg, xsu f32 [rows, hidden/128] (`turboexl3_prep2b`'s sg, su). Out: hd f16 [rows, inter] (the down's prepared input,
-  lane order) and hs f32 [rows, inter/128] (its 128-block sums): `root.BankedHalf`.
-- **Grid and threadgroup:** `((inter/128)·32, rows, 1)` / `(32, 1, 1)`.
-- **Template args:** INTER (inter), RKC (rows), KS (KS_gu), DEFER (1 for MUL1: the deferred affine map applied here),
-  NBH (hidden/128), LIMIT (the clamp, 1 to 128; DeepSeek-V4.1's swiglu_limit 10). A banked call needs a clamped top-1
-  geometry (`bankedKernels` refuses any other).
-- **Replaces:** `turboexl3_fin7c` (fin7 with the clamped SwiGLU), launched once per bank by each bank's own `moeClamped`
-  call: one launch over the three banks.
-- **Bits:** byte-identical to `moeClamped` on the pair's bank at top-1 with score 1: `fin7b_expert` (the slot row and
-  the bank's gate svh, up svh and down suh) replaces only the line that reads a bank's arrays, so every other statement
-  is `fin7c`'s. The streamer's sum, each full token's six pairs weighed, is held within 5e-3 of the clamped host
-  reference's rms (`ref.compare` against `ref.moeRowClamped`).
-- **Pinned by:** `src/models/deepseek_v41/banked_test.zig` "turboexl3 banked decode texts: each is its base text with
-  the bank's lines in place ..." (CPU: the text is its base text with `fin7b_expert` in place of the base line and
-  nothing else, every input read, no shape buffer); `src/models/deepseek_v41/banked_test.zig` "turboexl3 banked decode
-  refusals: the clamp, the ids' shape and dtype, the banks' dtypes, ..." (CPU: the call's refusals, before a launch);
-  `src/models/deepseek_v41/banked_test.zig` "turboexl3 gpu banked decode: every pair of moeClampedBanked over three
-  banks is moeClamped's ..." (GPU: every pair byte for byte against `moeClamped` at rows 1, 2, 6, 7, 16, 36 and 48, x
-  bf16 and f32, trellis U16 and I16, at DeepSeek-V4.1's routed geometry (hidden 5120, width 2304, limit 10, MUL1) over
-  synthetic banks of 20, 12 and 8 experts, K3 and K2 (n 48, 32); sampled token sums to the reference by 5e-3).
-
-### `turboexl3_fin7cbg`
-
-<!-- kernel-facts: turboexl3_fin7cbg -->
-
-| fact | from the code |
-|---|---|
-| made at | `src/core/decode.zig:915` (`const Kernels3`) |
-| inputs | `zg`, `zu`, `slots`, `gate_svh0`, `gate_svh1`, `gate_svh2`, `up_svh0`, `up_svh1`, `up_svh2`, `down_suh0`, `down_suh1`, `down_suh2`, `xsg`, `xsu` |
-| outputs | `hd`, `hs` |
-| source | `text_fin7cbg` = `decode/fin7_1` ++ `decode/skip_rk` ++ `decode/fin7b_expert` ++ `decode/fin7_2` ++ `decode/fin7_planes` ++ `decode/fin7_3` ++ `decode/fin7_sums` ++ `decode/fin7_4` ++ `decode/fin7_swiglu_clamp` ++ `decode/fin7_5` (3076 B, `25e578bf80c8`) |
-| header | `header5` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` (26594 B, `41efbbbbd943`) |
-| made at | `src/core/decode.zig:943` (`const Kernels3`) (the same text) |
-
-<!-- /kernel-facts -->
-
-- **Used by:** DeepSeek-V4.1: launch 3 of `root.moeClampedBanked` (DeepSeek-V4.1's streamed routed experts: each
-  row-slot one routed pair at top-1 over an expert streamer's three slot banks, base, ext and transient; 1 to
-  `banked_rows_max` (64) row-slots) on the grouped texts, g4 and g4m3 (made at both sites). Not served by default:
-  `Config.banked_group` 4 selects the grouped texts, or a call through `moeClampedBankedSel*` with `BankedSel` g4 or
-  g4m3 (hw4b's check mode, the tests).
-- **Shapes and dtypes:** As `turboexl3_fin7cb`; `skip_id` 0xFFFFFFFF (`root.banked_skip_id`) marks a row-slot that runs
-  no expert, and its hd and hs rows are left unwritten.
-- **Grid and threadgroup:** As `turboexl3_fin7cb`: `((inter/128)·32, rows, 1)` / `(32, 1, 1)`.
-- **Template args:** INTER, RKC (rows), KS (KS_gu), DEFER, NBH (hidden/128), LIMIT, as `turboexl3_fin7cb`.
-- **Replaces:** `turboexl3_fin7cb` in the same launch: its text with `skip_rk` before the bank lines.
-- **Bits:** byte-identical to `turboexl3_fin7cb` for every row-slot not skipped (hd and hs).
-- **Pinned by:** `src/models/deepseek_v41/banked_test.zig` "turboexl3 grouped banked decode texts: prep2bg, fin7cbg and
-  dfin3bg are the banked texts ..." (CPU: the text is the banked text with the skip line before its bank lines);
-  `src/models/deepseek_v41/banked_test.zig` "turboexl3 gpu banked group: the grouped banked call's rows are the banked
-  call's ..." (GPU: the grouped call's rows equal the banked call's byte for byte, a skipped row-slot's y row 0, rows 6,
-  12, 36 and 48, x bf16, trellis I16, at DeepSeek-V4.1's routed geometry (hidden 5120, width 2304, limit 10, MUL1) over
-  synthetic banks of 20, 12 and 8 experts, K3 and K2 (n 48, 32)). It runs in every arm of
-  `src/models/deepseek_v41/banked_grp_test.zig` "turboexl3 gpu banked grp: the M = 3 texts' gate|up outputs and rows are
-  today's, ..." and `src/models/deepseek_v41/banked_ilp_test.zig` "turboexl3 gpu banked ilp: every grouped GEMV
-  variant's gate|up outputs and rows, ..." (GPU), which hold the whole call's hd, hs and y.
-
-### `turboexl3_gu3b`
-
-<!-- kernel-facts: turboexl3_gu3b -->
-
-| fact | from the code |
-|---|---|
-| made at | `src/core/decode.zig:884` (`const Kernels3`) |
-| inputs | `xgp`, `xup`, `slots`, `gate_t0`, `gate_t1`, `gate_t2`, `up_t0`, `up_t1`, `up_t2` |
-| outputs | `zg`, `zu` |
-| source | `text_gu3b` = `decode/gu3_1` ++ `decode/rk_line` ++ `decode/gu3_2` ++ `decode/gu3b_w` ++ `decode/gu3_3` ++ `decode/gu3_stores` ++ `decode/gu3_4` (2717 B, `cf09a195e002`) |
-| header | `header` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` (18000 B, `771237d24284`) |
-
-<!-- /kernel-facts -->
-
-- **Used by:** DeepSeek-V4.1: launch 2 of `root.moeClampedBanked` (DeepSeek-V4.1's streamed routed experts: each
-  row-slot one routed pair at top-1 over an expert streamer's three slot banks, base, ext and transient; 1 to
-  `banked_rows_max` (64) row-slots), in its gate|up half. Served by default: `Config.banked_group` 2 runs the banked
-  texts.
-- **Shapes and dtypes:** xgp, xup f16 [rows, hidden] (`turboexl3_prep2b`'s xg, xu, lane order); slots the ids u32 or i32
-  [rows], each packed (bank << 24 | slot row); gate_t0/1/2 and up_t0/1/2 U16 or I16 [E_b, hidden/16, inter/16, n] (bank
-  b's trellis, every bank one dtype; I16 is the streamer's code arrays). Out: zg, zu f32 [KS_gu, rows, inter] (the
-  split-K gate and up planes). KS_gu is the gate|up's K slices, the largest of 4, 2, 1 with (hidden/16) % (2·KS) = 0
-  (`Kernels3.initWith(geo, 1, 4, 2)` from `root.kernelsFor`).
-- **Grid and threadgroup:** `((inter/(16·BT))·128, rows, z)` / `(128, 1, 1)`, z = max(1, KS_gu / kdiv9[min(rows, 4) −
-  1]) threadgroups along K (`kdiv9` 1 by default, so z = KS_gu).
-- **Template args:** NHW (n, the halfwords per tile: K = NHW/16), CODEBOOK (MUL1 0, MCG 1), WBITS (the window's bits),
-  HID (hidden), INTER (inter), RKC (rows), KS (KS_gu), SPT (KS_gu / z: 1 by default), BT (output tiles per threadgroup:
-  `bt1` at one row-slot, `bt9` from two, both 2 by default), GROUP (2 from two row-slots, so two row-slots of one packed
-  id share a decode only on one bank's one slot; 1 at one), DEFER (1 for MUL1: the GEMV sums x times the codeword's byte
-  sum). Every rate `bankedCall` admits (gate, up and down at one rate), both codebooks and every window.
-- **Replaces:** `turboexl3_gu3`, launched once per bank by each bank's own `moeClamped` call: one launch over the three
-  banks.
-- **Bits:** byte-identical to `moeClamped` on the pair's bank at top-1 with score 1: `gu3b_w` (the weight base: the
-  bank's trellis at the slot row) replaces only the line that reads a bank's arrays, so every other statement is
-  `gu3`'s. The streamer's sum, each full token's six pairs weighed, is held within 5e-3 of the clamped host reference's
-  rms (`ref.compare` against `ref.moeRowClamped`).
-- **Pinned by:** `src/models/deepseek_v41/banked_test.zig` "turboexl3 banked decode texts: each is its base text with
-  the bank's lines in place ..." (CPU: the text is its base text with `gu3b_w` in place of the base line and nothing
-  else, every input read, no shape buffer); `src/models/deepseek_v41/banked_test.zig` "turboexl3 banked decode refusals:
-  the clamp, the ids' shape and dtype, the banks' dtypes, ..." (CPU: the call's refusals, before a launch);
-  `src/models/deepseek_v41/banked_test.zig` "turboexl3 gpu banked decode: every pair of moeClampedBanked over three
-  banks is moeClamped's ..." (GPU: every pair byte for byte against `moeClamped` at rows 1, 2, 6, 7, 16, 36 and 48, x
-  bf16 and f32, trellis U16 and I16, at DeepSeek-V4.1's routed geometry (hidden 5120, width 2304, limit 10, MUL1) over
-  synthetic banks of 20, 12 and 8 experts, K3 and K2 (n 48, 32); sampled token sums to the reference by 5e-3). The texts
-  test also pins that the members compare the packed id.
-
-### `turboexl3_gu3bg`
-
-<!-- kernel-facts: turboexl3_gu3bg -->
-
-| fact | from the code |
-|---|---|
-| made at | `src/core/decode.zig:913` (`const Kernels3`) |
-| inputs | `xgp`, `xup`, `slots`, `gate_t0`, `gate_t1`, `gate_t2`, `up_t0`, `up_t1`, `up_t2` |
-| outputs | `zg`, `zu` |
-| source | `text_gu3bg` = `decode/gu3_1` ++ `decode/rk_line` ++ `decode/gu3g_2` ++ `decode/gu3b_w` ++ `decode/gu3g_3` (2796 B, `e427ea27f330`) |
-| header | `header_group` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/gemv_group` (26373 B, `b7023ef0567c`) |
-| made at | `src/core/decode.zig:1022` (`const Kernels3`) |
-| inputs | `xgp`, `xup`, `slots`, `gate_t0`, `gate_t1`, `gate_t2`, `up_t0`, `up_t1`, `up_t2` |
-| outputs | `zg`, `zu` |
-| source | `text_gu3bg` = `decode/gu3_1` ++ `decode/rk_line` ++ `decode/gu3g_2` ++ `decode/gu3b_w` ++ `decode/gu3g_3` (2796 B, `e427ea27f330`) |
-| header | `group_headers[v].ptr` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/gemv_group` (26373 B, `b7023ef0567c`) |
-
-<!-- /kernel-facts -->
-
-- **Used by:** DeepSeek-V4.1: launch 2 of `root.moeClampedBanked` (DeepSeek-V4.1's streamed routed experts: each
-  row-slot one routed pair at top-1 over an expert streamer's three slot banks, base, ext and transient; 1 to
-  `banked_rows_max` (64) row-slots) on today's grouped texts (g4): `Config.banked_group` 4 with `banked_m3` false, or
-  `BankedSel` g4. Not served by default. Its name is also variant 0's in the variant table (`group_gu_names[0]`;
-  `groupGemvs` makes only variants 1 and up).
-- **Shapes and dtypes:** As `turboexl3_gu3b`: xgp, xup f16 [rows, hidden]; slots the packed ids u32 or i32 [rows],
-  `skip_id` 0xFFFFFFFF (`root.banked_skip_id`) marks a row-slot that runs no expert (no decode, no plane rows written);
-  gate_t0/1/2, up_t0/1/2 U16 or I16 [E_b, hidden/16, inter/16, n]. Out: zg, zu f32 [KS_gu, rows, inter].
-- **Grid and threadgroup:** As `turboexl3_gu3b`: `((inter/(16·BT))·128, rows, z)` / `(128, 1, 1)`, z = KS_gu by default.
-  (`cfgsBankedG`).
-- **Template args:** NHW (n, the halfwords per tile: K = NHW/16), CODEBOOK (MUL1 0, MCG 1), WBITS (the window's bits),
-  HID (hidden), INTER (inter), RKC (rows), KS (KS_gu), SPT (KS_gu / z: 1 by default), BT (output tiles per threadgroup:
-  `bt1` at one row-slot, `bt9` from two, both 2 by default), GROUP (4 from two row-slots, 1 at one: up to four row-slots
-  of one packed id per lead threadgroup (`turboexl3_members_g`), a skipped row-slot no member), DEFER (1 for MUL1: the
-  GEMV sums x times the codeword's byte sum). Every rate `bankedCall` admits (gate, up and down at one rate), both
-  codebooks and every window. Inside: the member paths M 1, 2 and 4 of `turboexl3_gemv_group`, so a lead of three
-  members runs the M = 4 path with a fourth member's FMAs padding.
-- **Replaces:** `turboexl3_gu3b` in the same launch: the members widened from two row-slots of one packed id to four
-  (`gu3g_2`, `gu3g_3`), the banked weight base (`gu3b_w`) between them.
-- **Bits:** byte-identical to the banked text `turboexl3_gu3b` (the grouped call's rows are the banked call's): every
-  weight is read and decoded once and fed to each member in the one-member order.
-- **Pinned by:** `src/models/deepseek_v41/banked_test.zig` "turboexl3 grouped banked decode texts: prep2bg, fin7cbg and
-  dfin3bg are the banked texts ..." (CPU: the banked text's constants and grid line, then the four-member head, the
-  banked weight base, the four-member tail); `src/models/deepseek_v41/banked_test.zig` "turboexl3 gpu banked group: the
-  grouped banked call's rows are the banked call's ..." (GPU: the grouped call against the banked call, byte for byte, a
-  skipped row-slot's y row 0, rows 6, 12, 36 and 48, x bf16, trellis I16, at DeepSeek-V4.1's routed geometry (hidden
-  5120, width 2304, limit 10, MUL1) over synthetic banks of 20, 12 and 8 experts, K3 and K2 (n 48, 32); up to eight
-  row-slots of one id: two leads); `src/models/deepseek_v41/banked_ilp_test.zig` "turboexl3 banked ilp: variant 0 is
-  today's (no defines, the stock kernel names), ..." (CPU: variant 0 keeps the stock name and no defines). It is the
-  reference arm (g4, variant 0) of `src/models/deepseek_v41/banked_grp_test.zig` "turboexl3 gpu banked grp: the M = 3
-  texts' gate|up outputs and rows are today's, ..." and `src/models/deepseek_v41/banked_ilp_test.zig` "turboexl3 gpu
-  banked ilp: every grouped GEMV variant's gate|up outputs and rows, ..." (GPU).
-
-### `turboexl3_gu3bg_<variant>`
-
-<!-- kernel-facts: turboexl3_gu3bg_<variant> -->
-
-| fact | from the code |
-|---|---|
-| names | `turboexl3_gu3bg_ku`, `turboexl3_gu3bg_pf`, `turboexl3_gu3bg_xh`, `turboexl3_gu3bg_m2`, `turboexl3_gu3bg_sh`, `turboexl3_gu3bg_t4`, `turboexl3_gu3bg_t1`, `turboexl3_gu3bg_t0`, `turboexl3_gu3bg_pfxh`, `turboexl3_gu3bg_pfsh`, `turboexl3_gu3bg_xhm2` |
-| made at | `src/core/decode.zig:1022` (`const Kernels3`) |
-| inputs | `xgp`, `xup`, `slots`, `gate_t0`, `gate_t1`, `gate_t2`, `up_t0`, `up_t1`, `up_t2` |
-| outputs | `zg`, `zu` |
-| source | `text_gu3bg` = `decode/gu3_1` ++ `decode/rk_line` ++ `decode/gu3g_2` ++ `decode/gu3b_w` ++ `decode/gu3g_3` (2796 B, `e427ea27f330`) |
-| header | `group_headers[v].ptr`: a variant's defines ++ the base header, one per name |
-| header of `turboexl3_gu3bg_ku` | text '#define EXL3_KU 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/gemv_group` (26391 B, `893d0732e30e`) |
-| header of `turboexl3_gu3bg_pf` | text '#define EXL3_GPF 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/gemv_group` (26392 B, `719802404fb5`) |
-| header of `turboexl3_gu3bg_xh` | text '#define EXL3_GXH 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/gemv_group` (26392 B, `35cacdcfb1d7`) |
-| header of `turboexl3_gu3bg_m2` | text '#define EXL3_GM2 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/gemv_group` (26392 B, `d28773b43d18`) |
-| header of `turboexl3_gu3bg_sh` | text '#define EXL3_GSH 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/gemv_group` (26392 B, `1eaa64821218`) |
-| header of `turboexl3_gu3bg_t4` | text '#define EXL3_T1V 4\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/gemv_group` (26392 B, `acaeb8fa61e1`) |
-| header of `turboexl3_gu3bg_t1` | text '#define EXL3_T1V 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/gemv_group` (26392 B, `b0622147baad`) |
-| header of `turboexl3_gu3bg_t0` | text '#define EXL3_T1V 0\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/gemv_group` (26392 B, `9be4db5164be`) |
-| header of `turboexl3_gu3bg_pfxh` | text '#define EXL3_GPF 1\n#define EXL3_GXH 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/gemv_group` (26411 B, `c5b9183f1adc`) |
-| header of `turboexl3_gu3bg_pfsh` | text '#define EXL3_GPF 1\n#define EXL3_GSH 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/gemv_group` (26411 B, `2478957c5a9f`) |
-| header of `turboexl3_gu3bg_xhm2` | text '#define EXL3_GXH 1\n#define EXL3_GM2 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/gemv_group` (26411 B, `a43b1425ae6c`) |
-
-<!-- /kernel-facts -->
-
-- **Used by:** DeepSeek-V4.1: launch 2 of `root.moeClampedBanked` (DeepSeek-V4.1's streamed routed experts: each
-  row-slot one routed pair at top-1 over an expert streamer's three slot banks, base, ext and transient; 1 to
-  `banked_rows_max` (64) row-slots) at `Config.banked_variant_gu` v (1 to 11, needs `Config.banked_group` 4) on today's
-  grouped texts (`banked_m3` false), or `moeClampedBankedGateUpV` / `...SelV` with that variant; `Kernels3.groupGemvs`
-  makes each on first use (`banked_gv`). hw2's ILP retune; not served by default (variant 0).
-- **Shapes and dtypes:** As `turboexl3_gu3bg`.
-- **Grid and threadgroup:** As `turboexl3_gu3bg` (the configs of its texts, `cfgsBankedG`).
-- **Template args:** As `turboexl3_gu3bg`. The variant is the header: its Metal defines before `header_group`, under a
-  kernel name of its own (MLX keys a custom kernel's library by its name): `ku` EXL3_KU 1 (input tiles in pairs, both
-  tiles' words loaded before either decodes); `pf` EXL3_GPF 1 (a rolling prefetch: the next input tile's words loaded
-  before this tile decodes); `xh` EXL3_GXH 1 (each member's x quad held as half4 and widened at its FMA); `m2` EXL3_GM2
-  1 (the four-member path as two passes of two members, the second reading and decoding the tile again); `sh` EXL3_GSH 1
-  (the one-64-bit-window reader with each tile word loaded by one lane and taken by the others through `simd_shuffle`);
-  `t4`, `t1`, `t0` EXL3_T1V 4, 1, 0 (the route from a MUL1 codeword to t, default 3: 4 both pair sums as one half2, 1 a
-  shift and add for the 32-bit multiply, 0 the multiply by 0x10001 and an integer convert; MUL1 only); `pfxh`, `pfsh`,
-  `xhm2` two of those defines together.
-- **Replaces:** `turboexl3_gu3bg` in the same launch.
-- **Bits:** byte-identical to `turboexl3_gu3bg` (variant 0): each variant reads, decodes and sums every weight as
-  variant 0 does (the same codewords, decoded values, FMA sequence into the same f32 accumulators, and folds); they
-  differ only in when the tile words load, how many lanes load them, the registers the loop holds, the passes over a
-  tile and the instructions from a codeword to t.
-- **Pinned by:** `src/models/deepseek_v41/banked_ilp_test.zig` "turboexl3 banked ilp: variant 0 is today's (no defines,
-  the stock kernel names), ..." (CPU: each name distinct, its defines, each define's default in `header_group`, the
-  config's count of 12); `src/models/deepseek_v41/banked_ilp_test.zig` "turboexl3 gpu banked ilp: every grouped GEMV
-  variant's gate|up outputs and rows, ..." (GPU: every variant, both GEMVs at it, on g4 and g4m3, against g4 at variant
-  0: hd, hs and y word for word, a skipped row-slot's y row 0, rows 1, 2, 3, 4, 6, 7, 12, 16, 24, 36 and 48, x bf16 and
-  f32, trellis I16 and U16, at DeepSeek-V4.1's routed geometry (hidden 5120, width 2304, limit 10, MUL1) over synthetic
-  banks of 20, 12 and 8 experts, K3 and K2 (n 48, 32)); `src/models/deepseek_v41/banked_ilp_test.zig` "turboexl3 gpu
-  banked ilp t routes: every EXL3_T1V route gives today's route's t, ..." (GPU: the t routes of `t4`, `t1`, `t0` on
-  every codeword state, through `turboexl3_t1v_probe_<route>_<dtype>`); `src/core/config.zig` "turboexl3 config: the
-  defaults are valid and served; an unserved form, slice count ..." (CPU: a variant needs `banked_group` 4).
-
-### `turboexl3_gu3bgm3`
-
-<!-- kernel-facts: turboexl3_gu3bgm3 -->
-
-| fact | from the code |
-|---|---|
-| made at | `src/core/decode.zig:941` (`const Kernels3`) |
-| inputs | `xgp`, `xup`, `slots`, `gate_t0`, `gate_t1`, `gate_t2`, `up_t0`, `up_t1`, `up_t2` |
-| outputs | `zg`, `zu` |
-| source | `text_gu3bgm3` = `decode/gu3_1` ++ `decode/rk_line` ++ `decode/gu3g_2` ++ `decode/gu3b_w` ++ `decode/gu3g_3m3` (2967 B, `5d637580686f`) |
-| header | `header_group` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/gemv_group` (26373 B, `b7023ef0567c`) |
-| made at | `src/core/decode.zig:1020` (`const Kernels3`) |
-| inputs | `xgp`, `xup`, `slots`, `gate_t0`, `gate_t1`, `gate_t2`, `up_t0`, `up_t1`, `up_t2` |
-| outputs | `zg`, `zu` |
-| source | `text_gu3bgm3` = `decode/gu3_1` ++ `decode/rk_line` ++ `decode/gu3g_2` ++ `decode/gu3b_w` ++ `decode/gu3g_3m3` (2967 B, `5d637580686f`) |
-| header | `group_headers[v].ptr` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/gemv_group` (26373 B, `b7023ef0567c`) |
-
-<!-- /kernel-facts -->
-
-- **Used by:** DeepSeek-V4.1: launch 2 of `root.moeClampedBanked` (DeepSeek-V4.1's streamed routed experts: each
-  row-slot one routed pair at top-1 over an expert streamer's three slot banks, base, ext and transient; 1 to
-  `banked_rows_max` (64) row-slots) on hw4b's texts (g4m3): `Config.banked_group` 4 with `Config.banked_m3`, or
-  `BankedSel` g4m3. Not served by default. Its name is also variant 0's in the M = 3 variant table
-  (`group_gu_m3_names[0]`).
-- **Shapes and dtypes:** As `turboexl3_gu3b`: xgp, xup f16 [rows, hidden]; slots the packed ids u32 or i32 [rows],
-  `skip_id` 0xFFFFFFFF (`root.banked_skip_id`) marks a row-slot that runs no expert (no decode, no plane rows written);
-  gate_t0/1/2, up_t0/1/2 U16 or I16 [E_b, hidden/16, inter/16, n]. Out: zg, zu f32 [KS_gu, rows, inter].
-- **Grid and threadgroup:** As `turboexl3_gu3b`: `((inter/(16·BT))·128, rows, z)` / `(128, 1, 1)`, z = KS_gu by default.
-  (`cfgsBankedGM3`).
-- **Template args:** NHW (n, the halfwords per tile: K = NHW/16), CODEBOOK (MUL1 0, MCG 1), WBITS (the window's bits),
-  HID (hidden), INTER (inter), RKC (rows), KS (KS_gu), SPT (KS_gu / z: 1 by default), BT (output tiles per threadgroup:
-  `bt1` at one row-slot, `bt9` from two, both 2 by default), GROUP (4 from two row-slots, 1 at one: up to four row-slots
-  of one packed id per lead threadgroup (`turboexl3_members_g`), a skipped row-slot no member), DEFER (1 for MUL1: the
-  GEMV sums x times the codeword's byte sum). Every rate `bankedCall` admits (gate, up and down at one rate), both
-  codebooks and every window. Inside: the member paths M 1, 2, 3 and 4.
-- **Replaces:** `turboexl3_gu3bg` in the same launch: its text with one line added (`gu3g_3m3`), an M = 3 path for a
-  lead with three members, where `gu3bg` runs the M = 4 path with a fourth member's FMAs padding.
-- **Bits:** byte-identical to `turboexl3_gu3bg` (g4): every member fed in the one-member order (`turboexl3_gemv_group`);
-  the call's hd, hs and y equal today's, differing words 0, max_ulps 0, a skipped row-slot's y row 0.
-- **Pinned by:** `src/models/deepseek_v41/banked_grp_test.zig` "turboexl3 banked grp: the M = 3 texts are today's
-  grouped texts with the one M = 3 line ..." (CPU: today's grouped text with the one M = 3 line added after the M = 2
-  line); `src/models/deepseek_v41/banked_grp_test.zig` "turboexl3 gpu banked grp: the M = 3 texts' gate|up outputs and
-  rows are today's, ..." (GPU: g4m3 against g4, hd, hs and y word for word, rows 1 to 9, 12, 16, 24, 36, 42, 48 and 64,
-  x bf16 and f32, trellis I16 and U16, one id on up to 16 row-slots, skipped row-slots, at DeepSeek-V4.1's routed
-  geometry (hidden 5120, width 2304, limit 10, MUL1) over synthetic banks of 20, 12 and 8 experts, K3 and K2 (n 48,
-  32)); `src/models/deepseek_v41/banked_ilp_test.zig` "turboexl3 banked ilp: variant 0 is today's (no defines, the stock
-  kernel names), ..." (CPU: the names distinct); `src/models/deepseek_v41/banked_ilp_test.zig` "turboexl3 gpu banked
-  ilp: every grouped GEMV variant's gate|up outputs and rows, ..." (GPU: variant 0 on hw4b's texts against g4's variant
-  0); `src/core/config.zig` "turboexl3 config: the defaults are valid and served; an unserved form, slice count ..."
-  (CPU: `banked_m3` needs `banked_group` 4).
-
-### `turboexl3_gu3bgm3_<variant>`
-
-<!-- kernel-facts: turboexl3_gu3bgm3_<variant> -->
-
-| fact | from the code |
-|---|---|
-| names | `turboexl3_gu3bgm3_ku`, `turboexl3_gu3bgm3_pf`, `turboexl3_gu3bgm3_xh`, `turboexl3_gu3bgm3_m2`, `turboexl3_gu3bgm3_sh`, `turboexl3_gu3bgm3_t4`, `turboexl3_gu3bgm3_t1`, `turboexl3_gu3bgm3_t0`, `turboexl3_gu3bgm3_pfxh`, `turboexl3_gu3bgm3_pfsh`, `turboexl3_gu3bgm3_xhm2` |
-| made at | `src/core/decode.zig:1020` (`const Kernels3`) |
-| inputs | `xgp`, `xup`, `slots`, `gate_t0`, `gate_t1`, `gate_t2`, `up_t0`, `up_t1`, `up_t2` |
-| outputs | `zg`, `zu` |
-| source | `text_gu3bgm3` = `decode/gu3_1` ++ `decode/rk_line` ++ `decode/gu3g_2` ++ `decode/gu3b_w` ++ `decode/gu3g_3m3` (2967 B, `5d637580686f`) |
-| header | `group_headers[v].ptr`: a variant's defines ++ the base header, one per name |
-| header of `turboexl3_gu3bgm3_ku` | text '#define EXL3_KU 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/gemv_group` (26391 B, `893d0732e30e`) |
-| header of `turboexl3_gu3bgm3_pf` | text '#define EXL3_GPF 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/gemv_group` (26392 B, `719802404fb5`) |
-| header of `turboexl3_gu3bgm3_xh` | text '#define EXL3_GXH 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/gemv_group` (26392 B, `35cacdcfb1d7`) |
-| header of `turboexl3_gu3bgm3_m2` | text '#define EXL3_GM2 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/gemv_group` (26392 B, `d28773b43d18`) |
-| header of `turboexl3_gu3bgm3_sh` | text '#define EXL3_GSH 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/gemv_group` (26392 B, `1eaa64821218`) |
-| header of `turboexl3_gu3bgm3_t4` | text '#define EXL3_T1V 4\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/gemv_group` (26392 B, `acaeb8fa61e1`) |
-| header of `turboexl3_gu3bgm3_t1` | text '#define EXL3_T1V 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/gemv_group` (26392 B, `b0622147baad`) |
-| header of `turboexl3_gu3bgm3_t0` | text '#define EXL3_T1V 0\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/gemv_group` (26392 B, `9be4db5164be`) |
-| header of `turboexl3_gu3bgm3_pfxh` | text '#define EXL3_GPF 1\n#define EXL3_GXH 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/gemv_group` (26411 B, `c5b9183f1adc`) |
-| header of `turboexl3_gu3bgm3_pfsh` | text '#define EXL3_GPF 1\n#define EXL3_GSH 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/gemv_group` (26411 B, `2478957c5a9f`) |
-| header of `turboexl3_gu3bgm3_xhm2` | text '#define EXL3_GXH 1\n#define EXL3_GM2 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/gemv_group` (26411 B, `a43b1425ae6c`) |
-
-<!-- /kernel-facts -->
-
-- **Used by:** DeepSeek-V4.1: launch 2 of `root.moeClampedBanked` (DeepSeek-V4.1's streamed routed experts: each
-  row-slot one routed pair at top-1 over an expert streamer's three slot banks, base, ext and transient; 1 to
-  `banked_rows_max` (64) row-slots) at `Config.banked_variant_gu` v (1 to 11, needs `Config.banked_group` 4) on hw4b's
-  texts (`banked_m3` true), or `moeClampedBankedGateUpV` / `...SelV` with that variant; `Kernels3.groupGemvs` makes each
-  on first use (`banked_gvm3`). hw2's ILP retune; not served by default (variant 0).
-- **Shapes and dtypes:** As `turboexl3_gu3bgm3`.
-- **Grid and threadgroup:** As `turboexl3_gu3bgm3` (`cfgsBankedGM3`).
-- **Template args:** As `turboexl3_gu3bgm3`. The variant is the header: its Metal defines before `header_group`, under a
-  kernel name of its own: `ku` EXL3_KU 1 (input tiles in pairs, both tiles' words loaded before either decodes); `pf`
-  EXL3_GPF 1 (a rolling prefetch: the next input tile's words loaded before this tile decodes); `xh` EXL3_GXH 1 (each
-  member's x quad held as half4 and widened at its FMA); `m2` EXL3_GM2 1 (the four-member path as two passes of two
-  members, the second reading and decoding the tile again); `sh` EXL3_GSH 1 (the one-64-bit-window reader with each tile
-  word loaded by one lane and taken by the others through `simd_shuffle`); `t4`, `t1`, `t0` EXL3_T1V 4, 1, 0 (the route
-  from a MUL1 codeword to t, default 3: 4 both pair sums as one half2, 1 a shift and add for the 32-bit multiply, 0 the
-  multiply by 0x10001 and an integer convert; MUL1 only); `pfxh`, `pfsh`, `xhm2` two of those defines together.
-- **Replaces:** `turboexl3_gu3bgm3` in the same launch.
-- **Bits:** byte-identical to `turboexl3_gu3bgm3` (variant 0): each variant reads, decodes and sums every weight as
-  variant 0 does (the same codewords, decoded values, FMA sequence into the same f32 accumulators, and folds); they
-  differ only in when the tile words load, how many lanes load them, the registers the loop holds, the passes over a
-  tile and the instructions from a codeword to t. The GPU test holds each to g4's variant 0, so to `turboexl3_gu3bg`.
-- **Pinned by:** `src/models/deepseek_v41/banked_ilp_test.zig` "turboexl3 banked ilp: variant 0 is today's (no defines,
-  the stock kernel names), ..." (CPU: each name distinct, its defines, each define's default in `header_group`, the
-  config's count of 12); `src/models/deepseek_v41/banked_ilp_test.zig` "turboexl3 gpu banked ilp: every grouped GEMV
-  variant's gate|up outputs and rows, ..." (GPU: every variant, both GEMVs at it, on g4 and g4m3, against g4 at variant
-  0: hd, hs and y word for word, a skipped row-slot's y row 0, rows 1, 2, 3, 4, 6, 7, 12, 16, 24, 36 and 48, x bf16 and
-  f32, trellis I16 and U16, at DeepSeek-V4.1's routed geometry (hidden 5120, width 2304, limit 10, MUL1) over synthetic
-  banks of 20, 12 and 8 experts, K3 and K2 (n 48, 32)); `src/models/deepseek_v41/banked_ilp_test.zig` "turboexl3 gpu
-  banked ilp t routes: every EXL3_T1V route gives today's route's t, ..." (GPU: the t routes of `t4`, `t1`, `t0` on
-  every codeword state, through `turboexl3_t1v_probe_<route>_<dtype>`); `src/core/config.zig` "turboexl3 config: the
-  defaults are valid and served; an unserved form, slice count ..." (CPU: a variant needs `banked_group` 4).
-
-### `turboexl3_prep2b`
-
-<!-- kernel-facts: turboexl3_prep2b -->
-
-| fact | from the code |
-|---|---|
-| made at | `src/core/decode.zig:882` (`const Kernels3`) |
-| inputs | `x`, `slots`, `gate_suh0`, `gate_suh1`, `gate_suh2`, `up_suh0`, `up_suh1`, `up_suh2` |
-| outputs | `xg`, `xu`, `sg`, `su` |
-| source | `text_prep2b` = `decode/prep2_1` ++ `decode/prep2b_expert` ++ `decode/prep2_row` ++ `decode/prep2_2` (2352 B, `affd7b64e88f`) |
-| header | `header` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` (18000 B, `771237d24284`) |
-
-<!-- /kernel-facts -->
-
-- **Used by:** DeepSeek-V4.1: launch 1 of `root.moeClampedBanked` (DeepSeek-V4.1's streamed routed experts: each
-  row-slot one routed pair at top-1 over an expert streamer's three slot banks, base, ext and transient; 1 to
-  `banked_rows_max` (64) row-slots), the start of its gate|up half (`moeClampedBankedGateUp`,
-  `decode.Kernels3.bankedGateUp`). Served by default: `Config.banked_group` 2 runs the banked texts.
-- **Shapes and dtypes:** x T [rows, hidden] (T bf16, f16 or f32; TOPK 1, so row-slot r reads row r); slots the ids u32
-  or i32 [rows], each packed (bank << 24 | slot row); gate_suh0/1/2 and up_suh0/1/2 f16 [E_b, hidden] (bank b's suh, E_b
-  its slot count). Out: xg, xu f16 [rows, hidden] (the rotated inputs, lane order); sg, su f32 [rows, hidden/128] (each
-  128-block's sum of the rounded inputs, for the deferred MUL1 map).
-- **Grid and threadgroup:** `((hidden/128)·32, rows, 1)` / `(32, 1, 1)`.
-- **Template args:** DIM (hidden), TOPK (1). Every rate, codebook and window: the prepare reads no weight.
-- **Replaces:** `turboexl3_prep2`, launched once per bank by each bank's own `moeClamped` call at top-1: one launch over
-  the three banks. The banked chain is form 7's five launches (`prep2b` -> `gu3b` -> `fin7cb` -> `down3b` -> `dfin3b`),
-  five dependent levels, in form 9's launch shape.
-- **Bits:** byte-identical to `moeClamped` on the pair's bank at top-1 with score 1: `prep2b_expert` (the slot row and
-  the bank's gate and up suh) replaces only the line that reads a bank's arrays, so every other statement is `prep2`'s.
-  The streamer's sum, each full token's six pairs weighed, is held within 5e-3 of the clamped host reference's rms
-  (`ref.compare` against `ref.moeRowClamped`).
-- **Pinned by:** `src/models/deepseek_v41/banked_test.zig` "turboexl3 banked decode texts: each is its base text with
-  the bank's lines in place ..." (CPU: the text is its base text with `prep2b_expert` in place of the base line and
-  nothing else, every input read, no shape buffer); `src/models/deepseek_v41/banked_test.zig` "turboexl3 banked decode
-  refusals: the clamp, the ids' shape and dtype, the banks' dtypes, ..." (CPU: the call's refusals, before a launch);
-  `src/models/deepseek_v41/banked_test.zig` "turboexl3 gpu banked decode: every pair of moeClampedBanked over three
-  banks is moeClamped's ..." (GPU: every pair byte for byte against `moeClamped` at rows 1, 2, 6, 7, 16, 36 and 48, x
-  bf16 and f32, trellis U16 and I16, at DeepSeek-V4.1's routed geometry (hidden 5120, width 2304, limit 10, MUL1) over
-  synthetic banks of 20, 12 and 8 experts, K3 and K2 (n 48, 32); sampled token sums to the reference by 5e-3).
-
-### `turboexl3_prep2bg`
-
-<!-- kernel-facts: turboexl3_prep2bg -->
-
-| fact | from the code |
-|---|---|
-| made at | `src/core/decode.zig:911` (`const Kernels3`) |
-| inputs | `x`, `slots`, `gate_suh0`, `gate_suh1`, `gate_suh2`, `up_suh0`, `up_suh1`, `up_suh2` |
-| outputs | `xg`, `xu`, `sg`, `su` |
-| source | `text_prep2bg` = `decode/prep2_1` ++ `decode/skip_rk` ++ `decode/prep2b_expert` ++ `decode/prep2_row` ++ `decode/prep2_2` (2469 B, `110fd5d50005`) |
-| header | `header` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` (18000 B, `771237d24284`) |
-| made at | `src/core/decode.zig:939` (`const Kernels3`) (the same text) |
-
-<!-- /kernel-facts -->
-
-- **Used by:** DeepSeek-V4.1: launch 1 of `root.moeClampedBanked` (DeepSeek-V4.1's streamed routed experts: each
-  row-slot one routed pair at top-1 over an expert streamer's three slot banks, base, ext and transient; 1 to
-  `banked_rows_max` (64) row-slots) on the grouped texts, both today's (g4) and hw4b's (g4m3: made at both sites). Not
-  served by default: `Config.banked_group` 4 selects the grouped texts, or a call through `moeClampedBankedSel*` with
-  `BankedSel` g4 or g4m3 (hw4b's check mode, the tests).
-- **Shapes and dtypes:** As `turboexl3_prep2b`; `skip_id` 0xFFFFFFFF (`root.banked_skip_id`) marks a row-slot that runs
-  no expert, and its xg, xu, sg and su rows are left unwritten.
-- **Grid and threadgroup:** As `turboexl3_prep2b`: `((hidden/128)·32, rows, 1)` / `(32, 1, 1)` (`cfgsBankedG`,
-  `cfgsBankedGM3`).
-- **Template args:** DIM (hidden), TOPK (1).
-- **Replaces:** `turboexl3_prep2b` in the same launch: its text with `skip_rk` (return on a skipped row-slot) before the
-  bank lines.
-- **Bits:** byte-identical to `turboexl3_prep2b` for every row-slot not skipped.
-- **Pinned by:** `src/models/deepseek_v41/banked_test.zig` "turboexl3 grouped banked decode texts: prep2bg, fin7cbg and
-  dfin3bg are the banked texts ..." (CPU: the text is the banked text with the skip line before its bank lines);
-  `src/models/deepseek_v41/banked_test.zig` "turboexl3 gpu banked group: the grouped banked call's rows are the banked
-  call's ..." (GPU: the grouped call's rows equal the banked call's byte for byte, a skipped row-slot's y row 0, rows 6,
-  12, 36 and 48, x bf16, trellis I16, at DeepSeek-V4.1's routed geometry (hidden 5120, width 2304, limit 10, MUL1) over
-  synthetic banks of 20, 12 and 8 experts, K3 and K2 (n 48, 32)). It runs in every arm of
-  `src/models/deepseek_v41/banked_grp_test.zig` "turboexl3 gpu banked grp: the M = 3 texts' gate|up outputs and rows are
-  today's, ..." and `src/models/deepseek_v41/banked_ilp_test.zig` "turboexl3 gpu banked ilp: every grouped GEMV
-  variant's gate|up outputs and rows, ..." (GPU), which hold the whole call's hd, hs and y.
-
 ## `src/core/dense.zig`
 
 The dense EXL3 linear (`linear` and the entries built on it): DEC-ONE, the multi-row GEMV chain, the register-path GEMM,
-dequantize + matmul, the finishes, F3 and the un-rotated trunk.
+dequantize + matmul, the finishes and the un-rotated trunk. F3 (DeepSeek-V4.1's shared expert) is in
+`src/models/deepseek_v41/f3.zig` ([its catalog](../models/deepseek_v41/kernels.md)).
 
 ### `turboexl3_dense_dec0`
 
@@ -2348,7 +641,7 @@ dequantize + matmul, the finishes, F3 and the un-rotated trunk.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/dense.zig:416` (`const Dense`) |
+| made at | `src/core/dense.zig:397` (`const Dense`) |
 | inputs | `xp`, `xs`, `w`, `svh`, `cnt` |
 | outputs | `y`, `z` |
 | source | `text_dec0` = `dense/dec_head` ++ `dense/dec_gemv0` ++ `dense/dec_gemv_arrive` ++ `dense/dec_xsum0` ++ `dense/dec_finish_v` ++ `dense/dec_finish_store` (6206 B, `1f49ed16dcfc`) |
@@ -2393,7 +686,7 @@ dequantize + matmul, the finishes, F3 and the un-rotated trunk.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/dense.zig:417` (`const Dense`) |
+| made at | `src/core/dense.zig:398` (`const Dense`) |
 | inputs | `x`, `suh`, `w`, `svh`, `cnt` |
 | outputs | `y`, `z`, `xsx` |
 | source | `text_dec1` = `dense/dec_head` ++ `dense/dec_prep1` ++ `dense/dec_gemv1` ++ `dense/dec_gemv_arrive` ++ `dense/dec_xsum1` ++ `dense/dec_finish_v` ++ `dense/dec_finish_store` (7726 B, `d4555320479f`) |
@@ -2425,7 +718,7 @@ dequantize + matmul, the finishes, F3 and the un-rotated trunk.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/dense.zig:419` (`const Dense`) |
+| made at | `src/core/dense.zig:400` (`const Dense`) |
 | inputs | `svh` |
 | outputs | `cnt` |
 | source | `text_dec_zero` = `dense/dec_zero` (83 B, `c4a6f024bb78`) |
@@ -2457,7 +750,7 @@ dequantize + matmul, the finishes, F3 and the un-rotated trunk.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/dense.zig:398` (`const Dense`) |
+| made at | `src/core/dense.zig:379` (`const Dense`) |
 | inputs | `w` |
 | outputs | `W` |
 | source | `text_dequant` = `dense/dequant` (1463 B, `022fd8ffb1d9`) |
@@ -2497,7 +790,7 @@ dequantize + matmul, the finishes, F3 and the un-rotated trunk.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/dense.zig:401` (`const Dense`) |
+| made at | `src/core/dense.zig:382` (`const Dense`) |
 | inputs | `z`, `svh`, `xs` |
 | outputs | `y` |
 | source | `text_dfinish` = `dense/dfinish_v` ++ `dense/dfinish_store` (1452 B, `d89e31ec36d1`) |
@@ -2532,7 +825,7 @@ dequantize + matmul, the finishes, F3 and the un-rotated trunk.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/dense.zig:399` (`const Dense`) |
+| made at | `src/core/dense.zig:380` (`const Dense`) |
 | inputs | `xp`, `w` |
 | outputs | `z` |
 | source | `text_dgemv` = `dense/dgemv_1` ++ `dense/dgemv_x` ++ `dense/dgemv_2` ++ `dense/dgemv_m` ++ `dense/dgemv_fold` ++ `dense/dgemv_store` (3314 B, `e1f321adab55`) |
@@ -2574,7 +867,7 @@ dequantize + matmul, the finishes, F3 and the un-rotated trunk.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/dense.zig:400` (`const Dense`) |
+| made at | `src/core/dense.zig:381` (`const Dense`) |
 | inputs | `xp`, `w` |
 | outputs | `z` |
 | source | `text_dgemv_lean` = `dense/dgemv_1` ++ `dense/dgemv_2` ++ `dense/dgemv_j` ++ `dense/dgemv_fold` ++ `dense/dgemv_store` (3379 B, `dfc748cf15e0`) |
@@ -2616,7 +909,7 @@ dequantize + matmul, the finishes, F3 and the un-rotated trunk.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/dense.zig:397` (`const Dense`) |
+| made at | `src/core/dense.zig:378` (`const Dense`) |
 | inputs | `z`, `svh` |
 | outputs | `y` |
 | source | `text_finish` = `dense/finish` (854 B, `73f767f084a6`) |
@@ -2652,7 +945,7 @@ dequantize + matmul, the finishes, F3 and the un-rotated trunk.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/dense.zig:863` (`const Dense`) |
+| made at | `src/core/dense.zig:840` (`const Dense`) |
 | inputs | `zp0`, `zp1`, `zp2`, `zp3`, `svh`, `R1`, `R2`, `R3` |
 | outputs | `y` |
 | source | `text_finish_pieces` = `dense/finish_pieces` (1102 B, `577ca60ab2f0`) |
@@ -2684,7 +977,7 @@ dequantize + matmul, the finishes, F3 and the un-rotated trunk.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/dense.zig:396` (`const Dense`) |
+| made at | `src/core/dense.zig:377` (`const Dense`) |
 | inputs | `xp`, `slots`, `w` |
 | outputs | `z` |
 | source | `unfused.text_gemv` = `unfused/gemv` (3087 B, `eeb649b8f300`) |
@@ -2713,7 +1006,7 @@ dequantize + matmul, the finishes, F3 and the un-rotated trunk.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/dense.zig:407` (`const Dense`) |
+| made at | `src/core/dense.zig:388` (`const Dense`) |
 | inputs | `tiles`, `x0`, `w0`, `xs0` |
 | outputs | `z0` |
 | source | `prefill.gemm1_text` = `prefill/gemm_1` ++ `prefill/gemm_2` ++ `prefill/gemm_3` ++ `prefill/gemm_op1_wx` ++ `prefill/gemm_4` ++ `prefill/gemm_op1_xsz` ++ `prefill/gemm_5` (6517 B, `dd6225a4d3f1`) |
@@ -2751,7 +1044,7 @@ dequantize + matmul, the finishes, F3 and the un-rotated trunk.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/dense.zig:395` (`const Dense`) |
+| made at | `src/core/dense.zig:376` (`const Dense`) |
 | inputs | `x`, `suh` |
 | outputs | `xp` |
 | source | `text_prep` = `dense/prep` (1085 B, `110e3a6a2eb5`) |
@@ -2785,7 +1078,7 @@ dequantize + matmul, the finishes, F3 and the un-rotated trunk.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/dense.zig:402` (`const Dense`) |
+| made at | `src/core/dense.zig:383` (`const Dense`) |
 | inputs | `x`, `suh` |
 | outputs | `xp`, `xs` |
 | source | `text_prep_s` = `dense/prep_s` (1236 B, `4b5d658122db`) |
@@ -2820,7 +1113,7 @@ dequantize + matmul, the finishes, F3 and the un-rotated trunk.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/dense.zig:418` (`const Dense`) |
+| made at | `src/core/dense.zig:399` (`const Dense`) |
 | inputs | `x`, `suh` |
 | outputs | `xp`, `xs`, `cnt` |
 | source | `text_prep_sc` = `dense/prep_s` ++ `dense/prep_sc` (1429 B, `6e36fd607e96`) |
@@ -2854,7 +1147,7 @@ dequantize + matmul, the finishes, F3 and the un-rotated trunk.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/dense.zig:411` (`const Dense`) |
+| made at | `src/core/dense.zig:392` (`const Dense`) |
 | inputs | `tiles`, `x0`, `w0`, `xs0` |
 | outputs | `z0` |
 | source | `prefill.gemm1s_text` = `prefill/gemm_small_1` ++ `prefill/gemm_small_2` ++ `prefill/gemm_small_3` ++ `prefill/gemm_small_op1_wx` ++ `prefill/gemm_small_4` ++ `prefill/gemm_small_op1_xsz` ++ `prefill/gemm_small_5` (3747 B, `34fd7442f5b6`) |
@@ -2887,50 +1180,13 @@ dequantize + matmul, the finishes, F3 and the un-rotated trunk.
   same bytes); `src/core/gpu_test.zig` "turboexl3 gpu un-rotated trunk: root.linear on an un-rotated linear is one plain
   matmul within the bars at ..." (GPU, the chain's bytes at register-path rows on an un-rotated linear).
 
-### `turboexl3_dense_swiglu_prep`
-
-<!-- kernel-facts: turboexl3_dense_swiglu_prep -->
-
-| fact | from the code |
-|---|---|
-| made at | `src/core/dense.zig:913` (`const Dense`) |
-| inputs | `z1`, `xs1`, `svh1`, `z3`, `xs3`, `svh3`, `suh2`, `lim` |
-| outputs | `xp`, `xs` |
-| source | `text_swiglu_prep` = `dense/swiglu_prep` (4775 B, `111d0a28a123`) |
-| header | `decode.header` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` (18000 B, `771237d24284`) |
-
-<!-- /kernel-facts -->
-
-- **Used by:** DeepSeek-V4.1 (F3): `root.sharedSwiglu` (where `root.sharedSwigluTakes` holds), its shared expert at the
-  decode rows the dense chain takes, 5 to 16 (DEC-ONE keeps 1 to 4, so F3 refuses them), one rate and decode for gate,
-  up and down, limit > 0 (`swiglu_limit` 10). Made on first use on the gate's `Dense`. Ripple's clamped SwiGLU has the
-  same shape.
-- **Shapes and dtypes:** z1, z3 f32 [KS · rows, DIM] (the gate's and up's planes, `Dense.prepareGemv`; DIM = their OUT,
-  the inter width); xs1, xs3 f32 [rows, IN/128]; svh1, svh3 f16 [DIM]; suh2 f16 [DIM] (the down's suh); lim f32 [1].
-  Out: xp f16 [rows, DIM] in lane order; xs f32 [rows, DIM/128] (the down's prepared rows and block sums).
-- **Grid and threadgroup:** `((DIM/128) · 32, rows, 1)` / `(32, 1, 1)`: one simdgroup per (128-block, row).
-- **Template args:** DIM, KS1 and KS3 (both the gate shape's `ks_split`), ROWS, INBLK (IN/128), DEFER, OUT_T (the gate's
-  and up's output dtype, x's), ACT_T (the activation dtype `act`: bf16, f16 or f32; the configs are rebuilt when it
-  changes). Every rate, codebook and window (it reads no weight).
-- **Replaces:** the gate's and up's `turboexl3_dense_dfinish`, the host's clamped SwiGLU in MLX (astype f32, minimum,
-  maximum, minimum, sigmoid, multiplies, astype to `act`) and the down's `turboexl3_dense_prep_s`: three launches fewer
-  (`root.sharedSwiglu`'s comment) plus the MLX ops, and the finish -> SwiGLU -> prepare levels become one.
-- **Bits:** byte-identical to the host's chain (gate and up `linear`, astype f32, MLX's clamped SwiGLU, astype to `act`,
-  down `linear`).
-- **Pinned by:** `src/models/deepseek_v41/f3_test.zig` "turboexl3 f3u: the fused shared-expert text is text_dfinish's
-  finishes, MLX's clamped SwiGLU and text_prep_s's prepare" (CPU, its lines); `src/models/deepseek_v41/f3_test.zig`
-  "turboexl3 gpu f3u bytes: sharedSwiglu gives the host's shared expert's words at rows 1 to 16 (TURBOEXL3_F3=1)" (GPU,
-  bytes at rows 1 to 16 in bf16 and 6 and 12 in f32, `sharedSwigluTakes` true exactly from 5 rows);
-  `src/models/deepseek_v41/f3_test.zig` "turboexl3 gpu f3u time: the 40-layer trunk chain with the host's shared expert
-  against F3 at rows 5, ..." (GPU, every run's 40-layer output the first run's words).
-
 ### `turboexl3_unrot_cols`
 
 <!-- kernel-facts: turboexl3_unrot_cols -->
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/dense.zig:1356` (`fn unrotKernels`) |
+| made at | `src/core/dense.zig:1283` (`fn unrotKernels`) |
 | inputs | `w` |
 | outputs | `r` |
 | source | `text_unrot_cols` = `dense/unrot_cols` (731 B, `1e71a2b282ba`) |
@@ -2968,7 +1224,7 @@ dequantize + matmul, the finishes, F3 and the un-rotated trunk.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/dense.zig:1358` (`fn unrotKernels`) |
+| made at | `src/core/dense.zig:1285` (`fn unrotKernels`) |
 | inputs | `r`, `suh`, `svh` |
 | outputs | `W` |
 | source | `text_unrot_rows` = `dense/unrot_rows` (1431 B, `aeb52f782bb2`) |
@@ -3593,7 +1849,9 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 
 - **Used by:** not served: made in place of `turboexl3_pf_mid_v` for a clamped geometry (`Geometry.limit` != 0:
   `root.moeClamped`, DeepSeek-V4.1's swiglu_limit 10), and launched only with `Options.aux` != 0, which `root.pfOptions`
-  never sets. Tests only.
+  never sets. Tests only. The clamp's users: DeepSeek-V4 and V4.1 (swiglu_limit 10) and GLM (the same clamp), each
+  through `root.moeClamped`; Ripple's clamped SwiGLU is its own (`turboexl3_ric_swiglu_prep_sc` / `_prep`,
+  `src/models/ricursive/`).
 - **Shapes and dtypes:** zg and zu f16 [S, inter] (the gate and up inner products, sorted); inds u32 or i32 [S] (the
   flat expert ids, S = rows · topk); order u32 [S]; svh_g and svh_u f16 [experts, inter]; suh_d f16 [experts, inter].
   Out: xd f16 [S, inter] (natural order); xsd f32 [S, inter/128].
@@ -3630,7 +1888,9 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
   `moeSwiglu` and `moePrefill`) at more than `DECODE_ROWS_MAX` (16) rows (`Config.prefill` and `Config.nax` on), only
   with `Config.pf_t128` false (`Prefill.moe` on the mixed option set); with it on (the default) `turboexl3_pf_t128_midc`
   takes its place. Made in place of `turboexl3_pf_mid` when `Geometry.limit` != 0 (`root.moeClamped`): DeepSeek-V4.1's
-  routed experts (swiglu_limit 10).
+  routed experts (swiglu_limit 10). The clamp's users: DeepSeek-V4 and V4.1 (swiglu_limit 10) and GLM (the same clamp),
+  each through `root.moeClamped`; Ripple's clamped SwiGLU is its own (`turboexl3_ric_swiglu_prep_sc` / `_prep`,
+  `src/models/ricursive/`).
 - **Shapes and dtypes:** zg and zu f16 [S, inter] (the gate and up inner products, sorted); inds u32 or i32 [S] (the
   flat expert ids, S = rows · topk); order u32 [S]; svh_g and svh_u f16 [experts, inter]; suh_d f16 [experts, inter].
   Out: xd f16 [S, inter] (the down input, sorted, in ALAY's layout); xsd f32 [S, inter/128] (its block sums).
@@ -4014,7 +2274,9 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 - **Used by:** core: `root.moe`, `root.moeWithShared` and `root.moeClamped` (through `moeSwiglu` and `moePrefill`) at
   more than `DECODE_ROWS_MAX` (16) rows (`Config.prefill` and `Config.nax` on), in `Prefill.moeT128` (`Config.pf_t128`
   on, the default): `midT128` for a clamped geometry (`Geometry.limit` != 0): `root.moeClamped`, DeepSeek-V4.1's routed
-  experts (swiglu_limit 10).
+  experts (swiglu_limit 10). The clamp's users: DeepSeek-V4 and V4.1 (swiglu_limit 10) and GLM (the same clamp), each
+  through `root.moeClamped`; Ripple's clamped SwiGLU is its own (`turboexl3_ric_swiglu_prep_sc` / `_prep`,
+  `src/models/ricursive/`).
 - **Shapes and dtypes:** zg and zu f16 [S, inter] (the gate and up inner products, sorted); inds u32 or i32 [S] (the
   flat expert ids, S = rows · topk); order u32 [S]; svh_g and svh_u f16 [experts, inter]; suh_d f16 [experts, inter];
   zgt and zut f16 [S, inter] (`turboexl3_pf_t128_gut`'s); xbase int32 [experts]. zg and zu are
@@ -4301,7 +2563,7 @@ Kernels the GPU tests make as references (test only).
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/gpu_test.zig:1340` (`test turboexl3 gpu: the shared expert fused into form 9's launches equals the host's chain byte for byte (TURBOEXL3_GPU=1)`) |
+| made at | `src/core/gpu_test.zig:1341` (`test turboexl3 gpu: the shared expert fused into form 9's launches equals the host's chain byte for byte (TURBOEXL3_GPU=1)`) |
 | inputs | `gate`, `up`, `sigtab`, `N_size` |
 | outputs | `y` |
 | source | `host_swiglu_source` = `test/host_swiglu` (230 B, `f8e34292bc18`) |
@@ -4331,10 +2593,10 @@ Kernels the GPU tests make as references (test only).
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/gpu_test.zig:1799` (`test turboexl3 gpu: the router folded into form 9's prepare launch (and the shared gate's logit with it) equals the router kernel + prep2 and the host's chain byte for byte (TURBOEXL3_GPU=1)`) |
+| made at | `src/core/gpu_test.zig:1802` (`test turboexl3 gpu: the router folded into form 9's prepare launch (and the shared gate's logit with it) equals the router kernel + prep2 and the host's chain byte for byte (TURBOEXL3_GPU=1)`) |
 | inputs | `logits` |
 | outputs | `inds`, `scores` |
-| source | `decode.text_router_softmax` = `decode/router_softmax_1` ++ `decode/router_softmax_2` ++ `decode/router_softmax_3` ++ `decode/router_softmax_4` ++ `decode/router_softmax_5` ++ `decode/router_softmax_6` (2853 B, `c86a37992534`) |
+| source | `shared_heads.text_router_softmax` = `qwen38:shared/router_softmax_1` ++ `qwen38:shared/router_softmax_2` ++ `qwen38:shared/router_softmax_3` ++ `qwen38:shared/router_softmax_4` ++ `qwen38:shared/router_softmax_5` ++ `qwen38:shared/router_softmax_6` (2853 B, `c86a37992534`) |
 | header | `""` = (empty) (0 B, `e3b0c44298fc`) |
 
 <!-- /kernel-facts -->
@@ -4349,8 +2611,8 @@ Kernels the GPU tests make as references (test only).
 - **Template args:** TOUT, NE (experts), NK (top-k, 10 in the test), TG, NORM (1).
 - **Replaces:** nothing: a reference, the host's fused softmax router (`transformer.zig` `moeRouterSource(.softmax)`,
   the MLX kernel "mlxserve_moe_router_softmax").
-- **Bits:** the host's text byte for byte (`decode.text_router_softmax`; the host's own test pins this copy to its
-  source).
+- **Bits:** the host's text byte for byte (`shared.text_router_softmax` in `src/models/qwen38/shared.zig`; the host's
+  own test pins this copy to its source).
 - **Pinned by:** `src/core/gpu_test.zig` "turboexl3 gpu: the router folded into form 9's prepare launch (and the shared
   gate's logit with it) equals ..." (GPU, as the reference: rows 1 to 4, 8 and 16, bf16 and f16 logits, tie-heavy logits
   every other call); `src/core/decode.zig` "turboexl3 decode router-folded prepare texts: the merged launch carries the

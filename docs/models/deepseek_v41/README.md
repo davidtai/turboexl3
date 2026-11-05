@@ -10,9 +10,9 @@ What it runs on turboexl3:
 | part of the model | entry points | kernels |
 |---|---|---|
 | routed experts | `moeClamped` | the core's routed decode (`turboexl3_fin7c`) and prefill (`turboexl3_pf_midc`, `_mid_vc`, `_t128_midc`) chains with the clamp ([engines](../../core/engines.md)) |
-| routed experts over an expert streamer's slot banks | `moeClampedBanked`, `moeClampedBankedGateUp`, `moeClampedBankedDown` | the core's banked decode texts (`turboexl3_prep2b`, `gu3b`, `fin7cb`, `down3b`, `dfin3b` and their grouped variants) |
+| routed experts over an expert streamer's slot banks | `moeClampedBanked`, `moeClampedBankedGateUp`, `moeClampedBankedDown` | the banked decode texts on the core's routed decode (`src/models/deepseek_v41/banked.zig`: `turboexl3_prep2b`, `gu3b`, `fin7cb`, `down3b`, `dfin3b` and their grouped variants) |
 | the DSpark stages (top-3) and the shared expert as a one-expert bank | `moe`, `moeClamped` | the core's decode chain below a top-k of 4 (form 3's `dfin3`) |
-| the shared expert at decode rows | `sharedSwiglu` | F3, `turboexl3_dense_swiglu_prep`: the gate and up finishes, the clamped SwiGLU and the down's prepare in one launch |
+| the shared expert at decode rows | `sharedSwiglu` | F3 (`src/models/deepseek_v41/f3.zig`), `turboexl3_dense_swiglu_prep`: the gate and up finishes, the clamped SwiGLU and the down's prepare in one launch |
 | the trunk linears, the vision tower and the aligner | `linear`, `linearBias` | the core's dense linear |
 | the attention's `wo_a` | `linearGrouped` | `src/models/deepseek_v41/grouped.zig` ([kernels](kernels.md)) |
 
