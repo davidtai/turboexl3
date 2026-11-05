@@ -10,11 +10,11 @@ const std = @import("std");
 const sdk = @import("sdk");
 const mlx = sdk.mlx;
 const ks = sdk.kernel_launch;
-const support = @import("test_support.zig");
+const support = @import("../../core/test_support.zig");
 const G = support.Graph;
-const root = @import("root.zig");
-const dense = @import("dense.zig");
-const decode = @import("decode.zig");
+const root = @import("../../root.zig");
+const dense = @import("../../core/dense.zig");
+const decode = @import("../../core/decode.zig");
 const ds = @import("deepseek_test.zig");
 
 const testing = std.testing;

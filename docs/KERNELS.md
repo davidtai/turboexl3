@@ -5,9 +5,10 @@ name that it passes to `newKernel`. For each [fused path](GLOSSARY.md#chain), th
 [launches](GLOSSARY.md#launch) that the path replaces. It also tells why the fused path is faster and how its output
 bits relate to that chain.
 
-The Metal text of each kernel is a file `src/kernels/<module>/<name>.metal`. There `<module>` is the name of the Zig
-file that launches the kernel, without `.zig`. The steel headers lie directly in `src/kernels/` (`steel_nax.metal`),
-and the texts of the tests lie in `src/kernels/test/`. A Zig file imports each text with `@embedFile`. A kernel can
+The Metal text of each kernel is a file `<folder>/kernels/<module>/<name>.metal`, beside the Zig file that launches it:
+`<folder>` is `src/core` or `src/models/<model>`, and `<module>` is the name of that Zig file without `.zig` (so
+`src/core/kernels/decode/`, `src/models/qwen38/kernels/attn_io/`). The steel headers lie directly in `src/core/kernels/`
+(`steel_nax.metal`), and the texts of each folder's tests lie in its `kernels/test/`. A Zig file imports each text with `@embedFile`. A kernel can
 be several numbered pieces that the Zig file joins, for example `gu3_1.metal` and `gu3_2.metal`.
 
 The file headers (`//!`) and the `///` comments in `src/` hold the full statements; this page is the map. The
@@ -85,16 +86,16 @@ levels.
 
 ## Kernel families
 
-| family | entry points | rows | Zig file |
+| family | entry points | rows | Zig file (under `src/`) |
 |---|---|---|---|
-| decode GEMV of the [routed experts](GLOSSARY.md#routed-expert) | `moe`, `moeClamped` | 1–16 | `decode.zig` |
-| the same over three expert banks, one routed pair a row-slot | `moeClampedBanked` | 1–64 pairs | `decode.zig` |
-| shared expert and router in the decode launches | `moeFusedShared`, `moeFusedSharedRouted` | 1–4 (router fold: 2–4) | `decode.zig` |
-| prefill GEMM of the routed experts | `moe`, `moeClamped` | 17+ | `prefill.zig` |
-| dense projections | `linear`, `linearSplit`, the `linear` pieces, `trunkUnrot`, `linearBias` | any | `dense.zig` |
-| attention projections | `attnIn`, `attnPrep4`, `linearPreparedIdx`, `linearGated`, `attnInStd`, `linearGatedStd` | 17+ | `attn_io.zig` |
-| decode-row merges | `decodeMergeGated`, `decodeMergeQmergeGated`, `decodeMergeQPlanes`, `decodeMergeIndexer` | 1–16 | `decb.zig` |
-| grouped (block-diagonal) linear | `linearGrouped` | 1–16 (17+: `linear` of each slice) | `grouped.zig` |
+| decode GEMV of the [routed experts](GLOSSARY.md#routed-expert) | `moe`, `moeClamped` | 1–16 | `core/decode.zig` |
+| the same over three expert banks, one routed pair a row-slot | `moeClampedBanked` | 1–64 pairs | `core/decode.zig` (DeepSeek-V4.1) |
+| shared expert and router in the decode launches | `moeFusedShared`, `moeFusedSharedRouted` | 1–4 (router fold: 2–4) | `core/decode.zig` (Qwen3.8) |
+| prefill GEMM of the routed experts | `moe`, `moeClamped` | 17+ | `core/prefill.zig` |
+| dense projections | `linear`, `linearSplit`, the `linear` pieces, `trunkUnrot`, `linearBias` | any | `core/dense.zig` |
+| attention projections | `attnIn`, `attnPrep4`, `linearPreparedIdx`, `linearGated`, `attnInStd`, `linearGatedStd` | 17+ | `models/qwen38/attn_io.zig` |
+| decode-row merges | `decodeMergeGated`, `decodeMergeQmergeGated`, `decodeMergeQPlanes`, `decodeMergeIndexer` | 1–16 | `models/qwen38/decb.zig` |
+| grouped (block-diagonal) linear | `linearGrouped` | 1–16 (17+: `linear` of each slice) | `models/deepseek_v41/grouped.zig` |
 
 ---
 
@@ -1013,7 +1014,7 @@ in three DEC-ONE settings: off, on with the prepare inside, and on with the prep
   - the route, table, prep, mid and finish kernels of the routed prefill read `header_small` (an H128 helper before
     `decode.header`);
   - the prefill GEMMs read `header_nax` and `header_nax_small`: the NAX tiles, the decoders and the bodies' helpers.
-- **`src/kernels/steel_nax.metal` and `steel.zig`.** The steel headers of MLX 0.32.2, inlined: `steel/defines.h`,
+- **`src/core/kernels/steel_nax.metal` and `steel.zig`.** The steel headers of MLX 0.32.2, inlined: `steel/defines.h`,
   `steel/utils/type_traits.h`, `steel/utils/integral_constant.h` and `steel/gemm/nax.h`. A comment marks each section
   with its path and its copyright line, and the file is under MIT (see NOTICE). The prefill and dense GEMMs build on
   its `NAXTile` and `tile_matmad_nax` (over `mpp::tensor_ops::matmul2d`). When the consumer's `sdk` declares
@@ -1032,5 +1033,5 @@ in three DEC-ONE settings: off, on with the prepare inside, and on with the prep
 - **Not kernels of the library.** `turboexl3_test_host_swiglu`, `turboexl3_test_router` and `turboexl3_test_qmerge` run
   the host's SwiGLU, router and merge texts as references in the tests. The Metal-source dump (see the
   [README](../README.md#tests)) prints the kernels of the routed prefill chain as standalone source files. Its parts
-  are in `src/kernels/test/dump/`. The dump's
+  are in `src/core/kernels/test/dump/`. The dump's
   unit names (`turboexl3_pf_gemm2s_j`, ...) label option variants; they are not MLX kernel names.

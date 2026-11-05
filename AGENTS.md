@@ -5,9 +5,9 @@ Rules for anyone changing this repository, people and coding agents alike. CLAUD
 ## Metal lives in .metal files
 
 No Metal inside Zig or any other code file: no kernel body, helper block, statement, splice needle or replacement, test
-pin or dump preamble in a string literal. Every Metal text is a file under `src/kernels/` (the module's directory;
-`test/pins/` for what a test searches the kernels for, `test/dump/` for the TURBOEXL3_METAL_DUMP units), imported with
-`@embedFile`.
+pin or dump preamble in a string literal. Every Metal text is a file in the `kernels/` directory beside the Zig file that
+embeds it (`src/core/kernels/<module>/`, `src/models/<model>/kernels/<module>/`; `test/pins/` there for what a test
+searches the kernels for, `test/dump/` for the TURBOEXL3_METAL_DUMP units), imported with `@embedFile`.
 
 - A variant is a composition, never a search/replace over kernel text: cut the base at the splice point into numbered
   pieces (`x_1.metal`, `x_2.metal`, ...) and concatenate (`base = x_1 ++ x_2 ++ x_3`, `variant = x_1 ++ insert ++ x_3`).

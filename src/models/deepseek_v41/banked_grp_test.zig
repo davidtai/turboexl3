@@ -19,12 +19,12 @@
 const std = @import("std");
 const sdk = @import("sdk");
 const mlx = sdk.mlx;
-const support = @import("test_support.zig");
+const support = @import("../../core/test_support.zig");
 const G = support.Graph;
-const format = @import("format.zig");
-const ref = @import("ref.zig");
-const root = @import("root.zig");
-const decode = @import("decode.zig");
+const format = @import("../../core/format.zig");
+const ref = @import("../../core/ref.zig");
+const root = @import("../../root.zig");
+const decode = @import("../../core/decode.zig");
 
 const testing = std.testing;
 

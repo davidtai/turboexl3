@@ -717,7 +717,7 @@ test "turboexl3 gpu decode timing: the decode chain vs Sushi's decode arm (TURBO
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
     _ = std.c.getenv("TURBOEXL3_DEC_TIME") orelse return error.SkipZigTest;
     if (!has_sushi) return error.SkipZigTest;
-    const root = @import("root.zig");
+    const root = @import("../root.zig");
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
     const a = std.heap.page_allocator;

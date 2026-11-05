@@ -8,15 +8,15 @@ const std = @import("std");
 const sdk = @import("sdk");
 const mlx = sdk.mlx;
 const ks_launch = sdk.kernel_launch;
-const support = @import("test_support.zig");
+const support = @import("../../core/test_support.zig");
 const G = support.Graph;
-const format = @import("format.zig");
-const root = @import("root.zig");
-const dense = @import("dense.zig");
-const decode = @import("decode.zig");
+const format = @import("../../core/format.zig");
+const root = @import("../../root.zig");
+const dense = @import("../../core/dense.zig");
+const decode = @import("../../core/decode.zig");
 const grouped = @import("grouped.zig");
 const ds = @import("deepseek_test.zig");
-const config = @import("config.zig");
+const config = @import("../../core/config.zig");
 
 /// DeepSeek-V4.1's vocabulary: the LM head's outputs (5120 -> 129280 at the trunk's rate)
 const head_out: u32 = 129280;

@@ -241,17 +241,26 @@ shapes, its dtypes, the chain whose bytes it gives and when it refuses.
 
 ## Source layout
 
+The sources are organized by model: one shared core, and a folder for each model with what only that model uses.
+
 | path | what it holds |
 |---|---|
-| `src/root.zig` | the module root, with the API above |
-| `src/config.zig` | `Config` and `configure` |
-| `src/kernels/<module>/<name>.metal` | the Metal text of each kernel; `<module>` is the name of the Zig file that launches it, without `.zig` |
-| `src/kernels/steel_nax.metal` | four steel headers of MLX 0.32.2, inlined, for the prefill and dense GEMMs |
-| `src/steel.zig` | the steel headers that the GEMMs use: the consumer's (`sdk.steel`), else `steel_nax.metal` |
-| `src/kernels/test/` | the Metal texts of the tests: `pins/` holds what a test looks for in the kernels, and `dump/` the parts of the Metal dumps |
+| `src/root.zig` | the module root, with the API above (its names are the same whatever folder a file sits in) |
+| `src/tests.zig` | the test root: every file's tests |
+| `src/core/` | the shared core: the EXL3 reference (`format.zig`), the codeword readers (`lane.zig`), the pack contract (`spec.zig`), `Config` and `configure` (`config.zig`), the routed decode (`decode.zig`) and prefill (`prefill.zig`) engines, the dense linear (`dense.zig`, `pgemm.zig`), the unfused chain (`unfused.zig`), the steel headers (`steel.zig`), the texts more than one kernel splices (`sources.zig`), the host reference (`ref.zig`), the test support and the core's tests |
+| `src/models/qwen38/` | Qwen3.8-Flash-Next: the attention projections at prefill rows (`attn_io.zig`), the decode-row merges (`decb.zig`), the GDN tail (`gdn_out.zig`) and their tests |
+| `src/models/deepseek_v41/` | DeepSeek-V4.1: the grouped linear `wo_a` (`grouped.zig`) and the tests at its geometry (trunk, F3, clamped SwiGLU, banked decode) |
+| `<folder>/kernels/<module>/<name>.metal` | the Metal text of each kernel, beside the Zig file that launches it: `<module>` is that file's name without `.zig` (`src/core/kernels/decode/`, `src/models/qwen38/kernels/attn_io/`, ...) |
+| `<folder>/kernels/test/` | the Metal texts of that folder's tests: `pins/` holds what a test looks for in the kernels, and `dump/` the parts of the Metal dumps |
+| `src/core/kernels/steel_nax.metal` | four steel headers of MLX 0.32.2, inlined, for the prefill and dense GEMMs |
+| `src/hip/`, `src/hip_tests.zig`, `src/kernels/hip/` | the AMD (HIP) backend: its launch plans, runtime, tests and kernels (an outside consumer vendors these paths) |
 | `plugin/` | the mlx-serve quant plugin ([CONSUMING.md](CONSUMING.md)) |
 | `tools/check_texts.py` | a check that runs on the host, with no Zig: no Metal in a Zig file, and no kernel text changed by a refactor |
 | `AGENTS.md` | the rules for a change to this repository; `CLAUDE.md` points to it |
+
+Some kernels of the core serve one model: the fused shared expert and the router fold (Qwen3.8), the banked and grouped
+GEMVs (DeepSeek-V4.1), F3 and the clamped SwiGLU (DeepSeek-V4.1, GLM and Ripple). They stay in the core engines that
+launch them; [docs/KERNELS.md](docs/KERNELS.md) names the model of each.
 
 No Metal goes inside a Zig file. Each Zig file imports its Metal texts with `@embedFile`. A variant of a kernel is a
 composition, not a search and replace. The base text is cut into numbered pieces (`x_1.metal`, `x_2.metal`, ...), and
@@ -288,7 +297,7 @@ The members of `sdk`:
 - `kernel_launch`: `newKernel` makes a kernel, `buildConfig` makes the config of a launch, and `applyConfig` runs one
   launch. An optional `mlx_fast_metal_kernel_free` drops a kernel that `newKernel` made.
 - `steel` (optional): the four steel headers of the consumer's own MLX. An MLX update that changes them then reaches
-  the kernels. Without `steel`, the GEMMs use `src/kernels/steel_nax.metal`.
+  the kernels. Without `steel`, the GEMMs use `src/core/kernels/steel_nax.metal`.
 
 The plugin's `plugin/sdk.zig` is such a module:
 
@@ -328,7 +337,7 @@ consumer.addImport("turboexl3", t3);
 ## Configuration
 
 turboexl3 reads no environment. A consumer sets its choices once, before the first call, with
-`turboexl3.configure(.{ ... })`. The argument is one `Config` (`src/config.zig`). The default of each field is the
+`turboexl3.configure(.{ ... })`. The argument is one `Config` (`src/core/config.zig`). The default of each field is the
 served configuration.
 
 `configure` refuses a value that the library does not serve with `error.InvalidTurboexl3Config`, and then it changes

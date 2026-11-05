@@ -14,11 +14,11 @@
 //!   HAD_SCALE, f16.
 //! The two butterflies are `sources.had128`. The swish gate and the formula sigmoid are not served.
 const std = @import("std");
-const Global = @import("global.zig").Global;
+const Global = @import("../../core/global.zig").Global;
 const mlx = @import("sdk").mlx;
 const ks = @import("sdk").kernel_launch;
-const decode = @import("decode.zig");
-const sources = @import("sources.zig");
+const decode = @import("../../core/decode.zig");
+const sources = @import("../../core/sources.zig");
 
 const had128 = sources.had128;
 
@@ -98,7 +98,7 @@ pub const shared_state = .{ kernel_lock, kernel };
 // ── tests ──
 
 const testing = std.testing;
-const dense = @import("dense.zig");
+const dense = @import("../../core/dense.zig");
 const attn_io = @import("attn_io.zig");
 
 fn count(hay: []const u8, needle: []const u8) usize {
@@ -106,7 +106,7 @@ fn count(hay: []const u8, needle: []const u8) usize {
 }
 
 test "turboexl3 gdn_out text: dense's butterfly twice, z's finish and out_proj's prepare as dense writes them, the sigmoid by the table" {
-    const pin = comptime @import("test_support.zig").pins(@embedFile("kernels/test/pins/gdn_out.metal"));
+    const pin = comptime @import("../../core/test_support.zig").pins(@embedFile("kernels/test/pins/gdn_out.metal"));
     // the butterfly spliced is dense's (its prepare's and its finish's statements, verbatim): once for z's finish, once
     // for out_proj's prepare
     try testing.expectEqual(@as(usize, 1), count(dense.text_prep, had128));

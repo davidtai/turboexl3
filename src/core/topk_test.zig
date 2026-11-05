@@ -10,7 +10,7 @@ const support = @import("test_support.zig");
 const G = support.Graph;
 const format = @import("format.zig");
 const ref = @import("ref.zig");
-const root = @import("root.zig");
+const root = @import("../root.zig");
 
 const testing = std.testing;
 

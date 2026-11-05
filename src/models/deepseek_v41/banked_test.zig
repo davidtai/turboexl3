@@ -19,11 +19,11 @@
 const std = @import("std");
 const sdk = @import("sdk");
 const mlx = sdk.mlx;
-const support = @import("test_support.zig");
+const support = @import("../../core/test_support.zig");
 const G = support.Graph;
-const format = @import("format.zig");
-const ref = @import("ref.zig");
-const root = @import("root.zig");
+const format = @import("../../core/format.zig");
+const ref = @import("../../core/ref.zig");
+const root = @import("../../root.zig");
 
 const testing = std.testing;
 
@@ -59,15 +59,15 @@ fn envList(name: [*:0]const u8, default: []const u32, buf: []u32) []const u32 {
 }
 
 test "turboexl3 banked decode texts: each is its base text with the bank's lines in place of the expert line or the weight base and nothing else; every banked input is read, none asks MLX for a shape buffer" {
-    const decode = @import("decode.zig");
-    const expert_line = @embedFile("kernels/decode/expert_line.metal");
+    const decode = @import("../../core/decode.zig");
+    const expert_line = @embedFile("../../core/kernels/decode/expert_line.metal");
     const Pair = struct { base: []const u8, banked: []const u8, line: []const u8, piece: []const u8, inputs: []const [*:0]const u8 };
     const pairs = [_]Pair{
-        .{ .base = decode.text_prep2, .banked = decode.text_prep2b, .line = expert_line, .piece = @embedFile("kernels/decode/prep2b_expert.metal"), .inputs = &decode.prep2b_inputs },
-        .{ .base = decode.text_gu3, .banked = decode.text_gu3b, .line = @embedFile("kernels/decode/gu3_w.metal"), .piece = @embedFile("kernels/decode/gu3b_w.metal"), .inputs = &decode.gu3b_inputs },
-        .{ .base = decode.text_fin7c, .banked = decode.text_fin7cb, .line = expert_line, .piece = @embedFile("kernels/decode/fin7b_expert.metal"), .inputs = &decode.fin7b_inputs },
-        .{ .base = decode.text_down3, .banked = decode.text_down3b, .line = @embedFile("kernels/decode/down3_w.metal"), .piece = @embedFile("kernels/decode/down3b_w.metal"), .inputs = &decode.down3b_inputs },
-        .{ .base = decode.text_dfin3, .banked = decode.text_dfin3b, .line = @embedFile("kernels/decode/dfin3_expert.metal"), .piece = @embedFile("kernels/decode/dfin3b_expert.metal"), .inputs = &decode.dfin3b_inputs },
+        .{ .base = decode.text_prep2, .banked = decode.text_prep2b, .line = expert_line, .piece = @embedFile("../../core/kernels/decode/prep2b_expert.metal"), .inputs = &decode.prep2b_inputs },
+        .{ .base = decode.text_gu3, .banked = decode.text_gu3b, .line = @embedFile("../../core/kernels/decode/gu3_w.metal"), .piece = @embedFile("../../core/kernels/decode/gu3b_w.metal"), .inputs = &decode.gu3b_inputs },
+        .{ .base = decode.text_fin7c, .banked = decode.text_fin7cb, .line = expert_line, .piece = @embedFile("../../core/kernels/decode/fin7b_expert.metal"), .inputs = &decode.fin7b_inputs },
+        .{ .base = decode.text_down3, .banked = decode.text_down3b, .line = @embedFile("../../core/kernels/decode/down3_w.metal"), .piece = @embedFile("../../core/kernels/decode/down3b_w.metal"), .inputs = &decode.down3b_inputs },
+        .{ .base = decode.text_dfin3, .banked = decode.text_dfin3b, .line = @embedFile("../../core/kernels/decode/dfin3_expert.metal"), .piece = @embedFile("../../core/kernels/decode/dfin3b_expert.metal"), .inputs = &decode.dfin3b_inputs },
     };
     for (pairs) |p| {
         // the base reads the line once; the banked text has the piece once in its place and the base's bytes around it
@@ -101,8 +101,8 @@ test "turboexl3 banked decode texts: each is its base text with the bank's lines
         try testing.expect(std.mem.indexOf(u8, piece, pin[2]) != null);
         try testing.expect(std.mem.indexOf(u8, piece, pin[3]) != null);
     }
-    try testing.expect(std.mem.indexOf(u8, @embedFile("kernels/decode/gu3_2.metal"), pin[4]) != null);
-    try testing.expect(std.mem.indexOf(u8, @embedFile("kernels/decode/down3_2.metal"), pin[4]) != null);
+    try testing.expect(std.mem.indexOf(u8, @embedFile("../../core/kernels/decode/gu3_2.metal"), pin[4]) != null);
+    try testing.expect(std.mem.indexOf(u8, @embedFile("../../core/kernels/decode/down3_2.metal"), pin[4]) != null);
 }
 
 /// A zero host array of `shape` in `dt` (the refusals read shapes and dtypes only).
@@ -548,14 +548,14 @@ test "turboexl3 gpu banked decode time: the banked call and its halves against m
 // ── The grouped banked decode (`Config.banked_group` 4) ──
 
 test "turboexl3 grouped banked decode texts: prep2bg, fin7cbg and dfin3bg are the banked texts with the skip line before their bank lines; gu3bg and down3bg take the banked weight base between the four-member pieces" {
-    const decode = @import("decode.zig");
-    const skip = @embedFile("kernels/decode/skip_rk.metal");
-    const skip_next = @embedFile("kernels/decode/skip_rk_next.metal");
+    const decode = @import("../../core/decode.zig");
+    const skip = @embedFile("../../core/kernels/decode/skip_rk.metal");
+    const skip_next = @embedFile("../../core/kernels/decode/skip_rk_next.metal");
     const Ins = struct { banked: []const u8, grouped: []const u8, piece: []const u8, line: []const u8 };
     for ([_]Ins{
-        .{ .banked = decode.text_prep2b, .grouped = decode.text_prep2bg, .piece = @embedFile("kernels/decode/prep2b_expert.metal"), .line = skip },
-        .{ .banked = decode.text_fin7cb, .grouped = decode.text_fin7cbg, .piece = @embedFile("kernels/decode/fin7b_expert.metal"), .line = skip },
-        .{ .banked = decode.text_dfin3b, .grouped = decode.text_dfin3bg, .piece = @embedFile("kernels/decode/dfin3b_expert.metal"), .line = skip_next },
+        .{ .banked = decode.text_prep2b, .grouped = decode.text_prep2bg, .piece = @embedFile("../../core/kernels/decode/prep2b_expert.metal"), .line = skip },
+        .{ .banked = decode.text_fin7cb, .grouped = decode.text_fin7cbg, .piece = @embedFile("../../core/kernels/decode/fin7b_expert.metal"), .line = skip },
+        .{ .banked = decode.text_dfin3b, .grouped = decode.text_dfin3bg, .piece = @embedFile("../../core/kernels/decode/dfin3b_expert.metal"), .line = skip_next },
     }) |c| {
         const i = std.mem.indexOf(u8, c.banked, c.piece).?;
         try testing.expectEqualStrings(c.banked[0..i], c.grouped[0..i]);
@@ -564,8 +564,8 @@ test "turboexl3 grouped banked decode texts: prep2bg, fin7cbg and dfin3bg are th
     }
     const Gemv = struct { banked: []const u8, grouped: []const u8, w: []const u8, head: []const u8 };
     for ([_]Gemv{
-        .{ .banked = decode.text_gu3b, .grouped = decode.text_gu3bg, .w = @embedFile("kernels/decode/gu3b_w.metal"), .head = @embedFile("kernels/decode/gu3g_2.metal") },
-        .{ .banked = decode.text_down3b, .grouped = decode.text_down3bg, .w = @embedFile("kernels/decode/down3b_w.metal"), .head = @embedFile("kernels/decode/down3g_2.metal") },
+        .{ .banked = decode.text_gu3b, .grouped = decode.text_gu3bg, .w = @embedFile("../../core/kernels/decode/gu3b_w.metal"), .head = @embedFile("../../core/kernels/decode/gu3g_2.metal") },
+        .{ .banked = decode.text_down3b, .grouped = decode.text_down3bg, .w = @embedFile("../../core/kernels/decode/down3b_w.metal"), .head = @embedFile("../../core/kernels/decode/down3g_2.metal") },
     }) |c| {
         // the constants and grid line are the banked text's, then the member head, the weight base, the member tail
         const i = std.mem.indexOf(u8, c.grouped, c.head).?;
@@ -577,22 +577,22 @@ test "turboexl3 grouped banked decode texts: prep2bg, fin7cbg and dfin3bg are th
 
 /// A Kernels3 at DeepSeek-V4.1's routed geometry (top-1, clamped, MUL1) as `root` builds it for a banked call, its
 /// banked GEMVs at `group` row-slots per lead.
-fn bankedKernels3(rate: format.Rate, group: u32) !@import("decode.zig").Kernels3 {
-    var k = try @import("decode.zig").Kernels3.initWith(.{ .hidden = hidden, .inter = inter, .topk = 1, .rate = rate, .dec = .mul1, .limit = @intCast(limit) }, 1, 4, 2);
+fn bankedKernels3(rate: format.Rate, group: u32) !@import("../../core/decode.zig").Kernels3 {
+    var k = try @import("../../core/decode.zig").Kernels3.initWith(.{ .hidden = hidden, .inter = inter, .topk = 1, .rate = rate, .dec = .mul1, .limit = @intCast(limit) }, 1, 4, 2);
     k.out_dtype = .float32;
     k.banked_group = group;
     return k;
 }
 
 /// The banked launches' banks of three root banks.
-fn kernelBanks(rb: *const [3]root.Bank) [3]@import("decode.zig").Kernels.Bank {
-    var kb: [3]@import("decode.zig").Kernels.Bank = undefined;
+fn kernelBanks(rb: *const [3]root.Bank) [3]@import("../../core/decode.zig").Kernels.Bank {
+    var kb: [3]@import("../../core/decode.zig").Kernels.Bank = undefined;
     for (rb, &kb) |b, *o| o.* = .{ .gate_t = b.gate.trellis, .gate_suh = b.gate.suh, .gate_svh = b.gate.svh, .up_t = b.up.trellis, .up_suh = b.up.suh, .up_svh = b.up.svh, .down_t = b.down.trellis, .down_suh = b.down.suh, .down_svh = b.down.svh };
     return kb;
 }
 
 /// One banked call (gate|up, then down) on `k`: y f32 [rows, hidden]; the caller frees it.
-fn groupCall(k: *@import("decode.zig").Kernels3, s: mlx.mlx_stream, x: mlx.mlx_array, ids: mlx.mlx_array, kb: *const [3]@import("decode.zig").Kernels.Bank, rows: usize) !mlx.mlx_array {
+fn groupCall(k: *@import("../../core/decode.zig").Kernels3, s: mlx.mlx_stream, x: mlx.mlx_array, ids: mlx.mlx_array, kb: *const [3]@import("../../core/decode.zig").Kernels.Bank, rows: usize) !mlx.mlx_array {
     const h = try k.bankedGateUp(s, x, ids, kb, rows);
     defer _ = mlx.mlx_array_free(h[0]);
     defer _ = mlx.mlx_array_free(h[1]);

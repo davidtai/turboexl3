@@ -134,7 +134,7 @@ meaning first, then the precise one.
 - <a id="nax"></a>**NAX**: The matrix-multiply units ("neural accelerators") in the GPU cores of Apple's M5. MLX uses
   them through the NAX GEMM header of its steel library (`steel/gemm/nax.h`). Its `NAXTile` and `tile_matmad_nax` wrap
   Metal's `mpp::tensor_ops::matmul2d`. turboexl3 carries four steel headers (`defines.h`, `type_traits.h`,
-  `integral_constant.h` and `nax.h`), inlined, in `src/kernels/steel_nax.metal` (MLX 0.32.2). A consumer can give the
+  `integral_constant.h` and `nax.h`), inlined, in `src/core/kernels/steel_nax.metal` (MLX 0.32.2). A consumer can give the
   headers of its own MLX instead (`sdk.steel`).
 - <a id="nax-gate"></a>**NAX gate**: MLX's test for the NAX units: an M5-class GPU and macOS 26.2 or later. Below the
   M5, the GEMMs that use the NAX compute wrong values. So where the gate fails, a consumer sets `Config.nax` to false.

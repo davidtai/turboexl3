@@ -30,9 +30,9 @@
 const std = @import("std");
 const mlx = @import("sdk").mlx;
 const ks = @import("sdk").kernel_launch;
-const format = @import("format.zig");
-const decode = @import("decode.zig");
-const dense = @import("dense.zig");
+const format = @import("../../core/format.zig");
+const decode = @import("../../core/decode.zig");
+const dense = @import("../../core/dense.zig");
 
 const prep_in = [_][*:0]const u8{ "x", "suh" };
 const prep_out = [_][*:0]const u8{ "xp", "xs" };

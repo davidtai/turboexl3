@@ -14,7 +14,7 @@ const G = support.Graph;
 const format = @import("format.zig");
 const decode = @import("decode.zig");
 const ref = @import("ref.zig");
-const root = @import("root.zig");
+const root = @import("../root.zig");
 
 const testing = std.testing;
 

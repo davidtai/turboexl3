@@ -1321,7 +1321,7 @@ MOVES = [
     ('', 'core/'),
 ]
 # files the move adds that are no ORIG file's image (not code: checked by nothing else)
-MOVE_ADDED = ('models/qwen38/README.md', 'models/deepseek_v41/README.md', 'core/README.md')
+MOVE_ADDED = ('models/qwen38/README.md', 'models/deepseek_v41/README.md')
 
 
 def moved_path(rel):

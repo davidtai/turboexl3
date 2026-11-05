@@ -18,12 +18,12 @@
 const std = @import("std");
 const sdk = @import("sdk");
 const mlx = sdk.mlx;
-const support = @import("test_support.zig");
+const support = @import("../../core/test_support.zig");
 const G = support.Graph;
 const bf16Bits = support.bf16Bits;
-const format = @import("format.zig");
-const dense = @import("dense.zig");
-const decode = @import("decode.zig");
+const format = @import("../../core/format.zig");
+const dense = @import("../../core/dense.zig");
+const decode = @import("../../core/decode.zig");
 const decb = @import("decb.zig");
 const ks = @import("sdk").kernel_launch;
 

@@ -12,13 +12,13 @@
 const std = @import("std");
 const sdk = @import("sdk");
 const mlx = sdk.mlx;
-const support = @import("test_support.zig");
+const support = @import("../../core/test_support.zig");
 const G = support.Graph;
-const format = @import("format.zig");
-const decode = @import("decode.zig");
-const prefill = @import("prefill.zig");
-const ref = @import("ref.zig");
-const root = @import("root.zig");
+const format = @import("../../core/format.zig");
+const decode = @import("../../core/decode.zig");
+const prefill = @import("../../core/prefill.zig");
+const ref = @import("../../core/ref.zig");
+const root = @import("../../root.zig");
 
 const testing = std.testing;
 
@@ -32,10 +32,10 @@ fn bfExact(v: f32) f32 {
 }
 
 test "turboexl3 clamped texts: each clamped kernel is its base text with the SwiGLU line swapped for the clamp piece, nothing else; only the clamp reads LIMIT" {
-    const fin7_line = @embedFile("kernels/decode/fin7_swiglu.metal");
-    const fin7_clamp = @embedFile("kernels/decode/fin7_swiglu_clamp.metal");
-    const mid_line = @embedFile("kernels/prefill/mid_swiglu.metal");
-    const mid_clamp = @embedFile("kernels/prefill/mid_swiglu_clamp.metal");
+    const fin7_line = @embedFile("../../core/kernels/decode/fin7_swiglu.metal");
+    const fin7_clamp = @embedFile("../../core/kernels/decode/fin7_swiglu_clamp.metal");
+    const mid_line = @embedFile("../../core/kernels/prefill/mid_swiglu.metal");
+    const mid_clamp = @embedFile("../../core/kernels/prefill/mid_swiglu_clamp.metal");
     const Pair = struct { base: []const u8, clamped: []const u8, line: []const u8, clamp: []const u8 };
     const pairs = [_]Pair{
         .{ .base = decode.text_fin7, .clamped = decode.text_fin7c, .line = fin7_line, .clamp = fin7_clamp },

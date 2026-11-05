@@ -146,7 +146,7 @@ plugin unloaded. The list `"disabled"` in `plugins.json` turns off plugins by na
 
 | gap | what the plugin does instead | what would close the gap |
 |---|---|---|
-| MLX's steel headers: the kit stages only mlx-c's headers | turboexl3 uses its inlined copy, `src/kernels/steel_nax.metal` (MLX 0.32.2) | the kit stages the four steel headers of the server's MLX, for `sdk.steel` |
+| MLX's steel headers: the kit stages only mlx-c's headers | turboexl3 uses its inlined copy, `src/core/kernels/steel_nax.metal` (MLX 0.32.2) | the kit stages the four steel headers of the server's MLX, for `sdk.steel` |
 | the NAX gate of the server | `kit/nax.zig` (turboexl3_kit) finds it again from `sysctl`: an Apple M5 or later, macOS 26.2 or later, and no `FORCE_GPU_FAMILY_FALLBACK=1` | a member of the host table that gives the server's answer |
 | mlx-c bindings with Zig types: the kit's `mlx_c` comes from translate-C, with integer enums and `[*c]` pointers | `plugin/mlx.zig` declares the functions that turboexl3 calls, as mlx-serve's own bindings declare them | bindings with Zig types in the kit |
 | extra imports in `plugin()`: the builder takes only a name | `build.zig` adds `sdk` and `turboexl3` to the root module through `import_table.get("plugin")` | an option of `plugin()` for imports |

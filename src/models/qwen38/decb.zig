@@ -22,12 +22,12 @@
 //!
 //! The value-setting statements are dense's / the host's, spliced or copied verbatim; the CPU tests below pin them.
 const std = @import("std");
-const Global = @import("global.zig").Global;
+const Global = @import("../../core/global.zig").Global;
 const mlx = @import("sdk").mlx;
 const ks = @import("sdk").kernel_launch;
-const decode = @import("decode.zig");
-const dense = @import("dense.zig");
-const sources = @import("sources.zig");
+const decode = @import("../../core/decode.zig");
+const dense = @import("../../core/dense.zig");
+const sources = @import("../../core/sources.zig");
 
 /// One linear of a merged call: the `Dense` `linear` uses for its shape (`denseFor`'s) and the host's arrays
 pub const Member = struct { d: *dense.Dense, trellis: mlx.mlx_array, suh: mlx.mlx_array, svh: mlx.mlx_array };
@@ -760,7 +760,7 @@ fn stmtLines(a: std.mem.Allocator, text: []const u8) ![][]const u8 {
 }
 
 test "turboexl3 decode merges texts: dense's split finishes are its old texts, and every variant carries the chain's value-setting statements" {
-    const pin = comptime @import("test_support.zig").pins(@embedFile("kernels/test/pins/decb_dense_statements.metal"));
+    const pin = comptime @import("../../core/test_support.zig").pins(@embedFile("../../core/kernels/test/pins/decb_dense_statements.metal"));
     const a = testing.allocator;
     // the butterfly the merges splice is dense's: its prep's and its finish's statements, verbatim
     try testing.expect(has(dense.text_prep_s, had128) and has(dense.dfinish_v, had128));
@@ -829,7 +829,7 @@ test "turboexl3 decode merges texts: dense's split finishes are its old texts, a
 }
 
 test "turboexl3 decode merges texts: the indexer epilogues are the host's hd-128 QK-norm+RoPE and pooled-key statements, names mapped" {
-    const pin = comptime @import("test_support.zig").pins(@embedFile("kernels/test/pins/decb_indexer.metal"));
+    const pin = comptime @import("../../core/test_support.zig").pins(@embedFile("../../core/kernels/test/pins/decb_indexer.metal"));
     // QK_NORM_ROPE_SOURCE's arithmetic lines (transformer.zig), with lane -> L, HD -> IHD, eps -> qeps, w -> qn, angles -> arow,
     // T -> OUT_T (the host's CPU test checks these copies against its own text)
     const qrope = [_][]const u8{
@@ -874,7 +874,7 @@ test "turboexl3 decode merges texts: the indexer epilogues are the host's hd-128
 }
 
 test "turboexl3 decode merges texts: the signatures' names are used and no name is followed by MLX's shape / strides / ndim suffixes" {
-    const pin = comptime @import("test_support.zig").pins(@embedFile("kernels/test/pins/decb_signatures.metal"));
+    const pin = comptime @import("../../core/test_support.zig").pins(@embedFile("../../core/kernels/test/pins/decb_signatures.metal"));
     const Sig = struct { txt: []const u8, names: []const [*:0]const u8, unused: []const []const u8 = &.{} };
     const sigs = [_]Sig{
         .{ .txt = text_prep_gate_sc, .names = &(prep_gate_sc_in ++ prep_sc_out) },

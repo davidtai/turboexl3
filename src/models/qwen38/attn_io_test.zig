@@ -10,12 +10,12 @@
 const std = @import("std");
 const sdk = @import("sdk");
 const mlx = sdk.mlx;
-const support = @import("test_support.zig");
+const support = @import("../../core/test_support.zig");
 const G = support.Graph;
 const bf16Bits = support.bf16Bits;
-const format = @import("format.zig");
-const root = @import("root.zig");
-const dense = @import("dense.zig");
+const format = @import("../../core/format.zig");
+const root = @import("../../root.zig");
+const dense = @import("../../core/dense.zig");
 
 const testing = std.testing;
 

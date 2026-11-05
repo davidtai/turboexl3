@@ -13,27 +13,27 @@
 //! environment.
 const std = @import("std");
 /// A module global, the host's `Shared` where the consumer's `sdk` brings one (`global.zig`).
-pub const Global = @import("global.zig").Global;
+pub const Global = @import("core/global.zig").Global;
 const mlx = @import("sdk").mlx;
-pub const config = @import("config.zig");
+pub const config = @import("core/config.zig");
 pub const Config = config.Config;
 pub const configure = config.configure;
-pub const format = @import("format.zig");
-pub const spec = @import("spec.zig");
-pub const lane = @import("lane.zig");
-pub const decode = @import("decode.zig");
-pub const ref = @import("ref.zig");
-pub const unfused = @import("unfused.zig");
-pub const dense = @import("dense.zig");
+pub const format = @import("core/format.zig");
+pub const spec = @import("core/spec.zig");
+pub const lane = @import("core/lane.zig");
+pub const decode = @import("core/decode.zig");
+pub const ref = @import("core/ref.zig");
+pub const unfused = @import("core/unfused.zig");
+pub const dense = @import("core/dense.zig");
 /// pg2: a dense linear's prefill matmul and finish as one launch at this machine's tiles (pgemm.zig); the host sets `pgemm.mode`.
-pub const pgemm = @import("pgemm.zig");
-pub const prefill = @import("prefill.zig");
+pub const pgemm = @import("core/pgemm.zig");
+pub const prefill = @import("core/prefill.zig");
 /// The kernel texts a consumer may splice into its own Metal (MLX-free; `sources.zig`).
-pub const sources = @import("sources.zig");
+pub const sources = @import("core/sources.zig");
 /// The GDN layer's tail in one launch (`gdnOutPrep`).
-pub const gdn_out = @import("gdn_out.zig");
+pub const gdn_out = @import("models/qwen38/gdn_out.zig");
 /// The grouped linear's decode rows (`linearGrouped`).
-pub const grouped = @import("grouped.zig");
+pub const grouped = @import("models/deepseek_v41/grouped.zig");
 
 pub const Spec = spec.Spec;
 pub const parseExpertQuant = spec.parseExpertQuant;
@@ -654,7 +654,7 @@ fn unrotGroup(s: mlx.mlx_stream, grp: []const Proj, dec: format.Decode, act: mlx
 // Rows 1..kernels.DECODE_ROWS_MAX (the GEMV path), each the bytes of the chain it replaces, with DEC-ONE taking the call or
 // not; error.Exl3EngineNotImplemented where a call is not served (the caller keeps its chain).
 
-pub const decode_merge = @import("decb.zig");
+pub const decode_merge = @import("models/qwen38/decb.zig");
 
 /// The rows of x [..., in] and x as [rows, in] (the caller frees the view)
 fn rowsOf(x: mlx.mlx_array, in_dim: u32, s: mlx.mlx_stream) !struct { rows: usize, x2: mlx.mlx_array } {
@@ -757,7 +757,7 @@ pub fn decodeMergeIndexer(s: mlx.mlx_stream, x: mlx.mlx_array, idx: Proj, ep: de
 }
 
 /// The fused attention projections (`attn_io.zig`).
-pub const attn_io = @import("attn_io.zig");
+pub const attn_io = @import("models/qwen38/attn_io.zig");
 
 /// The `Dense` `linear` would take for one projection of x (in, its dtype), the trellis and suh / svh checked as `linear`
 /// checks them (plus their f16 dtype, which the fused texts name).

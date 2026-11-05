@@ -35,11 +35,11 @@
 //! and `attnIn` takes the other three as given (`Epilogue.prep`) instead of launching its prepare: the bytes of the
 //! indexer's `linear` and ATTN-IN's own prepare.
 const std = @import("std");
-const Global = @import("global.zig").Global;
+const Global = @import("../../core/global.zig").Global;
 const mlx = @import("sdk").mlx;
 const ks = @import("sdk").kernel_launch;
-const decode = @import("decode.zig");
-const dense = @import("dense.zig");
+const decode = @import("../../core/decode.zig");
+const dense = @import("../../core/dense.zig");
 
 /// One prepare for three members: xp_m half [rows, DIM] = H128(f16(x[row]) * suh_m) per 128-block, natural order (dense
 /// `text_prep` at LANE_ORDER 0, member by member on the one f16 value of x); one simdgroup per (block, row).
@@ -495,7 +495,7 @@ fn linesWith(a: std.mem.Allocator, text: []const u8, marker: []const u8) ![][]co
 }
 
 test "turboexl3 attn_io: the prepares and the finish repeat dense's prepare / finish statements (the Hadamard, the roundings)" {
-    const pin = comptime @import("test_support.zig").pins(@embedFile("kernels/test/pins/attn_io_dense_statements.metal"));
+    const pin = comptime @import("../../core/test_support.zig").pins(@embedFile("../../core/kernels/test/pins/attn_io_dense_statements.metal"));
     const a = testing.allocator;
     // the butterfly and the local 4-point stage, verbatim, in every text
     const fly = try linesWith(a, dense.text_prep, pin[0]);
@@ -524,7 +524,7 @@ test "turboexl3 attn_io: the prepares and the finish repeat dense's prepare / fi
 }
 
 test "turboexl3 attn_io: the epilogue is the host's hd-256 norm + rope statements (MLX's rms_single_row and rope_impl roundings)" {
-    const pin = comptime @import("test_support.zig").pins(@embedFile("kernels/test/pins/attn_io_epilogue.metal"));
+    const pin = comptime @import("../../core/test_support.zig").pins(@embedFile("../../core/kernels/test/pins/attn_io_epilogue.metal"));
     // the lines of the host's QK_NORM_ROPE_256_SOURCE (transformer.zig) that carry arithmetic, with its names mapped to ours
     // (src[base + i] -> ys[base + i], T -> OUT_T, HD -> HDC, simd_lane / simd_group -> L / sg)
     const want = [_][]const u8{
@@ -601,7 +601,7 @@ test "turboexl3 attn_io: the gated prepare's gate layouts address the q_proj gat
 // ---- the four-member prepare (its GPU byte tests are attn_io_test.zig's) ----
 
 test "turboexl3 attn_io: text_prep4 is text_prep3 with a fourth member (every arithmetic line verbatim, so dense's prepare at LANE_ORDER 0), over the names its signature binds" {
-    const pin = comptime @import("test_support.zig").pins(@embedFile("kernels/test/pins/attn_io_prep4.metal"));
+    const pin = comptime @import("../../core/test_support.zig").pins(@embedFile("../../core/kernels/test/pins/attn_io_prep4.metal"));
     // every line of text_prep3 but its member loop's bound and its three-way member selection
     var kept: usize = 0;
     var it = std.mem.splitScalar(u8, text_prep3, '\n');
@@ -632,7 +632,7 @@ test "turboexl3 attn_io: text_prep4 is text_prep3 with a fourth member (every ar
 // ---- the un-rotated trunk (its GPU checks are gpu_test.zig's) ----
 
 test "turboexl3 attn_io un-rotated trunk texts: the standard-basis epilogue is ATTN-IN's finish epilogue verbatim behind a plain read, and the gated input is ATTN-OUT's product without the prepare" {
-    const pin = comptime @import("test_support.zig").pins(@embedFile("kernels/test/pins/attn_io_std.metal"));
+    const pin = comptime @import("../../core/test_support.zig").pins(@embedFile("../../core/kernels/test/pins/attn_io_std.metal"));
     const has = struct {
         fn f(hay: []const u8, needle: []const u8) bool {
             return std.mem.indexOf(u8, hay, needle) != null;
