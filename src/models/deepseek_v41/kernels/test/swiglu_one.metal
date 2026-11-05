@@ -1,0 +1,13 @@
+    const uint i = thread_position_in_grid.x;
+    if (i >= uint(NEL)) return;
+    const float hi = lim[0];
+    const float lo = -lim[0];
+    const float gate = float(gt[i]);
+    const float up = float(ut[i]);
+    float g = metal::isnan(gate) ? gate : (gate < hi ? gate : hi);
+    float um = metal::isnan(up) ? up : (up > lo ? up : lo);
+    float u = metal::isnan(um) ? um : (um < hi ? um : hi);
+    float sy = 1 / (1 + metal::precise::exp(metal::abs(g)));
+    float sig = (g < 0) ? sy : 1 - sy;
+    float act = g * sig;
+    y[i] = bfloat16_t(act * u);

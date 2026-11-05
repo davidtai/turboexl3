@@ -1,8 +1,8 @@
 //! turboexl3's AMD (HIP) kernels on a real GPU against the host reference (format.zig): `zig build hip-test -Dhip=true`.
 //! The tests need libamdhip64 and a GPU of a -Dhip-arch the build admits (src/hip/flags.zig); they import no MLX.
 const std = @import("std");
-const format = @import("format.zig");
-const lane = @import("lane.zig");
+const format = @import("core/format.zig");
+const lane = @import("core/lane.zig");
 const rt = @import("hip/runtime.zig");
 const objects = @import("turboexl3_hip_objects");
 
@@ -125,7 +125,7 @@ test "HIP lane reader: every lane's codewords and decoded values equal format.un
 // ---- dense projections ------------------------------------------------------------------------------------------
 
 const plan = @import("hip/plan.zig");
-const ref = @import("ref.zig");
+const ref = @import("core/ref.zig");
 
 /// One projection's weights on the host and the device.
 const Proj = struct {

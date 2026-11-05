@@ -1,17 +1,26 @@
 #!/usr/bin/env python3
-"""Check that turboexl3's Metal lives only in src/kernels/**.metal and that a change to it is only what was intended.
+"""Check that turboexl3's Metal lives only in kernels/**.metal files and that a change to it is only what was intended.
 
-usage: python3 tools/check_texts.py ORIG_SRC [NEW_SRC] [-v]
+usage: python3 tools/check_texts.py ORIG_SRC [NEW_SRC] [-v] [--split]
 
   ORIG_SRC  the sources before the change (a checkout's src/; for the move out of Zig, the tree with the Metal still
             inside it, e.g. afb52be: `git worktree add /tmp/t3-orig afb52be`, then /tmp/t3-orig/src)
   NEW_SRC   the sources after it (default: this repository's src/)
   -v        every kernel and text const, one line each
+  --split   a change that moves declarations between files: checks 1 to 4 over the whole tree (`split_report`)
 
 All on the host, no Zig needed. Both trees are tokenized and their texts evaluated: string literals, `@embedFile`, `++`,
 consts, `module.const`, `if` (a comptime condition: only the taken branch, as Zig analyzes it), `&.{ ... }`, labeled blocks
 and the files' own functions, with sentinel / replace / replaceOnce / spliceOnce / textSlice / textJoin / pins emulated as
 the Zig computes them, and `@hasDecl(sdk, name)` answered as the test build's sdk declares (SDK_DECLS).
+
+Both trees are read whole (every .zig under src/, each @import / @embedFile path relative to its file). Where NEW holds
+src/core and ORIG does not, the change is the move into src/core and src/models/<model> (MOVES): ORIG's files are read
+under their NEW paths, and an @import / @embedFile path compares by the file it names, so a file that names a moved file
+by its new relative path is the original token for token.
+
+0. Moves (the move only). Every ORIG file is at its NEW path (MOVES), every non-Zig file (the .metal, .hip and .hpp
+   texts) byte for byte; every NEW file is an ORIG file's image or listed in MOVE_ADDED.
 
 Equal but for comments and whitespace: the same C++ tokens (`ctoks`), with line breaks counted where the preprocessor
 sees them (a directive's end, a function-like macro's parenthesis). A kernel's source may differ in whitespace alone: MLX
@@ -38,7 +47,8 @@ comment there could change the kernel; its header may differ in comments too.
    every text const and kernel text exactly as often as before.
 5. Dumps. Every TURBOEXL3_METAL_DUMP translation unit printMetal prints is byte-identical, or equal but for comments and
    whitespace (listed; both printMetals emulated).
-6. Files. Every @embedFile path exists and every .metal file under src/kernels is embedded.
+6. Files. Every @embedFile path exists, every .metal file is embedded and lies in a kernels/ directory (beside the Zig
+   that embeds it: src/core/kernels/<module>/, src/models/<model>/kernels/<module>/).
 7. No Metal in Zig. No `\\\\` literal and no string literal holding Metal (a Metal token such as threadgroup, simd_,
    uint, half, float, device, #include, [[; or a punctuated string found verbatim in a .metal file) in any .zig under
    src/, except the ones listed by file and exact value with their reason (EXCEPTIONS).
@@ -198,8 +208,10 @@ OPEN, CLOSE = ('{', '(', '['), ('}', ')', ']')
 class Unit:
     """one .zig file: its comment-free tokens, top-level declarations, consts, functions, tests, locals and imports"""
 
-    def __init__(self, name, toks):
-        self.name = name
+    def __init__(self, name, toks, real=None):
+        self.name = name  # the file's path in the NEW tree, relative to src/ (ORIG's files under their moved path, MOVES)
+        self.real = real or name  # its path in its own tree (what its relative @import / @embedFile paths start from)
+        self.ck = None  # its tokens' keys, an @import / @embedFile path as the NEW file it names (Program.canon_keys)
         self.t = [x for x in toks if x.kind != 'comment']
         self.consts, self.fns, self.tests, self.locals, self.imports = {}, {}, {}, {}, {}
         self.decls = []  # (key, first token, past the last token)
@@ -369,8 +381,38 @@ NATIVES = {
 
 
 class Program:
-    def __init__(self, src_dir, units):
+    def __init__(self, src_dir, units, mapper=None):
         self.dir, self.units, self.cache = src_dir, units, {}
+        self.mapper = mapper or (lambda rel: rel)  # this tree's path -> the NEW tree's (MOVES for ORIG)
+        for u in units.values():
+            u.ck = self.canon_keys(u)
+
+    def real_path(self, unit, path):
+        """`path` as `unit` names it (@import / @embedFile: relative to the unit's own directory), from src/"""
+        return os.path.normpath(os.path.join(os.path.dirname(unit.real), path)).replace(os.sep, '/')
+
+    def canon(self, unit, path):
+        """the NEW tree's path of the file `unit` names by `path`"""
+        return self.mapper(self.real_path(unit, path))
+
+    def canon_keys(self, unit):
+        """the unit's token keys, each @import("x.zig") / @embedFile("...") path as the NEW file it names, so a declaration
+        that names a moved file by its new relative path is the original's token for token"""
+        t, out = unit.t, []
+        for k, x in enumerate(t):
+            if x.kind == 'str' and k >= 2 and t[k - 1].text == '(' and (t[k - 2].text == '@embedFile' or
+                                                                       (t[k - 2].text == '@import' and x.value.endswith('.zig'))):
+                out.append(('path', self.canon(unit, x.value)))
+            else:
+                out.append(x.key())
+        return out
+
+    def unit_of(self, unit, path):
+        """the unit `unit` imports by `path`"""
+        f = self.canon(unit, path)
+        if f not in self.units:
+            raise EvalError(f'no unit {f}')
+        return self.units[f]
 
     def const(self, unit, name, local_ok=False):
         key = (unit.name, name)
@@ -406,8 +448,8 @@ class Program:
             raise EvalError(f'{name}: no return')
         return r[1]
 
-    def embed(self, path):
-        full = os.path.normpath(os.path.join(self.dir, path))
+    def embed(self, unit, path):
+        full = os.path.normpath(os.path.join(self.dir, self.real_path(unit, path)))
         if not os.path.isfile(full):
             raise EvalError(f'no file {path}')
         return read_bytes(full).decode('utf-8')
@@ -510,7 +552,7 @@ class Eval:
             self.take('(')
             p = self.take()
             self.take(')')
-            return self.p.embed(p.value)
+            return self.p.embed(self.u, p.value)
         if x.kind == 'builtin' and x.text == '@hasDecl':  # @hasDecl(sdk, "name"): what the test build's sdk declares
             self.take()
             self.take('(')
@@ -528,9 +570,7 @@ class Eval:
             self.take(')')
             self.take('.')
             member = self.take().text
-            if f not in self.p.units:
-                raise EvalError(f'no unit {f}')
-            return self.member(self.p.units[f], member)
+            return self.member(self.p.unit_of(self.u, f), member)
         if x.text == '(':
             self.take()
             v = self.expr()
@@ -564,7 +604,7 @@ class Eval:
                 member = self.take().text
                 if x.text not in self.u.imports:
                     raise EvalError(f'{x.text} is not a .zig import')
-                return self.member(self.p.units[self.u.imports[x.text]], member)
+                return self.member(self.p.unit_of(self.u, self.u.imports[x.text]), member)
             if x.text in self.env:
                 return self.env[x.text]
             return self.p.const(self.u, x.text)
@@ -761,7 +801,7 @@ FREE_ORIG = [('id', '_'), ('op', '='), ('id', 'mlx'), ('op', '.'), ('id', 'mlx_f
 
 def free_new(f):
     """how NEW's file f calls the one kernel free (decode.zig's `freeKernel`)"""
-    return [('id', 'freeKernel')] if f == 'decode.zig' else [('id', 'decode'), ('op', '.'), ('id', 'freeKernel')]
+    return [('id', 'freeKernel')] if os.path.basename(f) == 'decode.zig' else [('id', 'decode'), ('op', '.'), ('id', 'freeKernel')]
 
 
 def free_rewritten(keys, f):
@@ -814,7 +854,7 @@ def align_test(oname, nname, f, ou, nu, oprog, nprog):
             j += len(fnew)
             frees += 1
             continue
-        if i <= ob and j <= nb and o[i].key() == n[j].key():
+        if i <= ob and j <= nb and ou.ck[i] == nu.ck[j]:
             i += 1
             j += 1
             continue
@@ -831,7 +871,7 @@ def align_test(oname, nname, f, ou, nu, oprog, nprog):
     return moved, frees, None
 
 
-def test_named(f, u, tname, otext, ntext):
+def test_named(f, u, tname, otext, ntext, prog):
     """{key: (ORIG value, NEW value)} of every text const test `tname` of NEW's unit u names (`x` or `module.x`)"""
     a, b = u.tests[tname]
     t, out = u.t, {}
@@ -839,7 +879,7 @@ def test_named(f, u, tname, otext, ntext):
         x = t[k]
         if x.kind == 'id' and t[k - 1].text != '.':
             if t[k + 1].text == '.' and x.text in u.imports and t[k + 2].kind == 'id':
-                key = (u.imports[x.text], t[k + 2].text)
+                key = (prog.canon(u, u.imports[x.text]), t[k + 2].text)
             else:
                 key = (f, x.text)
             if key in otext and key in ntext:
@@ -853,7 +893,7 @@ def test_literals(u, tname):
     t, lits, pins = u.t, set(), []
     for k in range(a, b):
         if t[k].kind == 'str' and t[k].value:
-            if t[k - 2].text == '@embedFile' and t[k].value.startswith('kernels/test/pins/'):
+            if t[k - 2].text == '@embedFile' and 'kernels/test/pins/' in t[k].value:
                 pins.append(t[k].value)
             elif t[k - 2].text not in ('@embedFile', '@import'):
                 lits.add(t[k].value)
@@ -1141,6 +1181,26 @@ ADDED_FILES['banked_test.zig'] = ('the banked decode\'s tests: its texts\' compo
                                   'against moeClamped on its bank byte for byte and sampled pairs against '
                                   'ref.moeRowClamped (GPU), its timing against moeClamped\'s launches '
                                   '(TURBOEXL3_BANKED_TIME)')
+# Ricursive Ripple-65B (src/models/ricursive): two linears of one input in one DEC-ONE launch, the value residual and the
+# clamped SwiGLU in dense's prepares, and their tests
+ADDED_FILES['ricursive.zig'] = ('Ripple-65B\'s joined DEC-ONE launches (turboexl3_ric_jdec1, _jdec1_blend: dense\'s DEC-ONE '
+                                'text with the member\'s suh chosen after its head) and the prepares that form v\'s value '
+                                'residual and the MLP\'s clamped SwiGLU (turboexl3_ric_blend_prep, _swiglu_prep, '
+                                '_swiglu_prep_sc: dense\'s prep and prep_sc reading x through an accessor)')
+ADDED_FILES['ricursive_test.zig'] = ('Ripple-65B\'s tests: linear against format.project at every shape (K3, the head K6); the '
+                                     'joined launches, valueLinear and mlp against the host\'s chains word for word')
+ADDED[('root.zig', 'const ricursive')] = 'Ripple-65B\'s module (models/ricursive/ricursive.zig)'
+CHANGED[('root.zig', 'const shared_state')] = 'registers ricursive.shared_state'
+
+# the split of the model variants out of the core (split-model-variants; check_texts --split)
+ADDED_FILES['f3.zig'] = 'F3 (DeepSeek-V4.1\'s shared expert at decode rows), out of dense.zig and root.zig'
+ADDED_FILES['banked.zig'] = 'DeepSeek-V4.1\'s banked decode, out of decode.zig\'s Kernels3 (`Banked` beside a geometry\'s Kernels3)'
+ADDED_FILES['shared.zig'] = 'Qwen3.8\'s gated shared expert and router in the routed decode launches, out of decode.zig\'s Kernels3 (`SharedHeads` beside a geometry\'s Kernels3)'
+ADDED_FILES['models/qwen38/api.zig'] = 'Qwen3.8\'s entry points, out of root.zig (root re-exports each by name)'
+ADDED_FILES['models/deepseek_v41/api.zig'] = 'DeepSeek-V4.1\'s entry points, out of root.zig (root re-exports each by name)'
+ADDED_FILES['chains_test.zig'] = ('byte tests of the core paths no other test pinned: pg2 against dequantize + matmul + '
+                                  'finish, the pieces\' finish against the one-call finish, the unfused chain against the '
+                                  'reference')
 
 
 def metal_strings(fn, toks, corpus):
@@ -1174,8 +1234,13 @@ HIP_TOKENS = ('__global__', '__device__', '__shared__', '__launch_bounds__', 'th
               '__syncthreads', '__builtin_amdgcn', 'hip_runtime')
 
 
+def hip_root(src):
+    """(flags.zig, kernels/hip) of a tree"""
+    return os.path.join(src, 'hip', 'flags.zig'), os.path.join(src, 'kernels', 'hip')
+
+
 def hip_files(src):
-    root = os.path.join(src, 'kernels', 'hip')
+    root = hip_root(src)[1]
     out = {}
     if not os.path.isdir(root):
         return out
@@ -1195,7 +1260,7 @@ def hip_entries(text):
 def hip_report(orig_dir, new_dir, problems):
     new = hip_files(new_dir)
     old = hip_files(orig_dir)
-    flags_path = os.path.join(new_dir, 'hip', 'flags.zig')
+    flags_path = hip_root(new_dir)[0]
     listed = set()
     if os.path.exists(flags_path):
         with open(flags_path, encoding='utf-8') as fh:
@@ -1230,10 +1295,227 @@ def hip_report(orig_dir, new_dir, problems):
     print(f'   {len(new)} HIP files ({same} the original, {cw} equal but for comments and whitespace); '
           f'{len(listed)} listed in flags.zig; {zig_hits} Zig strings holding HIP\n')
 
+# ------------------------------------------------------------------------------------------------------------- moves
+
+# The move of src/ into src/core and src/models/<model> (organize-by-model): each ORIG path's NEW path, the first rule
+# whose ORIG prefix matches (a rule without a trailing / is one file). Each Zig file's Metal sits in a kernels/ directory
+# beside it, so a moved file's own @embedFile paths are unchanged; an @import or @embedFile across folders names the
+# same file by a new relative path, which Program.canon_keys compares by the file it names.
+MOVES = [
+    ('root.zig', 'root.zig'),
+    ('tests.zig', 'tests.zig'),
+    # Qwen3.8-Flash-Next: the gated attention's projections (ATTN-IN / ATTN-OUT), the decode-row merges, the GDN tail
+    ('attn_io.zig', 'models/qwen38/attn_io.zig'),
+    ('attn_io_test.zig', 'models/qwen38/attn_io_test.zig'),
+    ('decb.zig', 'models/qwen38/decb.zig'),
+    ('decb_test.zig', 'models/qwen38/decb_test.zig'),
+    ('gdn_out.zig', 'models/qwen38/gdn_out.zig'),
+    ('gdn_out_test.zig', 'models/qwen38/gdn_out_test.zig'),
+    ('kernels/decb/had128.metal', 'core/kernels/sources/had128.metal'),
+    ('kernels/attn_io/', 'models/qwen38/kernels/attn_io/'),
+    ('kernels/decb/', 'models/qwen38/kernels/decb/'),
+    ('kernels/gdn_out/', 'models/qwen38/kernels/gdn_out/'),
+    ('kernels/test/pins/attn_io_', 'models/qwen38/kernels/test/pins/attn_io_'),
+    ('kernels/test/pins/decb_', 'models/qwen38/kernels/test/pins/decb_'),
+    ('kernels/test/pins/gdn_out.metal', 'models/qwen38/kernels/test/pins/gdn_out.metal'),
+    # DeepSeek-V4.1: the grouped wo_a, the trunk, F3, the clamped SwiGLU at its geometry, the banked decode
+    ('grouped.zig', 'models/deepseek_v41/grouped.zig'),
+    ('deepseek_test.zig', 'models/deepseek_v41/deepseek_test.zig'),
+    ('deepseek_gemv_test.zig', 'models/deepseek_v41/deepseek_gemv_test.zig'),
+    ('f3_test.zig', 'models/deepseek_v41/f3_test.zig'),
+    ('clamped_test.zig', 'models/deepseek_v41/clamped_test.zig'),
+    ('banked_test.zig', 'models/deepseek_v41/banked_test.zig'),
+    ('banked_grp_test.zig', 'models/deepseek_v41/banked_grp_test.zig'),
+    ('banked_ilp_test.zig', 'models/deepseek_v41/banked_ilp_test.zig'),
+    ('kernels/grouped/', 'models/deepseek_v41/kernels/grouped/'),
+    ('kernels/test/pins/grouped_gemv_d.metal', 'models/deepseek_v41/kernels/test/pins/grouped_gemv_d.metal'),
+    ('kernels/test/pins/decode_banked.metal', 'models/deepseek_v41/kernels/test/pins/decode_banked.metal'),
+    # sources.zig's texts (more than one kernel splices them)
+    ('kernels/decode/gate_gemv.metal', 'core/kernels/sources/gate_gemv.metal'),
+    ('kernels/decode/gate_sum.metal', 'core/kernels/sources/gate_sum.metal'),
+    # the AMD backend stays where it is (an outside consumer vendors these paths)
+    ('hip/', 'hip/'),
+    ('hip_tests.zig', 'hip_tests.zig'),
+    ('kernels/hip/', 'kernels/hip/'),
+    # the shared core: every other file
+    ('kernels/', 'core/kernels/'),
+    ('', 'core/'),
+]
+# files the move adds that are no ORIG file's image (not code: checked by nothing else)
+MOVE_ADDED = ('models/qwen38/README.md', 'models/deepseek_v41/README.md')
+
+
+def moved_path(rel):
+    """ORIG path `rel` (from src/) -> its NEW path, by MOVES"""
+    for (a, b) in MOVES:
+        if (a.endswith('/') or a == '') and rel.startswith(a):
+            return b + rel[len(a):]
+        if rel == a:
+            return b
+    return rel
+
+
+def tree_files(d, exts=None):
+    """every file under d (relative, '/'-separated, sorted), those ending in one of exts when given"""
+    out = []
+    for root, dirs, files in os.walk(d):
+        dirs[:] = [x for x in dirs if not x.startswith('.') and x not in ('zig-out', '.zig-cache')]
+        for f in files:
+            if f.startswith('.') or (exts and not f.endswith(exts)):
+                continue
+            out.append(os.path.relpath(os.path.join(root, f), d).replace(os.sep, '/'))
+    return sorted(out)
+
+
+def moves_report(orig_dir, new_dir, problems):
+    """every ORIG file exists at its NEW path, every non-Zig file byte for byte (a Zig file is checked by 1 to 9); every
+    NEW file is an ORIG file's image or listed in MOVE_ADDED"""
+    ofiles, nfiles = tree_files(orig_dir), set(tree_files(new_dir))
+    images, by_ext, same, kept = set(), {}, 0, 0
+    for rel in ofiles:
+        new = moved_path(rel)
+        images.add(new)
+        if new not in nfiles:
+            problems.append(f'{rel}: not at its NEW path {new}')
+            continue
+        kept += new == rel
+        if not rel.endswith('.zig'):
+            if read_bytes(os.path.join(orig_dir, rel)) == read_bytes(os.path.join(new_dir, new)):
+                same += 1
+            else:
+                problems.append(f'{rel} -> {new}: bytes differ')
+        top = new.split('/')[0] if new.split('/')[0] != 'models' else '/'.join(new.split('/')[:2])
+        by_ext.setdefault((top, os.path.splitext(rel)[1]), 0)
+        by_ext[(top, os.path.splitext(rel)[1])] += 1
+    extra = sorted(nfiles - images)
+    for f in extra:
+        if f not in MOVE_ADDED:
+            problems.append(f'{f}: in NEW, no ORIG file\'s image and not in MOVE_ADDED')
+    print(f'   {len(ofiles)} ORIG files: {kept} at the same path, {len(ofiles) - kept} moved; '
+          f'{same} non-Zig files byte for byte at their new path')
+    print('   ' + ', '.join(f'{top}/ {n} {ext}' for (top, ext), n in sorted(by_ext.items())))
+    print(f'   added: {", ".join(f for f in extra if f in MOVE_ADDED) or "none"}\n')
+
+
+def path_of(base, units):
+    """the unit path whose file name is `base` (basenames are unique in src/), else `base`"""
+    hits = [f for f in units if os.path.basename(f) == base]
+    return hits[0] if len(hits) == 1 else base
+
+
+def rekey_tables(units):
+    """the tables of earlier changes name files by their name in src/: key them by the file's path"""
+    for tbl in (RECUT, RECOMPOSED, REMOVED, ADDED, CHANGED, ADDED_KERNELS, RENAMED_TESTS):
+        items = list(tbl.items())
+        tbl.clear()
+        tbl.update({(path_of(f, units), x): v for ((f, x), v) in items})
+    items = list(ADDED_FILES.items())
+    ADDED_FILES.clear()
+    ADDED_FILES.update({path_of(f, units): v for (f, v) in items})
+
+
+# ------------------------------------------------------------------------------------------------------------- split
+
+# --split against a base: the kernels whose texts a change means to change, the kernels it adds, and the text consts
+# whose values it changes, each with what changed (anything else that differs fails). They hold one change's entries
+# while it is checked against its base and are emptied after it lands, so a later run allows nothing by them (aa0222f's
+# joint layout used them: turboexl3_ric_jdec1 and _blend changed, the two interleaved test references added)
+SPLIT_CHANGED_KERNELS = {}
+SPLIT_ADDED_KERNELS = {}
+SPLIT_CHANGED_CONSTS = {}
+
+def split_report(oprog, nprog, ounits, nunits, orig_dir, new_dir, problems, verbose):
+    """--split (declarations moved between files, not only files): checks 1 to 4 over the whole tree instead of per file.
+    1. Every kernel name either tree can make (tools/kernel_docs.py's list: the computed-name families included) is in
+       both, with the same set of source and header texts. 2. Every text const keeps its value under its name, in
+       whatever file it now lives. 3. Declarations and 4. tests are reported (moved, changed), not compared: the proof
+       of a split is 1 and 2, the suite and the doc check."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('kernel_docs', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'kernel_docs.py'))
+    kd = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(kd)
+    print('1. kernels (split): every kernel name, its source and header texts, across the whole tree')
+    ok_ = kd.kernels(orig_dir)
+    nk = kd.kernels(new_dir)
+
+    def texts(calls):
+        return {(str(c['source']), str(c['header'])) for c in calls}
+
+    same = 0
+    for name in sorted(set(ok_) | set(nk)):
+        if name not in nk:
+            problems.append(f'kernel {name}: removed')
+            continue
+        if name not in ok_:
+            if name in SPLIT_ADDED_KERNELS:
+                print(f'   added (intended) {name}: {SPLIT_ADDED_KERNELS[name]}')
+            else:
+                problems.append(f'kernel {name}: added')
+            continue
+        to, tn = texts(ok_[name]), texts(nk[name])
+        fo = sorted({c['file'] for c in ok_[name]})
+        fn = sorted({c['file'] for c in nk[name]})
+        if to != tn and name in SPLIT_CHANGED_KERNELS:
+            print(f'   changed (intended) {name}: {SPLIT_CHANGED_KERNELS[name]}')
+        elif to != tn:
+            problems.append(f'kernel {name}: its texts differ ({len(to)} before, {len(tn)} after)')
+        else:
+            same += 1
+        if verbose or fo != fn:
+            print(f'   {name:36s} {",".join(fo)} -> {",".join(fn)}{"" if to == tn else "  DIFFERS"}')
+    print(f'   {len(ok_)} kernel names before, {len(nk)} after: {same} with every source and header identical\n')
+
+    print('2. text consts (split): every text const keeps its value under its name, wherever it lives')
+
+    def consts(units, prog):
+        out = {}
+        for f, u in units.items():
+            for c in u.consts:
+                try:
+                    v = prog.const(u, c)
+                except EvalError:
+                    continue
+                if isinstance(v, str):
+                    out.setdefault(c, {})[f] = str(v)
+        return out
+
+    oc, nc = consts(ounits, oprog), consts(nunits, nprog)
+    moved = kept = 0
+    for name, where in sorted(oc.items()):
+        for f, v in where.items():
+            if name in nc and f in nc[name] and nc[name][f] == v:
+                kept += 1
+            elif name in nc and v in nc[name].values():
+                moved += 1
+                g = next(g for g, w in nc[name].items() if w == v)
+                if verbose:
+                    print(f'   moved {name}: {f} -> {g}')
+            elif name in nc and f in nc[name] and name in SPLIT_CHANGED_CONSTS:
+                print(f'   changed (intended) {f} {name}: {SPLIT_CHANGED_CONSTS[name]}')
+            elif name in nc and f in nc[name]:
+                problems.append(f'{f} {name}: value differs')
+            else:
+                print(f'   gone  {f} {name} (its value no NEW const of that name holds: checked through the kernels in 1)')
+    print(f'   {kept} in place, {moved} moved with their values\n')
+
+    print('3. declarations (split): reported')
+    od = {(f, k): [x for x in ounits[f].ck[a:b]] for f in ounits for (k, a, b) in ounits[f].decls}
+    nd = {(f, k): [x for x in nunits[f].ck[a:b]] for f in nunits for (k, a, b) in nunits[f].decls}
+    same = sum(1 for k in od if k in nd and od[k] == nd[k])
+    print(f'   {len(od)} before, {len(nd)} after: {same} token for token in place; the rest moved or changed\n')
+
+    print('4. tests (split): every test name kept')
+    ot = {t for u in ounits.values() for t in u.tests}
+    nt = {t for u in nunits.values() for t in u.tests}
+    for t in sorted(ot - nt):
+        problems.append(f'test "{t[:70]}" missing')
+    print(f'   {len(ot)} tests before, {len(nt)} after, {len(nt - ot)} added\n')
+
 
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith('-')]
     verbose = '-v' in sys.argv[1:]
+    split = '--split' in sys.argv[1:]
     if not args:
         print(__doc__)
         sys.exit(2)
@@ -1242,16 +1524,23 @@ def main():
     print(f'ORIG {orig_dir}\nNEW  {new_dir}\n')
     problems = []
 
-    def load(d):
+    def load(d, mapper):
+        """every .zig under d, keyed by its path in the NEW tree"""
         units = {}
-        for f in sorted(os.listdir(d)):
-            if f.endswith('.zig'):
-                with open(os.path.join(d, f), encoding='utf-8', newline='') as fh:
-                    units[f] = Unit(f, tokenize(fh.read(), f))
+        for rel in tree_files(d, ('.zig',)):
+            with open(os.path.join(d, rel), encoding='utf-8', newline='') as fh:
+                units[mapper(rel)] = Unit(mapper(rel), tokenize(fh.read(), rel), real=rel)
         return units
 
-    ounits, nunits = load(orig_dir), load(new_dir)
-    oprog, nprog = Program(orig_dir, ounits), Program(new_dir, nunits)
+    # 0. moves: ORIG's files at their NEW paths (MOVES), when the change is the move into src/core and src/models
+    moving = os.path.isdir(os.path.join(new_dir, 'core')) and not os.path.isdir(os.path.join(orig_dir, 'core'))
+    omap = moved_path if moving else (lambda rel: rel)
+    if moving:
+        print('0. moves: every file of ORIG at its NEW path (MOVES), every kernel file byte for byte')
+        moves_report(orig_dir, new_dir, problems)
+    ounits, nunits = load(orig_dir, omap), load(new_dir, lambda rel: rel)
+    oprog, nprog = Program(orig_dir, ounits, omap), Program(new_dir, nunits)
+    rekey_tables(nunits)
     added_files = []
     for f in sorted(set(ounits) ^ set(nunits)):
         if f in nunits and f in ADDED_FILES:
@@ -1259,272 +1548,275 @@ def main():
         else:
             problems.append(f'{f}: only in {"ORIG" if f in ounits else "NEW"}')
 
-    # 1. kernels
-    print('1. kernels: every newKernel call\'s source and header, original vs new')
-    n_calls = n_same = 0
-    names, cw, gone, added_k = set(), [], [], []
-    orig_texts = []
-    new_calls = {f: kernel_calls(nprog, u) for f, u in nunits.items()}
-    new_names = {c[0] for cs in new_calls.values() for c in cs}
-    for f in sorted(ounits):
-        if f not in nunits:
-            continue
-        co, cn = kernel_calls(oprog, ounits[f]), new_calls[f]
-        orig_texts += [(f, c[0], c[2], c[3]) for c in co]
-        kept = []
-        for c in co:
-            dk = enclosing(ounits[f], c[4])
-            if (f, dk) in REMOVED:
-                gone.append((c[0], f, dk))
-            else:
-                kept.append(c)
-        # a kernel the change added (ADDED_KERNELS: a name the original file does not call) is set aside and listed
-        onames = {c[0] for c in co}
-        same_calls = []
-        for c in cn:
-            if (f, c[0]) in ADDED_KERNELS and c[0] not in onames:
-                added_k.append((f, c))
-            else:
-                same_calls.append(c)
-        cn = same_calls
-        if [c[0] for c in kept] != [c[0] for c in cn]:
-            problems.append(f'{f}: newKernel calls differ in names or order (past the calls of removed declarations)')
-            continue
-        for (name, line, so, ho, _), (_, nline, sn, hn, _) in zip(kept, cn):
-            n_calls += 1
-            names.add(name)
-            bad = [x for x in (so, ho, sn, hn) if isinstance(x, EvalError)]
-            if bad:
-                problems.append(f'{f}:{nline} {name}: not evaluable ({bad[0]})')
+    if split:
+        split_report(oprog, nprog, ounits, nunits, orig_dir, new_dir, problems, verbose)
+    else:
+        # 1. kernels
+        print('1. kernels: every newKernel call\'s source and header, original vs new')
+        n_calls = n_same = 0
+        names, cw, gone, added_k = set(), [], [], []
+        orig_texts = []
+        new_calls = {f: kernel_calls(nprog, u) for f, u in nunits.items()}
+        new_names = {c[0] for cs in new_calls.values() for c in cs}
+        for f in sorted(ounits):
+            if f not in nunits:
                 continue
-            ok = so == sn and ho == hn
-            n_same += ok
-            if ok:
-                status = 'identical'
-            elif (so == sn or same_but_cw(so, sn, comments=True)) and (ho == hn or same_but_cw(ho, hn)):
-                status = ', '.join(x for x in ('source: whitespace' if so != sn else '', 'header: comments / whitespace' if ho != hn else '') if x)
-                cw.append((name, so != sn, ho != hn))
-            else:
-                status = 'DIFFERS'
-                problems.append(f'{f}:{nline} {name}: {"source" if so != sn else "header"} differs '
-                                f'{"beyond whitespace" if so != sn else "beyond comments and whitespace"}')
-            if verbose:
-                print(f'   {name:34s} {f + ":" + str(nline):18s} source {len(sn.encode()):6d} B {sha(sn)}  header {len(hn.encode()):6d} B {sha(hn)}  '
-                      f'{status}')
-    print(f'   {n_calls} calls ({len(names)} kernel names): {n_same} identical, {len(cw)} equal but for comments and whitespace, '
-          f'{n_calls - n_same - len(cw)} not')
-    if cw:
-        src_ws = [k for (k, s, _) in cw if s]
-        hdr_cw = [k for (k, _, h) in cw if h]
-        if src_ws:
-            print(f'   source differs in whitespace alone ({len(src_ws)}): {", ".join(src_ws)}')
-        if hdr_cw:
-            print(f'   header differs in comments and whitespace alone ({len(hdr_cw)}): {", ".join(hdr_cw)}')
-    if gone:
-        by_decl = {}
-        for (name, f, dk) in gone:
-            by_decl.setdefault((f, dk), []).append(name)
-        print(f'   removed with their declarations ({len(gone)} calls):')
-        for (f, dk), ns in by_decl.items():
-            print(f'     {f} {dk}: {", ".join(ns)}')
-        dropped = sorted({n for (n, _, _) in gone} - new_names)
-        print(f'   kernels removed ({len(dropped)}): {", ".join(dropped)}')
-        for n in sorted({n for (n, _, _) in gone} & new_names):
-            left = sum(1 for cs in new_calls.values() for c in cs if c[0] == n)
-            print(f'   kept: {n} ({sum(1 for g in gone if g[0] == n)} of its calls removed, {left} left)')
-    if added_k:
-        def of_orig(f, text, i, comments):
-            """the original kernel (file f's first) whose source (i 2) or header (i 3) is `text`: (name, exact) or None"""
-            rows = [r for r in orig_texts if r[0] == f] + [r for r in orig_texts if r[0] != f]
-            for row in rows:
-                if row[i] == text:
-                    return row[1], True
-            for row in rows:
-                if not isinstance(row[i], EvalError) and same_but_cw(row[i], text, comments=comments):
-                    return row[1], False
-            return None
-
-        print(f'   added on purpose ({len(added_k)} calls):')
-        for (f, (name, nline, sn, hn, _)) in added_k:
-            bad = [x for x in (sn, hn) if isinstance(x, EvalError)]
-            if bad:
-                problems.append(f'{f}:{nline} {name}: not evaluable ({bad[0]})')
+            co, cn = kernel_calls(oprog, ounits[f]), new_calls[f]
+            orig_texts += [(f, c[0], c[2], c[3]) for c in co]
+            kept = []
+            for c in co:
+                dk = enclosing(ounits[f], c[4])
+                if (f, dk) in REMOVED:
+                    gone.append((c[0], f, dk))
+                else:
+                    kept.append(c)
+            # a kernel the change added (ADDED_KERNELS: a name the original file does not call) is set aside and listed
+            onames = {c[0] for c in co}
+            same_calls = []
+            for c in cn:
+                if (f, c[0]) in ADDED_KERNELS and c[0] not in onames:
+                    added_k.append((f, c))
+                else:
+                    same_calls.append(c)
+            cn = same_calls
+            if [c[0] for c in kept] != [c[0] for c in cn]:
+                problems.append(f'{f}: newKernel calls differ in names or order (past the calls of removed declarations)')
                 continue
-            print(f'     {name} ({f}:{nline}): {ADDED_KERNELS[(f, name)]}')
-            for (what, text, i, comments) in (('source', sn, 2, True), ('header', hn, 3, False)):
-                o = of_orig(f, text, i, comments)
-                near = ' but for whitespace' if comments else ' but for comments and whitespace'
-                kind = 'a new text' if o is None else (f"{o[0]}'s {what}" + ('' if o[1] else near))
-                print(f'       {what} {len(text.encode()):6d} B {sha(text)}: {kind}')
-    print()
-
-    # 2. text consts
-    print('2. text consts: every top-level const both trees evaluate to a string')
-    same = diff = 0
-    otext, ntext = {}, {}
-    for units, prog, store in ((ounits, oprog, otext), (nunits, nprog, ntext)):
-        for f, u in units.items():
-            for c in u.consts:
-                try:
-                    v = prog.const(u, c)
-                except EvalError:
+            for (name, line, so, ho, _), (_, nline, sn, hn, _) in zip(kept, cn):
+                n_calls += 1
+                names.add(name)
+                bad = [x for x in (so, ho, sn, hn) if isinstance(x, EvalError)]
+                if bad:
+                    problems.append(f'{f}:{nline} {name}: not evaluable ({bad[0]})')
                     continue
-                if isinstance(v, str):
-                    store[(f, c)] = v
-    cw_consts = []
-    for key in sorted(set(otext) & set(ntext)):
-        if otext[key] == ntext[key]:
-            same += 1
-        elif key in RECUT:
-            print(f'   {key[0]} {key[1]}: recut piece, {RECUT[key]}')
-        elif same_but_cw(otext[key], ntext[key]):
-            cw_consts.append(f'{key[0]} {key[1]}')
-        else:
-            diff += 1
-            problems.append(f'{key[0]} {key[1]}: values differ beyond comments and whitespace')
-        if verbose:
-            print(f'   {key[0]:13s} {key[1]:24s} {len(ntext[key].encode()):6d} B {sha(ntext[key])}  '
-                  f'{"identical" if otext[key] == ntext[key] else ("comments / whitespace" if f"{key[0]} {key[1]}" in cw_consts else "DIFFERS")}')
-    print(f'   {same} identical, {len(cw_consts)} equal but for comments and whitespace, {diff} differ; {len(set(otext) - set(ntext))} only in '
-          f'the original, {len(set(ntext) - set(otext))} only in the new (listed in 3)')
-    if cw_consts:
-        print(f'   comments / whitespace ({len(cw_consts)}): {", ".join(cw_consts)}')
-    print()
-
-    # 3. declarations
-    print('3. declarations: every other top-level declaration token for token the original')
-    helpers = {'fn spliceOnce', 'fn textSlice', 'fn textWithSecond', 'fn textWithSecondOf', 'fn replaceOnce'}
-    composers = {'fn gemmText', 'fn gemmSmallText', 'fn gemmMixedText', 'fn pins'}
-    n_same = 0
-    changed, removed, added = [], [], []
-    for f in sorted(set(ounits) & set(nunits)):
-        ou, nu = ounits[f], nunits[f]
-        od = {k: (a, b) for (k, a, b) in ou.decls}
-        back = {f'test {new}': f'test {old}' for ((rf, old), new) in RENAMED_TESTS.items() if rf == f and old in ou.tests and new in nu.tests}
-        nd = {back.get(k, k): (a, b) for (k, a, b) in nu.decls}
-        for key in od:
-            if key not in nd:
-                if (f, key) in REMOVED:
-                    kind = REMOVED[(f, key)]
-                elif (f, key.split(' ', 1)[1]) in otext and key.startswith('const '):
-                    kind = 'text'
+                ok = so == sn and ho == hn
+                n_same += ok
+                if ok:
+                    status = 'identical'
+                elif (so == sn or same_but_cw(so, sn, comments=True)) and (ho == hn or same_but_cw(ho, hn)):
+                    status = ', '.join(x for x in ('source: whitespace' if so != sn else '', 'header: comments / whitespace' if ho != hn else '') if x)
+                    cw.append((name, so != sn, ho != hn))
                 else:
-                    kind = 'splice helper' if key in helpers else ('dump harness (5)' if (f, key) == ('prefill.zig', 'const MetalArg') else None)
-                removed.append((f, key, kind))
-                if kind is None:
-                    problems.append(f'{f}: {key} removed')
-                continue
-            ot = [x.key() for x in ou.t[od[key][0]:od[key][1]]]
-            nt = [x.key() for x in nu.t[nd[key][0]:nd[key][1]]]
-            if ot == nt:
-                n_same += 1
-                continue
-            name = key.split(' ', 1)[1]
-            rw, n_rw = free_rewritten(ot, f)
-            if key.startswith('const ') and (f, name) in RECUT:
-                changed.append((f, key, 'recut piece (2)'))
-            elif key.startswith('const ') and (f, name) in otext and (f, name) in ntext:
-                changed.append((f, key, 'text const, same value' if otext[(f, name)] == ntext[(f, name)] else
-                                ('text const, comments / whitespace (2)' if same_but_cw(otext[(f, name)], ntext[(f, name)]) else 'TEXT DIFFERS')))
-            elif (f, key) in RECOMPOSED:
-                changed.append((f, key, RECOMPOSED[(f, key)]))
-            elif (f, key) in CHANGED:
-                changed.append((f, key, CHANGED[(f, key)]))
-            elif key.startswith('test '):
-                changed.append((f, key, 'test (4, 5)' + (', renamed' if key in back.values() else '')))
-            elif key == 'fn printMetal' and f == 'prefill.zig':
-                changed.append((f, key, 'dump printer (5)'))
-            elif n_rw and rw == nt:
-                changed.append((f, key, f"kernel free through the consumer's API ({n_rw}: freeKernel)"))
-            else:
-                changed.append((f, key, 'UNEXPECTED'))
-                problems.append(f'{f}: {key} changed')
-        for key in nd:
-            if key not in od:
-                if (f, key) in ADDED:
-                    kind = ADDED[(f, key)]
-                else:
-                    kind = 'piece / text' if key.startswith('const ') and (f, key.split(' ', 1)[1]) in ntext else ('composition' if key in composers else None)
-                added.append((f, key, kind))
-                if kind is None:
-                    problems.append(f'{f}: {key} added')
-    print(f'   {n_same} identical; {len(changed)} changed, {len(removed)} removed, {len(added)} added:')
-    for f in added_files:
-        print(f'     added    {f:13s} file: {ADDED_FILES[f]}')
-    for (f, key, why) in changed:
-        if why != 'text const, same value' or verbose:
-            print(f'     changed  {f:13s} {key[:90]:90s} {why}')
-    print(f'     changed  {sum(1 for c in changed if c[2] == "text const, same value")} text consts, same value (-v lists them)')
-    by_why = {}
-    for (f, key, kind) in removed:
-        if kind in ('text', 'splice helper', 'dump harness (5)', None):
-            print(f'     removed  {f:13s} {key:40s} {kind or "UNEXPECTED"}')
-        else:
-            by_why.setdefault((f, kind), []).append(key.split(' ', 1)[1])
-    for (f, why), keys in by_why.items():
-        print(f'     removed  {f:13s} {", ".join(keys)}: {why}')
-    by_kind = {}
-    for (f, key, kind) in added:
-        by_kind.setdefault((f, kind), []).append(key.split(' ', 1)[1])
-    for (f, kind), keys in sorted(by_kind.items(), key=lambda x: (x[0][0], str(x[0][1]))):
-        print(f'     added    {f:13s} {kind or "UNEXPECTED"}: {", ".join(keys)}')
-    print()
+                    status = 'DIFFERS'
+                    problems.append(f'{f}:{nline} {name}: {"source" if so != sn else "header"} differs '
+                                    f'{"beyond whitespace" if so != sn else "beyond comments and whitespace"}')
+                if verbose:
+                    print(f'   {name:34s} {f + ":" + str(nline):18s} source {len(sn.encode()):6d} B {sha(sn)}  header {len(hn.encode()):6d} B {sha(hn)}  '
+                          f'{status}')
+        print(f'   {n_calls} calls ({len(names)} kernel names): {n_same} identical, {len(cw)} equal but for comments and whitespace, '
+              f'{n_calls - n_same - len(cw)} not')
+        if cw:
+            src_ws = [k for (k, s, _) in cw if s]
+            hdr_cw = [k for (k, _, h) in cw if h]
+            if src_ws:
+                print(f'   source differs in whitespace alone ({len(src_ws)}): {", ".join(src_ws)}')
+            if hdr_cw:
+                print(f'   header differs in comments and whitespace alone ({len(hdr_cw)}): {", ".join(hdr_cw)}')
+        if gone:
+            by_decl = {}
+            for (name, f, dk) in gone:
+                by_decl.setdefault((f, dk), []).append(name)
+            print(f'   removed with their declarations ({len(gone)} calls):')
+            for (f, dk), ns in by_decl.items():
+                print(f'     {f} {dk}: {", ".join(ns)}')
+            dropped = sorted({n for (n, _, _) in gone} - new_names)
+            print(f'   kernels removed ({len(dropped)}): {", ".join(dropped)}')
+            for n in sorted({n for (n, _, _) in gone} & new_names):
+                left = sum(1 for cs in new_calls.values() for c in cs if c[0] == n)
+                print(f'   kept: {n} ({sum(1 for g in gone if g[0] == n)} of its calls removed, {left} left)')
+        if added_k:
+            def of_orig(f, text, i, comments):
+                """the original kernel (file f's first) whose source (i 2) or header (i 3) is `text`: (name, exact) or None"""
+                rows = [r for r in orig_texts if r[0] == f] + [r for r in orig_texts if r[0] != f]
+                for row in rows:
+                    if row[i] == text:
+                        return row[1], True
+                for row in rows:
+                    if not isinstance(row[i], EvalError) and same_but_cw(row[i], text, comments=comments):
+                        return row[1], False
+                return None
 
-    # 4 and 5. tests and dumps
-    print('4. tests: each test compares the original\'s strings, now read from .metal files')
-    n_tests = n_moved = n_conv = n_free = n_needle = 0
-    for f in sorted(set(ounits) & set(nunits)):
-        ou, nu = ounits[f], nunits[f]
-        renamed_to = {old: new for ((rf, old), new) in RENAMED_TESTS.items() if rf == f and old in ou.tests and new in nu.tests}
-        for name in ou.tests:
-            nname = renamed_to.get(name, name)
-            if nname not in nu.tests:
-                problems.append(f'{f}: test "{name[:60]}" missing')
-                continue
-            if nname != name:
-                print(f'   {f:13s} renamed "{name[:70]}" -> "{nname[:70]}"')
-            if name in DUMP_TESTS:
-                continue
-            n_tests += 1
-            moved, frees, err = align_test(name, nname, f, ou, nu, oprog, nprog)
-            if err:
-                problems.append(f'{f}: test "{name[:60]}": {err}')
-            if moved:
-                n_conv += 1
-                n_moved += moved
-                print(f'   {f:13s} {moved:3d} strings  "{name[:80]}"')
-            if frees:
-                n_free += frees
-                print(f'   {f:13s} {frees:3d} free(s) through freeKernel  "{nname[:70]}"')
-        for name in nu.tests:
-            if name not in ou.tests and name not in renamed_to.values():
-                problems.append(f'{f}: test "{name[:60]}" added')
-            named = test_named(f, nu, name, otext, ntext)
-            lits, pin_files = test_literals(nu, name)
-            needles = [(o, n, 'count', f'{k[0]} {k[1]}') for k, (o, n) in named.items()]
-            for pf in pin_files:
-                needles += [(v, v, 'count', f'{pf}: {v[:50]}') for v in n_pins(nprog.embed(pf)) if v]
-            needles += [(v, v, 'presence', repr(v[:50])) for v in sorted(lits)]
-            for (on, nn, mode, what) in needles:
-                for key, (oh, nh) in named.items():
-                    if on == nn and oh == nh:
+            print(f'   added on purpose ({len(added_k)} calls):')
+            for (f, (name, nline, sn, hn, _)) in added_k:
+                bad = [x for x in (sn, hn) if isinstance(x, EvalError)]
+                if bad:
+                    problems.append(f'{f}:{nline} {name}: not evaluable ({bad[0]})')
+                    continue
+                print(f'     {name} ({f}:{nline}): {ADDED_KERNELS[(f, name)]}')
+                for (what, text, i, comments) in (('source', sn, 2, True), ('header', hn, 3, False)):
+                    o = of_orig(f, text, i, comments)
+                    near = ' but for whitespace' if comments else ' but for comments and whitespace'
+                    kind = 'a new text' if o is None else (f"{o[0]}'s {what}" + ('' if o[1] else near))
+                    print(f'       {what} {len(text.encode()):6d} B {sha(text)}: {kind}')
+        print()
+
+        # 2. text consts
+        print('2. text consts: every top-level const both trees evaluate to a string')
+        same = diff = 0
+        otext, ntext = {}, {}
+        for units, prog, store in ((ounits, oprog, otext), (nunits, nprog, ntext)):
+            for f, u in units.items():
+                for c in u.consts:
+                    try:
+                        v = prog.const(u, c)
+                    except EvalError:
                         continue
-                    n_needle += 1
-                    co, cn = oh.count(on), nh.count(nn)
-                    if (co != cn) if mode == 'count' else ((co > 0) != (cn > 0)):
-                        problems.append(f'{f}: test "{name[:40]}": {what} in {key[0]} {key[1]}: found {co} times before, {cn} after')
-    print(f'   {n_tests} tests aligned; {n_conv} read {n_moved} strings from files, each the original string; {n_free} kernel frees '
-          'through freeKernel')
-    print(f'   needles: in every text const a test names, its pin lines and the text consts it names are found exactly as '
-          f'often as before, its string literals where they were before ({n_needle} counts where a needle or a text changed)\n')
+                    if isinstance(v, str):
+                        store[(f, c)] = v
+        cw_consts = []
+        for key in sorted(set(otext) & set(ntext)):
+            if otext[key] == ntext[key]:
+                same += 1
+            elif key in RECUT:
+                print(f'   {key[0]} {key[1]}: recut piece, {RECUT[key]}')
+            elif same_but_cw(otext[key], ntext[key]):
+                cw_consts.append(f'{key[0]} {key[1]}')
+            else:
+                diff += 1
+                problems.append(f'{key[0]} {key[1]}: values differ beyond comments and whitespace')
+            if verbose:
+                print(f'   {key[0]:13s} {key[1]:24s} {len(ntext[key].encode()):6d} B {sha(ntext[key])}  '
+                      f'{"identical" if otext[key] == ntext[key] else ("comments / whitespace" if f"{key[0]} {key[1]}" in cw_consts else "DIFFERS")}')
+        print(f'   {same} identical, {len(cw_consts)} equal but for comments and whitespace, {diff} differ; {len(set(otext) - set(ntext))} only in '
+              f'the original, {len(set(ntext) - set(otext))} only in the new (listed in 3)')
+        if cw_consts:
+            print(f'   comments / whitespace ({len(cw_consts)}): {", ".join(cw_consts)}')
+        print()
+
+        # 3. declarations
+        print('3. declarations: every other top-level declaration token for token the original')
+        helpers = {'fn spliceOnce', 'fn textSlice', 'fn textWithSecond', 'fn textWithSecondOf', 'fn replaceOnce'}
+        composers = {'fn gemmText', 'fn gemmSmallText', 'fn gemmMixedText', 'fn pins'}
+        n_same = 0
+        changed, removed, added = [], [], []
+        for f in sorted(set(ounits) & set(nunits)):
+            ou, nu = ounits[f], nunits[f]
+            od = {k: (a, b) for (k, a, b) in ou.decls}
+            back = {f'test {new}': f'test {old}' for ((rf, old), new) in RENAMED_TESTS.items() if rf == f and old in ou.tests and new in nu.tests}
+            nd = {back.get(k, k): (a, b) for (k, a, b) in nu.decls}
+            for key in od:
+                if key not in nd:
+                    if (f, key) in REMOVED:
+                        kind = REMOVED[(f, key)]
+                    elif (f, key.split(' ', 1)[1]) in otext and key.startswith('const '):
+                        kind = 'text'
+                    else:
+                        kind = 'splice helper' if key in helpers else ('dump harness (5)' if (os.path.basename(f), key) == ('prefill.zig', 'const MetalArg') else None)
+                    removed.append((f, key, kind))
+                    if kind is None:
+                        problems.append(f'{f}: {key} removed')
+                    continue
+                ot = ou.ck[od[key][0]:od[key][1]]
+                nt = nu.ck[nd[key][0]:nd[key][1]]
+                if ot == nt:
+                    n_same += 1
+                    continue
+                name = key.split(' ', 1)[1]
+                rw, n_rw = free_rewritten(ot, f)
+                if key.startswith('const ') and (f, name) in RECUT:
+                    changed.append((f, key, 'recut piece (2)'))
+                elif key.startswith('const ') and (f, name) in otext and (f, name) in ntext:
+                    changed.append((f, key, 'text const, same value' if otext[(f, name)] == ntext[(f, name)] else
+                                    ('text const, comments / whitespace (2)' if same_but_cw(otext[(f, name)], ntext[(f, name)]) else 'TEXT DIFFERS')))
+                elif (f, key) in RECOMPOSED:
+                    changed.append((f, key, RECOMPOSED[(f, key)]))
+                elif (f, key) in CHANGED:
+                    changed.append((f, key, CHANGED[(f, key)]))
+                elif key.startswith('test '):
+                    changed.append((f, key, 'test (4, 5)' + (', renamed' if key in back.values() else '')))
+                elif key == 'fn printMetal' and os.path.basename(f) == 'prefill.zig':
+                    changed.append((f, key, 'dump printer (5)'))
+                elif n_rw and rw == nt:
+                    changed.append((f, key, f"kernel free through the consumer's API ({n_rw}: freeKernel)"))
+                else:
+                    changed.append((f, key, 'UNEXPECTED'))
+                    problems.append(f'{f}: {key} changed')
+            for key in nd:
+                if key not in od:
+                    if (f, key) in ADDED:
+                        kind = ADDED[(f, key)]
+                    else:
+                        kind = 'piece / text' if key.startswith('const ') and (f, key.split(' ', 1)[1]) in ntext else ('composition' if key in composers else None)
+                    added.append((f, key, kind))
+                    if kind is None:
+                        problems.append(f'{f}: {key} added')
+        print(f'   {n_same} identical; {len(changed)} changed, {len(removed)} removed, {len(added)} added:')
+        for f in added_files:
+            print(f'     added    {f:13s} file: {ADDED_FILES[f]}')
+        for (f, key, why) in changed:
+            if why != 'text const, same value' or verbose:
+                print(f'     changed  {f:13s} {key[:90]:90s} {why}')
+        print(f'     changed  {sum(1 for c in changed if c[2] == "text const, same value")} text consts, same value (-v lists them)')
+        by_why = {}
+        for (f, key, kind) in removed:
+            if kind in ('text', 'splice helper', 'dump harness (5)', None):
+                print(f'     removed  {f:13s} {key:40s} {kind or "UNEXPECTED"}')
+            else:
+                by_why.setdefault((f, kind), []).append(key.split(' ', 1)[1])
+        for (f, why), keys in by_why.items():
+            print(f'     removed  {f:13s} {", ".join(keys)}: {why}')
+        by_kind = {}
+        for (f, key, kind) in added:
+            by_kind.setdefault((f, kind), []).append(key.split(' ', 1)[1])
+        for (f, kind), keys in sorted(by_kind.items(), key=lambda x: (x[0][0], str(x[0][1]))):
+            print(f'     added    {f:13s} {kind or "UNEXPECTED"}: {", ".join(keys)}')
+        print()
+
+        # 4 and 5. tests and dumps
+        print('4. tests: each test compares the original\'s strings, now read from .metal files')
+        n_tests = n_moved = n_conv = n_free = n_needle = 0
+        for f in sorted(set(ounits) & set(nunits)):
+            ou, nu = ounits[f], nunits[f]
+            renamed_to = {old: new for ((rf, old), new) in RENAMED_TESTS.items() if rf == f and old in ou.tests and new in nu.tests}
+            for name in ou.tests:
+                nname = renamed_to.get(name, name)
+                if nname not in nu.tests:
+                    problems.append(f'{f}: test "{name[:60]}" missing')
+                    continue
+                if nname != name:
+                    print(f'   {f:13s} renamed "{name[:70]}" -> "{nname[:70]}"')
+                if name in DUMP_TESTS:
+                    continue
+                n_tests += 1
+                moved, frees, err = align_test(name, nname, f, ou, nu, oprog, nprog)
+                if err:
+                    problems.append(f'{f}: test "{name[:60]}": {err}')
+                if moved:
+                    n_conv += 1
+                    n_moved += moved
+                    print(f'   {f:13s} {moved:3d} strings  "{name[:80]}"')
+                if frees:
+                    n_free += frees
+                    print(f'   {f:13s} {frees:3d} free(s) through freeKernel  "{nname[:70]}"')
+            for name in nu.tests:
+                if name not in ou.tests and name not in renamed_to.values():
+                    problems.append(f'{f}: test "{name[:60]}" added')
+                named = test_named(f, nu, name, otext, ntext, nprog)
+                lits, pin_files = test_literals(nu, name)
+                needles = [(o, n, 'count', f'{k[0]} {k[1]}') for k, (o, n) in named.items()]
+                for pf in pin_files:
+                    needles += [(v, v, 'count', f'{pf}: {v[:50]}') for v in n_pins(nprog.embed(nu, pf)) if v]
+                needles += [(v, v, 'presence', repr(v[:50])) for v in sorted(lits)]
+                for (on, nn, mode, what) in needles:
+                    for key, (oh, nh) in named.items():
+                        if on == nn and oh == nh:
+                            continue
+                        n_needle += 1
+                        co, cn = oh.count(on), nh.count(nn)
+                        if (co != cn) if mode == 'count' else ((co > 0) != (cn > 0)):
+                            problems.append(f'{f}: test "{name[:40]}": {what} in {key[0]} {key[1]}: found {co} times before, {cn} after')
+        print(f'   {n_tests} tests aligned; {n_conv} read {n_moved} strings from files, each the original string; {n_free} kernel frees '
+              'through freeKernel')
+        print(f'   needles: in every text const a test names, its pin lines and the text consts it names are found exactly as '
+              f'often as before, its string literals where they were before ({n_needle} counts where a needle or a text changed)\n')
 
     print('5. dumps: every TURBOEXL3_METAL_DUMP unit printMetal prints, original vs new')
     n_units = n_same = 0
     cw_units = []
     for name in DUMP_TESTS:
         try:
-            oo = dump_outputs(oprog, ounits['prefill.zig'], name)
-            no = dump_outputs(nprog, nunits['prefill.zig'], name)
+            oo = dump_outputs(oprog, ounits[path_of('prefill.zig', nunits)], name)
+            no = dump_outputs(nprog, nunits[path_of('prefill.zig', nunits)], name)
         except (EvalError, AssertionError, KeyError) as e:
             problems.append(f'dump test "{name[:50]}": {e}')
             continue
@@ -1548,7 +1840,7 @@ def main():
     for f, u in nunits.items():
         for k in range(len(u.t) - 3):
             if u.t[k].text == '@embedFile' and u.t[k + 2].kind == 'str':
-                full = os.path.normpath(os.path.join(new_dir, u.t[k + 2].value))
+                full = os.path.normpath(os.path.join(new_dir, nprog.real_path(u, u.t[k + 2].value)))
                 embedded.setdefault(full, []).append(f'{f}:{u.t[k].line}')
                 if not os.path.isfile(full):
                     problems.append(f'{f}:{u.t[k].line}: @embedFile("{u.t[k + 2].value}"): no such file')
@@ -1561,8 +1853,8 @@ def main():
                 corpus.append(read_bytes(full).decode('utf-8'))
                 if full not in embedded:
                     problems.append(f'{os.path.relpath(full, new_dir)} is embedded nowhere')
-                if not os.path.relpath(full, new_dir).startswith('kernels' + os.sep):
-                    problems.append(f'{os.path.relpath(full, new_dir)} lies outside src/kernels')
+                if 'kernels' not in os.path.relpath(full, new_dir).split(os.sep)[:-1]:
+                    problems.append(f'{os.path.relpath(full, new_dir)} lies outside a kernels/ directory')
     dirs = {}
     for m in metal:
         d = os.path.dirname(os.path.relpath(m, new_dir))
@@ -1578,7 +1870,7 @@ def main():
             toks = tokenize(fh.read(), f)
         hits = metal_strings(f, toks, corpus_s)
         for (line, kind, v) in hits:
-            reason = EXCEPTIONS.get((f, v))
+            reason = EXCEPTIONS.get((os.path.basename(f), v))
             if reason:
                 n_exc += 1
                 print(f'   exception {f}:{line} ({"multiline" if kind == "mlstr" else "string"}): {reason}')
@@ -1612,4 +1904,5 @@ def main():
           'every removal and addition is a listed one, no Metal is left inside Zig, and every kernel free is freeKernel\'s')
 
 
-main()
+if __name__ == '__main__':
+    main()

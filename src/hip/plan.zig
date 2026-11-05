@@ -3,7 +3,7 @@
 //! own HIP runtime (TensorFold) binds them to its own. The partition rules are dense.zig's (`Dense.ksFor`, `btFor`,
 //! `rbCap`, `chainRb`), so a row's sums do not depend on the rows beside it.
 const std = @import("std");
-const format = @import("../format.zig");
+const format = @import("../core/format.zig");
 
 /// A buffer a launch reads or writes, bound by the host.
 pub const Role = enum {
