@@ -51,14 +51,15 @@ turboexl3 is designed to work with the MLX versions of turboderp's packs. These 
 file layout that mlx-serve loads; nothing is quantized again. The repacks are made with
 [qwen38-exl3-mlx-serve-converter](https://github.com/OpenSourceWTF/qwen38-exl3-mlx-serve-converter):
 
-| bpw | turboderp's branch | MLX repack | download | KLD vs BF16 | perplexity |
-|---|---|---|---:|---:|---:|
-| 2.05 | [2.05bpw_h4_ng4](https://huggingface.co/turboderp/Qwen3.8-Flash-Next-exl3/tree/2.05bpw_h4_ng4) | [OpensourceWTF/Qwen3.8-Flash-Next-EXL3-2.05-mlx-serve](https://huggingface.co/OpensourceWTF/Qwen3.8-Flash-Next-EXL3-2.05-mlx-serve) | 63.1 GB | 0.0681 | 1.4871 |
-| 3.05 | [3.05bpw_h5_ng5](https://huggingface.co/turboderp/Qwen3.8-Flash-Next-exl3/tree/3.05bpw_h5_ng5) | [OpensourceWTF/Qwen3.8-Flash-Next-EXL3-3.05-mlx-serve](https://huggingface.co/OpensourceWTF/Qwen3.8-Flash-Next-EXL3-3.05-mlx-serve) | 85.4 GB | 0.0174 | 1.4074 |
-| 4.05 | [4.05bpw_h6_ng6](https://huggingface.co/turboderp/Qwen3.8-Flash-Next-exl3/tree/4.05bpw_h6_ng6) | [OpensourceWTF/Qwen3.8-Flash-Next-EXL3-4.05-mlx-serve](https://huggingface.co/OpensourceWTF/Qwen3.8-Flash-Next-EXL3-4.05-mlx-serve) | 107.6 GB | 0.0066 | 1.3897 |
-| 5.05 | [5.05bpw_h6_ng6](https://huggingface.co/turboderp/Qwen3.8-Flash-Next-exl3/tree/5.05bpw_h6_ng6) | [OpensourceWTF/Qwen3.8-Flash-Next-EXL3-5.05-mlx-serve](https://huggingface.co/OpensourceWTF/Qwen3.8-Flash-Next-EXL3-5.05-mlx-serve) | 123.4 GB | 0.0040 | 1.3848 |
+| bpw | turboderp's branch | MLX repack | download | n-gram table, not in the branch | KLD vs BF16 | perplexity |
+|---|---|---|---:|---:|---:|---:|
+| 2.05 | [2.05bpw_h4_ng4](https://huggingface.co/turboderp/Qwen3.8-Flash-Next-exl3/tree/2.05bpw_h4_ng4) | [OpensourceWTF/Qwen3.8-Flash-Next-exl3@2.05bpw](https://huggingface.co/OpensourceWTF/Qwen3.8-Flash-Next-exl3/tree/2.05bpw) | 36.85 GB | 26.24 GB | 0.0681 | 1.4871 |
+| 3.05 | [3.05bpw_h5_ng5](https://huggingface.co/turboderp/Qwen3.8-Flash-Next-exl3/tree/3.05bpw_h5_ng5) | [OpensourceWTF/Qwen3.8-Flash-Next-exl3@3.05bpw](https://huggingface.co/OpensourceWTF/Qwen3.8-Flash-Next-exl3/tree/3.05bpw) | 52.72 GB | 32.64 GB | 0.0174 | 1.4074 |
+| 4.05 | [4.05bpw_h6_ng6](https://huggingface.co/turboderp/Qwen3.8-Flash-Next-exl3/tree/4.05bpw_h6_ng6) | [OpensourceWTF/Qwen3.8-Flash-Next-exl3@4.05bpw](https://huggingface.co/OpensourceWTF/Qwen3.8-Flash-Next-exl3/tree/4.05bpw) | 68.59 GB | 39.04 GB | 0.0066 | 1.3897 |
+| 5.05 | [5.05bpw_h6_ng6](https://huggingface.co/turboderp/Qwen3.8-Flash-Next-exl3/tree/5.05bpw_h6_ng6) | [OpensourceWTF/Qwen3.8-Flash-Next-exl3@5.05bpw](https://huggingface.co/OpensourceWTF/Qwen3.8-Flash-Next-exl3/tree/5.05bpw) | 84.38 GB | 39.04 GB | 0.0040 | 1.3848 |
 
-Each download includes the pack's n-gram table. The KLD and perplexity columns are turboderp's, read from the charts on
+The branches do not include the n-gram table: [the repo's card](https://huggingface.co/OpensourceWTF/Qwen3.8-Flash-Next-exl3#the-n-gram-table)
+says where each one comes from. The KLD and perplexity columns are turboderp's, read from the charts on
 [his model card](https://huggingface.co/turboderp/Qwen3.8-Flash-Next-exl3): the mean KL divergence D_KL(p_BF16 ‖
 p_quant) and the perplexity over a self-generated in-domain trace (14,496 input and 45,588 output tokens), measured with
 exllamav3 on his files. On that trace BF16 has a perplexity of 1.38474, and the KLD noise floor is 0.00262. The repacks
