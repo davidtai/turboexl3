@@ -9,7 +9,13 @@
 //!   member's `linear` (v's on the host's blend: astype f32, subtract, multiply, add, astype), word for word, at every
 //!   decode row count the joined launch serves. Lines: TURBOEXL3_RIC_JOINT.
 //! - `ricursive.valueLinear` at prefill rows against the host's blend then `linear`, word for word.
-//! - `ricursive.mlp` (with and without gate | up joined) against `linear(gate)`, `linear(up)`, the host's clamped SwiGLU
+//! - the joint's layout: its launches against the joined text before the end-to-end layout (the members interleaved
+//!   along OUT, `kernels/test/jsel_interleaved.metal`), word for word; each member's view (`Joint.members`) through
+//!   `root.linear` against the member's own arrays, word for word, at every path's rows; the views are the joint's
+//!   words, no copy: their data at the joint's (member 1 offset by member 0's words), row-contiguous strides (so no
+//!   kernel's row-contiguous input copies them), and `join` adds one copy of the members' words to MLX's active memory,
+//!   not two. Lines: TURBOEXL3_RIC_LAYOUT.
+//! - `ricursive.mlp` (gate | up joined, or each member's view where the joined launch does not serve) against `linear(gate)`, `linear(up)`, the host's clamped SwiGLU
 //!   in the activation dtype (MLX's minimum, clip, sigmoid and two multiplies) and `linear(down)`, word for word, at rows
 //!   1 to 6, 8 and 16 (decode) and 17, 32, 33 and 64 (prefill), the gate and up scaled so the clamp at 20 is reached.
 //!   Lines: TURBOEXL3_RIC_MLP.
@@ -326,15 +332,126 @@ test "turboexl3 gpu ricursive mlp: gate | up, the clamped SwiGLU in the down's p
                 std.debug.print("TURBOEXL3_RIC_MLP_CLAMP rows=64 x={s} gates_over={d}/{d} ups_over={d}/{d}\n", .{ @tagName(dt), over[0], nel, over[1], nel });
                 try testing.expect(over[0] > 0 and over[1] > 0);
             }
-            for ([_]bool{ true, false }) |joined| {
-                const y = try g.adopt(try ric.mlp(s, x, gate, up, down, if (joined) gu else null, lim, sigtab, .mul1));
-                const d = try wordsDiffer(a, &g, y, want, rows * ric.hidden);
-                lines += 1;
-                bad += @intFromBool(d != 0);
-                std.debug.print("TURBOEXL3_RIC_MLP rows={d} x={s} gate_up={s} differing={d}/{d} {s}\n", .{ rows, @tagName(dt), if (joined and ric.jointPlan(gu, .mul1, rows) != null) "joined" else "two linears", d, rows * ric.hidden, if (d == 0) "OK" else "DIFFER" });
-            }
+            const y = try g.adopt(try ric.mlp(s, x, gu, down, lim, sigtab, .mul1));
+            const d = try wordsDiffer(a, &g, y, want, rows * ric.hidden);
+            lines += 1;
+            bad += @intFromBool(d != 0);
+            std.debug.print("TURBOEXL3_RIC_MLP rows={d} x={s} gate_up={s} differing={d}/{d} {s}\n", .{ rows, @tagName(dt), if (rows <= 16 and ric.jointPlan(gu, .mul1, rows) != null) "joined" else "two linears", d, rows * ric.hidden, if (d == 0) "OK" else "DIFFER" });
         }
     }
     std.debug.print("TURBOEXL3_RIC_MLP_DONE lines={d} differing_lines={d} {s}\n", .{ lines, bad, if (bad == 0) "BYTES_OK" else "BYTES_DIFFER" });
+    try testing.expectEqual(@as(usize, 0), bad);
+}
+
+// ── the joint's layout ──
+
+extern "c" fn mlx_get_active_memory(res: *usize) c_int;
+extern "c" fn mlx_array_data_uint16(arr: A) ?[*]const u16;
+
+const ks = sdk.kernel_launch;
+const dense = @import("../../core/dense.zig");
+const decode = @import("../../core/decode.zig");
+/// the joined launch's member choice before the end-to-end layout: the suh alone (the members interleaved along OUT)
+const jsel_interleaved = @embedFile("kernels/test/jsel_interleaved.metal");
+const body_interleaved = dense.dec_prep1 ++ dense.dec_gemv1 ++ dense.dec_gemv_arrive ++ dense.dec_xsum1 ++ dense.dec_finish_v ++ dense.dec_finish_store;
+const text_interleaved: [:0]const u8 = dense.dec_head ++ jsel_interleaved ++ body_interleaved;
+const text_interleaved_blend: [:0]const u8 = dense.dec_head ++ jsel_interleaved ++ ric.blend_struct ++ ric.blend_member ++ body_interleaved;
+
+test "turboexl3 gpu ricursive joint layout: the end-to-end joint gives the interleaved joint's words, each member's view gives its own linear's words, and the views copy nothing (TURBOEXL3_GPU=1)" {
+    _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    const s = mlx.mlx_default_gpu_stream_new();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    const a = std.heap.page_allocator;
+    var g = try G.init(a, s);
+    defer g.deinit();
+    var prng = std.Random.DefaultPrng.init(0x81C2);
+    const rnd = prng.random();
+    const n = ric.n_linear;
+    const kin = [_][*:0]const u8{ "x", "suh0", "suh1", "w", "svh", "cnt" };
+    const kin_blend = [_][*:0]const u8{ "xa", "x0", "blend", "suh0", "suh1", "w", "svh", "cnt" };
+    const kout = [_][*:0]const u8{ "y", "z", "xsx" };
+    const k_il = ks.newKernel("turboexl3_test_ric_jdec1_interleaved", &kin, &kout, text_interleaved, decode.header5, true) orelse return error.KernelCreateFailed;
+    defer decode.freeKernel(k_il);
+    const k_ilb = ks.newKernel("turboexl3_test_ric_jdec1_blend_interleaved", &kin_blend, &kout, text_interleaved_blend, decode.header5, true) orelse return error.KernelCreateFailed;
+    defer decode.freeKernel(k_ilb);
+    const blend = try g.hostArray(std.mem.sliceAsBytes(&[_]f32{0.3775406688}), &.{1}, .float32);
+    var bad: usize = 0;
+    var lines: usize = 0;
+    const Pair = struct { name: []const u8, out: u32, blend: bool };
+    for ([_]Pair{ .{ .name = "q,g", .out = ric.q_out, .blend = false }, .{ .name = "k,v", .out = ric.kv_out, .blend = true }, .{ .name = "gate,up", .out = ric.ffn, .blend = false } }) |pr| {
+        const pm = g.mark();
+        defer g.resetTo(pm);
+        const m0 = try randProj(a, &g, rnd, ric.hidden, pr.out, n, 1);
+        const m1 = try randProj(a, &g, rnd, ric.hidden, pr.out, n, 1);
+        try g.evalAll(&.{ m0.trellis, m1.trellis, m0.svh, m1.svh, m0.suh, m1.suh });
+        var act0: usize = 0;
+        try mlx.check(mlx_get_active_memory(&act0));
+        var j = try ric.join(s, m0, m1);
+        defer j.deinit();
+        var act1: usize = 0;
+        try mlx.check(mlx_get_active_memory(&act1));
+        // the members interleaved along OUT: the joint before the end-to-end layout
+        var il = mlx.mlx_array_new();
+        {
+            const both = [_]A{ m0.trellis, m1.trellis };
+            const vec = mlx.mlx_vector_array_new_data(&both, 2);
+            defer _ = mlx.mlx_vector_array_free(vec);
+            try mlx.check(mlx.mlx_concatenate_axis(&il, vec, 1, s));
+        }
+        const ilt = try g.adopt(il);
+        // the views share the joint's buffer: member 0 at its start, member 1 after member 0's words
+        try g.evalAll(&.{ilt});
+        const base = mlx_array_data_uint16(j.trellis) orelse return error.NoData;
+        const p0 = mlx_array_data_uint16(j.members[0].trellis) orelse return error.NoData;
+        const p1 = mlx_array_data_uint16(j.members[1].trellis) orelse return error.NoData;
+        const len0 = mlx.mlx_array_size(j.members[0].trellis);
+        const shares = p0 == base and p1 == base + len0 and mlx.mlx_array_size(j.trellis) == 2 * len0;
+        // row-contiguous strides: [IN/16, OUT/16, NHW] at (OUT/16 NHW, NHW, 1), what MLX reads as row-contiguous
+        var dense_strides = true;
+        for (j.members) |mv| {
+            const sh = mlx.getShape(mv.trellis);
+            const st = mlx.mlx_array_strides(mv.trellis);
+            dense_strides = dense_strides and st[2] == 1 and st[1] == @as(usize, @intCast(sh[2])) and st[0] == @as(usize, @intCast(sh[1] * sh[2]));
+        }
+        // one copy of the members' words (the joint's trellis and svh), not two: under a quarter of a member's words more
+        const joint_bytes = 2 * len0 * 2 + 2 * pr.out * 2;
+        const grew = act1 -| act0;
+        const one_copy = grew <= joint_bytes + len0 / 2;
+        const ok = shares and dense_strides and one_copy;
+        lines += 1;
+        bad += @intFromBool(!ok);
+        std.debug.print("TURBOEXL3_RIC_LAYOUT {s} views_share_joint={} row_contiguous={} join_grew={d} joint_bytes={d} {s}\n", .{ pr.name, shares, dense_strides, grew, joint_bytes, if (ok) "OK" else "DIFFER" });
+        for ([_]mlx.mlx_dtype{ .bfloat16, .float32 }) |dt| for ([_]u32{ 1, 2, 3, 4, 5, 6, 8, 16, 17, 64 }) |rows| {
+            const rm = g.mark();
+            defer g.resetTo(rm);
+            const x = try randX(a, &g, rnd, rows, ric.hidden, dt);
+            const x0 = try randX(a, &g, rnd, rows, ric.hidden, dt);
+            // the joined launch against the interleaved joint's, where it serves
+            if (rows <= 16) if (ric.jointPlan(j, .mul1, rows)) |p| {
+                const y = try g.adopt(if (pr.blend) try ric.jointLinearBlend(s, x, x0, blend, j, .mul1) else try ric.jointLinear(s, x, j, .mul1));
+                const b1 = try g.reshape(blend, &.{1});
+                const w = try g.adopt(if (pr.blend)
+                    try ric.jointLaunch(s, k_ilb, true, &.{ x, x0, b1, j.suh0, j.suh1, ilt, j.svh }, j, .mul1, rows, dt, p)
+                else
+                    try ric.jointLaunch(s, k_il, false, &.{ x, j.suh0, j.suh1, ilt, j.svh }, j, .mul1, rows, dt, p));
+                const d = try wordsDiffer(a, &g, y, w, rows * 2 * pr.out);
+                lines += 1;
+                bad += @intFromBool(d != 0);
+                std.debug.print("TURBOEXL3_RIC_LAYOUT {s} joined rows={d} x={s} vs_interleaved differing={d}/{d} {s}\n", .{ pr.name, rows, @tagName(dt), d, rows * 2 * pr.out, if (d == 0) "OK" else "DIFFER" });
+            };
+            // each member's view through root.linear against the member's own arrays (DEC-ONE, the GEMV chain, the
+            // register path, dequantize + matmul)
+            if (dt == .float32 and rows != 1 and rows != 5 and rows != 17 and rows != 64) continue;
+            for ([_]root.Proj{ m0, m1 }, j.members, 0..) |own, mv, mi| {
+                const yv = try g.adopt(try root.linear(s, x, mv.trellis, mv.suh, mv.svh, .mul1));
+                const yo = try g.adopt(try root.linear(s, x, own.trellis, own.suh, own.svh, .mul1));
+                const d = try wordsDiffer(a, &g, yv, yo, rows * pr.out);
+                lines += 1;
+                bad += @intFromBool(d != 0);
+                std.debug.print("TURBOEXL3_RIC_LAYOUT {s} member={d} rows={d} x={s} view_vs_own differing={d}/{d} {s}\n", .{ pr.name, mi, rows, @tagName(dt), d, rows * pr.out, if (d == 0) "OK" else "DIFFER" });
+            }
+        };
+    }
+    std.debug.print("TURBOEXL3_RIC_LAYOUT_DONE lines={d} differing_lines={d} {s}\n", .{ lines, bad, if (bad == 0) "BYTES_OK" else "BYTES_DIFFER" });
     try testing.expectEqual(@as(usize, 0), bad);
 }

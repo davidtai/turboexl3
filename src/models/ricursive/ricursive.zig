@@ -5,11 +5,14 @@
 //! (5120 -> 100352). Its pack is uniform K3 (MUL1), the head K6. Every projection runs `root.linear`; this file adds
 //! what folds launches where several linears read one input or one linear's input is a cheap function of others':
 //!
-//! - `jointLinear`: two linears of one input in one DEC-ONE launch (q | g, gate | up): their trellises and svh joined
-//!   along OUT once at load (`join`), each threadgroup's prepare scaling x by its member's own suh (`text_jdec1`: dense's
-//!   DEC-ONE text with the prepare inside, `jsel.metal` choosing the suh). Each member's K split is its own linear's
-//!   (`Dense.ksFor(in, out)` of one member, so the members must share it), so y [rows, out0 + out1] holds each member's
-//!   `linear` bytes.
+//! - `jointLinear`: two linears of one input in one DEC-ONE launch (q | g, gate | up): their trellises joined end to end
+//!   and their svh along OUT once at load (`join`), each threadgroup's prepare scaling x by its member's own suh and its
+//!   GEMV reading its member's trellis (`text_jdec1`: dense's DEC-ONE text with the prepare inside, `jsel.metal`
+//!   choosing the member, `jtile.metal` its tile in place of `dense.dec_tile`). Each member's K split is its own
+//!   linear's (`Dense.ksFor(in, out)` of one member, so the members must share it), so y [rows, out0 + out1] holds each
+//!   member's `linear` bytes. The joint is the one resident copy: each member is a view of it (`Joint.members`, no copy),
+//!   which every per-member call (`root.linear`, `valueLinear`, `mlp`'s two linears) takes where the joined launch
+//!   does not serve.
 //! - `jointLinearBlend`: the same for k | v with v's input the value residual, formed in the prepare (`text_jdec1_blend`):
 //!   v's columns are `linear(v, T(x0 + blend (x - x0)))`'s bytes, the blend in f32 as the host's ops form it.
 //! - `valueLinear`: v alone at prefill rows, the blend in its prepare (`text_blend_prep`): the bytes of the host's blend
@@ -50,18 +53,21 @@ pub const n_head: u32 = 96;
 
 // ── texts ──
 
-/// the joined launches' member choice (the suh of the threadgroup's member)
+/// the joined launches' member choice (the suh, trellis base and output tiles of the threadgroup's member) and the
+/// GEMV's tile address in that member's trellis (in place of `dense.dec_tile`)
 const jsel = @embedFile("kernels/ricursive/jsel.metal");
+const jtile = @embedFile("kernels/ricursive/jtile.metal");
 /// the value residual's blend as the prepare reads x, and its two uses: member 1 of a joined launch, every element
-const blend_struct = @embedFile("kernels/ricursive/blend_struct.metal");
-const blend_member = @embedFile("kernels/ricursive/blend_member.metal");
+pub const blend_struct = @embedFile("kernels/ricursive/blend_struct.metal");
+pub const blend_member = @embedFile("kernels/ricursive/blend_member.metal");
 const blend_all = @embedFile("kernels/ricursive/blend_all.metal");
 /// the clamped SwiGLU of the gate's and up's outputs as the down's prepare reads x
 const swiglu_x = @embedFile("kernels/ricursive/swiglu_x.metal");
 
-/// DEC-ONE with the prepare inside (`dense.text_dec1`) after its head: the prepare, the GEMV, the arrival and the finish
-const dec1_body = dense.dec_prep1 ++ dense.dec_gemv1 ++ dense.dec_gemv_arrive ++ dense.dec_xsum1 ++ dense.dec_finish_v ++ dense.dec_finish_store;
-/// two members of one input x in one DEC-ONE launch: `dense.text_dec1` with the member's suh chosen after its head
+/// DEC-ONE with the prepare inside (`dense.text_dec1`) after its head: the prepare, the GEMV, the arrival and the finish,
+/// the GEMV's tile read in the threadgroup's member's trellis (`jtile`)
+const dec1_body = dense.dec_prep1 ++ dense.dec_gemv1 ++ dense.dec_gemv_arrive_1 ++ jtile ++ dense.dec_gemv_arrive_2 ++ dense.dec_xsum1 ++ dense.dec_finish_v ++ dense.dec_finish_store;
+/// two members of one input x in one DEC-ONE launch: `dense.text_dec1` with the member chosen after its head
 pub const text_jdec1: [:0]const u8 = dense.dec_head ++ jsel ++ dec1_body;
 /// the same with member 1's input the value residual's blend of xa and x0
 pub const text_jdec1_blend: [:0]const u8 = dense.dec_head ++ jsel ++ blend_struct ++ blend_member ++ dec1_body;
@@ -107,23 +113,51 @@ pub const shared_state = .{ kernel_lock, kernels };
 
 // ── joined members ──
 
-/// Two linears of one input joined along OUT: the trellis [in/16, (out0 + out1)/16, n] and svh [out0 + out1] (member 0's
-/// columns first), each member's own suh [in]. Made once per layer at load (`join`); `deinit` frees what it holds.
+/// Two linears of one input joined: the trellis flat, member 0's [in/16, out0/16, n] then member 1's [in/16, out1/16, n]
+/// (in/16 (out0 + out1)/16 n words), svh [out0 + out1] (member 0's columns first), each member's own suh [in], and the
+/// members as views of the joint (`members`: trellis [in/16, out_m/16, n] a contiguous range of `trellis`, svh a range
+/// of `svh`, the member's suh), so the joint is the one copy of its members' weights. Made once per layer at load
+/// (`join`); `deinit` frees what it holds, the views included.
 pub const Joint = struct {
     trellis: mlx.mlx_array,
     svh: mlx.mlx_array,
     suh0: mlx.mlx_array,
     suh1: mlx.mlx_array,
+    members: [2]root.Proj,
     in: u32,
     out0: u32,
     out1: u32,
     n: u32,
 
     pub fn deinit(j: *Joint) void {
+        for (j.members) |m| for ([_]mlx.mlx_array{ m.trellis, m.svh }) |a| {
+            _ = mlx.mlx_array_free(a);
+        };
         for ([_]mlx.mlx_array{ j.trellis, j.svh, j.suh0, j.suh1 }) |a| _ = mlx.mlx_array_free(a);
         j.* = undefined;
     }
 };
+
+/// The view of `a` from element `off`, `shape` (a contiguous range of a row-contiguous array: no copy), evaluated
+fn view(s: mlx.mlx_stream, a: mlx.mlx_array, off: usize, shape: []const c_int) !mlx.mlx_array {
+    var size: c_int = 1;
+    for (shape) |d| size *= d;
+    var flat = mlx.mlx_array_new();
+    defer _ = mlx.mlx_array_free(flat);
+    try mlx.check(mlx.mlx_slice(&flat, a, &[_]c_int{@intCast(off)}, 1, &[_]c_int{@as(c_int, @intCast(off)) + size}, 1, &[_]c_int{1}, 1, s));
+    var r = mlx.mlx_array_new();
+    errdefer _ = mlx.mlx_array_free(r);
+    try mlx.check(mlx.mlx_reshape(&r, flat, shape.ptr, shape.len, s));
+    try mlx.check(mlx.mlx_array_eval(r));
+    return r;
+}
+
+fn flat1(s: mlx.mlx_stream, a: mlx.mlx_array) !mlx.mlx_array {
+    var r = mlx.mlx_array_new();
+    errdefer _ = mlx.mlx_array_free(r);
+    try mlx.check(mlx.mlx_reshape(&r, a, &[_]c_int{@intCast(mlx.mlx_array_size(a))}, 1, s));
+    return r;
+}
 
 fn concat2(s: mlx.mlx_stream, a: mlx.mlx_array, b: mlx.mlx_array, axis: c_int) !mlx.mlx_array {
     const both = [_]mlx.mlx_array{ a, b };
@@ -136,8 +170,8 @@ fn concat2(s: mlx.mlx_stream, a: mlx.mlx_array, b: mlx.mlx_array, axis: c_int) !
     return r;
 }
 
-/// `a` and `b` (one input width, one rate, U16 or I16 trellises alike) joined along OUT, evaluated: the caller may drop
-/// the members' trellises and svh after (each suh is a new reference).
+/// `a` and `b` (one input width, one rate, U16 or I16 trellises alike) joined, evaluated (`Joint`): the caller frees the
+/// members' trellises and svh after, and runs each member through `Joint.members` (each suh is a new reference).
 pub fn join(s: mlx.mlx_stream, a: root.Proj, b: root.Proj) !Joint {
     const ta = mlx.getShape(a.trellis);
     const tb = mlx.getShape(b.trellis);
@@ -151,7 +185,11 @@ pub fn join(s: mlx.mlx_stream, a: root.Proj, b: root.Proj) !Joint {
         if (mlx.getShape(p.svh).len != 1 or mlx.getShape(p.svh)[0] != @as(c_int, @intCast(o))) return error.BadExl3Shape;
         if (mlx.mlx_array_dtype(p.suh) != .float16 or mlx.mlx_array_dtype(p.svh) != .float16) return error.BadExl3Dtype;
     }
-    const t = try concat2(s, a.trellis, b.trellis, 1);
+    const fa = try flat1(s, a.trellis);
+    defer _ = mlx.mlx_array_free(fa);
+    const fb = try flat1(s, b.trellis);
+    defer _ = mlx.mlx_array_free(fb);
+    const t = try concat2(s, fa, fb, 0);
     errdefer _ = mlx.mlx_array_free(t);
     const v = try concat2(s, a.svh, b.svh, 0);
     errdefer _ = mlx.mlx_array_free(v);
@@ -159,8 +197,27 @@ pub fn join(s: mlx.mlx_stream, a: root.Proj, b: root.Proj) !Joint {
     errdefer _ = mlx.mlx_array_free(s0);
     try mlx.check(mlx.mlx_array_set(&s0, a.suh));
     var s1 = mlx.mlx_array_new();
+    errdefer _ = mlx.mlx_array_free(s1);
     try mlx.check(mlx.mlx_array_set(&s1, b.suh));
-    return .{ .trellis = t, .svh = v, .suh0 = s0, .suh1 = s1, .in = in, .out0 = out0, .out1 = out1, .n = @intCast(ta[2]) };
+    const len0 = mlx.mlx_array_size(fa);
+    const t0 = try view(s, t, 0, &.{ ta[0], ta[1], ta[2] });
+    errdefer _ = mlx.mlx_array_free(t0);
+    const t1 = try view(s, t, len0, &.{ tb[0], tb[1], tb[2] });
+    errdefer _ = mlx.mlx_array_free(t1);
+    const v0 = try view(s, v, 0, &.{@intCast(out0)});
+    errdefer _ = mlx.mlx_array_free(v0);
+    const v1 = try view(s, v, out0, &.{@intCast(out1)});
+    return .{
+        .trellis = t,
+        .svh = v,
+        .suh0 = s0,
+        .suh1 = s1,
+        .members = .{ .{ .trellis = t0, .suh = s0, .svh = v0 }, .{ .trellis = t1, .suh = s1, .svh = v1 } },
+        .in = in,
+        .out0 = out0,
+        .out1 = out1,
+        .n = @intCast(ta[2]),
+    };
 }
 
 /// The joined launch's plan at `rows` rows, or null where it does not serve (the caller runs `linear` per member):
@@ -216,9 +273,14 @@ fn actDtype(d: mlx.mlx_dtype) !void {
     if (d != .bfloat16 and d != .float16 and d != .float32) return error.BadExl3Dtype;
 }
 
-/// The joined launch: `dec_zero`'s counters (a launch that waits on nothing) then `text_jdec1` (or `_blend`).
+/// The joined launch: `dec_zero`'s counters (a launch that waits on nothing) then `text_jdec1` (or `_blend`)
 fn jointRun(s: mlx.mlx_stream, kind: Kind, inputs: []const mlx.mlx_array, j: Joint, dec: format.Decode, rows: usize, xd: mlx.mlx_dtype, p: JointPlan) !mlx.mlx_array {
-    const k = try kernelOf(kind);
+    return jointLaunch(s, try kernelOf(kind), kind == .jdec1_blend, inputs, j, dec, rows, xd, p);
+}
+
+/// `jointRun` with kernel `k` (`blend`: its inputs and template are `text_jdec1_blend`'s): the tests run the joint's
+/// earlier text, over the members interleaved along OUT, through the same configs
+pub fn jointLaunch(s: mlx.mlx_stream, k: mlx.mlx_fast_metal_kernel, blend: bool, inputs: []const mlx.mlx_array, j: Joint, dec: format.Decode, rows: usize, xd: mlx.mlx_dtype, p: JointPlan) !mlx.mlx_array {
     const rate = format.Rate.fromN(j.n) orelse return error.BadExl3Shape;
     // DEC-ONE's counter zeroing, dense's own kernel (the member shape's Dense: its kernels only)
     const d = try root.denseCached(.{ .in = j.in, .out = j.out0, .rate = rate, .dec = dec, .out_dtype = xd });
@@ -251,7 +313,7 @@ fn jointRun(s: mlx.mlx_stream, kind: Kind, inputs: []const mlx.mlx_array, j: Joi
         .out_shapes = &.{ &[_]c_int{ r, @intCast(out) }, &[_]c_int{ @as(c_int, @intCast(p.ks)) * r, @intCast(out) }, &[_]c_int{@intCast(p.nx)} },
         .out_dtypes = &.{ xd, .float32, .float32 },
         // the plain launch has no T: its x is the input itself
-        .template = if (kind == .jdec1) tmpl[0 .. tmpl.len - 1] else &tmpl,
+        .template = if (!blend) tmpl[0 .. tmpl.len - 1] else &tmpl,
     });
     defer _ = mlx.mlx_fast_metal_kernel_config_free(cfg);
     var o: [3]mlx.mlx_array = undefined;
@@ -337,11 +399,14 @@ pub fn valueLinear(s: mlx.mlx_stream, x: mlx.mlx_array, x0: mlx.mlx_array, blend
 const Gu = struct { gate: mlx.mlx_array, up: mlx.mlx_array, stride: u32, uoff: u32 };
 
 /// Ripple's MLP of x [..., hidden]: down(clampedSwiGLU(gate(x), up(x), limit)) in x's dtype (bf16 or f16), [rows, out].
-/// `gu` (optional) is gate | up joined (`join`), taken where `jointLinear` serves; `lim` x's dtype, one element (the limit, 20; 0-d or [1]);
+/// `gu` is gate | up joined (`join`): one launch where `jointLinear` serves, else `linear` of each member's view
+/// (`gu.members`); `lim` x's dtype, one element (the limit, 20; 0-d or [1]);
 /// `sigtab` x's dtype [65536] (MLX's sigmoid of every 16-bit pattern, the host's table). The bytes of `linear(gate)`,
 /// `linear(up)`, the host's clamped SwiGLU and `linear(down)`. error.Exl3EngineNotImplemented where a step does not
 /// serve (the down's prepare inside its DEC-ONE launch), before its launches.
-pub fn mlp(s: mlx.mlx_stream, x: mlx.mlx_array, gate: root.Proj, up: root.Proj, down: root.Proj, gu: ?Joint, lim: mlx.mlx_array, sigtab: mlx.mlx_array, dec: format.Decode) !mlx.mlx_array {
+pub fn mlp(s: mlx.mlx_stream, x: mlx.mlx_array, gu: Joint, down: root.Proj, lim: mlx.mlx_array, sigtab: mlx.mlx_array, dec: format.Decode) !mlx.mlx_array {
+    const gate = gu.members[0];
+    const up = gu.members[1];
     const xd = mlx.mlx_array_dtype(x);
     if (xd != .bfloat16 and xd != .float16) return error.BadExl3Dtype;
     if (mlx.mlx_array_dtype(lim) != xd or mlx.mlx_array_size(lim) != 1) return error.BadExl3Dtype;
@@ -370,8 +435,9 @@ pub fn mlp(s: mlx.mlx_stream, x: mlx.mlx_array, gate: root.Proj, up: root.Proj, 
         if (h) |a| _ = mlx.mlx_array_free(a);
     };
     var ops: Gu = undefined;
-    if (gu != null and decode_rows and gu.?.out0 == f and gu.?.out1 == f and jointPlan(gu.?, dec, rows) != null) {
-        held[0] = try jointRun(s, .jdec1, &.{ v.x2, gu.?.suh0, gu.?.suh1, gu.?.trellis, gu.?.svh }, gu.?, dec, rows, xd, jointPlan(gu.?, dec, rows).?);
+    if (gu.out0 != f or gu.out1 != f) return error.BadExl3Shape;
+    if (decode_rows and jointPlan(gu, dec, rows) != null) {
+        held[0] = try jointRun(s, .jdec1, &.{ v.x2, gu.suh0, gu.suh1, gu.trellis, gu.svh }, gu, dec, rows, xd, jointPlan(gu, dec, rows).?);
         ops = .{ .gate = held[0].?, .up = held[0].?, .stride = 2 * f, .uoff = f };
     } else {
         held[0] = try root.linear(s, v.x2, gate.trellis, gate.suh, gate.svh, dec);
@@ -446,12 +512,23 @@ fn count(hay: []const u8, needle: []const u8) usize {
     return std.mem.count(u8, hay, needle);
 }
 
+/// a joint's shape alone (`jointPlan` reads no array)
+fn fakeJoint(in: u32, out0: u32, out1: u32) Joint {
+    const fake: mlx.mlx_array = .{ .ctx = null };
+    const fp: root.Proj = .{ .trellis = fake, .suh = fake, .svh = fake };
+    return .{ .trellis = fake, .svh = fake, .suh0 = fake, .suh1 = fake, .members = .{ fp, fp }, .in = in, .out0 = out0, .out1 = out1, .n = n_linear };
+}
+
 test "turboexl3 ricursive texts: dense's DEC-ONE and prepare statements verbatim around the member choice, the blend and the clamped SwiGLU" {
     // the joined launches are DEC-ONE with the prepare inside, the member's suh chosen after its head
     try testing.expect(std.mem.startsWith(u8, text_jdec1, dense.dec_head ++ jsel));
-    try testing.expect(std.mem.endsWith(u8, text_jdec1, dense.dec_prep1 ++ dense.dec_gemv1 ++ dense.dec_gemv_arrive ++ dense.dec_xsum1 ++ dense.dec_finish_v ++ dense.dec_finish_store));
-    try testing.expectEqual(dense.text_dec1.len + jsel.len, text_jdec1.len);
-    try testing.expectEqualStrings(dense.text_dec1, dense.dec_head ++ dec1_body);
+    try testing.expect(std.mem.endsWith(u8, text_jdec1, dense.dec_gemv_arrive_2 ++ dense.dec_xsum1 ++ dense.dec_finish_v ++ dense.dec_finish_store));
+    // dense's DEC-ONE with the prepare inside but for its one tile address, which reads the member's trellis
+    try testing.expectEqual(dense.text_dec1.len + jsel.len - dense.dec_tile.len + jtile.len, text_jdec1.len);
+    try testing.expectEqualStrings(dense.dec_gemv_arrive, dense.dec_gemv_arrive_1 ++ dense.dec_tile ++ dense.dec_gemv_arrive_2);
+    try testing.expectEqualStrings(dense.text_dec1, dense.dec_head ++ dense.dec_prep1 ++ dense.dec_gemv1 ++ dense.dec_gemv_arrive ++ dense.dec_xsum1 ++ dense.dec_finish_v ++ dense.dec_finish_store);
+    try testing.expectEqual(@as(usize, 1), count(text_jdec1, jtile));
+    try testing.expectEqual(@as(usize, 0), count(text_jdec1, dense.dec_tile));
     try testing.expectEqualStrings(text_jdec1_blend, dense.dec_head ++ jsel ++ blend_struct ++ blend_member ++ dec1_body);
     // the prepares are dense's, x read through the accessor
     try testing.expect(std.mem.endsWith(u8, text_swiglu_prep_sc, dense.text_prep_sc));
@@ -477,10 +554,9 @@ test "turboexl3 ricursive plan: q | g and gate | up join where the row chunks ar
     try testing.expectEqual(@as(u32, 1), dense.Dense.ksFor(hidden, q_out));
     try testing.expectEqual(@as(u32, 10), dense.Dense.ksFor(hidden, kv_out));
     try testing.expectEqual(@as(u32, 1), dense.Dense.ksFor(hidden, ffn));
-    const fake: mlx.mlx_array = .{ .ctx = null };
-    const qg: Joint = .{ .trellis = fake, .svh = fake, .suh0 = fake, .suh1 = fake, .in = hidden, .out0 = q_out, .out1 = q_out, .n = n_linear };
-    const kv: Joint = .{ .trellis = fake, .svh = fake, .suh0 = fake, .suh1 = fake, .in = hidden, .out0 = kv_out, .out1 = kv_out, .n = n_linear };
-    const gu: Joint = .{ .trellis = fake, .svh = fake, .suh0 = fake, .suh1 = fake, .in = hidden, .out0 = ffn, .out1 = ffn, .n = n_linear };
+    const qg = fakeJoint(hidden, q_out, q_out);
+    const kv = fakeJoint(hidden, kv_out, kv_out);
+    const gu = fakeJoint(hidden, ffn, ffn);
     for (1..17) |rows| {
         // the joined prepare holds RB rows of the K slice: 3 at most at q | g's and gate | up's K split of 1
         const small = dense.Dense.rbFor(@intCast(rows)) <= 3;
@@ -492,7 +568,7 @@ test "turboexl3 ricursive plan: q | g and gate | up join where the row chunks ar
     try testing.expect(jointPlan(qg, .mul1, 6) != null and jointPlan(qg, .mul1, 4) == null);
     try testing.expect(jointPlan(qg, .mul1, 17) == null);
     // members whose own K splits differ do not join (q with k)
-    const qk: Joint = .{ .trellis = fake, .svh = fake, .suh0 = fake, .suh1 = fake, .in = hidden, .out0 = q_out, .out1 = kv_out, .n = n_linear };
+    const qk = fakeJoint(hidden, q_out, kv_out);
     try testing.expect(jointPlan(qk, .mul1, 1) == null);
     // every Ripple shape is a width the dense kernels admit
     for ([_][2]u32{ .{ hidden, q_out }, .{ hidden, kv_out }, .{ q_out, hidden }, .{ hidden, ffn }, .{ ffn, hidden }, .{ hidden, vocab } }) |io| {

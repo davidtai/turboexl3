@@ -654,7 +654,7 @@ The decode-row merges (rows 1 to 16) on DEC-ONE's launches.
 | made at | `src/models/qwen38/decb.zig:181` (`fn kernelsGet`) |
 | inputs | `xp`, `xs`, `w`, `svh`, `cnt`, `qn`, `qeps`, `angles`, `kn`, `ring`, `pcos`, `psin`, `peps`, `invr`, `ln` |
 | outputs | `y`, `z`, `oq`, `op` |
-| source | `text_dec0_idx` = `dense/dec_head` ++ `qwen38:decb/idx_dec_decl` ++ `dense/dec_gemv0` ++ `dense/dec_gemv_arrive` ++ `dense/dec_xsum0` ++ `dense/dec_finish_v` ++ `qwen38:decb/idx_dec_finish_1` ++ `qwen38:decb/idx_qrope` ++ `qwen38:decb/idx_dec_finish_2` ++ `qwen38:decb/idx_pool` ++ `qwen38:decb/idx_dec_finish_3` (9228 B, `28ce4602bd28`) |
+| source | `text_dec0_idx` = `dense/dec_head` ++ `qwen38:decb/idx_dec_decl` ++ `dense/dec_gemv0` ++ `dense/dec_gemv_arrive_1` ++ `dense/dec_tile` ++ `dense/dec_gemv_arrive_2` ++ `dense/dec_xsum0` ++ `dense/dec_finish_v` ++ `qwen38:decb/idx_dec_finish_1` ++ `qwen38:decb/idx_qrope` ++ `qwen38:decb/idx_dec_finish_2` ++ `qwen38:decb/idx_pool` ++ `qwen38:decb/idx_dec_finish_3` (9228 B, `28ce4602bd28`) |
 | header | `decode.header5` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` (26594 B, `41efbbbbd943`) |
 
 <!-- /kernel-facts -->
@@ -707,7 +707,7 @@ The decode-row merges (rows 1 to 16) on DEC-ONE's launches.
 | made at | `src/models/qwen38/decb.zig:178` (`fn kernelsGet`) |
 | inputs | `xp`, `xs`, `w`, `svh`, `cnt` |
 | outputs | `yq`, `yg`, `z` |
-| source | `text_dec0_planes` = `dense/dec_head` ++ `dense/dec_gemv0` ++ `dense/dec_gemv_arrive` ++ `dense/dec_xsum0` ++ `dense/dec_finish_v` ++ `qwen38:decb/planes_store_dec` (6384 B, `e7352682e47c`) |
+| source | `text_dec0_planes` = `dense/dec_head` ++ `dense/dec_gemv0` ++ `dense/dec_gemv_arrive_1` ++ `dense/dec_tile` ++ `dense/dec_gemv_arrive_2` ++ `dense/dec_xsum0` ++ `dense/dec_finish_v` ++ `qwen38:decb/planes_store_dec` (6384 B, `e7352682e47c`) |
 | header | `decode.header5` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` (26594 B, `41efbbbbd943`) |
 
 <!-- /kernel-facts -->
@@ -747,7 +747,7 @@ The decode-row merges (rows 1 to 16) on DEC-ONE's launches.
 | made at | `src/models/qwen38/decb.zig:182` (`fn kernelsGet`) |
 | inputs | `x`, `suh`, `w`, `svh`, `cnt`, `qn`, `qeps`, `angles`, `kn`, `ring`, `pcos`, `psin`, `peps`, `invr`, `ln` |
 | outputs | `y`, `z`, `xsx`, `oq`, `op` |
-| source | `text_dec1_idx` = `dense/dec_head` ++ `qwen38:decb/idx_dec_decl` ++ `dense/dec_prep1` ++ `dense/dec_gemv1` ++ `dense/dec_gemv_arrive` ++ `dense/dec_xsum1` ++ `dense/dec_finish_v` ++ `qwen38:decb/idx_dec_finish_1` ++ `qwen38:decb/idx_qrope` ++ `qwen38:decb/idx_dec_finish_2` ++ `qwen38:decb/idx_pool` ++ `qwen38:decb/idx_dec_finish_3` (10748 B, `6765c9aa771b`) |
+| source | `text_dec1_idx` = `dense/dec_head` ++ `qwen38:decb/idx_dec_decl` ++ `dense/dec_prep1` ++ `dense/dec_gemv1` ++ `dense/dec_gemv_arrive_1` ++ `dense/dec_tile` ++ `dense/dec_gemv_arrive_2` ++ `dense/dec_xsum1` ++ `dense/dec_finish_v` ++ `qwen38:decb/idx_dec_finish_1` ++ `qwen38:decb/idx_qrope` ++ `qwen38:decb/idx_dec_finish_2` ++ `qwen38:decb/idx_pool` ++ `qwen38:decb/idx_dec_finish_3` (10748 B, `6765c9aa771b`) |
 | header | `decode.header5` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` (26594 B, `41efbbbbd943`) |
 
 <!-- /kernel-facts -->
@@ -788,7 +788,7 @@ The decode-row merges (rows 1 to 16) on DEC-ONE's launches.
 | made at | `src/models/qwen38/decb.zig:179` (`fn kernelsGet`) |
 | inputs | `x`, `suh`, `w`, `svh`, `cnt` |
 | outputs | `yq`, `yg`, `z`, `xsx` |
-| source | `text_dec1_planes` = `dense/dec_head` ++ `dense/dec_prep1` ++ `dense/dec_gemv1` ++ `dense/dec_gemv_arrive` ++ `dense/dec_xsum1` ++ `dense/dec_finish_v` ++ `qwen38:decb/planes_store_dec` (7904 B, `58f26c31f476`) |
+| source | `text_dec1_planes` = `dense/dec_head` ++ `dense/dec_prep1` ++ `dense/dec_gemv1` ++ `dense/dec_gemv_arrive_1` ++ `dense/dec_tile` ++ `dense/dec_gemv_arrive_2` ++ `dense/dec_xsum1` ++ `dense/dec_finish_v` ++ `qwen38:decb/planes_store_dec` (7904 B, `58f26c31f476`) |
 | header | `decode.header5` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` (26594 B, `41efbbbbd943`) |
 
 <!-- /kernel-facts -->

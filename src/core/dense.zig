@@ -112,8 +112,13 @@ pub const dec_gemv0 = @embedFile("kernels/dense/dec_gemv0.metal");
 /// ... or the slice prepared in threadgroup memory
 pub const dec_gemv1 = @embedFile("kernels/dense/dec_gemv1.metal");
 
-/// text_dgemv's tile loop, quad fold and simdgroup sum (the z plane values), then the arrival
-pub const dec_gemv_arrive = @embedFile("kernels/dense/dec_gemv_arrive.metal");
+/// text_dgemv's tile loop, quad fold and simdgroup sum (the z plane values), then the arrival: the loop's head, the
+/// tile's address (`dec_tile`: tile (tk, the block's column t) of the one trellis, which a joined launch reads at its
+/// member's base instead, ricursive.zig), and the rest
+pub const dec_gemv_arrive_1 = @embedFile("kernels/dense/dec_gemv_arrive_1.metal");
+pub const dec_tile = @embedFile("kernels/dense/dec_tile.metal");
+pub const dec_gemv_arrive_2 = @embedFile("kernels/dense/dec_gemv_arrive_2.metal");
+pub const dec_gemv_arrive = dec_gemv_arrive_1 ++ dec_tile ++ dec_gemv_arrive_2;
 
 /// the finish's input sums: prep_sc's (text_dfinish's loop) ...
 pub const dec_xsum0 = @embedFile("kernels/dense/dec_xsum0.metal");

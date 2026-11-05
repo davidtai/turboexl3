@@ -1416,6 +1416,25 @@ def rekey_tables(units):
 
 # ------------------------------------------------------------------------------------------------------------- split
 
+# --split against a base: the kernels whose texts a change means to change, the kernels it adds, and the text consts
+# whose values it changes, each with what changed (anything else that differs fails)
+SPLIT_CHANGED_KERNELS = {
+    'turboexl3_ric_jdec1': 'the joint end to end (member 0\'s trellis, then member 1\'s): jsel picks the member\'s base '
+                           'and output tiles, jtile.metal reads the tile there in place of dense.dec_tile',
+    'turboexl3_ric_jdec1_blend': 'as turboexl3_ric_jdec1',
+}
+SPLIT_ADDED_KERNELS = {
+    'turboexl3_test_ric_jdec1_interleaved': 'the joined launch before the end-to-end layout (its earlier text), the layout '
+                                            'test\'s reference',
+    'turboexl3_test_ric_jdec1_blend_interleaved': 'as turboexl3_test_ric_jdec1_interleaved, k | v\'s',
+}
+SPLIT_CHANGED_CONSTS = {
+    'jsel': 'the member choice adds the member\'s trellis base and output tiles',
+    'dec1_body': 'ricursive\'s DEC-ONE body reads the tile through jtile',
+    'text_jdec1': 'as turboexl3_ric_jdec1',
+    'text_jdec1_blend': 'as turboexl3_ric_jdec1_blend',
+}
+
 def split_report(oprog, nprog, ounits, nunits, orig_dir, new_dir, problems, verbose):
     """--split (declarations moved between files, not only files): checks 1 to 4 over the whole tree instead of per file.
     1. Every kernel name either tree can make (tools/kernel_docs.py's list: the computed-name families included) is in
@@ -1439,12 +1458,17 @@ def split_report(oprog, nprog, ounits, nunits, orig_dir, new_dir, problems, verb
             problems.append(f'kernel {name}: removed')
             continue
         if name not in ok_:
-            problems.append(f'kernel {name}: added')
+            if name in SPLIT_ADDED_KERNELS:
+                print(f'   added (intended) {name}: {SPLIT_ADDED_KERNELS[name]}')
+            else:
+                problems.append(f'kernel {name}: added')
             continue
         to, tn = texts(ok_[name]), texts(nk[name])
         fo = sorted({c['file'] for c in ok_[name]})
         fn = sorted({c['file'] for c in nk[name]})
-        if to != tn:
+        if to != tn and name in SPLIT_CHANGED_KERNELS:
+            print(f'   changed (intended) {name}: {SPLIT_CHANGED_KERNELS[name]}')
+        elif to != tn:
             problems.append(f'kernel {name}: its texts differ ({len(to)} before, {len(tn)} after)')
         else:
             same += 1
@@ -1477,6 +1501,8 @@ def split_report(oprog, nprog, ounits, nunits, orig_dir, new_dir, problems, verb
                 g = next(g for g, w in nc[name].items() if w == v)
                 if verbose:
                     print(f'   moved {name}: {f} -> {g}')
+            elif name in nc and f in nc[name] and name in SPLIT_CHANGED_CONSTS:
+                print(f'   changed (intended) {f} {name}: {SPLIT_CHANGED_CONSTS[name]}')
             elif name in nc and f in nc[name]:
                 problems.append(f'{f} {name}: value differs')
             else:

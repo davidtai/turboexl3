@@ -24,8 +24,13 @@ What it runs on turboexl3 (`root.ricursive`, `src/models/ricursive/ricursive.zig
 | q and g | `jointLinear` over `join(q, g)` | 1, 2, 3 and 6 (where a row chunk is at most 3 rows, so the joined prepare fits threadgroup memory) | `dec_zero` + `turboexl3_ric_jdec1`: one dependent level for both |
 | k and v, v's input the value residual | `jointLinearBlend` over `join(k, v)` | 1 to 16 | `dec_zero` + `turboexl3_ric_jdec1_blend`: the blend formed in v's prepare |
 | v at prefill rows | `valueLinear` | 17 and more | `turboexl3_ric_blend_prep`, then `linear`'s inner product and finish |
-| the MLP | `mlp` (gate \| up joined where `jointLinear` serves) | any | decode: gate \| up, `turboexl3_ric_swiglu_prep_sc` (the clamped SwiGLU in the down's prepare), the down's DEC-ONE GEMV (`turboexl3_dense_dec0`) or GEMV and finish; prefill: gate and up `linear`, `turboexl3_ric_swiglu_prep`, the down's inner product and finish |
+| the MLP | `mlp` over `join(gate, up)` (one launch where `jointLinear` serves, else `linear` of each member's view) | any | decode: gate \| up, `turboexl3_ric_swiglu_prep_sc` (the clamped SwiGLU in the down's prepare), the down's DEC-ONE GEMV (`turboexl3_dense_dec0`) or GEMV and finish; prefill: gate and up `linear`, `turboexl3_ric_swiglu_prep`, the down's inner product and finish |
 | o, the head, and any call the entries above decline | `root.linear` | any | the core's dense linear |
+
+`join` keeps one copy of its members' weights: the joint's trellis is member 0's whole trellis, then member 1's, and
+each member is a view of it (`Joint.members`: a contiguous range, so MLX shares the buffer and no call copies it). The
+host frees the members after `join` and runs every per-member call (`root.linear` of q, g, k, v at the rows the joined
+launches decline, `valueLinear`, `mlp`'s two linears) on the views.
 
 Rows 2 to 8 (prompt-lookup speculation) are served by the same paths: the joined launches where they fit, `linear`
 elsewhere. Every fused path gives the words of the chain it replaces (each member's `linear`, the host's blend, the
