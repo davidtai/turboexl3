@@ -11,7 +11,7 @@
 //! - `ricursive.valueLinear` at prefill rows against the host's blend then `linear`, word for word.
 //! - `ricursive.mlp` (with and without gate | up joined) against `linear(gate)`, `linear(up)`, the host's clamped SwiGLU
 //!   in the activation dtype (MLX's minimum, clip, sigmoid and two multiplies) and `linear(down)`, word for word, at rows
-//!   1 to 5, 8 and 16 (decode) and 17, 32, 33 and 64 (prefill), the gate and up scaled so the clamp at 20 is reached.
+//!   1 to 6, 8 and 16 (decode) and 17, 32, 33 and 64 (prefill), the gate and up scaled so the clamp at 20 is reached.
 //!   Lines: TURBOEXL3_RIC_MLP.
 //! The joined launches' and the fused prepares' values against `format.project` follow: their words are `linear`'s, and
 //! `linear` is held to `format.project` by the first test at the same shapes.
@@ -222,7 +222,7 @@ test "turboexl3 gpu ricursive joint: q | g and gate | up in one launch, and k | 
     const blend = try g.hostArray(std.mem.sliceAsBytes(&[_]f32{0.3775406688}), &.{1}, .float32);
     var bad: usize = 0;
     var lines: usize = 0;
-    for ([_]mlx.mlx_dtype{ .bfloat16, .float32 }) |dt| for ([_]u32{ 1, 2, 3, 4, 5, 8, 16 }) |rows| {
+    for ([_]mlx.mlx_dtype{ .bfloat16, .float32 }) |dt| for ([_]u32{ 1, 2, 3, 4, 5, 6, 8, 16 }) |rows| {
         const rm = g.mark();
         defer g.resetTo(rm);
         const x = try randX(a, &g, rnd, rows, ric.hidden, dt);
@@ -304,7 +304,7 @@ test "turboexl3 gpu ricursive mlp: gate | up, the clamped SwiGLU in the down's p
     for ([_]mlx.mlx_dtype{ .bfloat16, .float16 }) |dt| {
         const sigtab = try sigTable(a, &g, s, dt);
         const lim = try g.scalar(ric.clamp, dt);
-        for ([_]u32{ 1, 2, 3, 4, 5, 8, 16, 17, 32, 33, 64 }) |rows| {
+        for ([_]u32{ 1, 2, 3, 4, 5, 6, 8, 16, 17, 32, 33, 64 }) |rows| {
             if (dt == .float16 and rows != 1 and rows != 33) continue;
             const rm = g.mark();
             defer g.resetTo(rm);

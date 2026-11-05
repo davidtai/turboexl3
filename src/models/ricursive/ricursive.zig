@@ -23,8 +23,8 @@
 //!   the host's table of MLX's own results) and `linear(down)`.
 //!
 //! o and the head are `root.linear` (o's input, the gated attention output, is the host's). Rows: `jointLinear` and
-//! `jointLinearBlend` serve 1 to 16 rows where the joined prepare fits threadgroup memory (`Dense.decPrepFits`: q | g up
-//! to 3 rows, k | v every decode row); a call they do not serve returns error.Exl3EngineNotImplemented before any
+//! `jointLinearBlend` serve 1 to 16 rows where the joined prepare fits threadgroup memory (`Dense.decPrepFits`: q | g and
+//! gate | up where a row chunk is at most 3 rows, so 1, 2, 3 and 6; k | v every decode row); a call they do not serve returns error.Exl3EngineNotImplemented before any
 //! launch, and the caller runs `root.linear` per member.
 const std = @import("std");
 const mlx = @import("sdk").mlx;
@@ -458,7 +458,7 @@ test "turboexl3 ricursive texts: dense's DEC-ONE and prepare statements verbatim
     try testing.expectEqual(@as(usize, 1), count(dense.text_prep_s, pin[4]));
 }
 
-test "turboexl3 ricursive plan: q | g joins at one K split up to 3 rows, k | v at every decode row, gate | up up to 3 rows" {
+test "turboexl3 ricursive plan: q | g and gate | up join where the row chunks are at most 3 rows (1, 2, 3, 6), k | v at every decode row" {
     // the members' own K splits, which the joined launch keeps
     try testing.expectEqual(@as(u32, 1), dense.Dense.ksFor(hidden, q_out));
     try testing.expectEqual(@as(u32, 10), dense.Dense.ksFor(hidden, kv_out));
@@ -468,11 +468,14 @@ test "turboexl3 ricursive plan: q | g joins at one K split up to 3 rows, k | v a
     const kv: Joint = .{ .trellis = fake, .svh = fake, .suh0 = fake, .suh1 = fake, .in = hidden, .out0 = kv_out, .out1 = kv_out, .n = n_linear };
     const gu: Joint = .{ .trellis = fake, .svh = fake, .suh0 = fake, .suh1 = fake, .in = hidden, .out0 = ffn, .out1 = ffn, .n = n_linear };
     for (1..17) |rows| {
-        try testing.expectEqual(rows <= 3, jointPlan(qg, .mul1, rows) != null);
+        // the joined prepare holds RB rows of the K slice: 3 at most at q | g's and gate | up's K split of 1
+        const small = dense.Dense.rbFor(@intCast(rows)) <= 3;
+        try testing.expectEqual(small, jointPlan(qg, .mul1, rows) != null);
         try testing.expect(jointPlan(kv, .mul1, rows) != null);
-        try testing.expectEqual(rows <= 3, jointPlan(gu, .mul1, rows) != null);
+        try testing.expectEqual(small, jointPlan(gu, .mul1, rows) != null);
         if (jointPlan(kv, .mul1, rows)) |p| try testing.expectEqual(@as(u32, 10), p.ks);
     }
+    try testing.expect(jointPlan(qg, .mul1, 6) != null and jointPlan(qg, .mul1, 4) == null);
     try testing.expect(jointPlan(qg, .mul1, 17) == null);
     // members whose own K splits differ do not join (q with k)
     const qk: Joint = .{ .trellis = fake, .svh = fake, .suh0 = fake, .suh1 = fake, .in = hidden, .out0 = q_out, .out1 = kv_out, .n = n_linear };

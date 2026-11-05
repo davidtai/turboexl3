@@ -54,7 +54,7 @@ The joined launches, the value residual's prepare and the MLP's clamped SwiGLU i
 
 - **Used by:** Ripple-65B: `ricursive.jointLinear` over `ricursive.join(q, g)` (and `join(gate, up)` inside
   `ricursive.mlp`) at the decode rows `ricursive.jointPlan` admits: 1 to 16 rows whose joined prepare fits threadgroup
-  memory (`Dense.decPrepFits`; q | g and gate | up up to 3 rows at Ripple's widths).
+  memory (`Dense.decPrepFits`; q | g and gate | up where a row chunk is at most 3 rows, so 1, 2, 3 and 6, at Ripple's widths).
 - **Shapes and dtypes:** x T [rows, IN] (bf16, f16 or f32); suh0, suh1 f16 [IN] (each member's own); w the joined
   trellis U16 or I16 [IN/16, (out0 + out1)/16, NHW] (member 0's tile columns first); svh f16 [out0 + out1]; cnt u32
   [max(OUT/128 · chunks, 8)] from `turboexl3_dense_dec_zero`. Out: y T [rows, out0 + out1] (member 0's columns, then
@@ -72,10 +72,10 @@ The joined launches, the value residual's prepare and the MLP's clamped SwiGLU i
   K split, slice order and finish per output block).
 - **Pinned by:** `src/models/ricursive/ricursive_test.zig` "turboexl3 gpu ricursive joint: q | g and gate | up in one
   launch, and k | v with v's value residual in its prepare, give each member's linear words (TURBOEXL3_GPU=1)" (GPU,
-  words at rows 1 to 5, 8 and 16, bf16 and f32, where it serves; a refusal where it does not);
+  words at rows 1 to 6, 8 and 16, bf16 and f32, where it serves; a refusal where it does not);
   `src/models/ricursive/ricursive.zig` "turboexl3 ricursive texts: dense's DEC-ONE and prepare statements verbatim
   around the member choice, the blend and the clamped SwiGLU" (CPU, the texts); `src/models/ricursive/ricursive.zig`
-  "turboexl3 ricursive plan: q | g joins at one K split up to 3 rows, k | v at every decode row, gate | up up to 3 rows"
+  "turboexl3 ricursive plan: q | g and gate | up join where the row chunks are at most 3 rows (1, 2, 3, 6), k | v at every decode row"
   (CPU, where the joined launch serves).
 
 ### `turboexl3_ric_jdec1_blend`
@@ -109,7 +109,7 @@ The joined launches, the value residual's prepare and the MLP's clamped SwiGLU i
   f32 statements one host op each).
 - **Pinned by:** `src/models/ricursive/ricursive_test.zig` "turboexl3 gpu ricursive joint: q | g and gate | up in one
   launch, and k | v with v's value residual in its prepare, give each member's linear words (TURBOEXL3_GPU=1)" (GPU,
-  words, k | v at rows 1 to 5, 8 and 16, bf16 and f32); `src/models/ricursive/ricursive.zig` "turboexl3 ricursive texts:
+  words, k | v at rows 1 to 6, 8 and 16, bf16 and f32); `src/models/ricursive/ricursive.zig` "turboexl3 ricursive texts:
   dense's DEC-ONE and prepare statements verbatim around the member choice, the blend and the clamped SwiGLU" (CPU, the
   texts).
 
@@ -173,6 +173,6 @@ The joined launches, the value residual's prepare and the MLP's clamped SwiGLU i
   `linear(up)`, word for word.
 - **Pinned by:** `src/models/ricursive/ricursive_test.zig` "turboexl3 gpu ricursive mlp: gate | up, the clamped SwiGLU
   in the down's prepare and the down give the host's MLP words, decode and prefill rows (TURBOEXL3_GPU=1)" (GPU, words
-  at rows 1 to 5, 8 and 16 in bf16 and row 1 in f16, gate | up joined and apart, the clamp reached);
+  at rows 1 to 6, 8 and 16 in bf16 and row 1 in f16, gate | up joined and apart, the clamp reached);
   `src/models/ricursive/ricursive.zig` "turboexl3 ricursive texts: dense's DEC-ONE and prepare statements verbatim
   around the member choice, the blend and the clamped SwiGLU" (CPU, the texts).

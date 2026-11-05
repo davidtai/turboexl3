@@ -21,7 +21,7 @@ What it runs on turboexl3 (`root.ricursive`, `src/models/ricursive/ricursive.zig
 
 | part | entry point | rows | launches |
 |---|---|---|---|
-| q and g | `jointLinear` over `join(q, g)` | 1 to 3 (where the joined prepare fits threadgroup memory) | `dec_zero` + `turboexl3_ric_jdec1`: one dependent level for both |
+| q and g | `jointLinear` over `join(q, g)` | 1, 2, 3 and 6 (where a row chunk is at most 3 rows, so the joined prepare fits threadgroup memory) | `dec_zero` + `turboexl3_ric_jdec1`: one dependent level for both |
 | k and v, v's input the value residual | `jointLinearBlend` over `join(k, v)` | 1 to 16 | `dec_zero` + `turboexl3_ric_jdec1_blend`: the blend formed in v's prepare |
 | v at prefill rows | `valueLinear` | 17 and more | `turboexl3_ric_blend_prep`, then `linear`'s inner product and finish |
 | the MLP | `mlp` (gate \| up joined where `jointLinear` serves) | any | decode: gate \| up, `turboexl3_ric_swiglu_prep_sc` (the clamped SwiGLU in the down's prepare), the down's DEC-ONE GEMV (`turboexl3_dense_dec0`) or GEMV and finish; prefill: gate and up `linear`, `turboexl3_ric_swiglu_prep`, the down's inner product and finish |
