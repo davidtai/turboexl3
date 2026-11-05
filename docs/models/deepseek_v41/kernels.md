@@ -226,18 +226,18 @@ Kernels F3's tests make as references (test only).
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/deepseek_v41/f3_test.zig:236` (`test turboexl3 gpu f3u time: the 40-layer trunk chain with the host's shared expert against F3 at rows 5, 6 and 8, every run the first's words (TURBOEXL3_F3_TIME=1)`) |
+| made at | `src/models/deepseek_v41/f3_test.zig:222` (`test turboexl3 gpu f3u time: the 40-layer trunk chain with the host's shared expert against F3 at rows 5, 6 and 8, every run the first's words (TURBOEXL3_F3_TIME=1)`) |
 | inputs | `gt`, `ut`, `lim` |
 | outputs | `y` |
-| source | `text_swiglu_one` = text (551 B) (551 B, `9be0c03bd41d`) |
+| source | `text_swiglu_one` = `deepseek_v41:test/swiglu_one` (551 B, `9be0c03bd41d`) |
 | header | `""` = (empty) (0 B, `e3b0c44298fc`) |
 
 <!-- /kernel-facts -->
 
 - **Used by:** test only: arm A of `src/models/deepseek_v41/f3_test.zig` "turboexl3 gpu f3u time: the 40-layer trunk
   chain with the host's shared expert against F3 at rows 5, ...": the host's clamped SwiGLU as MLX's compiled decode
-  stretch runs it, one elementwise launch between the shared gate and up linears and the down linear. Its text is a
-  string literal in `f3_test.zig`.
+  stretch runs it, one elementwise launch between the shared gate and up linears and the down linear. Its text is
+  `src/models/deepseek_v41/kernels/test/swiglu_one.metal`.
 - **Shapes and dtypes:** gt, ut bf16 [rows, 2304] (the gate's and up's outputs; rows 5, 6 and 8); lim f32 [1] (10). Out:
   y bf16 [rows, 2304].
 - **Grid and threadgroup:** `(ceil(NEL/256) · 256, 1, 1)` / `(256, 1, 1)`, NEL = rows · 2304.

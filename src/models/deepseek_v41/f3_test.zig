@@ -134,21 +134,7 @@ test "turboexl3 gpu f3u bytes: sharedSwiglu gives the host's shared expert's wor
 
 /// The host's clamped SwiGLU as MLX's compiled decode stretch runs it: one elementwise launch over the gate and up (bf16),
 /// the functors in clampedSwiGLU's order in f32, the activation dtype out
-const text_swiglu_one =
-    \\    const uint i = thread_position_in_grid.x;
-    \\    if (i >= uint(NEL)) return;
-    \\    const float hi = lim[0];
-    \\    const float lo = -lim[0];
-    \\    const float gate = float(gt[i]);
-    \\    const float up = float(ut[i]);
-    \\    float g = metal::isnan(gate) ? gate : (gate < hi ? gate : hi);
-    \\    float um = metal::isnan(up) ? up : (up > lo ? up : lo);
-    \\    float u = metal::isnan(um) ? um : (um < hi ? um : hi);
-    \\    float sy = 1 / (1 + metal::precise::exp(metal::abs(g)));
-    \\    float sig = (g < 0) ? sy : 1 - sy;
-    \\    float act = g * sig;
-    \\    y[i] = bfloat16_t(act * u);
-;
+const text_swiglu_one = @embedFile("kernels/test/swiglu_one.metal");
 
 const ChainCtx = struct {
     k: mlx.mlx_fast_metal_kernel,
