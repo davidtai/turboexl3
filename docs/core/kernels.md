@@ -4168,12 +4168,13 @@ The unfused decode chain: the separately launched steps the fused forms replace 
 - **Grid and threadgroup:** `((DIM/128) · 32, RK, 1)` / `(32, 1, 1)`.
 - **Template args:** DIM (inter for gate and up, hidden for down).
 - **Replaces:** nothing: a step of the unfused chain, the math of `decode.zig`'s form 1 split into separate launches.
-- **Bits:** `format.project`'s finish rounding points (f16 z, H128, svh, f16), output f32. The chain it is a step of is
-  held within 5e-3 of `ref.moeRowDec`.
-- **Pinned by:** `src/core/chains_test.zig` "turboexl3 gpu unfused: the eleven-launch chain equals the host reference
-  within the decode chain's tolerance, at form 1's cases (TURBOEXL3_GPU=1)" (GPU: the whole chain within 5e-3 of
-  `ref.moeRowDec`; its words against form 1's reported); `src/core/unfused.zig` "turboexl3 unfused texts: the inputs
-  each signature names are read, the outputs written" (CPU, the texts).
+- **Bits:** `format.project`'s finish rounding points (f16 z, H128, svh, f16), output f32. The chain it is a step of
+  gives form 1's words (`turboexl3_gu`, `turboexl3_down`) and is held within 5e-3 of `ref.moeRowDec`.
+- **Pinned by:** `src/core/chains_test.zig` "turboexl3 gpu unfused: the eleven-launch chain gives form 1's words and
+  equals the host reference within the decode chain's tolerance, at form 1's cases (TURBOEXL3_GPU=1)" (GPU: the whole
+  chain word for word against form 1 (`decode.Kernels`) and within 5e-3 of `ref.moeRowDec`, at 512 x 256 and 2560 x 640,
+  MUL1 and MCG, rows 1 to 8); `src/core/unfused.zig` "turboexl3 unfused texts: the inputs each signature names are read,
+  the outputs written" (CPU, the texts).
 
 ### `turboexl3_gemv`
 
@@ -4197,12 +4198,13 @@ The unfused decode chain: the separately launched steps the fused forms replace 
   row-slot).
 - **Template args:** NHW, CODEBOOK, WBITS, IN, OUT. Every rate, codebook and window.
 - **Replaces:** nothing: a step of the unfused chain (form 1's math).
-- **Bits:** its own summation order, f32 sums unrounded. The chain it is a step of is held within 5e-3 of
-  `ref.moeRowDec`.
-- **Pinned by:** `src/core/chains_test.zig` "turboexl3 gpu unfused: the eleven-launch chain equals the host reference
-  within the decode chain's tolerance, at form 1's cases (TURBOEXL3_GPU=1)" (GPU: the whole chain within 5e-3 of
-  `ref.moeRowDec`; its words against form 1's reported); `src/core/unfused.zig` "turboexl3 unfused texts: the inputs
-  each signature names are read, the outputs written" (CPU, the texts).
+- **Bits:** its own summation order, f32 sums unrounded. The chain it is a step of gives form 1's words (`turboexl3_gu`,
+  `turboexl3_down`) and is held within 5e-3 of `ref.moeRowDec`.
+- **Pinned by:** `src/core/chains_test.zig` "turboexl3 gpu unfused: the eleven-launch chain gives form 1's words and
+  equals the host reference within the decode chain's tolerance, at form 1's cases (TURBOEXL3_GPU=1)" (GPU: the whole
+  chain word for word against form 1 (`decode.Kernels`) and within 5e-3 of `ref.moeRowDec`, at 512 x 256 and 2560 x 640,
+  MUL1 and MCG, rows 1 to 8); `src/core/unfused.zig` "turboexl3 unfused texts: the inputs each signature names are read,
+  the outputs written" (CPU, the texts).
 
 ### `turboexl3_prep`
 
@@ -4226,12 +4228,13 @@ The unfused decode chain: the separately launched steps the fused forms replace 
 - **Template args:** DIM (hidden or inter), TOPK (the bank's top-k; 1 for the down's prepare, where row-slot i is its
   own row).
 - **Replaces:** nothing: a step of the unfused chain (form 1's math).
-- **Bits:** `format.project`'s prepare rounding points (f16 x, suh, H128, f16). The chain it is a step of is held within
-  5e-3 of `ref.moeRowDec`.
-- **Pinned by:** `src/core/chains_test.zig` "turboexl3 gpu unfused: the eleven-launch chain equals the host reference
-  within the decode chain's tolerance, at form 1's cases (TURBOEXL3_GPU=1)" (GPU: the whole chain within 5e-3 of
-  `ref.moeRowDec`; its words against form 1's reported); `src/core/unfused.zig` "turboexl3 unfused texts: the inputs
-  each signature names are read, the outputs written" (CPU, the texts).
+- **Bits:** `format.project`'s prepare rounding points (f16 x, suh, H128, f16). The chain it is a step of gives form 1's
+  words (`turboexl3_gu`, `turboexl3_down`) and is held within 5e-3 of `ref.moeRowDec`.
+- **Pinned by:** `src/core/chains_test.zig` "turboexl3 gpu unfused: the eleven-launch chain gives form 1's words and
+  equals the host reference within the decode chain's tolerance, at form 1's cases (TURBOEXL3_GPU=1)" (GPU: the whole
+  chain word for word against form 1 (`decode.Kernels`) and within 5e-3 of `ref.moeRowDec`, at 512 x 256 and 2560 x 640,
+  MUL1 and MCG, rows 1 to 8); `src/core/unfused.zig` "turboexl3 unfused texts: the inputs each signature names are read,
+  the outputs written" (CPU, the texts).
 
 ### `turboexl3_reduce`
 
@@ -4253,12 +4256,13 @@ The unfused decode chain: the separately launched steps the fused forms replace 
 - **Grid and threadgroup:** `(DIM, rows, 1)` / `(256, 1, 1)`.
 - **Template args:** DIM (hidden), TOPK.
 - **Replaces:** nothing: the last step of the unfused chain.
-- **Bits:** its own: each row's slots summed in slot order with f32 fma. The chain it is a step of is held within 5e-3
-  of `ref.moeRowDec`.
-- **Pinned by:** `src/core/chains_test.zig` "turboexl3 gpu unfused: the eleven-launch chain equals the host reference
-  within the decode chain's tolerance, at form 1's cases (TURBOEXL3_GPU=1)" (GPU: the whole chain within 5e-3 of
-  `ref.moeRowDec`; its words against form 1's reported); `src/core/unfused.zig` "turboexl3 unfused texts: the inputs
-  each signature names are read, the outputs written" (CPU, the texts).
+- **Bits:** its own: each row's slots summed in slot order with f32 fma. The chain it is a step of gives form 1's words
+  (`turboexl3_gu`, `turboexl3_down`) and is held within 5e-3 of `ref.moeRowDec`.
+- **Pinned by:** `src/core/chains_test.zig` "turboexl3 gpu unfused: the eleven-launch chain gives form 1's words and
+  equals the host reference within the decode chain's tolerance, at form 1's cases (TURBOEXL3_GPU=1)" (GPU: the whole
+  chain word for word against form 1 (`decode.Kernels`) and within 5e-3 of `ref.moeRowDec`, at 512 x 256 and 2560 x 640,
+  MUL1 and MCG, rows 1 to 8); `src/core/unfused.zig` "turboexl3 unfused texts: the inputs each signature names are read,
+  the outputs written" (CPU, the texts).
 
 ### `turboexl3_swiglu`
 
@@ -4280,10 +4284,12 @@ The unfused decode chain: the separately launched steps the fused forms replace 
 - **Template args:** none.
 - **Replaces:** nothing: a step of the unfused chain.
 - **Bits:** silu(g) · u in f32, the sigmoid through `metal::exp` (its precision follows the compiler's math mode). The
-  chain it is a step of is held within 5e-3 of `ref.moeRowDec`.
-- **Pinned by:** `src/core/chains_test.zig` "turboexl3 gpu unfused: the eleven-launch chain equals the host reference
-  within the decode chain's tolerance, at form 1's cases (TURBOEXL3_GPU=1)" (GPU: the whole chain within 5e-3 of
-  `ref.moeRowDec`; its words against form 1's reported).
+  chain it is a step of gives form 1's words (`turboexl3_gu`, `turboexl3_down`) and is held within 5e-3 of
+  `ref.moeRowDec`.
+- **Pinned by:** `src/core/chains_test.zig` "turboexl3 gpu unfused: the eleven-launch chain gives form 1's words and
+  equals the host reference within the decode chain's tolerance, at form 1's cases (TURBOEXL3_GPU=1)" (GPU: the whole
+  chain word for word against form 1 (`decode.Kernels`) and within 5e-3 of `ref.moeRowDec`, at 512 x 256 and 2560 x 640,
+  MUL1 and MCG, rows 1 to 8).
 
 ## `src/core/gpu_test.zig`
 

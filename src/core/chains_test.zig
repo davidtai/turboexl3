@@ -6,9 +6,9 @@
 //!   the one-call finish's words over the pieces' inner products joined (`root.linearFinish`). Lines:
 //!   TURBOEXL3_PIECES_BYTES (also: whether the pieces equal `linear` of the joined rows, which holds wherever MLX's matmul
 //!   runs one kernel at every piece's row count; reported, not asserted).
-//! - the unfused decode chain (`unfused.Steps`, 11 launches, not served): within the decode chain's tolerance (5e-3) of the
-//!   host reference (`ref.moeRowDec`) at form 1's cases; its words against form 1's (`decode.Kernels`) reported, not
-//!   asserted (the stated relation is the same math, not the same order). Lines: TURBOEXL3_UNFUSED.
+//! - the unfused decode chain (`unfused.Steps`, 11 launches, not served): form 1's words (`decode.Kernels`, the same math in
+//!   two launches), word for word, and within the decode chain's tolerance (5e-3) of the host reference (`ref.moeRowDec`),
+//!   at form 1's cases. Lines: TURBOEXL3_UNFUSED.
 const std = @import("std");
 const sdk = @import("sdk");
 const mlx = sdk.mlx;
@@ -162,7 +162,7 @@ const cases = [_]Case{
     .{ .hidden = 2560, .inter = 640, .topk = 10, .rows = 8, .experts = 12, .n = 80, .dec = .mul1 },
 };
 
-test "turboexl3 gpu unfused: the eleven-launch chain equals the host reference within the decode chain's tolerance, at form 1's cases (TURBOEXL3_GPU=1)" {
+test "turboexl3 gpu unfused: the eleven-launch chain gives form 1's words and equals the host reference within the decode chain's tolerance, at form 1's cases (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
@@ -222,14 +222,14 @@ test "turboexl3 gpu unfused: the eleven-launch chain equals the host reference w
         defer a.free(got);
         _ = try g.hostF32(y, got);
         const e = ref.compare(got, y_ref);
-        // against form 1's words (the same math in two launches): reported
+        // form 1's words (the same math in two launches)
         var k1 = try decode.Kernels.init(geo);
         defer k1.deinit();
         const o1 = try k1.moe(s, xa, sa, wa, arrays, c.rows);
         _ = try g.adopt(o1.h);
         const y1 = try g.adopt(o1.y);
         const d1 = try wordsDiffer(a, &g, y, y1, c.rows * c.hidden);
-        const ok = std.math.isFinite(e.max_abs) and e.max_ratio <= 5e-3;
+        const ok = std.math.isFinite(e.max_abs) and e.max_ratio <= 5e-3 and d1 == 0;
         failed += @intFromBool(!ok);
         std.debug.print("TURBOEXL3_UNFUSED n={d} cb={s} w={d} geo={d}x{d} rows={d} topk={d} max_abs={e:.3} rms={e:.3} ratio={e:.3} bar=5.0e-3 {s} (against form 1: {d}/{d} words differ)\n", .{ c.n, @tagName(c.dec.codebook), c.dec.window.bits(), c.hidden, c.inter, c.rows, c.topk, e.max_abs, e.rms_ref, e.max_ratio, if (ok) "PASS" else "FAIL", d1, c.rows * c.hidden });
     }
