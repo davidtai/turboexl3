@@ -1,4 +1,4 @@
-//! hw4b, the grouped banked GEMVs with an M = 3 member path (`decode.text_gu3bgm3`, `text_down3bgm3`; `Kernels3.BankedSel`;
+//! hw4b, the grouped banked GEMVs with an M = 3 member path (`banked.text_gu3bgm3`, `text_down3bgm3`; `Kernels3.BankedSel`;
 //! `Config.banked_m3`): a lead with three members runs it, where today's grouped texts run the M = 4 path with a fourth
 //! member's FMAs padding. CPU (always): the M = 3 texts are today's with the one M = 3 line added. GPU (TURBOEXL3_GPU=1,
 //! else skipped), at DeepSeek-V4.1's routed geometry (hidden 5120, expert width 2304, swiglu_limit 10, MUL1) over three
@@ -24,6 +24,7 @@ const G = support.Graph;
 const format = @import("../../core/format.zig");
 const ref = @import("../../core/ref.zig");
 const root = @import("../../root.zig");
+const banked = @import("banked.zig");
 const decode = @import("../../core/decode.zig");
 
 const testing = std.testing;
@@ -35,7 +36,7 @@ const sigma: f32 = 8;
 /// the byte test's banks (base, ext, transient), and the timing test's (72 experts)
 const bank_experts = [3]u32{ 20, 12, 8 };
 const time_experts = [3]u32{ 48, 16, 8 };
-const Sel = decode.Kernels3.BankedSel;
+const Sel = banked.Banked.BankedSel;
 /// the arms: today's grouped texts first
 const sels = [_]Sel{ .g4, .g4m3 };
 
@@ -62,7 +63,7 @@ fn envList(name: [*:0]const u8, default: []const u32, buf: []u32) []const u32 {
 }
 
 test "turboexl3 banked grp: the M = 3 texts are today's grouped texts with the one M = 3 line added after the M = 2 line" {
-    for ([_][2][:0]const u8{ .{ decode.text_gu3bg, decode.text_gu3bgm3 }, .{ decode.text_down3bg, decode.text_down3bgm3 } }) |p| {
+    for ([_][2][:0]const u8{ .{ banked.text_gu3bg, banked.text_gu3bgm3 }, .{ banked.text_down3bg, banked.text_down3bgm3 } }) |p| {
         const today = p[0];
         const m3 = p[1];
         try testing.expect(std.mem.indexOf(u8, today, "BTC, 3u, uint(DEFER)>") == null);
@@ -103,11 +104,10 @@ fn kernelBanks(rb: *const [3]root.Bank) [3]decode.Kernels.Bank {
 
 /// A Kernels3 at DeepSeek-V4.1's routed geometry (top-1, clamped, MUL1) as `root` builds it for a banked call, its
 /// banked GEMVs grouped (4 row-slots a lead); the arms pick their texts per call (`BankedSel`).
-fn groupedKernels3(rate: format.Rate) !decode.Kernels3 {
+fn groupedKernels3(rate: format.Rate) !banked.Owned {
     var k = try decode.Kernels3.initWith(.{ .hidden = hidden, .inter = inter, .topk = 1, .rate = rate, .dec = .mul1, .limit = @intCast(limit) }, 1, 4, 2);
     k.out_dtype = .float32;
-    k.banked_group = 4;
-    return k;
+    return .{ .k = k, .b = .{ .banked_group = 4 } };
 }
 
 /// Two arrays' f32 words compared (`row_w` words a row): the compared words, the differing words, the largest ulp
@@ -191,11 +191,11 @@ fn drawIds(rnd: std.Random, rows: usize, ids: []u32, skipped: *[2]usize) []const
 
 /// The banked call's three outputs on `sel`'s texts: hd (f16, as f32), hs and y; KEPT by `g`.
 const Outs = struct { hd: mlx.mlx_array, hs: mlx.mlx_array, y: mlx.mlx_array };
-fn callSel(g: *G, k: *decode.Kernels3, s: mlx.mlx_stream, x: mlx.mlx_array, ids: mlx.mlx_array, kb: *const [3]decode.Kernels.Bank, rows: usize, sel: Sel) !Outs {
-    const h = try k.bankedGateUpSel(s, x, ids, kb, rows, sel);
+fn callSel(g: *G, k: *banked.Owned, s: mlx.mlx_stream, x: mlx.mlx_array, ids: mlx.mlx_array, kb: *const [3]decode.Kernels.Bank, rows: usize, sel: Sel) !Outs {
+    const h = try k.b.bankedGateUpSel(&k.k, s, x, ids, kb, rows, sel);
     const hd = try g.adopt(h[0]);
     const hs = try g.adopt(h[1]);
-    const y = try g.adopt(try k.bankedDownSel(s, hd, hs, ids, kb, rows, sel));
+    const y = try g.adopt(try k.b.bankedDownSel(&k.k, s, hd, hs, ids, kb, rows, sel));
     return .{ .hd = try g.astype(hd, .float32), .hs = hs, .y = y };
 }
 
@@ -350,11 +350,11 @@ const profiles = [_]Profile{
     .{ .set = "sweep", .name = "d8c8", .count = .{ 0, 0, 0, 0, 0, 0, 0, 0, 8 }, .skip = 0 },
 };
 
-fn timedCall(k: *decode.Kernels3, s: mlx.mlx_stream, x: mlx.mlx_array, ids: mlx.mlx_array, kb: *const [3]decode.Kernels.Bank, rows: usize, sel: Sel) !mlx.mlx_array {
-    const h = try k.bankedGateUpSel(s, x, ids, kb, rows, sel);
+fn timedCall(k: *banked.Owned, s: mlx.mlx_stream, x: mlx.mlx_array, ids: mlx.mlx_array, kb: *const [3]decode.Kernels.Bank, rows: usize, sel: Sel) !mlx.mlx_array {
+    const h = try k.b.bankedGateUpSel(&k.k, s, x, ids, kb, rows, sel);
     defer _ = mlx.mlx_array_free(h[0]);
     defer _ = mlx.mlx_array_free(h[1]);
-    return k.bankedDownSel(s, h[0], h[1], ids, kb, rows, sel);
+    return k.b.bankedDownSel(&k.k, s, h[0], h[1], ids, kb, rows, sel);
 }
 
 test "turboexl3 gpu banked grp time: the M = 3 texts against today's grouped texts, recorded and swept profiles (TURBOEXL3_GPU=1 TURBOEXL3_BANKED_GRP_TIME=1)" {

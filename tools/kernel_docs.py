@@ -218,6 +218,10 @@ FAMILIES = {
     ('decode.zig', 'group_down_names[v].ptr'): ('turboexl3_down3bg_<variant>', lambda p, u: _group_family(p, u, 'turboexl3_down3bg')),
     ('banked_ilp_test.zig', 't_probe_names[ri][j].ptr'): ('turboexl3_t1v_probe_<route>_<dtype>', lambda p, u: _probe_family(p, u)),
 }
+# the grouped-GEMV variants live in deepseek_v41/banked.zig since the split (decode.zig before it)
+for (_f, _e), _v in list(FAMILIES.items()):
+    if _f == 'decode.zig':
+        FAMILIES[('banked.zig', _e)] = _v
 
 
 def kernels(src):

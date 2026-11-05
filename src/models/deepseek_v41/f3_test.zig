@@ -1,4 +1,4 @@
-//! F3 (`root.sharedSwiglu`, `dense.text_swiglu_prep`): DeepSeek-V4.1's shared expert at decode rows with the gate's and
+//! F3 (`root.sharedSwiglu`, `f3.text_swiglu_prep`): DeepSeek-V4.1's shared expert at decode rows with the gate's and
 //! up's finishes, the host's clamped SwiGLU and the down's prepare in one launch. The CPU test holds the fused text to the
 //! statements it reuses; TURBOEXL3_GPU=1 TURBOEXL3_F3=1 compares it with the host's chain (gate and up `linear`, astype f32,
 //! MLX's minimum, clip, sigmoid and multiplies, astype to the activation dtype, down `linear`) word for word at rows 1 to
@@ -24,7 +24,7 @@ const A = mlx.mlx_array;
 const limit: f32 = 10.0;
 
 test "turboexl3 f3u: the fused shared-expert text is text_dfinish's finishes, MLX's clamped SwiGLU and text_prep_s's prepare" {
-    const t = dense.text_swiglu_prep;
+    const t = @import("f3.zig").text_swiglu_prep;
     for ([_][]const u8{
         // text_dfinish's statements on both planes
         "float acc = z1[ulong(row) * ulong(DIMC) + o];",

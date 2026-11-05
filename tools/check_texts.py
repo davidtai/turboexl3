@@ -1192,6 +1192,9 @@ ADDED_FILES['ricursive_test.zig'] = ('Ripple-65B\'s tests: linear against format
 ADDED[('root.zig', 'const ricursive')] = 'Ripple-65B\'s module (models/ricursive/ricursive.zig)'
 CHANGED[('root.zig', 'const shared_state')] = 'registers ricursive.shared_state'
 
+# the split of the model variants out of the core (split-model-variants; check_texts --split)
+ADDED_FILES['f3.zig'] = 'F3 (DeepSeek-V4.1\'s shared expert at decode rows), out of dense.zig and root.zig'
+ADDED_FILES['banked.zig'] = 'DeepSeek-V4.1\'s banked decode, out of decode.zig\'s Kernels3 (`Banked` beside a geometry\'s Kernels3)'
 ADDED_FILES['chains_test.zig'] = ('byte tests of the core paths no other test pinned: pg2 against dequantize + matmul + '
                                   'finish, the pieces\' finish against the one-call finish, the unfused chain against the '
                                   'reference')

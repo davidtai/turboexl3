@@ -62,7 +62,7 @@ pub const header: [:0]const u8 = lane.metal_helpers ++ metal_common ++ metal_gem
 const gu_inputs = [_][*:0]const u8{ "x", "slots", "gate_t", "gate_suh", "gate_svh", "up_t", "up_suh", "up_svh" };
 const gu_outputs = [_][*:0]const u8{"h"};
 const down_inputs = [_][*:0]const u8{ "h", "slots", "scores", "down_t", "down_suh", "down_svh" };
-const down_outputs = [_][*:0]const u8{"y"};
+pub const down_outputs = [_][*:0]const u8{"y"};
 
 /// Drops a kernel `ks.newKernel` made, by the consumer's kernel API (README.md's Wiring). A `kernel_launch` that declares
 /// `mlx_fast_metal_kernel_free` hands each kernel to its caller and frees it there (mlx-stream's: the kernel's launch-cache
@@ -210,12 +210,12 @@ test "turboexl3 decode geometry admission: 128-aligned widths, top-k within the 
 pub const text_gu3 = gu3_1 ++ rk_line ++ gu3_body;
 /// gu3's pieces after its rk line, cut where gu3sf differs: after its reduction buffer (its declarations) and at the
 /// planes' stores; and where the banked text differs: at the weight base (`gu3_w`)
-const gu3_1 = @embedFile("kernels/decode/gu3_1.metal");
-const gu3_2 = @embedFile("kernels/decode/gu3_2.metal");
+pub const gu3_1 = @embedFile("kernels/decode/gu3_1.metal");
+pub const gu3_2 = @embedFile("kernels/decode/gu3_2.metal");
 const gu3_w = @embedFile("kernels/decode/gu3_w.metal");
-const gu3_3 = @embedFile("kernels/decode/gu3_3.metal");
-const gu3_stores = @embedFile("kernels/decode/gu3_stores.metal");
-const gu3_4 = @embedFile("kernels/decode/gu3_4.metal");
+pub const gu3_3 = @embedFile("kernels/decode/gu3_3.metal");
+pub const gu3_stores = @embedFile("kernels/decode/gu3_stores.metal");
+pub const gu3_4 = @embedFile("kernels/decode/gu3_4.metal");
 const gu3_body = gu3_2 ++ gu3_w ++ gu3_3 ++ gu3_stores ++ gu3_4;
 
 /// Form 3, launch 3: per (128-wide intermediate block, row-slot): sum the planes, f16 round, H128, svh, f16 round,
@@ -227,160 +227,38 @@ pub const text_fin3 = @embedFile("kernels/decode/fin3.metal");
 pub const text_down3 = down3_1 ++ rk_line ++ down3_2 ++ down3_w ++ down3_3;
 /// down3's pieces: its constants and grid line, then its body cut at the weight base (`down3_w`; the banked text's
 /// differs)
-const down3_1 = @embedFile("kernels/decode/down3_1.metal");
-const down3_2 = @embedFile("kernels/decode/down3_2.metal");
+pub const down3_1 = @embedFile("kernels/decode/down3_1.metal");
+pub const down3_2 = @embedFile("kernels/decode/down3_2.metal");
 const down3_w = @embedFile("kernels/decode/down3_w.metal");
-const down3_3 = @embedFile("kernels/decode/down3_3.metal");
+pub const down3_3 = @embedFile("kernels/decode/down3_3.metal");
 
 /// Form 3, launch 5: per (128-wide hidden block, row): for each slot in order sum the planes, f16 round, H128, svh,
 /// f16 round, times the score; y f32 [rows, hidden].
 pub const text_dfin3 = dfin3_1 ++ dfin3_expert ++ dfin3_2;
 /// dfin3's pieces, cut at the slot's expert line (the banked text's differs)
-const dfin3_1 = @embedFile("kernels/decode/dfin3_1.metal");
+pub const dfin3_1 = @embedFile("kernels/decode/dfin3_1.metal");
 const dfin3_expert = @embedFile("kernels/decode/dfin3_expert.metal");
-const dfin3_2 = @embedFile("kernels/decode/dfin3_2.metal");
+pub const dfin3_2 = @embedFile("kernels/decode/dfin3_2.metal");
 
 /// Form 3's prepare for gate and up in one launch: xg, xu half [RK, DIM] in lane order from x [rows, DIM] and the two suh.
 pub const text_prep2 = prep2_1 ++ expert_line ++ prep2_row ++ prep2_body;
 /// prep2's constants and grid lines, and its row line after the expert line
-const prep2_1 = @embedFile("kernels/decode/prep2_1.metal");
-const prep2_row = @embedFile("kernels/decode/prep2_row.metal");
+pub const prep2_1 = @embedFile("kernels/decode/prep2_1.metal");
+pub const prep2_row = @embedFile("kernels/decode/prep2_row.metal");
 /// A row-slot's expert, read where the kernel starts (prep2, fin7); the banked texts read a bank and a slot row there
 /// (`prep2b_expert`, `fin7b_expert`)
 const expert_line = @embedFile("kernels/decode/expert_line.metal");
 const prep2_inputs = [_][*:0]const u8{ "x", "slots", "gate_suh", "up_suh" };
-const prep2_outputs = [_][*:0]const u8{ "xg", "xu", "sg", "su" };
+pub const prep2_outputs = [_][*:0]const u8{ "xg", "xu", "sg", "su" };
 
 const gu3_inputs = [_][*:0]const u8{ "xgp", "xup", "slots", "gate_t", "up_t" };
-const gu3_outputs = [_][*:0]const u8{ "zg", "zu" };
+pub const gu3_outputs = [_][*:0]const u8{ "zg", "zu" };
 const fin3_inputs = [_][*:0]const u8{ "zg", "zu", "slots", "gate_svh", "up_svh", "down_suh", "xsg", "xsu" };
-const fin3_outputs = [_][*:0]const u8{ "hd", "hs" };
+pub const fin3_outputs = [_][*:0]const u8{ "hd", "hs" };
 const down3_inputs = [_][*:0]const u8{ "hdp", "slots", "down_t" };
-const down3_outputs = [_][*:0]const u8{"zd"};
+pub const down3_outputs = [_][*:0]const u8{"zd"};
 const dfin3_inputs = [_][*:0]const u8{ "zd", "slots", "scores", "down_svh", "hsx" };
 
-// ── The banked decode (`Kernels3.bankedGateUp` / `bankedDown`) ──
-//
-// A call's row-slots over three expert banks (an expert streamer's slot banks: base, ext, transient, each its own arrays
-// with its own slot count), a row-slot's id packed (bank << 24 | slot row). Form 7's launches at top-1 (prep2, gu3, fin7
-// clamped, down3, dfin3), each its base text with the lines that read a bank's arrays replaced and every other statement
-// kept: where the base reads the expert line, the banked text takes the slot row and selects the row-slot's suh / svh
-// arrays by its bank (`prep2b_expert`, `fin7b_expert`, `dfin3b_expert`); where the GEMVs take their weight base, the
-// bank's trellis at the slot row (`gu3b_w`, `down3b_w`). The GEMVs' members compare the packed ids, so two row-slots
-// share a decode only on one bank's one slot. A row-slot's statements, so its bytes, are the base launch's on its bank.
-// Each bank's arrays are separate inputs (at most 14 inputs and 2 outputs a launch, within Metal's 31 buffers).
-pub const text_prep2b = prep2_1 ++ prep2b_expert ++ prep2_row ++ prep2_body;
-pub const text_gu3b = gu3_1 ++ rk_line ++ gu3_2 ++ gu3b_w ++ gu3_3 ++ gu3_stores ++ gu3_4;
-pub const text_fin7cb = fin7_1 ++ fin7b_expert ++ fin7_2 ++ fin7_planes ++ fin7_3 ++ fin7_sums ++ fin7_4 ++ fin7_swiglu_clamp ++ fin7_5;
-pub const text_down3b = down3_1 ++ rk_line ++ down3_2 ++ down3b_w ++ down3_3;
-pub const text_dfin3b = dfin3_1 ++ dfin3b_expert ++ dfin3_2;
-const prep2b_expert = @embedFile("kernels/decode/prep2b_expert.metal");
-const gu3b_w = @embedFile("kernels/decode/gu3b_w.metal");
-const fin7b_expert = @embedFile("kernels/decode/fin7b_expert.metal");
-const down3b_w = @embedFile("kernels/decode/down3b_w.metal");
-const dfin3b_expert = @embedFile("kernels/decode/dfin3b_expert.metal");
-/// The banked launches' inputs: each banked array once per bank (0 base, 1 ext, 2 transient), in the base's order
-pub const prep2b_inputs = [_][*:0]const u8{ "x", "slots", "gate_suh0", "gate_suh1", "gate_suh2", "up_suh0", "up_suh1", "up_suh2" };
-pub const gu3b_inputs = [_][*:0]const u8{ "xgp", "xup", "slots", "gate_t0", "gate_t1", "gate_t2", "up_t0", "up_t1", "up_t2" };
-pub const fin7b_inputs = [_][*:0]const u8{ "zg", "zu", "slots", "gate_svh0", "gate_svh1", "gate_svh2", "up_svh0", "up_svh1", "up_svh2", "down_suh0", "down_suh1", "down_suh2", "xsg", "xsu" };
-pub const down3b_inputs = [_][*:0]const u8{ "hdp", "slots", "down_t0", "down_t1", "down_t2" };
-pub const dfin3b_inputs = [_][*:0]const u8{ "zd", "slots", "scores", "down_svh0", "down_svh1", "down_svh2", "hsx" };
-
-// ── The grouped banked decode (`Kernels3.banked_group` 4) ──
-//
-// The banked launches with the GEMVs' members widened from two row-slots to four of one packed id per lead threadgroup
-// (`turboexl3_members_g`, `turboexl3_gemv_group`: every weight read and decoded once and fed to each member in the
-// one-member order, so a row-slot's bytes are the banked call's), and a row-slot whose id is `skip_id` skipped by every
-// launch: no decode, its y row 0 (DEVROUTE's pairs whose expert no bank holds; the caller replaces their rows).
-pub const skip_id: u32 = 0xFFFFFFFF;
-/// The grouped GEMVs' members and core, after the base header
-pub const header_group: [:0]const u8 = header ++ @embedFile("kernels/decode/gemv_group.metal");
-/// hw2 (the hit wave's ILP retune): the grouped banked GEMVs' variants (`Kernels3.bankedGateUpSelV`, `bankedDownSelV`;
-/// `Config.banked_variant_gu`, `banked_variant_dn`). Each is Metal defines put before `header_group` for the grouped
-/// gate|up and down GEMVs alone (gu3bg and down3bg, or hw4b's gu3bgm3 and down3bgm3; gemv_group.metal and the MUL1
-/// helper read them), under kernel names of its own (MLX keys a custom kernel's library by its name). Every variant reads,
-/// decodes and sums each weight as variant 0 (today's) does: the same codewords, the same decoded values, the same FMA
-/// sequence into the same f32 accumulators and the same folds, so the same bytes (banked_ilp_test.zig checks every word,
-/// on today's grouped texts and on hw4b's). They differ in when the tile words load and how many lanes load them, the
-/// registers the loop holds, the passes over a tile and the instructions from a codeword to t.
-pub const GroupVariant = struct { name: [:0]const u8, defines: [:0]const u8 };
-pub const group_variants = [_]GroupVariant{
-    .{ .name = "", .defines = "" },
-    .{ .name = "ku", .defines = "#define EXL3_KU 1\n" },
-    .{ .name = "pf", .defines = "#define EXL3_GPF 1\n" },
-    .{ .name = "xh", .defines = "#define EXL3_GXH 1\n" },
-    .{ .name = "m2", .defines = "#define EXL3_GM2 1\n" },
-    .{ .name = "sh", .defines = "#define EXL3_GSH 1\n" },
-    .{ .name = "t4", .defines = "#define EXL3_T1V 4\n" },
-    .{ .name = "t1", .defines = "#define EXL3_T1V 1\n" },
-    .{ .name = "t0", .defines = "#define EXL3_T1V 0\n" },
-    .{ .name = "pfxh", .defines = "#define EXL3_GPF 1\n#define EXL3_GXH 1\n" },
-    .{ .name = "pfsh", .defines = "#define EXL3_GPF 1\n#define EXL3_GSH 1\n" },
-    .{ .name = "xhm2", .defines = "#define EXL3_GXH 1\n#define EXL3_GM2 1\n" },
-};
-comptime {
-    if (group_variants.len != @import("config.zig").banked_variants) @compileError("config.banked_variants is not group_variants.len");
-}
-/// `group_variants`' index by name (null: none)
-pub fn groupVariantOf(name: []const u8) ?u8 {
-    for (group_variants, 0..) |v, i| if (std.mem.eql(u8, v.name, name)) return @intCast(i);
-    return null;
-}
-/// `group_variants[i]`'s header, and its grouped GEMVs' kernel names on today's grouped texts (gu3bg, down3bg) and on
-/// hw4b's (gu3bgm3, down3bgm3); variant 0's the stock names
-const group_headers: [group_variants.len][:0]const u8 = blk: {
-    var h: [group_variants.len][:0]const u8 = undefined;
-    for (group_variants, 0..) |v, i| h[i] = v.defines ++ header_group;
-    break :blk h;
-};
-const group_gu_names: [group_variants.len][:0]const u8 = blk: {
-    var n: [group_variants.len][:0]const u8 = undefined;
-    n[0] = "turboexl3_gu3bg";
-    for (group_variants[1..], 1..) |v, i| n[i] = "turboexl3_gu3bg_" ++ v.name;
-    break :blk n;
-};
-const group_down_names: [group_variants.len][:0]const u8 = blk: {
-    var n: [group_variants.len][:0]const u8 = undefined;
-    n[0] = "turboexl3_down3bg";
-    for (group_variants[1..], 1..) |v, i| n[i] = "turboexl3_down3bg_" ++ v.name;
-    break :blk n;
-};
-const group_gu_m3_names: [group_variants.len][:0]const u8 = blk: {
-    var n: [group_variants.len][:0]const u8 = undefined;
-    n[0] = "turboexl3_gu3bgm3";
-    for (group_variants[1..], 1..) |v, i| n[i] = "turboexl3_gu3bgm3_" ++ v.name;
-    break :blk n;
-};
-const group_down_m3_names: [group_variants.len][:0]const u8 = blk: {
-    var n: [group_variants.len][:0]const u8 = undefined;
-    n[0] = "turboexl3_down3bgm3";
-    for (group_variants[1..], 1..) |v, i| n[i] = "turboexl3_down3bgm3_" ++ v.name;
-    break :blk n;
-};
-/// Every grouped GEMV kernel name a variant or a text set uses, for the tests: distinct names, distinct libraries.
-pub const group_kernel_names = group_gu_names ++ group_down_names ++ group_gu_m3_names ++ group_down_m3_names;
-pub const text_prep2bg = prep2_1 ++ skip_rk ++ prep2b_expert ++ prep2_row ++ prep2_body;
-pub const text_gu3bg = gu3_1 ++ rk_line ++ gu3g_2 ++ gu3b_w ++ gu3g_3;
-pub const text_fin7cbg = fin7_1 ++ skip_rk ++ fin7b_expert ++ fin7_2 ++ fin7_planes ++ fin7_3 ++ fin7_sums ++ fin7_4 ++ fin7_swiglu_clamp ++ fin7_5;
-pub const text_down3bg = down3_1 ++ rk_line ++ down3g_2 ++ down3b_w ++ down3g_3;
-pub const text_dfin3bg = dfin3_1 ++ skip_rk_next ++ dfin3b_expert ++ dfin3_2;
-/// hw4b: the grouped GEMVs with an M = 3 member path (`gu3g_3m3`, `down3g_3m3`): a lead with three members runs it, where
-/// today's run the M = 4 path with a fourth member's FMAs padding. Every member is fed in the one-member order
-/// (`turboexl3_gemv_group`), so a row-slot's bytes are the grouped call's. prep2bg, fin7cbg and dfin3bg are the grouped
-/// texts unchanged.
-pub const text_gu3bgm3 = gu3_1 ++ rk_line ++ gu3g_2 ++ gu3b_w ++ gu3g_3m3;
-pub const text_down3bgm3 = down3_1 ++ rk_line ++ down3g_2 ++ down3b_w ++ down3g_3m3;
-/// The skipped row-slot's line where a launch starts on one (prep2, fin7) and in dfin3's slot loop
-const skip_rk = @embedFile("kernels/decode/skip_rk.metal");
-const skip_rk_next = @embedFile("kernels/decode/skip_rk_next.metal");
-/// gu3's and down3's pieces after the constants and grid line and around the weight base: four members per lead, the
-/// reduction buffer for each and the planes' stores for each
-const gu3g_2 = @embedFile("kernels/decode/gu3g_2.metal");
-const gu3g_3 = @embedFile("kernels/decode/gu3g_3.metal");
-const down3g_2 = @embedFile("kernels/decode/down3g_2.metal");
-const down3g_3 = @embedFile("kernels/decode/down3g_3.metal");
-const gu3g_3m3 = @embedFile("kernels/decode/gu3g_3m3.metal");
-const down3g_3m3 = @embedFile("kernels/decode/down3g_3m3.metal");
 
 /// Form 3: five launches (prepare gate and up, split-K gate/up planes, finish + SwiGLU + down prepare, split-K down
 /// planes, finish + reduce); KS slices fill the GPU at one row.
@@ -492,40 +370,7 @@ pub const Kernels3 = struct {
     route_prepg: ?mlx.mlx_fast_metal_kernel = null,
     route_cfg: [Kernels.max_rows + 1]?mlx.mlx_fast_metal_kernel_config = @splat(null),
     route_key: [Kernels.max_rows + 1]RouteKey = undefined,
-    /// The banked decode (`bankedGateUp`, `bankedDown`; a top-1 clamped geometry): its kernels, built on first use, one
-    /// config set per row-slot count up to `banked_rows_max` (form 9's launch shape), and dfin3's unit scores
-    banked: ?BankedKernels = null,
-    cfgb: [banked_rows_max + 1]?Cfg = @splat(null),
-    banked_ones: ?mlx.mlx_array = null,
-    /// The banked GEMVs' row-slots of one packed id per lead threadgroup: 2 the banked texts (`group`'s pairing), 4 the
-    /// grouped texts (`text_gu3bg` .. `text_dfin3bg`), which also skip a row-slot whose id is `skip_id`. The same bytes
-    /// for every other row-slot. Set before the first banked call.
-    banked_group: u32 = 2,
-    banked_g: ?BankedKernels = null,
-    cfgbg: [banked_rows_max + 1]?Cfg = @splat(null),
-    /// hw4b: at `banked_group` 4, the grouped texts with the M = 3 member path (`text_gu3bgm3`, `text_down3bgm3`); their
-    /// kernels and their configs, a table of its own. The same bytes for every row-slot.
-    banked_m3: bool = false,
-    banked_gm3: ?BankedKernels = null,
-    cfgbgm3: [banked_rows_max + 1]?Cfg = @splat(null),
-    /// hw2: each grouped GEMV variant's gate|up and down kernels on today's grouped texts (`banked_gv`) and on hw4b's
-    /// (`banked_gvm3`) (`group_variants`; `bankedGateUpSelV`, `bankedDownSelV`), made on first use (variant 0's are
-    /// `banked_g`'s and `banked_gm3`'s). The configs are their texts' (`cfgbg`, `cfgbgm3`).
-    banked_gv: [group_variants.len]?GroupGemvs = @splat(null),
-    banked_gvm3: [group_variants.len]?GroupGemvs = @splat(null),
 
-    /// The most row-slots a banked call takes (an expert streamer's route: 8 verify rows of top-6 = 48 pairs)
-    pub const banked_rows_max: usize = 64;
-    /// The banked texts' kernels (`text_prep2b` .. `text_dfin3b`)
-    pub const BankedKernels = struct {
-        prep: mlx.mlx_fast_metal_kernel,
-        gu: mlx.mlx_fast_metal_kernel,
-        fin: mlx.mlx_fast_metal_kernel,
-        down: mlx.mlx_fast_metal_kernel,
-        dfin: mlx.mlx_fast_metal_kernel,
-    };
-    /// A grouped GEMV variant's two kernels (`banked_gv`, `banked_gvm3`)
-    pub const GroupGemvs = struct { gu: mlx.mlx_fast_metal_kernel, down: mlx.mlx_fast_metal_kernel };
 
     /// The shared expert `moeShared` folds into the routed launches: three dense EXL3 linears (gate, up: hidden -> inter;
     /// down: inter -> hidden; trellis U16 [in/16, out/16, n], suh [in], svh [out]) as dense.zig serves them (`n_*` their
@@ -603,7 +448,7 @@ pub const Kernels3 = struct {
         return .{ sharedOts(self.geo.inter / 16, 2, self.sots[ri], r), sharedOts(self.geo.hidden / 16, 1, self.sotsd[ri], r) };
     }
 
-    const Cfg = struct { prep_h: mlx.mlx_fast_metal_kernel_config, gu: mlx.mlx_fast_metal_kernel_config, fin: mlx.mlx_fast_metal_kernel_config, down: mlx.mlx_fast_metal_kernel_config, dfin: mlx.mlx_fast_metal_kernel_config, fin7: mlx.mlx_fast_metal_kernel_config, dfin7: mlx.mlx_fast_metal_kernel_config, gu8: mlx.mlx_fast_metal_kernel_config };
+    pub const Cfg = struct { prep_h: mlx.mlx_fast_metal_kernel_config, gu: mlx.mlx_fast_metal_kernel_config, fin: mlx.mlx_fast_metal_kernel_config, down: mlx.mlx_fast_metal_kernel_config, dfin: mlx.mlx_fast_metal_kernel_config, fin7: mlx.mlx_fast_metal_kernel_config, dfin7: mlx.mlx_fast_metal_kernel_config, gu8: mlx.mlx_fast_metal_kernel_config };
     const prep_in = [_][*:0]const u8{ "x", "slots", "suh" };
     const prep_out = [_][*:0]const u8{"xp"};
 
@@ -701,32 +546,6 @@ pub const Kernels3 = struct {
         inline for (.{ self.route_prep, self.route_prepg }) |k| if (k) |kk| {
             freeKernel(kk);
         };
-        for (&self.cfgb) |*c| if (c.*) |cc| {
-            inline for (.{ cc.prep_h, cc.gu, cc.fin, cc.down, cc.dfin, cc.fin7, cc.dfin7, cc.gu8 }) |k| _ = mlx.mlx_fast_metal_kernel_config_free(k);
-            c.* = null;
-        };
-        for (&self.cfgbg) |*c| if (c.*) |cc| {
-            inline for (.{ cc.prep_h, cc.gu, cc.fin, cc.down, cc.dfin, cc.fin7, cc.dfin7, cc.gu8 }) |k| _ = mlx.mlx_fast_metal_kernel_config_free(k);
-            c.* = null;
-        };
-        for (&self.cfgbgm3) |*c| if (c.*) |cc| {
-            inline for (.{ cc.prep_h, cc.gu, cc.fin, cc.down, cc.dfin, cc.fin7, cc.dfin7, cc.gu8 }) |k| _ = mlx.mlx_fast_metal_kernel_config_free(k);
-            c.* = null;
-        };
-        if (self.banked) |b| inline for (.{ b.prep, b.gu, b.fin, b.down, b.dfin }) |k| freeKernel(k);
-        if (self.banked_g) |b| inline for (.{ b.prep, b.gu, b.fin, b.down, b.dfin }) |k| freeKernel(k);
-        if (self.banked_gm3) |b| inline for (.{ b.prep, b.gu, b.fin, b.down, b.dfin }) |k| freeKernel(k);
-        for (&self.banked_gv) |*g| if (g.*) |gg| {
-            freeKernel(gg.gu);
-            freeKernel(gg.down);
-            g.* = null;
-        };
-        for (&self.banked_gvm3) |*g| if (g.*) |gg| {
-            freeKernel(gg.gu);
-            freeKernel(gg.down);
-            g.* = null;
-        };
-        if (self.banked_ones) |o| _ = mlx.mlx_array_free(o);
         inline for (.{ self.prep, self.gu, self.fin, self.down, self.dfin, self.fin7, self.dfin7, self.gu8, self.gu3s, self.gu8s, self.fin7s, self.down3s, self.dfin7s, self.sgu, self.sfin, self.sdown }) |k| freeKernel(k);
         inline for (.{ self.gu8t, self.gu3t, self.gu3p, self.prep2t, self.fin7t, self.down3t, self.dfin7t, self.sgu2, self.sgu2p, self.sprep2, self.sfin2, self.sdown2 }) |k| freeKernel(k);
     }
@@ -776,12 +595,12 @@ pub const Kernels3 = struct {
         return self.buildCfgsSplit(rows, bt, kdiv, kdiv);
     }
 
-    fn buildCfgsSplit(self: *Kernels3, rows: usize, bt: u32, kdiv: [4]u32, kdiv_dn: [4]u32) !Cfg {
+    pub fn buildCfgsSplit(self: *Kernels3, rows: usize, bt: u32, kdiv: [4]u32, kdiv_dn: [4]u32) !Cfg {
         return self.buildCfgsGroup(rows, bt, kdiv, kdiv_dn, self.group);
     }
 
     /// `buildCfgsSplit` at `group` row-slots per lead (the GEMVs' GROUP from two rows up)
-    fn buildCfgsGroup(self: *Kernels3, rows: usize, bt: u32, kdiv: [4]u32, kdiv_dn: [4]u32, group: u32) !Cfg {
+    pub fn buildCfgsGroup(self: *Kernels3, rows: usize, bt: u32, kdiv: [4]u32, kdiv_dn: [4]u32, group: u32) !Cfg {
         const g = self.geo;
         const z_gu = self.kThreadgroups(self.ks_gu, rows, kdiv);
         const z_dn = self.kThreadgroups(self.ks_dn, rows, kdiv_dn);
@@ -822,7 +641,7 @@ pub const Kernels3 = struct {
         };
     }
 
-    fn one(k: mlx.mlx_fast_metal_kernel, c: mlx.mlx_fast_metal_kernel_config, ins: []const mlx.mlx_array, s: mlx.mlx_stream) !mlx.mlx_array {
+    pub fn one(k: mlx.mlx_fast_metal_kernel, c: mlx.mlx_fast_metal_kernel_config, ins: []const mlx.mlx_array, s: mlx.mlx_stream) !mlx.mlx_array {
         var outs: [1]mlx.mlx_array = undefined;
         try ks.applyConfig(k, c, ins, &outs, s);
         return outs[0];
@@ -874,244 +693,6 @@ pub const Kernels3 = struct {
         return one(if (f7d) self.dfin7 else self.dfin, if (f7d) c.dfin7 else c.dfin, &.{ zd, slots, scores, bank.down_svh, hd[1] }, s);
     }
 
-    /// The banked decode's kernels, made on first use: a clamped top-1 geometry's (each row-slot a pair at weight 1, its
-    /// SwiGLU fin7c's); error.Exl3EngineNotImplemented for any other.
-    fn bankedKernels(self: *Kernels3) !*const BankedKernels {
-        if (self.banked) |*b| return b;
-        if (self.geo.limit == 0 or self.geo.topk != 1) return error.Exl3EngineNotImplemented;
-        const prep = ks.newKernel("turboexl3_prep2b", &prep2b_inputs, &prep2_outputs, text_prep2b, header, true) orelse return error.KernelCreateFailed;
-        errdefer freeKernel(prep);
-        const gu = ks.newKernel("turboexl3_gu3b", &gu3b_inputs, &gu3_outputs, text_gu3b, header, true) orelse return error.KernelCreateFailed;
-        errdefer freeKernel(gu);
-        const fin = ks.newKernel("turboexl3_fin7cb", &fin7b_inputs, &fin3_outputs, text_fin7cb, header5, true) orelse return error.KernelCreateFailed;
-        errdefer freeKernel(fin);
-        const down = ks.newKernel("turboexl3_down3b", &down3b_inputs, &down3_outputs, text_down3b, header, true) orelse return error.KernelCreateFailed;
-        errdefer freeKernel(down);
-        const dfin = ks.newKernel("turboexl3_dfin3b", &dfin3b_inputs, &down_outputs, text_dfin3b, header, true) orelse return error.KernelCreateFailed;
-        self.banked = .{ .prep = prep, .gu = gu, .fin = fin, .down = down, .dfin = dfin };
-        return &self.banked.?;
-    }
-
-    /// The banked decode's configs at `rows` row-slots: form 9's launch shape at that many row-slots (`cfgs9`'s: bt1 at
-    /// one, bt9 above, kdiv9's K threadgroups), in a table of its own up to `banked_rows_max`.
-    fn cfgsBanked(self: *Kernels3, rows: usize) !Cfg {
-        if (rows == 0 or rows > banked_rows_max) return error.BadExl3Shape;
-        if (self.cfgb[rows]) |c| return c;
-        const bt = if (rows == 1) self.bt1 else self.bt9;
-        if (bt != 1 and bt != 2 and bt != 4 and bt != 8) return error.BadExl3Shape;
-        const c = try self.buildCfgsSplit(rows, bt, self.kdiv9, self.kdiv9d orelse self.kdiv9);
-        self.cfgb[rows] = c;
-        return c;
-    }
-
-    /// The grouped banked kernels (`banked_group` 4), made on first use; the geometry as `bankedKernels` takes it.
-    fn bankedKernelsG(self: *Kernels3) !*const BankedKernels {
-        if (self.banked_g) |*b| return b;
-        if (self.geo.limit == 0 or self.geo.topk != 1) return error.Exl3EngineNotImplemented;
-        const prep = ks.newKernel("turboexl3_prep2bg", &prep2b_inputs, &prep2_outputs, text_prep2bg, header, true) orelse return error.KernelCreateFailed;
-        errdefer freeKernel(prep);
-        const gu = ks.newKernel("turboexl3_gu3bg", &gu3b_inputs, &gu3_outputs, text_gu3bg, header_group, true) orelse return error.KernelCreateFailed;
-        errdefer freeKernel(gu);
-        const fin = ks.newKernel("turboexl3_fin7cbg", &fin7b_inputs, &fin3_outputs, text_fin7cbg, header5, true) orelse return error.KernelCreateFailed;
-        errdefer freeKernel(fin);
-        const down = ks.newKernel("turboexl3_down3bg", &down3b_inputs, &down3_outputs, text_down3bg, header_group, true) orelse return error.KernelCreateFailed;
-        errdefer freeKernel(down);
-        const dfin = ks.newKernel("turboexl3_dfin3bg", &dfin3b_inputs, &down_outputs, text_dfin3bg, header, true) orelse return error.KernelCreateFailed;
-        self.banked_g = .{ .prep = prep, .gu = gu, .fin = fin, .down = down, .dfin = dfin };
-        return &self.banked_g.?;
-    }
-
-    /// `cfgsBanked` at 4 row-slots per lead (the grouped texts' GROUP), in a table of its own.
-    fn cfgsBankedG(self: *Kernels3, rows: usize) !Cfg {
-        if (rows == 0 or rows > banked_rows_max) return error.BadExl3Shape;
-        if (self.cfgbg[rows]) |c| return c;
-        const bt = if (rows == 1) self.bt1 else self.bt9;
-        if (bt != 1 and bt != 2 and bt != 4 and bt != 8) return error.BadExl3Shape;
-        const c = try self.buildCfgsGroup(rows, bt, self.kdiv9, self.kdiv9d orelse self.kdiv9, 4);
-        self.cfgbg[rows] = c;
-        return c;
-    }
-
-    /// hw4b's kernels (`text_gu3bgm3`, `text_down3bgm3`; prep2bg, fin7cbg and dfin3bg the grouped texts), made on first use.
-    fn bankedKernelsGM3(self: *Kernels3) !*const BankedKernels {
-        if (self.banked_gm3) |*b| return b;
-        if (self.geo.limit == 0 or self.geo.topk != 1) return error.Exl3EngineNotImplemented;
-        const prep = ks.newKernel("turboexl3_prep2bg", &prep2b_inputs, &prep2_outputs, text_prep2bg, header, true) orelse return error.KernelCreateFailed;
-        errdefer freeKernel(prep);
-        const gu = ks.newKernel("turboexl3_gu3bgm3", &gu3b_inputs, &gu3_outputs, text_gu3bgm3, header_group, true) orelse return error.KernelCreateFailed;
-        errdefer freeKernel(gu);
-        const fin = ks.newKernel("turboexl3_fin7cbg", &fin7b_inputs, &fin3_outputs, text_fin7cbg, header5, true) orelse return error.KernelCreateFailed;
-        errdefer freeKernel(fin);
-        const down = ks.newKernel("turboexl3_down3bgm3", &down3b_inputs, &down3_outputs, text_down3bgm3, header_group, true) orelse return error.KernelCreateFailed;
-        errdefer freeKernel(down);
-        const dfin = ks.newKernel("turboexl3_dfin3bg", &dfin3b_inputs, &down_outputs, text_dfin3bg, header, true) orelse return error.KernelCreateFailed;
-        self.banked_gm3 = .{ .prep = prep, .gu = gu, .fin = fin, .down = down, .dfin = dfin };
-        return &self.banked_gm3.?;
-    }
-
-    /// hw4b's configs at 4 row-slots per lead, in a table of its own.
-    fn cfgsBankedGM3(self: *Kernels3, rows: usize) !Cfg {
-        if (rows == 0 or rows > banked_rows_max) return error.BadExl3Shape;
-        if (self.cfgbgm3[rows]) |c| return c;
-        const bt = if (rows == 1) self.bt1 else self.bt9;
-        if (bt != 1 and bt != 2 and bt != 4 and bt != 8) return error.BadExl3Shape;
-        const c = try self.buildCfgsGroup(rows, bt, self.kdiv9, self.kdiv9d orelse self.kdiv9, 4);
-        self.cfgbgm3[rows] = c;
-        return c;
-    }
-
-    /// Which banked texts a call runs (`bankedGateUpSel`, `bankedDownSel`): `configured` (`banked_group`, `banked_m3`),
-    /// today's grouped texts (`g4`) or hw4b's (`g4m3`: the M = 3 path). Every selection gives a row-slot the same bytes.
-    pub const BankedSel = enum { configured, g4, g4m3 };
-    /// A set's texts: the banked ones (GROUP 2), today's grouped ones or hw4b's (the texts hw2's variants run on)
-    const Texts = enum { banked, g4, g4m3 };
-    const BankedSet = struct { k: *const BankedKernels, c: Cfg, texts: Texts };
-
-    /// The banked launches and configs at `banked_group`: the banked texts at 2, the grouped texts at 4 (hw4b's with
-    /// `banked_m3`).
-    fn bankedSet(self: *Kernels3, rows: usize) !BankedSet {
-        return switch (self.banked_group) {
-            2 => .{ .k = try self.bankedKernels(), .c = try self.cfgsBanked(rows), .texts = .banked },
-            4 => if (self.banked_m3) self.gm3Set(rows) else self.g4Set(rows),
-            else => error.BadExl3Shape,
-        };
-    }
-
-    /// Today's grouped texts at GROUP 4.
-    fn g4Set(self: *Kernels3, rows: usize) !BankedSet {
-        return .{ .k = try self.bankedKernelsG(), .c = try self.cfgsBankedG(rows), .texts = .g4 };
-    }
-
-    /// hw4b's texts at GROUP 4.
-    fn gm3Set(self: *Kernels3, rows: usize) !BankedSet {
-        return .{ .k = try self.bankedKernelsGM3(), .c = try self.cfgsBankedGM3(rows), .texts = .g4m3 };
-    }
-
-    /// `sel`'s launches and configs (`configured`: `bankedSet`'s).
-    fn bankedSetSel(self: *Kernels3, rows: usize, sel: BankedSel) !BankedSet {
-        return switch (sel) {
-            .configured => self.bankedSet(rows),
-            .g4 => self.g4Set(rows),
-            .g4m3 => self.gm3Set(rows),
-        };
-    }
-
-    /// `bankedSetSel` with the grouped GEMVs of `variant` (`group_variants`; 0: the set's own) on the set's grouped texts
-    /// (today's or hw4b's); any but 0 needs grouped texts (`banked_group` 4, or `sel` g4 or g4m3).
-    fn bankedSetSelV(self: *Kernels3, rows: usize, sel: BankedSel, variant: u8) !struct { k: BankedKernels, c: Cfg } {
-        if (variant >= group_variants.len) return error.BadExl3Shape;
-        const set = try self.bankedSetSel(rows, sel);
-        var k = set.k.*;
-        if (variant != 0) {
-            if (set.texts == .banked) return error.BadExl3Shape;
-            const g = try self.groupGemvs(variant, set.texts == .g4m3);
-            k.gu = g.gu;
-            k.down = g.down;
-        }
-        return .{ .k = k, .c = set.c };
-    }
-
-    /// Variant `v`'s grouped gate|up and down GEMVs (`group_variants`, v >= 1) on today's grouped texts or, `m3`, on
-    /// hw4b's, made on first use: the texts on the variant's header.
-    fn groupGemvs(self: *Kernels3, v: u8, m3: bool) !GroupGemvs {
-        const slot = if (m3) &self.banked_gvm3[v] else &self.banked_gv[v];
-        if (slot.*) |g| return g;
-        const gu = (if (m3)
-            ks.newKernel(group_gu_m3_names[v].ptr, &gu3b_inputs, &gu3_outputs, text_gu3bgm3, group_headers[v].ptr, true)
-        else
-            ks.newKernel(group_gu_names[v].ptr, &gu3b_inputs, &gu3_outputs, text_gu3bg, group_headers[v].ptr, true)) orelse return error.KernelCreateFailed;
-        errdefer freeKernel(gu);
-        const down = (if (m3)
-            ks.newKernel(group_down_m3_names[v].ptr, &down3b_inputs, &down3_outputs, text_down3bgm3, group_headers[v].ptr, true)
-        else
-            ks.newKernel(group_down_names[v].ptr, &down3b_inputs, &down3_outputs, text_down3bg, group_headers[v].ptr, true)) orelse return error.KernelCreateFailed;
-        slot.* = .{ .gu = gu, .down = down };
-        return slot.*.?;
-    }
-
-    /// dfin3's unit scores in the banked down (f32 [banked_rows_max], made and evaluated on first use).
-    fn bankedOnes(self: *Kernels3) !mlx.mlx_array {
-        if (self.banked_ones) |o| return o;
-        const buf: [banked_rows_max]f32 = @splat(1.0);
-        const o = mlx.mlx_array_new_data(&buf, &[_]c_int{banked_rows_max}, 1, .float32);
-        if (o.ctx == null) return error.MlxError;
-        errdefer _ = mlx.mlx_array_free(o);
-        try mlx.check(mlx.mlx_array_eval(o));
-        self.banked_ones = o;
-        return o;
-    }
-
-    /// The banked decode's gate|up (prep2b, gu3b, fin7cb): x [rows, hidden] (bf16, f16 or f32: row-slot r's row), `ids`
-    /// [rows] u32 or i32, row-slot r's id packed (bank << 24 | slot row) -> the down's prepared input hd f16 [rows, inter]
-    /// (lane order) and its 128-block sums hs f32 [rows, inter / 128]. `banks`: base, ext, transient, each its own slot
-    /// count (a bank no id names may repeat another's arrays). Needs a clamped top-1 geometry; rows 1..banked_rows_max.
-    /// The caller frees both.
-    pub fn bankedGateUp(self: *Kernels3, s: mlx.mlx_stream, x: mlx.mlx_array, ids: mlx.mlx_array, banks: *const [3]Kernels.Bank, rows: usize) ![2]mlx.mlx_array {
-        return self.bankedGateUpSel(s, x, ids, banks, rows, .configured);
-    }
-
-    /// `bankedGateUp` on `sel`'s texts (hw4b's check and tests): the same bytes for every selection.
-    pub fn bankedGateUpSel(self: *Kernels3, s: mlx.mlx_stream, x: mlx.mlx_array, ids: mlx.mlx_array, banks: *const [3]Kernels.Bank, rows: usize, sel: BankedSel) ![2]mlx.mlx_array {
-        return self.bankedGateUpSelV(s, x, ids, banks, rows, sel, 0);
-    }
-
-    /// `bankedGateUp` with the grouped gate|up GEMV of `variant` (hw2's `group_variants`; any but 0 needs `banked_group`
-    /// 4): the same bytes.
-    pub fn bankedGateUpV(self: *Kernels3, s: mlx.mlx_stream, x: mlx.mlx_array, ids: mlx.mlx_array, banks: *const [3]Kernels.Bank, rows: usize, variant: u8) ![2]mlx.mlx_array {
-        return self.bankedGateUpSelV(s, x, ids, banks, rows, .configured, variant);
-    }
-
-    /// `bankedGateUp` on `sel`'s texts with the grouped gate|up GEMV of `variant` on them (`bankedSetSelV`): the same
-    /// bytes for every selection and variant.
-    pub fn bankedGateUpSelV(self: *Kernels3, s: mlx.mlx_stream, x: mlx.mlx_array, ids: mlx.mlx_array, banks: *const [3]Kernels.Bank, rows: usize, sel: BankedSel, variant: u8) ![2]mlx.mlx_array {
-        const set = try self.bankedSetSelV(rows, sel, variant);
-        const k = &set.k;
-        const c = set.c;
-        const b = banks;
-        var xp: [4]mlx.mlx_array = undefined; // xg, xu, and their per-block input sums
-        try ks.applyConfig(k.prep, c.prep_h, &.{ x, ids, b[0].gate_suh, b[1].gate_suh, b[2].gate_suh, b[0].up_suh, b[1].up_suh, b[2].up_suh }, &xp, s);
-        defer for (xp) |a| {
-            _ = mlx.mlx_array_free(a);
-        };
-        var z: [2]mlx.mlx_array = undefined; // the split-K gate|up planes
-        try ks.applyConfig(k.gu, c.gu, &.{ xp[0], xp[1], ids, b[0].gate_t, b[1].gate_t, b[2].gate_t, b[0].up_t, b[1].up_t, b[2].up_t }, &z, s);
-        defer for (z) |a| {
-            _ = mlx.mlx_array_free(a);
-        };
-        var hd: [2]mlx.mlx_array = undefined;
-        try ks.applyConfig(k.fin, c.fin7, &.{ z[0], z[1], ids, b[0].gate_svh, b[1].gate_svh, b[2].gate_svh, b[0].up_svh, b[1].up_svh, b[2].up_svh, b[0].down_suh, b[1].down_suh, b[2].down_suh, xp[2], xp[3] }, &hd, s);
-        return hd;
-    }
-
-    /// The banked decode's down (down3b, then dfin3b at top-1 with unit scores): `hd`, `hs` (`bankedGateUp`'s), the same
-    /// ids and banks -> y f32 [rows, hidden], row-slot r's expert output at weight 1. The caller frees y.
-    pub fn bankedDown(self: *Kernels3, s: mlx.mlx_stream, hd: mlx.mlx_array, hs: mlx.mlx_array, ids: mlx.mlx_array, banks: *const [3]Kernels.Bank, rows: usize) !mlx.mlx_array {
-        return self.bankedDownSel(s, hd, hs, ids, banks, rows, .configured);
-    }
-
-    /// `bankedDown` on `sel`'s texts (hw4b's check and tests): the same bytes for every selection.
-    pub fn bankedDownSel(self: *Kernels3, s: mlx.mlx_stream, hd: mlx.mlx_array, hs: mlx.mlx_array, ids: mlx.mlx_array, banks: *const [3]Kernels.Bank, rows: usize, sel: BankedSel) !mlx.mlx_array {
-        return self.bankedDownSelV(s, hd, hs, ids, banks, rows, sel, 0);
-    }
-
-    /// `bankedDown` with the grouped down GEMV of `variant` (hw2's `group_variants`; any but 0 needs `banked_group` 4):
-    /// the same bytes.
-    pub fn bankedDownV(self: *Kernels3, s: mlx.mlx_stream, hd: mlx.mlx_array, hs: mlx.mlx_array, ids: mlx.mlx_array, banks: *const [3]Kernels.Bank, rows: usize, variant: u8) !mlx.mlx_array {
-        return self.bankedDownSelV(s, hd, hs, ids, banks, rows, .configured, variant);
-    }
-
-    /// `bankedDown` on `sel`'s texts with the grouped down GEMV of `variant` on them (`bankedSetSelV`): the same bytes for
-    /// every selection and variant.
-    pub fn bankedDownSelV(self: *Kernels3, s: mlx.mlx_stream, hd: mlx.mlx_array, hs: mlx.mlx_array, ids: mlx.mlx_array, banks: *const [3]Kernels.Bank, rows: usize, sel: BankedSel, variant: u8) !mlx.mlx_array {
-        const set = try self.bankedSetSelV(rows, sel, variant);
-        const k = &set.k;
-        const c = set.c;
-        const ones = try self.bankedOnes();
-        const b = banks;
-        const zd = try one(k.down, c.down, &.{ hd, ids, b[0].down_t, b[1].down_t, b[2].down_t }, s);
-        defer _ = mlx.mlx_array_free(zd);
-        return one(k.dfin, c.dfin, &.{ zd, ids, ones, b[0].down_svh, b[1].down_svh, b[2].down_svh, hs }, s);
-    }
 
     /// Whether `moeShared` carries this shared expert at `rows`: up to `shared_rows_max` rows, the routed width as its
     /// intermediate, gate|up K slices of exactly one 128-block of hidden (the heads rotate their block in-kernel: dense prep_s's
@@ -1963,20 +1544,20 @@ pub const text_fin7 = fin7_1 ++ expert_line ++ fin7_2 ++ fin7_planes ++ fin7_3 +
 /// fin7's pieces: its constants and grid lines; the expert line (`expert_line`: the banked text reads a bank there); its
 /// body, cut at the planes' read (gu3sf reads the planes through coherent pointers), at the input sums' read and at the
 /// SwiGLU's line (`text_fin7c` clamps there)
-const fin7_1 = @embedFile("kernels/decode/fin7_1.metal");
-const fin7_2 = @embedFile("kernels/decode/fin7_2.metal");
-const fin7_planes = @embedFile("kernels/decode/fin7_planes.metal");
-const fin7_3 = @embedFile("kernels/decode/fin7_3.metal");
-const fin7_sums = @embedFile("kernels/decode/fin7_sums.metal");
-const fin7_4 = @embedFile("kernels/decode/fin7_4.metal");
+pub const fin7_1 = @embedFile("kernels/decode/fin7_1.metal");
+pub const fin7_2 = @embedFile("kernels/decode/fin7_2.metal");
+pub const fin7_planes = @embedFile("kernels/decode/fin7_planes.metal");
+pub const fin7_3 = @embedFile("kernels/decode/fin7_3.metal");
+pub const fin7_sums = @embedFile("kernels/decode/fin7_sums.metal");
+pub const fin7_4 = @embedFile("kernels/decode/fin7_4.metal");
 const fin7_swiglu = @embedFile("kernels/decode/fin7_swiglu.metal");
-const fin7_5 = @embedFile("kernels/decode/fin7_5.metal");
+pub const fin7_5 = @embedFile("kernels/decode/fin7_5.metal");
 
 /// Form 7's launch 3 with the clamped SwiGLU (`Geometry.limit`, the template int LIMIT; `root.moeClamped`): fin7 with its
 /// SwiGLU line replaced by the clamp (the gate clamped from above at LIMIT and up to [-LIMIT, LIMIT], then fin7's SwiGLU
 /// on them), every other statement fin7's, so where no value passes the limit it gives fin7's bytes.
 pub const text_fin7c = fin7_1 ++ expert_line ++ fin7_2 ++ fin7_planes ++ fin7_3 ++ fin7_sums ++ fin7_4 ++ fin7_swiglu_clamp ++ fin7_5;
-const fin7_swiglu_clamp = @embedFile("kernels/decode/fin7_swiglu_clamp.metal");
+pub const fin7_swiglu_clamp = @embedFile("kernels/decode/fin7_swiglu_clamp.metal");
 
 /// Form 7, launch 5 (dfin3 with the slots side by side): per (128-wide hidden block, row), simdgroup k finishes slot k (the
 /// planes' sum, the deferred map, f16 round, H128 in registers, svh, f16 round) into threadgroup memory, then 128 threads
@@ -2150,7 +1731,7 @@ const shared_down2_head = shared2_prologue ++ @embedFile("kernels/decode/shared_
 pub const text_dfin7t = @embedFile("kernels/decode/dfin7t.metal");
 
 /// The routed bodies under the v2 heads: rk = y - SYOFF (SYOFF 0: v1's rows; > 0: the shared rows first).
-const rk_line = @embedFile("kernels/decode/rk_line.metal");
+pub const rk_line = @embedFile("kernels/decode/rk_line.metal");
 const rk_line_y = @embedFile("kernels/decode/rk_line_y.metal");
 const text_gu8_y: [:0]const u8 = @embedFile("kernels/decode/gu8_1.metal") ++ rk_line_y ++ @embedFile("kernels/decode/gu8_2.metal");
 const text_gu3_y: [:0]const u8 = gu3_1 ++ rk_line_y ++ gu3_body;
@@ -2199,7 +1780,7 @@ fn textJoin(comptime parts: []const []const u8) [:0]const u8 {
 const router_sel = @embedFile("kernels/decode/router_softmax_3.metal");
 const router_softmax = @embedFile("kernels/decode/router_softmax_2.metal");
 const router_weights = @embedFile("kernels/decode/router_softmax_5.metal");
-const prep2_body = @embedFile("kernels/decode/prep2_2.metal");
+pub const prep2_body = @embedFile("kernels/decode/prep2_2.metal");
 
 /// The shared gate's logit for one row exactly as MLX computes it at the verify widths, as one simdgroup's part
 /// (`gx` x [R, GK] bf16, `gw` the gate's weight vector [GK] bf16, `gp` the 8 partials): MLX 0.32's `matmul` of x and the gate's

@@ -1,4 +1,4 @@
-//! hw2, the hit wave's ILP retune: the grouped banked GEMVs' variants (`decode.group_variants`; `Kernels3.bankedGateUpV`,
+//! hw2, the hit wave's ILP retune: the grouped banked GEMVs' variants (`banked.group_variants`; `Kernels3.bankedGateUpV`,
 //! `bankedDownV`; `Config.banked_variant_gu`, `banked_variant_dn`): gu3bg and down3bg on today's texts with Metal
 //! defines before their header (gemv_group.metal's EXL3_GPF, EXL3_GXH, EXL3_GM2, EXL3_GSH; the MUL1 helper's EXL3_T1V
 //! and EXL3_KU), each another schedule of the same reads, decodes and sums. CPU (always): the variant table, its names
@@ -28,6 +28,7 @@ const G = support.Graph;
 const format = @import("../../core/format.zig");
 const ref = @import("../../core/ref.zig");
 const root = @import("../../root.zig");
+const banked = @import("banked.zig");
 const decode = @import("../../core/decode.zig");
 const config = @import("../../core/config.zig");
 
@@ -40,8 +41,8 @@ const sigma: f32 = 8;
 /// the byte test's banks (base, ext, transient), and the timing test's (72 experts)
 const bank_experts = [3]u32{ 20, 12, 8 };
 const time_experts = [3]u32{ 48, 16, 8 };
-const n_var = decode.group_variants.len;
-const Sel = decode.Kernels3.BankedSel;
+const n_var = banked.group_variants.len;
+const Sel = banked.Banked.BankedSel;
 /// the byte test's texts: today's grouped texts and hw4b's (every variant on each)
 const sels = [_]Sel{ .g4, .g4m3 };
 
@@ -69,24 +70,24 @@ fn envList(name: [*:0]const u8, default: []const u32, buf: []u32) []const u32 {
 
 test "turboexl3 banked ilp: variant 0 is today's (no defines, the stock kernel names), every other variant a distinct name with its defines, and the config counts them" {
     try testing.expectEqual(@as(usize, config.banked_variants), n_var);
-    try testing.expectEqualStrings("", decode.group_variants[0].name);
-    try testing.expectEqualStrings("", decode.group_variants[0].defines);
-    try testing.expectEqual(@as(?u8, 0), decode.groupVariantOf(""));
-    for (decode.group_variants[1..], 1..) |v, i| {
+    try testing.expectEqualStrings("", banked.group_variants[0].name);
+    try testing.expectEqualStrings("", banked.group_variants[0].defines);
+    try testing.expectEqual(@as(?u8, 0), banked.groupVariantOf(""));
+    for (banked.group_variants[1..], 1..) |v, i| {
         try testing.expect(v.name.len > 0 and v.defines.len > 0);
         try testing.expect(std.mem.startsWith(u8, v.defines, "#define EXL3_") and std.mem.endsWith(u8, v.defines, "\n"));
-        try testing.expectEqual(@as(?u8, @as(u8, @intCast(i))), decode.groupVariantOf(v.name));
-        for (decode.group_variants[i + 1 ..]) |w| {
+        try testing.expectEqual(@as(?u8, @as(u8, @intCast(i))), banked.groupVariantOf(v.name));
+        for (banked.group_variants[i + 1 ..]) |w| {
             try testing.expect(!std.mem.eql(u8, v.name, w.name));
             try testing.expect(!std.mem.eql(u8, v.defines, w.defines));
         }
     }
-    try testing.expectEqual(@as(?u8, null), decode.groupVariantOf("nope"));
+    try testing.expectEqual(@as(?u8, null), banked.groupVariantOf("nope"));
     // every grouped GEMV kernel a variant or a text set makes has a name of its own (MLX keys a library by its name)
-    const names = decode.group_kernel_names;
+    const names = banked.group_kernel_names;
     for (names, 0..) |a, i| for (names[i + 1 ..]) |b| try testing.expect(!std.mem.eql(u8, a, b));
     // every define a variant sets has its default in the header the defines go before
-    for (decode.group_variants[1..]) |v| {
+    for (banked.group_variants[1..]) |v| {
         var it = std.mem.splitScalar(u8, v.defines, '\n');
         while (it.next()) |line| {
             if (line.len == 0) continue;
@@ -94,7 +95,7 @@ test "turboexl3 banked ilp: variant 0 is today's (no defines, the stock kernel n
             _ = parts.next();
             const name = parts.next().?;
             var buf: [64]u8 = undefined;
-            try testing.expect(std.mem.indexOf(u8, decode.header_group, try std.fmt.bufPrint(&buf, "#ifndef {s}\n#define {s} ", .{ name, name })) != null);
+            try testing.expect(std.mem.indexOf(u8, banked.header_group, try std.fmt.bufPrint(&buf, "#ifndef {s}\n#define {s} ", .{ name, name })) != null);
         }
     }
 }
@@ -124,11 +125,10 @@ fn kernelBanks(rb: *const [3]root.Bank) [3]decode.Kernels.Bank {
 
 /// A Kernels3 at DeepSeek-V4.1's routed geometry (top-1, clamped, MUL1) as `root` builds it for a banked call, its
 /// banked GEMVs grouped (4 row-slots a lead).
-fn groupedKernels3(rate: format.Rate) !decode.Kernels3 {
+fn groupedKernels3(rate: format.Rate) !banked.Owned {
     var k = try decode.Kernels3.initWith(.{ .hidden = hidden, .inter = inter, .topk = 1, .rate = rate, .dec = .mul1, .limit = @intCast(limit) }, 1, 4, 2);
     k.out_dtype = .float32;
-    k.banked_group = 4;
-    return k;
+    return .{ .k = k, .b = .{ .banked_group = 4 } };
 }
 
 /// Two arrays' f32 words compared (`row_w` words a row): the compared words, the differing words, the largest ulp
@@ -190,11 +190,11 @@ fn drawIds(rnd: std.Random, rows: usize, ids: []u32, skipped: *[2]usize) []const
 
 /// The banked call's three outputs on `sel`'s texts at variants (`vgu`, `vdn`): hd (f16, as f32), hs and y; KEPT by `g`.
 const Outs = struct { hd: mlx.mlx_array, hs: mlx.mlx_array, y: mlx.mlx_array };
-fn callV(g: *G, k: *decode.Kernels3, s: mlx.mlx_stream, x: mlx.mlx_array, ids: mlx.mlx_array, kb: *const [3]decode.Kernels.Bank, rows: usize, sel: Sel, vgu: u8, vdn: u8) !Outs {
-    const h = try k.bankedGateUpSelV(s, x, ids, kb, rows, sel, vgu);
+fn callV(g: *G, k: *banked.Owned, s: mlx.mlx_stream, x: mlx.mlx_array, ids: mlx.mlx_array, kb: *const [3]decode.Kernels.Bank, rows: usize, sel: Sel, vgu: u8, vdn: u8) !Outs {
+    const h = try k.b.bankedGateUpSelV(&k.k, s, x, ids, kb, rows, sel, vgu);
     const hd = try g.adopt(h[0]);
     const hs = try g.adopt(h[1]);
-    const y = try g.adopt(try k.bankedDownSelV(s, hd, hs, ids, kb, rows, sel, vdn));
+    const y = try g.adopt(try k.b.bankedDownSelV(&k.k, s, hd, hs, ids, kb, rows, sel, vdn));
     return .{ .hd = try g.astype(hd, .float32), .hs = hs, .y = y };
 }
 
@@ -416,11 +416,11 @@ const t_arms = blk: {
     break :blk t;
 };
 
-fn timedCall(k: *decode.Kernels3, s: mlx.mlx_stream, x: mlx.mlx_array, ids: mlx.mlx_array, kb: *const [3]decode.Kernels.Bank, rows: usize, arm: TArm) !mlx.mlx_array {
-    const h = try k.bankedGateUpV(s, x, ids, kb, rows, arm.vgu);
+fn timedCall(k: *banked.Owned, s: mlx.mlx_stream, x: mlx.mlx_array, ids: mlx.mlx_array, kb: *const [3]decode.Kernels.Bank, rows: usize, arm: TArm) !mlx.mlx_array {
+    const h = try k.b.bankedGateUpV(&k.k, s, x, ids, kb, rows, arm.vgu);
     defer _ = mlx.mlx_array_free(h[0]);
     defer _ = mlx.mlx_array_free(h[1]);
-    return k.bankedDownV(s, h[0], h[1], ids, kb, rows, arm.vdn);
+    return k.b.bankedDownV(&k.k, s, h[0], h[1], ids, kb, rows, arm.vdn);
 }
 
 test "turboexl3 gpu banked ilp time: the grouped GEMV variants against today's at a verify's 36 pairs (TURBOEXL3_GPU=1 TURBOEXL3_BANKED_ILP_TIME=1)" {
@@ -456,7 +456,7 @@ test "turboexl3 gpu banked ilp time: the grouped GEMV variants against today's a
         var k = try groupedKernels3(rate);
         defer k.deinit();
         // TURBOEXL3_BANKED_ILP_M3: the calls on hw4b's texts (variant 0 g4m3, every variant on them)
-        k.banked_m3 = std.c.getenv("TURBOEXL3_BANKED_ILP_M3") != null;
+        k.b.banked_m3 = std.c.getenv("TURBOEXL3_BANKED_ILP_M3") != null;
         for (profiles) |pf| {
             const m2 = g.mark();
             defer g.resetTo(m2);
@@ -536,7 +536,7 @@ test "turboexl3 gpu banked ilp time: the grouped GEMV variants against today's a
                     }
                 };
                 const arm = t_arms[ai];
-                std.debug.print("TURBOEXL3_BANKED_ILP_TIME n={d} profile={s} distinct={d} texts={s} gu={s} dn={s} single_min_us={d:.1} single_med_us={d:.1} chain_min_us={d:.1} chain_med_us={d:.1}\n", .{ n, pf.name, d, if (k.banked_m3) "g4m3" else "g4", varName(arm.vgu), varName(arm.vdn), us.of(single[ai][0]), us.of(single[ai][timed / 2]), us.of(chained[ai][0]), us.of(chained[ai][timed / 2]) });
+                std.debug.print("TURBOEXL3_BANKED_ILP_TIME n={d} profile={s} distinct={d} texts={s} gu={s} dn={s} single_min_us={d:.1} single_med_us={d:.1} chain_min_us={d:.1} chain_med_us={d:.1}\n", .{ n, pf.name, d, if (k.b.banked_m3) "g4m3" else "g4", varName(arm.vgu), varName(arm.vdn), us.of(single[ai][0]), us.of(single[ai][timed / 2]), us.of(chained[ai][0]), us.of(chained[ai][timed / 2]) });
             }
         }
     }
@@ -544,5 +544,5 @@ test "turboexl3 gpu banked ilp time: the grouped GEMV variants against today's a
 
 /// A variant's name in the lines ("0" for today's).
 fn varName(v: u8) []const u8 {
-    return if (v == 0) "0" else decode.group_variants[v].name;
+    return if (v == 0) "0" else banked.group_variants[v].name;
 }
