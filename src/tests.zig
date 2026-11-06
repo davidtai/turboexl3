@@ -40,6 +40,8 @@ comptime {
     _ = @import("core/chains_test.zig");
     _ = @import("models/ricursive/ricursive_test.zig");
     _ = @import("models/ling/ling_test.zig");
+    _ = @import("models/ling/combine.zig");
+    _ = @import("models/ling/combine_test.zig");
 }
 
 

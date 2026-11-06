@@ -42,6 +42,7 @@ Ling-3.1-flash's routed experts (`models/ling/api.zig`):
 |---|---|
 | `moeLing` | `moe` with Ling-3.1's SwiGLU: `limit` 0 none (`moe`'s bytes), 1 to 128 clamped after the SiLU, min(silu(g), L) · clamp(u, −L, L); decode rows on fin7's Ling variant, prefill rows on the Ling mid |
 | `moeLingBanked` (`moeLingBankedGateUp`, `moeLingBankedDown`) | `moeClampedBanked`'s launches with Ling-3.1's SwiGLU (`moeLing`'s `limit`, 0 included): each pair's bytes `moeLing`'s on its bank at top-1 with score 1 |
+| `ling.combineRouted`, `ling.combineParts` | a wide routed call's combine in one launch (`models/ling/combine.zig`): routed f32 [n, K, D] (or the call's unjoined outputs, at most 24, and each pair's (source, row): JOINLESS) times weights f32 [n, K], summed over K <= 8 -> f32 [n, D], the words of MLX's `sum(multiply(astype(routed, f32), expand_dims(weights, -1)), -2)` |
 
 Qwen3.8's shared expert and router, at 1 to 4 decode rows (`models/qwen38/api.zig`):
 

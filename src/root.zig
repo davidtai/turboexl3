@@ -930,6 +930,8 @@ pub const moeLing = ling.moeLing;
 pub const moeLingBanked = ling.moeLingBanked;
 pub const moeLingBankedGateUp = ling.moeLingBankedGateUp;
 pub const moeLingBankedDown = ling.moeLingBankedDown;
+/// Ling-3.1-flash's routed combine at prompt rows, joined and JOINLESS (models/ling/combine.zig)
+pub const ling_combine = @import("models/ling/combine.zig");
 
 test {
     _ = config;
@@ -997,4 +999,5 @@ pub const shared_state = .{
     ricursive.shared_state,
     qwen38.shared_state,
     deepseek_v41.shared_state,
+    ling_combine.shared_state,
 };

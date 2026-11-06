@@ -2,12 +2,14 @@
 //! layers and clamped after the SiLU on the late ones (`expert_swiglu_limit_list`: min(silu(g), L) * clamp(u, -L, L),
 //! exllamav3's `act_limit` with SiLU), over a stacked bank (`moeLing`) and over an expert streamer's three slot banks
 //! (`moeLingBanked`). Every launch is root's routed chain or DeepSeek-V4.1's banked decode; only the SwiGLU line differs
-//! (`decode.text_fin7co`, `prefill.text_midco` and the banked `text_fin7b` / `text_fin7cob`).
+//! (`decode.text_fin7co`, `prefill.text_midco` and the banked `text_fin7b` / `text_fin7cob`). A wide routed call's
+//! combine (`combineRouted`, `combineParts`) is Ling's own kernel (`combine.zig`).
 const std = @import("std");
 const mlx = @import("sdk").mlx;
 const root = @import("../../root.zig");
 const format = @import("../../core/format.zig");
 const ds = @import("../deepseek_v41/api.zig");
+const combine = @import("combine.zig");
 const Bank = root.Bank;
 const freeArr = root.freeArr;
 
@@ -39,6 +41,14 @@ pub fn moeLingBankedGateUp(s: mlx.mlx_stream, x: mlx.mlx_array, banks: *const [3
 pub fn moeLingBankedDown(s: mlx.mlx_stream, h: ds.BankedHalf, banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, limit: c_int) !mlx.mlx_array {
     return ds.bankedDownAct(s, h, banks, ids, dec, try act(limit), .configured, root.config.get().banked_variant_dn);
 }
+
+/// A wide routed call's combine at prompt rows (`combine.zig`): the routed rows times their routing weights, summed over
+/// the top-k in one launch, MLX's `sum(multiply(astype(routed, f32), expand_dims(weights, -1)), -2)` word for word:
+/// over the joined routed array (`combineRouted`) or the call's unjoined outputs (`combineParts`, JOINLESS).
+pub const combineRouted = combine.combineRouted;
+pub const combineParts = combine.combineParts;
+/// The sources `combineParts` binds at most (the streamer's `joinless_sources`)
+pub const combine_max_sources = combine.max_sources;
 
 fn act(limit: c_int) !ds.BankedAct {
     if (limit < 0 or limit > 128) return error.InvalidExl3Clamp;

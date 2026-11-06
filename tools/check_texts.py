@@ -1208,6 +1208,12 @@ ADDED_FILES['models/ling/api.zig'] = ('Ling-3.1\'s entry points (moeLing, moeLin
 ADDED_FILES['ling_test.zig'] = ('Ling-3.1\'s tests: its texts\' compositions, the reference clamp and the refusals (CPU); '
                                 'moeLing against moe and the reference, moeLingBanked against moeLing byte for byte, and '
                                 'linear at every trunk shape (GPU)')
+# Ling-3.1-flash's routed combine at prompt rows (turboexl3_ling_combine, _combine_parts)
+ADDED_FILES['models/ling/combine.zig'] = ('Ling-3.1\'s wide routed call combine in one launch (combineRouted, combineParts: '
+                                          'MLX\'s sum(multiply(astype(routed, f32), expand_dims(weights, -1)), -2) word for '
+                                          'word, over a joined array or the call\'s JOINLESS sources) and its texts\' CPU test')
+ADDED_FILES['models/ling/combine_test.zig'] = ('the combine\'s GPU tests: both entries against MLX\'s composed combine word for '
+                                               'word, the refusals')
 
 def metal_strings(fn, toks, corpus):
     """(line, kind, value) of every literal in a .zig file that holds Metal"""
@@ -1436,6 +1442,9 @@ SPLIT_ADDED_KERNELS = {
     'turboexl3_fin7cob': 'the banked fin7 with Ling-3.1\'s clamp: fin7cb with fin7_swiglu_clamp_out in place of the clamp',
     'turboexl3_fin7bg': 'fin7b\'s grouped text (fin7cbg with fin7\'s own SwiGLU line)',
     'turboexl3_fin7cobg': 'fin7cob\'s grouped text (fin7cbg with fin7_swiglu_clamp_out)',
+    'turboexl3_ling_combine': 'Ling-3.1\'s routed combine over a joined array (models/ling/combine.zig): MLX\'s Multiply and '
+                              'col_reduce_small sum in one launch, word for word',
+    'turboexl3_ling_combine_parts': 'the same over a wide call\'s JOINLESS sources (each pair\'s (source, row))',
 }
 SPLIT_CHANGED_CONSTS = {}
 
