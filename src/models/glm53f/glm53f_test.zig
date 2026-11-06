@@ -5,13 +5,17 @@
 //! DSA and shared expert), the 6-bit `lm_head`, and the vision tower's blocks (biased) and merger. Each shape runs at
 //! every K the four packs store it at (the packs' tensor headers, `rates` below).
 //! - CPU (always): each shape is a width the dense kernels admit at each of its rates (in and out whole 128-blocks, the
-//!   GEMV's K split whole four-tile parts), and its trellis shape [in / 16, out / 16, 16 K] reads back as that rate.
+//!   GEMV's K split whole four-tile parts), and its trellis shape [in / 16, out / 16, 16 K] reads back as that rate; the
+//!   cases' rates are exactly the four packs' (`packs`, from their shard headers), and one served pack's engines fit
+//!   root's cache slots (`root.dense_cache_slots`, `engine_cache_slots`, `prefill_cache_slots`).
 //! - GPU (TURBOEXL3_GPU=1, else skipped): `root.linear` (`root.linearBias` for the tower's biased linears) at each shape
 //!   and rate against the host reference (`ref.Linear`: `format.project`'s values on `ref.synthLinear`'s weights, plus
 //!   the bias), at rows 1, 4, 16, 32 and 512 (DEC-ONE, the GEMV chain's two chunks, the register path, dequantize +
 //!   matmul); the head at rows 1 and 4 only (its host reference holds 634M weights). The bars are DeepSeek-V4.1's trunk
 //!   test's: f32 x and y within 5e-3 of the reference rms, bf16 x and y (rows 4 and 512) within 2.5e-2; up to 16 rows
 //!   every row is compared, past that six. TURBOEXL3_GLM_K (a comma list of K, default every rate) narrows the rates.
+//!   Each case's engines are freed after it (`root.releaseEngines`): the 52 configurations at two dtypes outgrow the
+//!   dense cache, which one served pack's 20 fit.
 //!   Lines: TURBOEXL3_GLM_PARITY per case, rate, row count and dtype.
 const std = @import("std");
 const sdk = @import("sdk");
@@ -22,39 +26,92 @@ const format = @import("../../core/format.zig");
 const ref = @import("../../core/ref.zig");
 const root = @import("../../root.zig");
 const dense = @import("../../core/dense.zig");
+const routed = @import("routed_test.zig");
 
 const testing = std.testing;
 
 /// The integer K a linear is stored at: K bits a weight, 16 K halfwords a 256-weight tile.
 const K = u32;
 
-const Case = struct { name: []const u8, in: u32, out: u32, rates: []const K, bias: bool = false, head: bool = false };
+/// Which of a pack's rates a shape is stored at (`Pack`): the trunk's attention (KDA and DSA, layers 0-44), the DSA
+/// attention and indexer (the trunk's and the MTP layer's), the shared expert (the trunk's and the MTP layer's), the
+/// dense layers' MLP, the MTP layer's `eh_proj`, the head, the vision tower (6 bits in every pack, not served).
+const Role = enum { kda, dsa, shared, dense_mlp, eh, head, vision };
+
+const Case = struct { name: []const u8, in: u32, out: u32, rates: []const K, role: Role, bias: bool = false, head: bool = false };
 
 /// Every distinct shape a GLM-5.3-Flash SC pack stores as EXL3 outside the routed experts, with the K values the four
-/// packs store it at: the trunk's attention at 5 (2.10), 6 (2.60, 3.10) and 8 (4.10); the MTP layer's attention and
+/// packs store it at (`packs`): the trunk's attention at 5 (2.10), 6 (2.60, 3.10) and 8 (4.10); the MTP layer's attention and
 /// shared expert at 3 (2.10), 4 (2.60, 3.10) and 6 (4.10), its `eh_proj` at 3, 4 and 5; the trunk's shared expert at 6
-/// and 8; the dense MLP at 5 and 6; the head and the vision tower at 6.
+/// and 8; the dense MLP at 5 and 6; the head and the vision tower at 6. 53 (shape, K) entries; `kda.o_proj` and
+/// `mtp.eh_proj` are one shape (8192 x 4096) and both hold K5 (sc_2.10's attention, sc_4.10's `eh_proj`), so 52 distinct
+/// (in, out, K) kernel configurations.
 pub const cases = [_]Case{
-    .{ .name = "kda.qkv_proj", .in = 4096, .out = 24576, .rates = &.{ 5, 6, 8 } },
-    .{ .name = "kda.o_proj", .in = 8192, .out = 4096, .rates = &.{ 5, 6, 8 } },
-    .{ .name = "dsa.q_a_proj", .in = 4096, .out = 1536, .rates = &.{ 3, 4, 5, 6, 8 } },
-    .{ .name = "dsa.q_b_proj", .in = 1536, .out = 16384, .rates = &.{ 3, 4, 5, 6, 8 } },
-    .{ .name = "dsa.kv_a_proj_with_mqa", .in = 4096, .out = 512, .rates = &.{ 3, 4, 5, 6, 8 } },
-    .{ .name = "dsa.o_proj", .in = 16384, .out = 4096, .rates = &.{ 3, 4, 5, 6, 8 } },
-    .{ .name = "indexer.wq_b", .in = 1536, .out = 4096, .rates = &.{ 3, 4, 5, 6, 8 } },
-    .{ .name = "shared_experts.gate_proj/up_proj", .in = 4096, .out = 2048, .rates = &.{ 3, 4, 6, 8 } },
-    .{ .name = "shared_experts.down_proj", .in = 2048, .out = 4096, .rates = &.{ 3, 4, 6, 8 } },
-    .{ .name = "mlp.gate_proj/up_proj (dense layers)", .in = 4096, .out = 12288, .rates = &.{ 5, 6 } },
-    .{ .name = "mlp.down_proj (dense layers)", .in = 12288, .out = 4096, .rates = &.{ 5, 6 } },
-    .{ .name = "mtp.eh_proj", .in = 8192, .out = 4096, .rates = &.{ 3, 4, 5 } },
-    .{ .name = "lm_head", .in = 4096, .out = 154880, .rates = &.{6}, .head = true },
-    .{ .name = "visual.attn.q/k/v_proj/proj", .in = 1024, .out = 1024, .rates = &.{6}, .bias = true },
-    .{ .name = "visual.mlp.gate_proj/up_proj", .in = 1024, .out = 4096, .rates = &.{6}, .bias = true },
-    .{ .name = "visual.mlp.down_proj", .in = 4096, .out = 1024, .rates = &.{6}, .bias = true },
-    .{ .name = "visual.merger.proj", .in = 4096, .out = 4096, .rates = &.{6} },
-    .{ .name = "visual.merger.gate_proj/up_proj", .in = 4096, .out = 10240, .rates = &.{6} },
-    .{ .name = "visual.merger.down_proj", .in = 10240, .out = 4096, .rates = &.{6} },
+    .{ .name = "kda.qkv_proj", .in = 4096, .out = 24576, .rates = &.{ 5, 6, 8 }, .role = .kda },
+    .{ .name = "kda.o_proj", .in = 8192, .out = 4096, .rates = &.{ 5, 6, 8 }, .role = .kda },
+    .{ .name = "dsa.q_a_proj", .in = 4096, .out = 1536, .rates = &.{ 3, 4, 5, 6, 8 }, .role = .dsa },
+    .{ .name = "dsa.q_b_proj", .in = 1536, .out = 16384, .rates = &.{ 3, 4, 5, 6, 8 }, .role = .dsa },
+    .{ .name = "dsa.kv_a_proj_with_mqa", .in = 4096, .out = 512, .rates = &.{ 3, 4, 5, 6, 8 }, .role = .dsa },
+    .{ .name = "dsa.o_proj", .in = 16384, .out = 4096, .rates = &.{ 3, 4, 5, 6, 8 }, .role = .dsa },
+    .{ .name = "indexer.wq_b", .in = 1536, .out = 4096, .rates = &.{ 3, 4, 5, 6, 8 }, .role = .dsa },
+    .{ .name = "shared_experts.gate_proj/up_proj", .in = 4096, .out = 2048, .rates = &.{ 3, 4, 6, 8 }, .role = .shared },
+    .{ .name = "shared_experts.down_proj", .in = 2048, .out = 4096, .rates = &.{ 3, 4, 6, 8 }, .role = .shared },
+    .{ .name = "mlp.gate_proj/up_proj (dense layers)", .in = 4096, .out = 12288, .rates = &.{ 5, 6 }, .role = .dense_mlp },
+    .{ .name = "mlp.down_proj (dense layers)", .in = 12288, .out = 4096, .rates = &.{ 5, 6 }, .role = .dense_mlp },
+    .{ .name = "mtp.eh_proj", .in = 8192, .out = 4096, .rates = &.{ 3, 4, 5 }, .role = .eh },
+    .{ .name = "lm_head", .in = 4096, .out = 154880, .rates = &.{6}, .role = .head, .head = true },
+    .{ .name = "visual.attn.q/k/v_proj/proj", .in = 1024, .out = 1024, .rates = &.{6}, .role = .vision, .bias = true },
+    .{ .name = "visual.mlp.gate_proj/up_proj", .in = 1024, .out = 4096, .rates = &.{6}, .role = .vision, .bias = true },
+    .{ .name = "visual.mlp.down_proj", .in = 4096, .out = 1024, .rates = &.{6}, .role = .vision, .bias = true },
+    .{ .name = "visual.merger.proj", .in = 4096, .out = 4096, .rates = &.{6}, .role = .vision },
+    .{ .name = "visual.merger.gate_proj/up_proj", .in = 4096, .out = 10240, .rates = &.{6}, .role = .vision },
+    .{ .name = "visual.merger.down_proj", .in = 10240, .out = 4096, .rates = &.{6}, .role = .vision },
 };
+
+/// One SC pack's EXL3 rates, read from its 22 or 23 shard headers (each repack's `receipts/source-headers.json.gz`,
+/// 2026-11-06): the trunk's attention (KDA and DSA, the dense layers' too), the trunk's shared expert, the dense layers'
+/// MLP, the MTP layer's attention and shared expert, its `eh_proj`; the routed experts in halfwords a tile: layers 4-44,
+/// layer 3, the MTP layer's. The head is 6 bits in every pack.
+const Pack = struct { name: []const u8, attn: K, shared: K, dense_mlp: K, mtp: K, eh: K, routed_n: u32, l3_n: u32, mtp_n: u32 };
+
+pub const packs = [_]Pack{
+    .{ .name = "sc_2.10bpw", .attn = 5, .shared = 6, .dense_mlp = 5, .mtp = 3, .eh = 3, .routed_n = 32, .l3_n = 48, .mtp_n = 48 },
+    .{ .name = "sc_2.60bpw", .attn = 6, .shared = 6, .dense_mlp = 6, .mtp = 4, .eh = 4, .routed_n = 40, .l3_n = 56, .mtp_n = 64 },
+    .{ .name = "sc_3.10bpw", .attn = 6, .shared = 6, .dense_mlp = 6, .mtp = 4, .eh = 4, .routed_n = 48, .l3_n = 64, .mtp_n = 64 },
+    .{ .name = "sc_4.10bpw", .attn = 8, .shared = 8, .dense_mlp = 6, .mtp = 6, .eh = 5, .routed_n = 64, .l3_n = 80, .mtp_n = 64 },
+};
+
+/// The K values pack `p` stores a shape of role `r` at (two where the trunk and the MTP layer both hold it): `buf[0..n]`.
+fn packRates(p: Pack, r: Role, buf: *[2]K) []const K {
+    buf.* = switch (r) {
+        .kda => .{ p.attn, p.attn },
+        .dsa => .{ p.attn, p.mtp },
+        .shared => .{ p.shared, p.mtp },
+        .dense_mlp => .{ p.dense_mlp, p.dense_mlp },
+        .eh => .{ p.eh, p.eh },
+        .head, .vision => .{ 6, 6 },
+    };
+    return if (buf[0] == buf[1]) buf[0..1] else buf[0..2];
+}
+
+/// A served pack's distinct dense (in, out, K): every role but the vision tower (the plugin does not serve it).
+fn packDense(p: Pack, out: *[cases.len * 2][3]u32) usize {
+    var n: usize = 0;
+    for (cases) |c| {
+        if (c.role == .vision) continue;
+        var rb: [2]K = undefined;
+        for (packRates(p, c.role, &rb)) |k| {
+            const key = [3]u32{ c.in, c.out, k };
+            for (out[0..n]) |e| {
+                if (std.mem.eql(u32, &e, &key)) break;
+            } else {
+                out[n] = key;
+                n += 1;
+            }
+        }
+    }
+    return n;
+}
 
 /// DEC-ONE (1, 4), the GEMV chain's two chunks (16), the register path (32), dequantize + matmul (512)
 const row_counts = [_]u32{ 1, 4, 16, 32, 512 };
@@ -96,9 +153,63 @@ test "turboexl3 glm53f: every GLM-5.3-Flash dense EXL3 shape is a width the dens
             seen += 1;
         }
     }
-    // 19 shapes, 51 (shape, rate) cases
+    // 19 named shapes, 53 (shape, rate) entries (3 + 3 + 5 x 5 + 4 + 4 + 2 + 2 + 3 + 7 x 1), 52 distinct (in, out, K):
+    // kda.o_proj's K5 and mtp.eh_proj's K5 are one configuration
     try testing.expectEqual(@as(usize, 19), cases.len);
-    try testing.expectEqual(@as(usize, 51), seen);
+    try testing.expectEqual(@as(usize, 53), seen);
+    var keys: [cases.len * 8][3]u32 = undefined;
+    var distinct: usize = 0;
+    for (cases) |c| for (c.rates) |k| {
+        const key = [3]u32{ c.in, c.out, k };
+        for (keys[0..distinct]) |e| {
+            if (std.mem.eql(u32, &e, &key)) break;
+        } else {
+            keys[distinct] = key;
+            distinct += 1;
+        }
+    };
+    try testing.expectEqual(@as(usize, 52), distinct);
+}
+
+test "turboexl3 glm53f: the dense shapes' rates are exactly the four SC packs' (their shard headers), and one served pack's engines fit turboexl3's caches" {
+    // every rate a case holds is one a pack stores it at, and every rate a pack stores a shape at is in the case
+    for (cases) |c| {
+        for (c.rates) |k| {
+            var stored = false;
+            for (packs) |p| {
+                var rb: [2]K = undefined;
+                if (std.mem.indexOfScalar(K, packRates(p, c.role, &rb), k) != null) stored = true;
+            }
+            if (!stored) std.debug.print("glm53f: {s} holds K{d}, which no SC pack stores it at\n", .{ c.name, k });
+            try testing.expect(stored);
+        }
+        for (packs) |p| {
+            var rb: [2]K = undefined;
+            for (packRates(p, c.role, &rb)) |k| {
+                if (std.mem.indexOfScalar(K, c.rates, k) == null) std.debug.print("glm53f: {s} stores {s} at K{d}, not a case\n", .{ p.name, c.name, k });
+                try testing.expect(std.mem.indexOfScalar(K, c.rates, k) != null);
+            }
+        }
+    }
+    for (packs) |p| {
+        // the trunk, the head and the MTP layer: 20 distinct dense (in, out, K) in every pack (its shard headers' count,
+        // the vision tower left out); the plugin's activations are bf16, so 20 of the dense cache's slots, and 40 at two
+        // activation dtypes
+        var keys: [cases.len * 2][3]u32 = undefined;
+        const n = packDense(p, &keys);
+        try testing.expectEqual(@as(usize, 20), n);
+        try testing.expect(2 * n <= root.dense_cache_slots);
+        // the routed rates are routed_test.zig's
+        for ([_]u32{ p.routed_n, p.l3_n, p.mtp_n }) |rn| try testing.expect(std.mem.indexOfScalar(u32, &routed.rates_n, rn) != null);
+        // the decode engines (`decode.Kernels3`, one per rate, top-k, clamp and output dtype): the banked decode's top-1 f32
+        // at the two routed rates, the MTP layer's resident bank at top-8 at its rate in two activation dtypes
+        try testing.expect(p.routed_n != p.l3_n);
+        try testing.expect(2 + 2 <= root.engine_cache_slots);
+        // the prefill engines (one per rate, top-k and expert count): the prompt calls' top-1 over each routed rate's base
+        // and transient slot banks (the prompt phase's rows are one count across the layers), the MTP layer's top-8 over
+        // its 288 experts
+        try testing.expect(2 * 2 + 1 <= root.prefill_cache_slots);
+    }
 }
 
 /// A comma list of numbers from the environment (at most buf.len of them), else `default`.
@@ -205,6 +316,9 @@ test "turboexl3 gpu glm53f: root.linear and root.linearBias equal the host refer
     for (cases) |c| for (c.rates) |k| {
         if (only.len > 0 and std.mem.indexOfScalar(u32, only, k) == null) continue;
         defer _ = mlx.mlx_clear_cache();
+        // 52 configurations at two dtypes outgrow the dense cache's slots, which a served pack's 20 fit: each case's
+        // engines are freed after it (its arrays were read back, so no call is in flight)
+        defer root.releaseEngines();
         failed += try linearCase(a, &g, s, c, k);
         ran += 1;
     };

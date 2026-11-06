@@ -505,6 +505,16 @@ pub fn forKernels(k3: *const Kernels3) !*Banked {
     return &cache.get().*[i].?.b;
 }
 
+/// Every banked state freed (`root.releaseEngines`, before the `Kernels3` they sit beside): no call in flight.
+pub fn releaseAll() void {
+    while (cache_lock.get().*.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
+    defer cache_lock.get().*.store(0, .release);
+    for (&cache.get().*) |*slot| if (slot.*) |*e| {
+        e.b.deinit();
+        slot.* = null;
+    };
+}
+
 /// This file's module state (`Global`): what a host that shares its units' state registers.
 pub const shared_state = .{ cache_lock, cache };
 

@@ -134,10 +134,19 @@ pub fn validateCall(x: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array, scores: m
     return bankGeometry(bank, sh[2]);
 }
 
+/// The slots of each engine cache: a geometry's kernels are compiled at its first call and kept for the process, and a call
+/// at a geometry past a full cache fails with error.Exl3EngineCacheFull. One served model needs a handful of each:
+/// GLM-5.3-Flash's SC packs (models/glm53f) 20 dense (in, out, K) per activation dtype of the 64, at most 4 decode
+/// geometries of the 16 and 5 prefill geometries of the 16 (glm53f_test.zig's per-pack count holds each pack to them).
+/// A test that runs more geometries in one process frees them between its cases (`releaseEngines`).
+pub const engine_cache_slots = 16;
+pub const dense_cache_slots = 64;
+pub const prefill_cache_slots = 16;
+
 /// The compiled kernels of every geometry this process has served (a handful per model).
 /// a spinlock: the cache fills once per geometry and is read thereafter
 const cache_lock = Global(std.atomic.Value(u32), "root_cache_lock", std.atomic.Value(u32).init(0));
-const cache = Global([16]?decode.Kernels3, "root_cache", @splat(null));
+const cache = Global([engine_cache_slots]?decode.Kernels3, "root_cache", @splat(null));
 
 pub fn kernelsFor(geo: decode.Geometry, out_dtype: mlx.mlx_dtype) !*decode.Kernels3 {
     while (cache_lock.get().*.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
@@ -220,7 +229,7 @@ pub const SlotStats = struct {
 };
 
 /// Form 5's kernels per geometry, as `cache` holds form 3's.
-const cache5 = Global([16]?decode.Kernels5, "root_cache5", @splat(null));
+const cache5 = Global([engine_cache_slots]?decode.Kernels5, "root_cache5", @splat(null));
 
 fn kernels5For(geo: decode.Geometry, out_dtype: mlx.mlx_dtype) !*decode.Kernels5 {
     while (cache_lock.get().*.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
@@ -261,7 +270,7 @@ fn decodeForm() u8 {
 /// fourteen with its vision tower, its aligner and `wo_a`'s slice. 64 holds two such models at two dtypes (every test in
 /// one process).
 const dense_lock = Global(std.atomic.Value(u32), "root_dense_lock", std.atomic.Value(u32).init(0));
-const dense_cache = Global([64]?dense.Dense, "root_dense_cache", @splat(null));
+const dense_cache = Global([dense_cache_slots]?dense.Dense, "root_dense_cache", @splat(null));
 
 fn denseFor(shape: dense.Shape) !*dense.Dense {
     while (dense_lock.get().*.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
@@ -661,7 +670,7 @@ pub fn linearPiecesFinish(s: mlx.mlx_stream, inners: []const mlx.mlx_array, p: P
 /// included): DeepSeek-V4.1 alone serves 8 (its K3 and K2 routed banks per streamed bank kind, the DSpark stages, the
 /// shared expert as a one-expert bank).
 const pf_lock = Global(std.atomic.Value(u32), "root_pf_lock", std.atomic.Value(u32).init(0));
-const pf_cache = Global([16]?prefill.Prefill, "root_pf_cache", @splat(null));
+const pf_cache = Global([prefill_cache_slots]?prefill.Prefill, "root_pf_cache", @splat(null));
 const pf_logged = Global(bool, "root_pf_logged", false);
 
 /// The served prefill variant: 64-row tiles (bm 64) with the register path for <= 32-row remainders in one launch (mixed),
@@ -921,6 +930,63 @@ pub const moeClampedBankedDown = deepseek_v41.moeClampedBankedDown;
 pub const moeClampedBankedDownSel = deepseek_v41.moeClampedBankedDownSel;
 pub const moeClampedBankedDownV = deepseek_v41.moeClampedBankedDownV;
 pub const moeClampedBankedDownSelV = deepseek_v41.moeClampedBankedDownSelV;
+
+/// Test seam: every engine this process compiled freed and its slot emptied (the decode, dense, prefill and grouped
+/// caches, and the banked, shared-head and F3 states keyed by those engines' addresses, which go first so no stale
+/// key names a reused slot). For a test that runs more geometries in one process than a served model does
+/// (`engine_cache_slots`); the stream synchronized, no call in flight and no engine pointer held. A later call compiles
+/// its geometry again.
+pub fn releaseEngines() void {
+    banked.releaseAll();
+    shared_heads.releaseAll();
+    f3.releaseAll();
+    deepseek_v41.releaseGrouped();
+    {
+        while (cache_lock.get().*.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
+        defer cache_lock.get().*.store(0, .release);
+        for (&cache.get().*) |*slot| if (slot.*) |*k| {
+            k.deinit();
+            slot.* = null;
+        };
+        for (&cache5.get().*) |*slot| if (slot.*) |*k| {
+            k.deinit();
+            slot.* = null;
+        };
+    }
+    {
+        while (dense_lock.get().*.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
+        defer dense_lock.get().*.store(0, .release);
+        for (&dense_cache.get().*) |*slot| if (slot.*) |*d| {
+            d.deinit();
+            slot.* = null;
+        };
+    }
+    {
+        while (pf_lock.get().*.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
+        defer pf_lock.get().*.store(0, .release);
+        for (&pf_cache.get().*) |*slot| if (slot.*) |*p| {
+            p.deinit();
+            slot.* = null;
+        };
+    }
+}
+
+/// The engines `releaseEngines` would free: the decode (forms 3 and 5), dense and prefill caches' filled slots.
+pub const EnginesHeld = struct { decode: usize = 0, dense: usize = 0, prefill: usize = 0 };
+pub fn enginesHeld() EnginesHeld {
+    var n: EnginesHeld = .{};
+    for (cache.get().*) |s| n.decode += @intFromBool(s != null);
+    for (cache5.get().*) |s| n.decode += @intFromBool(s != null);
+    for (dense_cache.get().*) |s| n.dense += @intFromBool(s != null);
+    for (pf_cache.get().*) |s| n.prefill += @intFromBool(s != null);
+    return n;
+}
+
+test "turboexl3 root: releaseEngines empties every engine cache (a no-op on empty ones)" {
+    releaseEngines();
+    const n = enginesHeld();
+    try std.testing.expectEqual(@as(usize, 0), n.decode + n.dense + n.prefill);
+}
 
 test {
     _ = config;

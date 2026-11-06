@@ -15,6 +15,7 @@
 //!   TURBOEXL3_GLM_ROUTED_N (rates in halfwords a tile, a comma list; default 32,40,48,56,64,80) and
 //!   TURBOEXL3_GLM_ROUTED_ROWS (default 1,4,16,32,1328) narrow the first, TURBOEXL3_GLM_BANKED_ROWS (default
 //!   1,2,7,8,16,32,48,64) the second. One rate's bank is held twice (host and device): 2 x 2.3 GB at K2 up to 2 x 5.7 GB at K5.
+//!   Each rate's engines are freed after it (`root.releaseEngines`).
 //!   Lines: TURBOEXL3_GLM_ROUTED_PARITY, TURBOEXL3_GLM_BANKED_BYTES.
 const std = @import("std");
 const sdk = @import("sdk");
@@ -154,6 +155,9 @@ test "turboexl3 gpu glm53f routed: root.moeClamped at GLM-5.3-Flash's routed geo
     var failed = false;
     for (rates) |n| {
         defer _ = mlx.mlx_clear_cache();
+        // each rate's engines freed after it (`root.releaseEngines`): every SC rate at top-8 in two output dtypes and at
+        // top-1 outgrows the decode cache's slots, which one served pack's four fit (glm53f_test.zig)
+        defer root.releaseEngines();
         const rate = format.Rate.fromN(n) orelse return error.Exl3RateUnsupported;
         const mark = g.mark();
         defer g.resetTo(mark);
@@ -249,6 +253,9 @@ test "turboexl3 gpu glm53f banked: every pair of moeClampedBanked over three slo
     var failed = false;
     for (rates) |n| {
         defer _ = mlx.mlx_clear_cache();
+        // each rate's engines freed after it (`root.releaseEngines`): every SC rate at top-8 in two output dtypes and at
+        // top-1 outgrows the decode cache's slots, which one served pack's four fit (glm53f_test.zig)
+        defer root.releaseEngines();
         const rate = format.Rate.fromN(n) orelse return error.Exl3RateUnsupported;
         const mark = g.mark();
         defer g.resetTo(mark);

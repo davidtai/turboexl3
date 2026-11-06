@@ -40,4 +40,11 @@ GLM-5.3-Flash has no kernel of its own. Its tests (`src/models/glm53f/`) hold ev
 routed experts (`moeClamped`, at every routed rate) against the clamped reference and the banked decode against
 `moeClamped`, byte for byte. [Tests](../../core/testing.md) gives their variables.
 
+turboexl3 compiles each geometry's kernels once and keeps them for the process, in fixed caches (`src/root.zig`:
+`dense_cache_slots` 64, `engine_cache_slots` 16 for the decode chains, `prefill_cache_slots` 16). One served pack
+needs 20 dense (in, out, K) per activation dtype, 4 decode and 5 prefill geometries; a CPU test in `glm53f_test.zig`
+holds each pack to the slots. The GPU tests run all four packs' rates in one process (52 dense configurations at two
+dtypes, every routed rate), more than the caches hold, so they free the engines after each case
+(`releaseEngines`).
+
 No speed or quality result comes from this repository: the standard test through the outside plugin decides.

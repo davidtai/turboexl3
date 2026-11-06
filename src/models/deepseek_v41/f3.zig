@@ -114,6 +114,16 @@ pub fn forDense(d: *const Dense) !*F3 {
     return &cache.get().*[i].?.f;
 }
 
+/// Every F3 state freed (`root.releaseEngines`, before the `Dense` they sit beside): no call in flight.
+pub fn releaseAll() void {
+    while (cache_lock.get().*.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
+    defer cache_lock.get().*.store(0, .release);
+    for (&cache.get().*) |*slot| if (slot.*) |*e| {
+        e.f.deinit();
+        slot.* = null;
+    };
+}
+
 /// This file's module state (`Global`): what a host that shares its units' state registers.
 pub const shared_state = .{ cache_lock, cache };
 

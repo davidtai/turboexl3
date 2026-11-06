@@ -297,5 +297,15 @@ fn bankedGeometry(banks: *const [3]Bank) !Geometry {
 pub const sharedSwigluTakes = f3.sharedSwigluTakes;
 pub const sharedSwiglu = f3.sharedSwiglu;
 
+/// Every grouped linear's kernels freed (`root.releaseEngines`): no call in flight.
+pub fn releaseGrouped() void {
+    while (grouped_lock.get().*.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
+    defer grouped_lock.get().*.store(0, .release);
+    for (&grouped_cache.get().*) |*slot| if (slot.*) |*gr| {
+        gr.deinit();
+        slot.* = null;
+    };
+}
+
 /// The process-wide state here (root's `shared_state` lists it)
 pub const shared_state = .{ grouped_lock, grouped_cache };
