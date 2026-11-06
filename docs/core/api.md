@@ -36,6 +36,13 @@ The routed experts:
 | `moeClamped` | `moe` with DeepSeek-V4's (and GLM's) clamped SwiGLU, `swiglu_limit` 1 to 128: the gate clamped from above and up to [−limit, limit] before SwiGLU; decode rows on fin7's clamped variant, prefill rows on the clamped mid |
 | `moeClampedBanked` (`moeClampedBankedGateUp`, `moeClampedBankedDown`) | DeepSeek-V4.1 (`models/deepseek_v41/api.zig`): `moeClamped`'s decode launches over an expert streamer's three slot banks: up to 64 routed pairs, each a row-slot whose id is packed (bank << 24 \| slot row), each pair's output at weight 1 with `moeClamped`'s bytes on its bank at top-1; the gate\|up and the down as two calls (the gate\|up half also reads the down's suh: it prepares the down's input) |
 
+Ling-3.1-flash's routed experts (`models/ling/api.zig`):
+
+| name | what it does |
+|---|---|
+| `moeLing` | `moe` with Ling-3.1's SwiGLU: `limit` 0 none (`moe`'s bytes), 1 to 128 clamped after the SiLU, min(silu(g), L) · clamp(u, −L, L); decode rows on fin7's Ling variant, prefill rows on the Ling mid |
+| `moeLingBanked` (`moeLingBankedGateUp`, `moeLingBankedDown`) | `moeClampedBanked`'s launches with Ling-3.1's SwiGLU (`moeLing`'s `limit`, 0 included): each pair's bytes `moeLing`'s on its bank at top-1 with score 1 |
+
 Qwen3.8's shared expert and router, at 1 to 4 decode rows (`models/qwen38/api.zig`):
 
 | name | what it does |
@@ -77,7 +84,7 @@ The resident and un-rotated trunk:
 
 The namespaces are `config`, `format` (the reference), `spec`, `lane` (the codeword readers), `decode`, `dense`,
 `pgemm`, `prefill`, `sources`, `unfused` and `ref` (the core); `qwen38` (its entries), `attn_io`, `decode_merge`,
-`gdn_out` and `shared_heads` (Qwen3.8); `deepseek_v41` (its entries), `grouped`, `banked` and `f3` (DeepSeek-V4.1);
+`gdn_out` and `shared_heads` (Qwen3.8); `deepseek_v41` (its entries), `grouped`, `banked` and `f3` (DeepSeek-V4.1); `ling` (Ling-3.1-flash);
 and `ricursive` (Ripple). The doc comment of each function states its
 shapes, its dtypes, the chain whose bytes it gives and when it refuses.
 

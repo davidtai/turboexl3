@@ -1,0 +1,46 @@
+//! Ling-3.1-flash's entry points (root re-exports each under its own name): its routed experts' SwiGLU, unclamped on most
+//! layers and clamped after the SiLU on the late ones (`expert_swiglu_limit_list`: min(silu(g), L) * clamp(u, -L, L),
+//! exllamav3's `act_limit` with SiLU), over a stacked bank (`moeLing`) and over an expert streamer's three slot banks
+//! (`moeLingBanked`). Every launch is root's routed chain or DeepSeek-V4.1's banked decode; only the SwiGLU line differs
+//! (`decode.text_fin7co`, `prefill.text_midco` and the banked `text_fin7b` / `text_fin7cob`).
+const std = @import("std");
+const mlx = @import("sdk").mlx;
+const root = @import("../../root.zig");
+const format = @import("../../core/format.zig");
+const ds = @import("../deepseek_v41/api.zig");
+const Bank = root.Bank;
+const freeArr = root.freeArr;
+
+/// `root.moe` with Ling-3.1's SwiGLU: `limit` 0 none (`moe`'s bytes), 1..128 the clamp after the SiLU (each row-slot's
+/// gate SiLU clamped from above at `limit` and its up to [-limit, limit], in f32 on the projections' f16-rounded outputs);
+/// else error.InvalidExl3Clamp. Decode rows run form 9's launches (fin7's Ling variant where it clamps), prefill rows the
+/// fused chain (the Ling mid). `moe`'s refusals hold. `ref.moeRowClampedAt` at `silu_out` is the reference.
+pub fn moeLing(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array, scores: mlx.mlx_array, dec: format.Decode, limit: c_int) !mlx.mlx_array {
+    if (limit < 0 or limit > 128) return error.InvalidExl3Clamp;
+    return root.moeSwiglu(s, x, bank, inds, scores, dec, @intCast(limit), .silu_out);
+}
+
+/// `moeClampedBanked` with Ling-3.1's SwiGLU (`moeLing`'s `limit`): each pair x's row r through the expert at `ids[r]`
+/// (bank << 24 | slot row) at weight 1, y f32 [rows, hidden], each pair's bytes `moeLing`'s on its bank at top-1 with
+/// score 1. The banks, ids and rows as `moeClampedBanked` takes them; `limit` 0..128, else error.InvalidExl3Clamp.
+pub fn moeLingBanked(s: mlx.mlx_stream, x: mlx.mlx_array, banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, limit: c_int) !mlx.mlx_array {
+    const h = try moeLingBankedGateUp(s, x, banks, ids, dec, limit);
+    defer freeArr(h.hd);
+    defer freeArr(h.hs);
+    return moeLingBankedDown(s, h, banks, ids, dec, limit);
+}
+
+/// `moeLingBanked`'s gate|up (prep2b, gu3b and fin7b or fin7cob, or their grouped texts): as `moeClampedBankedGateUp`.
+pub fn moeLingBankedGateUp(s: mlx.mlx_stream, x: mlx.mlx_array, banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, limit: c_int) !ds.BankedHalf {
+    return ds.bankedGateUpAct(s, x, banks, ids, dec, try act(limit), .configured, root.config.get().banked_variant_gu);
+}
+
+/// `moeLingBanked`'s down over the gate|up's `h` at the same `limit` -> y f32 [rows, hidden]; the caller frees y.
+pub fn moeLingBankedDown(s: mlx.mlx_stream, h: ds.BankedHalf, banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, limit: c_int) !mlx.mlx_array {
+    return ds.bankedDownAct(s, h, banks, ids, dec, try act(limit), .configured, root.config.get().banked_variant_dn);
+}
+
+fn act(limit: c_int) !ds.BankedAct {
+    if (limit < 0 or limit > 128) return error.InvalidExl3Clamp;
+    return .{ .limit = @intCast(limit), .clamp = .silu_out };
+}

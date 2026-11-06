@@ -1202,6 +1202,12 @@ ADDED_FILES['chains_test.zig'] = ('byte tests of the core paths no other test pi
                                   'finish, the pieces\' finish against the one-call finish, the unfused chain against the '
                                   'reference')
 
+# Ling-3.1-flash (src/models/ling): its routed SwiGLU, unclamped or clamped after the SiLU, stacked and banked
+ADDED_FILES['models/ling/api.zig'] = ('Ling-3.1\'s entry points (moeLing, moeLingBanked and its halves) over root\'s routed '
+                                      'chain and DeepSeek-V4.1\'s banked decode, the SwiGLU its geometry\'s')
+ADDED_FILES['ling_test.zig'] = ('Ling-3.1\'s tests: its texts\' compositions, the reference clamp and the refusals (CPU); '
+                                'moeLing against moe and the reference, moeLingBanked against moeLing byte for byte, and '
+                                'linear at every trunk shape (GPU)')
 
 def metal_strings(fn, toks, corpus):
     """(line, kind, value) of every literal in a .zig file that holds Metal"""
@@ -1421,7 +1427,16 @@ def rekey_tables(units):
 # while it is checked against its base and are emptied after it lands, so a later run allows nothing by them (aa0222f's
 # joint layout used them: turboexl3_ric_jdec1 and _blend changed, the two interleaved test references added)
 SPLIT_CHANGED_KERNELS = {}
-SPLIT_ADDED_KERNELS = {}
+SPLIT_ADDED_KERNELS = {
+    'turboexl3_fin7co': 'Ling-3.1\'s clamp after the SiLU: text_fin7 with its SwiGLU line swapped for fin7_swiglu_clamp_out',
+    'turboexl3_pf_midco': 'Ling-3.1\'s clamp: text_mid with its SwiGLU line swapped for mid_swiglu_clamp_out',
+    'turboexl3_pf_mid_vco': 'Ling-3.1\'s clamp: text_mid_v, the same swap',
+    'turboexl3_pf_t128_midco': 'Ling-3.1\'s clamp: text_mid_t128, the same swap',
+    'turboexl3_fin7b': 'the banked fin7 unclamped (Ling-3.1\'s layers below the clamp): fin7cb with fin7\'s own SwiGLU line',
+    'turboexl3_fin7cob': 'the banked fin7 with Ling-3.1\'s clamp: fin7cb with fin7_swiglu_clamp_out in place of the clamp',
+    'turboexl3_fin7bg': 'fin7b\'s grouped text (fin7cbg with fin7\'s own SwiGLU line)',
+    'turboexl3_fin7cobg': 'fin7cob\'s grouped text (fin7cbg with fin7_swiglu_clamp_out)',
+}
 SPLIT_CHANGED_CONSTS = {}
 
 def split_report(oprog, nprog, ounits, nunits, orig_dir, new_dir, problems, verbose):

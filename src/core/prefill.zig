@@ -104,6 +104,12 @@ const mid_swiglu_clamp = @embedFile("kernels/prefill/mid_swiglu_clamp.metal");
 pub const text_midc = mid_1 ++ mid_2 ++ mid_3 ++ mid_4 ++ mid_swiglu_clamp ++ mid_5;
 pub const text_mid_vc = mid_v_1 ++ mid_swiglu_clamp ++ mid_v_2;
 pub const text_mid_t128c: [:0]const u8 = sentinel(mid_1 ++ mid_t128_pick ++ mid_2 ++ mid_t128_loads ++ mid_4 ++ mid_swiglu_clamp ++ mid_5);
+/// Ling-3.1's clamp (`Geometry.clamp` `silu_out`): each mid with its SwiGLU line replaced by `mid_swiglu_clamp_out` (the
+/// SiLU's output clamped from above at LIMIT and the up to [-LIMIT, LIMIT]), every other statement the mid's.
+const mid_swiglu_clamp_out = @embedFile("kernels/prefill/mid_swiglu_clamp_out.metal");
+pub const text_midco = mid_1 ++ mid_2 ++ mid_3 ++ mid_4 ++ mid_swiglu_clamp_out ++ mid_5;
+pub const text_mid_vco = mid_v_1 ++ mid_swiglu_clamp_out ++ mid_v_2;
+pub const text_mid_t128co: [:0]const u8 = sentinel(mid_1 ++ mid_t128_pick ++ mid_2 ++ mid_t128_loads ++ mid_4 ++ mid_swiglu_clamp_out ++ mid_5);
 
 /// The down finish and the slot reduce, per (128-block of hidden, row): y OUT_T [R, HID] = sum over the row's slots in slot
 /// order of score * f16(H128(zd[inv[slot]]) * 2^-3.5 * svh_e).
@@ -317,6 +323,9 @@ pub const Geometry = struct {
     /// the SwiGLU's clamp (`root.moeClamped`: DeepSeek-V4's and GLM's `swiglu_limit`; 0 none): every mid is its clamped
     /// variant (`text_midc`, `text_mid_vc`, `text_mid_t128c`) with LIMIT = limit; nothing else changes
     limit: u32 = 0,
+    /// where a clamped geometry clamps (`format.ClampAt`): `gate_in` the clamped mids above, `silu_out` Ling-3.1's
+    /// (`text_midco`, `text_mid_vco`, `text_mid_t128co`); an unclamped geometry ignores it
+    clamp: format.ClampAt = .gate_in,
 
     pub fn admitted(g: Geometry) bool {
         return g.hidden % 128 == 0 and g.inter % 128 == 0 and g.hidden % BK == 0 and g.inter % BK == 0 and
@@ -576,7 +585,7 @@ pub const T128Kernels = struct {
     mid: mlx.mlx_fast_metal_kernel,
     fin: mlx.mlx_fast_metal_kernel,
 
-    fn init(limit: u32) !T128Kernels {
+    fn init(limit: u32, clamp: format.ClampAt) !T128Kernels {
         return .{
             .route = ks.newKernel("turboexl3_pf_t128_route", &froute_in, &froute_t128_out, text_froute_t128, header_small, true) orelse return error.KernelCreateFailed,
             .gu_mixed = ks.newKernel("turboexl3_pf_t128_gum", &gemm2_in, &gemm2_out, gemm2m_text, header_nax, true) orelse return error.KernelCreateFailed,
@@ -585,8 +594,10 @@ pub const T128Kernels = struct {
             .dn_t128 = ks.newKernel("turboexl3_pf_t128_dnt", &gemm1_in, &gemm1_out, gemm1_text, header_nax, true) orelse return error.KernelCreateFailed,
             .mid = (if (limit == 0)
                 ks.newKernel("turboexl3_pf_t128_mid", &mid_t128_in, &mid_out, text_mid_t128, header_small, true)
+            else if (clamp == .gate_in)
+                ks.newKernel("turboexl3_pf_t128_midc", &mid_t128_in, &mid_out, text_mid_t128c, header_small, true)
             else
-                ks.newKernel("turboexl3_pf_t128_midc", &mid_t128_in, &mid_out, text_mid_t128c, header_small, true)) orelse return error.KernelCreateFailed,
+                ks.newKernel("turboexl3_pf_t128_midco", &mid_t128_in, &mid_out, text_mid_t128co, header_small, true)) orelse return error.KernelCreateFailed,
             .fin = ks.newKernel("turboexl3_pf_t128_fin", &fin_t128_in, &fin_out, text_finish_t128, header_small, true) orelse return error.KernelCreateFailed,
         };
     }
@@ -634,8 +645,10 @@ pub const Prefill = struct {
             // a clamped geometry's mids are the clamped variants (`Geometry.limit`)
             .mid_k = (if (geo.limit == 0)
                 ks.newKernel("turboexl3_pf_mid", &mid_in, &mid_out, text_mid, header_small, true)
+            else if (geo.clamp == .gate_in)
+                ks.newKernel("turboexl3_pf_midc", &mid_in, &mid_out, text_midc, header_small, true)
             else
-                ks.newKernel("turboexl3_pf_midc", &mid_in, &mid_out, text_midc, header_small, true)) orelse return error.KernelCreateFailed,
+                ks.newKernel("turboexl3_pf_midco", &mid_in, &mid_out, text_midco, header_small, true)) orelse return error.KernelCreateFailed,
             .fin = ks.newKernel("turboexl3_pf_fin", &fin_in, &fin_out, text_finish, header_small, true) orelse return error.KernelCreateFailed,
             .gemm2s = ks.newKernel("turboexl3_pf_gemm2s", &gemm2_in, &gemm2_out, gemm2s_text, header_nax_small, true) orelse return error.KernelCreateFailed,
             .gemm1s = ks.newKernel("turboexl3_pf_gemm1s", &gemm1_in, &gemm1_out, gemm1s_text, header_nax_small, true) orelse return error.KernelCreateFailed,
@@ -647,10 +660,12 @@ pub const Prefill = struct {
             .prep_v = ks.newKernel("turboexl3_pf_prep_v", &prep_in, &prep_out, text_prep_v, header_small, true) orelse return error.KernelCreateFailed,
             .mid_v = (if (geo.limit == 0)
                 ks.newKernel("turboexl3_pf_mid_v", &mid_in, &mid_out, text_mid_v, header_small, true)
+            else if (geo.clamp == .gate_in)
+                ks.newKernel("turboexl3_pf_mid_vc", &mid_in, &mid_out, text_mid_vc, header_small, true)
             else
-                ks.newKernel("turboexl3_pf_mid_vc", &mid_in, &mid_out, text_mid_vc, header_small, true)) orelse return error.KernelCreateFailed,
+                ks.newKernel("turboexl3_pf_mid_vco", &mid_in, &mid_out, text_mid_vco, header_small, true)) orelse return error.KernelCreateFailed,
             .fin_v = ks.newKernel("turboexl3_pf_fin_v", &fin_in, &fin_out, text_finish_v, header_small, true) orelse return error.KernelCreateFailed,
-            .t128_k = if (!opts.t128) null else try T128Kernels.init(geo.limit),
+            .t128_k = if (!opts.t128) null else try T128Kernels.init(geo.limit, geo.clamp),
         };
     }
 

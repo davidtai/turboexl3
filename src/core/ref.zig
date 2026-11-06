@@ -119,6 +119,16 @@ pub const Hits = struct { gate: usize = 0, up: usize = 0, total: usize = 0 };
 /// One element's SwiGLU in f32 with DeepSeek-V4's and GLM's clamp (`limit` > 0; 0 none): the gate clamped from above only,
 /// up to [-limit, limit], then silu(gate) * up. Comparisons, so a NaN passes through as torch.clamp passes it (the Metal
 /// clamp's rule).
+/// One element's SwiGLU in f32 with Ling-3.1's clamp (`limit` > 0; 0 none; exllamav3's `act_limit` with SiLU): the gate's
+/// SiLU clamped from above only, up to [-limit, limit], then their product. A NaN passes through.
+pub fn swigluClampedOut(g: f32, u: f32, limit: f32) f32 {
+    const sg = g / (1.0 + @exp(-g));
+    if (limit <= 0) return sg * u;
+    const sc = if (sg > limit) limit else sg;
+    const uc = if (u > limit) limit else if (u < -limit) -limit else u;
+    return sc * uc;
+}
+
 pub fn swigluClamped(g: f32, u: f32, limit: f32) f32 {
     var gc = g;
     var uc = u;
@@ -136,6 +146,12 @@ pub fn swigluClamped(g: f32, u: f32, limit: f32) f32 {
 /// f16-rounded output (the same product, the down projection being linear; the rounding points differ). `limit` 0 is
 /// `moeRowDec`. Returns what it clamped.
 pub fn moeRowClamped(a: std.mem.Allocator, b: *const Bank, dec: format.Decode, limit: f32, x: []const f32, slots: []const u32, scores: []const f32, y: []f32) !Hits {
+    return moeRowClampedAt(a, b, dec, limit, .gate_in, x, slots, scores, y);
+}
+
+/// `moeRowClamped` clamping at `clamp` (`format.ClampAt`): `gate_in` `swigluClamped`, `silu_out` `swigluClampedOut` (the
+/// SiLU's output counted as the gate's hits). `root.moeLing`'s reference at `silu_out`.
+pub fn moeRowClampedAt(a: std.mem.Allocator, b: *const Bank, dec: format.Decode, limit: f32, clamp: format.ClampAt, x: []const f32, slots: []const u32, scores: []const f32, y: []f32) !Hits {
     const hidden = b.hidden;
     const inter = b.inter;
     @memset(y, 0);
@@ -159,9 +175,10 @@ pub fn moeRowClamped(a: std.mem.Allocator, b: *const Bank, dec: format.Decode, l
         format.project(x, b.gate_t[off..][0..stride], b.gate_suh[e * hidden ..][0..hidden], b.gate_svh[e * inter ..][0..inter], hidden, inter, b.rate, dec, transformed, inner[0..inter], gate_y);
         format.project(x, b.up_t[off..][0..stride], b.up_suh[e * hidden ..][0..hidden], b.up_svh[e * inter ..][0..inter], hidden, inter, b.rate, dec, transformed, inner[0..inter], up_y);
         for (0..inter) |i| {
-            h[i] = swigluClamped(gate_y[i], up_y[i], limit);
+            h[i] = if (clamp == .silu_out) swigluClampedOut(gate_y[i], up_y[i], limit) else swigluClamped(gate_y[i], up_y[i], limit);
             if (limit > 0) {
-                hits.gate += @intFromBool(gate_y[i] > limit);
+                const gv = if (clamp == .silu_out) gate_y[i] / (1.0 + @exp(-gate_y[i])) else gate_y[i];
+                hits.gate += @intFromBool(gv > limit);
                 hits.up += @intFromBool(@abs(up_y[i]) > limit);
             }
         }

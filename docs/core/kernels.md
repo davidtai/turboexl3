@@ -37,7 +37,7 @@ streamer's slot banks and its grouped variants DeepSeek-V4.1's ([its catalog](..
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/decode.zig:342` (`const Kernels3`) |
+| made at | `src/core/decode.zig:345` (`const Kernels3`) |
 | inputs | `zd`, `slots`, `scores`, `down_svh`, `hsx` |
 | outputs | `y` |
 | source | `text_dfin3` = `decode/dfin3_1` ++ `decode/dfin3_expert` ++ `decode/dfin3_2` (1324 B, `f7c3494d91f8`) |
@@ -82,7 +82,7 @@ streamer's slot banks and its grouped variants DeepSeek-V4.1's ([its catalog](..
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/decode.zig:348` (`const Kernels3`) |
+| made at | `src/core/decode.zig:353` (`const Kernels3`) |
 | inputs | `zd`, `slots`, `scores`, `down_svh`, `hsx` |
 | outputs | `y` |
 | source | `text_dfin7` = `decode/dfin7` (1771 B, `8412c8c0b289`) |
@@ -119,7 +119,7 @@ streamer's slot banks and its grouped variants DeepSeek-V4.1's ([its catalog](..
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/decode.zig:637` (`const Kernels5`) |
+| made at | `src/core/decode.zig:647` (`const Kernels5`) |
 | inputs | `zg`, `zu`, `xsg`, `xsu`, `slots`, `gate_svh`, `up_svh`, `down_suh`, `down_t`, `down_svh` |
 | outputs | `wv` |
 | source | `text_dn5` = `decode/dn5_head` ++ `decode/dn5_tail` (5054 B, `58b2ca539f44`) |
@@ -160,7 +160,7 @@ streamer's slot banks and its grouped variants DeepSeek-V4.1's ([its catalog](..
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/decode.zig:639` (`const Kernels5`) |
+| made at | `src/core/decode.zig:649` (`const Kernels5`) |
 | inputs | `zg`, `zu`, `xsg`, `xsu`, `slots`, `gate_svh`, `up_svh`, `down_suh`, `down_t`, `down_svh`, `cnt`, `scores` |
 | outputs | `wv`, `y` |
 | source | `text_dn6` = `decode/dn5_head` ++ `decode/dn6_tail` (6350 B, `020e3537b6a1`) |
@@ -194,7 +194,7 @@ streamer's slot banks and its grouped variants DeepSeek-V4.1's ([its catalog](..
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/decode.zig:89` (`const Kernels`) |
+| made at | `src/core/decode.zig:92` (`const Kernels`) |
 | inputs | `h`, `slots`, `scores`, `down_t`, `down_suh`, `down_svh` |
 | outputs | `y` |
 | source | `text_down` = `decode/down` (5902 B, `41783dbdc215`) |
@@ -229,7 +229,7 @@ streamer's slot banks and its grouped variants DeepSeek-V4.1's ([its catalog](..
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/decode.zig:341` (`const Kernels3`) |
+| made at | `src/core/decode.zig:344` (`const Kernels3`) |
 | inputs | `hdp`, `slots`, `down_t` |
 | outputs | `zd` |
 | source | `text_down3` = `decode/down3_1` ++ `decode/rk_line` ++ `decode/down3_2` ++ `decode/down3_w` ++ `decode/down3_3` (2340 B, `873aac06a4a9`) |
@@ -273,7 +273,7 @@ streamer's slot banks and its grouped variants DeepSeek-V4.1's ([its catalog](..
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/decode.zig:340` (`const Kernels3`) |
+| made at | `src/core/decode.zig:343` (`const Kernels3`) |
 | inputs | `zg`, `zu`, `slots`, `gate_svh`, `up_svh`, `down_suh`, `xsg`, `xsu` |
 | outputs | `hd`, `hs` |
 | source | `text_fin3` = `decode/fin3` (2206 B, `187e822beba3`) |
@@ -315,7 +315,7 @@ streamer's slot banks and its grouped variants DeepSeek-V4.1's ([its catalog](..
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/decode.zig:345` (`const Kernels3`) |
+| made at | `src/core/decode.zig:348` (`const Kernels3`) |
 | inputs | `zg`, `zu`, `slots`, `gate_svh`, `up_svh`, `down_suh`, `xsg`, `xsu` |
 | outputs | `hd`, `hs` |
 | source | `text_fin7` = `decode/fin7_1` ++ `decode/expert_line` ++ `decode/fin7_2` ++ `decode/fin7_planes` ++ `decode/fin7_3` ++ `decode/fin7_sums` ++ `decode/fin7_4` ++ `decode/fin7_swiglu` ++ `decode/fin7_5` (2152 B, `7360fcbe736a`) |
@@ -354,7 +354,7 @@ streamer's slot banks and its grouped variants DeepSeek-V4.1's ([its catalog](..
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/decode.zig:347` (`const Kernels3`) |
+| made at | `src/core/decode.zig:350` (`const Kernels3`) |
 | inputs | `zg`, `zu`, `slots`, `gate_svh`, `up_svh`, `down_suh`, `xsg`, `xsu` |
 | outputs | `hd`, `hs` |
 | source | `text_fin7c` = `decode/fin7_1` ++ `decode/expert_line` ++ `decode/fin7_2` ++ `decode/fin7_planes` ++ `decode/fin7_3` ++ `decode/fin7_sums` ++ `decode/fin7_4` ++ `decode/fin7_swiglu_clamp` ++ `decode/fin7_5` (2505 B, `a82ad5c1492b`) |
@@ -396,7 +396,7 @@ streamer's slot banks and its grouped variants DeepSeek-V4.1's ([its catalog](..
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/decode.zig:88` (`const Kernels`) |
+| made at | `src/core/decode.zig:91` (`const Kernels`) |
 | inputs | `x`, `slots`, `gate_t`, `gate_suh`, `gate_svh`, `up_t`, `up_suh`, `up_svh` |
 | outputs | `h` |
 | source | `text_gu` = `decode/gu` (8530 B, `12117a37337c`) |
@@ -429,7 +429,7 @@ streamer's slot banks and its grouped variants DeepSeek-V4.1's ([its catalog](..
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/decode.zig:339` (`const Kernels3`) |
+| made at | `src/core/decode.zig:342` (`const Kernels3`) |
 | inputs | `xgp`, `xup`, `slots`, `gate_t`, `up_t` |
 | outputs | `zg`, `zu` |
 | source | `text_gu3` = `decode/gu3_1` ++ `decode/rk_line` ++ `decode/gu3_2` ++ `decode/gu3_w` ++ `decode/gu3_3` ++ `decode/gu3_stores` ++ `decode/gu3_4` (2506 B, `89eae969537a`) |
@@ -479,7 +479,7 @@ streamer's slot banks and its grouped variants DeepSeek-V4.1's ([its catalog](..
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/decode.zig:636` (`const Kernels5`) |
+| made at | `src/core/decode.zig:646` (`const Kernels5`) |
 | inputs | `x`, `slots`, `gate_suh`, `up_suh`, `gate_t`, `up_t` |
 | outputs | `zg`, `zu`, `xsg`, `xsu`, `cnt` |
 | source | `text_gu5` = `decode/gu5` (4502 B, `fc4946388503`) |
@@ -517,7 +517,7 @@ streamer's slot banks and its grouped variants DeepSeek-V4.1's ([its catalog](..
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/decode.zig:349` (`const Kernels3`) |
+| made at | `src/core/decode.zig:354` (`const Kernels3`) |
 | inputs | `x`, `slots`, `gate_suh`, `up_suh`, `gate_t`, `up_t` |
 | outputs | `zg`, `zu`, `xsg`, `xsu` |
 | source | `text_gu8` = `decode/gu8_1` ++ `decode/rk_line` ++ `decode/gu8_2` (4061 B, `b1354b8afc06`) |
@@ -555,7 +555,7 @@ streamer's slot banks and its grouped variants DeepSeek-V4.1's ([its catalog](..
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/decode.zig:338` (`const Kernels3`) |
+| made at | `src/core/decode.zig:341` (`const Kernels3`) |
 | inputs | `x`, `slots`, `gate_suh`, `up_suh` |
 | outputs | `xg`, `xu`, `sg`, `su` |
 | source | `text_prep2` = `decode/prep2_1` ++ `decode/expert_line` ++ `decode/prep2_row` ++ `decode/prep2_2` (1991 B, `b0711f523a54`) |
@@ -608,7 +608,7 @@ streamer's slot banks and its grouped variants DeepSeek-V4.1's ([its catalog](..
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/decode.zig:638` (`const Kernels5`) |
+| made at | `src/core/decode.zig:648` (`const Kernels5`) |
 | inputs | `wv`, `scores` |
 | outputs | `y` |
 | source | `text_red5` = `decode/red5` (391 B, `71b235db1931`) |
@@ -629,11 +629,39 @@ streamer's slot banks and its grouped variants DeepSeek-V4.1's ([its catalog](..
   row, bf16); `src/core/decode.zig` "turboexl3 decode form 5 texts: every template constant read is passed, every
   signature name is used" (CPU: names).
 
-## `src/core/dense.zig`
+### `turboexl3_fin7co`
 
-The dense EXL3 linear (`linear` and the entries built on it): DEC-ONE, the multi-row GEMV chain, the register-path GEMM,
-dequantize + matmul, the finishes and the un-rotated trunk. F3 (DeepSeek-V4.1's shared expert) is in
-`src/models/deepseek_v41/f3.zig` ([its catalog](../models/deepseek_v41/kernels.md)).
+<!-- kernel-facts: turboexl3_fin7co -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/core/decode.zig:352` (`const Kernels3`) |
+| inputs | `zg`, `zu`, `slots`, `gate_svh`, `up_svh`, `down_suh`, `xsg`, `xsu` |
+| outputs | `hd`, `hs` |
+| source | `text_fin7co` = `decode/fin7_1` ++ `decode/expert_line` ++ `decode/fin7_2` ++ `decode/fin7_planes` ++ `decode/fin7_3` ++ `decode/fin7_sums` ++ `decode/fin7_4` ++ `decode/fin7_swiglu_clamp_out` ++ `decode/fin7_5` (2561 B, `e9f1d528ba34`) |
+| header | `header5` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` (26594 B, `41efbbbbd943`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** core: `root.moeLing` at 1 to 16 decode rows with a limit (launch 3 of forms 7, 8 and 9 as configured,
+  form 9 for forms 3, 5 and 6): a geometry with `limit` 1 to 128 and `clamp` `silu_out` builds it in `fin7`'s place.
+  Ling-3.1-flash (`models/ling/api.zig`): its routed experts on layers 65 to 71 (`expert_swiglu_limit_list` 10), whose
+  SwiGLU is clamped after the SiLU: min(silu(g), L) · clamp(u, −L, L), exllamav3's `act_limit` with SiLU (inclusionAI's
+  vLLM and SGLang the same).
+- **Shapes and dtypes:** as `turboexl3_fin7c`.
+- **Grid and threadgroup:** as `fin7`: `((INTER/128)·32, RK, 1)` / `(32, 1, 1)`.
+- **Template args:** fin7's five (INTER, RKC, KS, DEFER, NBH), then LIMIT (an integer 1 to 128, Ling-3.1's 10): the
+  gate's SiLU clamped from above at LIMIT and up to [−LIMIT, LIMIT], in f32 on the finished f16 values; a NaN passes
+  through.
+- **Replaces:** `turboexl3_fin7`'s launch with Ling's clamp (the unfused chain has no clamp).
+- **Bits:** byte-identical to `turboexl3_fin7` where no value reaches the limit; with the clamp acting, within 5e-3 of
+  `ref.moeRowClampedAt` at `silu_out` (f32 `ref.compare`; bf16 `ref.compareRounded` at 2^-8) at Ling-3.1-flash's routed
+  geometry (4096 x 1280, 512 experts, top-8), at least 1% of the gates' SiLUs and of the ups past the limit.
+- **Pinned by:** `src/models/ling/ling_test.zig` "turboexl3 ling texts: each Ling kernel is its base text with the
+  SwiGLU line swapped for Ling's clamp ..." (CPU: this text is its base with the one swap, nothing else; only a clamp
+  reads LIMIT); `src/models/ling/ling_test.zig` "turboexl3 gpu ling: root.moeLing at Ling-3.1-flash's routed geometry
+  ..." (GPU: at limit 128 with x ~ N(0, 1) `moe`'s bytes at rows 1, 16 and 400, bf16 and f32; at limits 0 and 10 with x
+  ~ N(0, 8^2) within 5e-3 of `ref.moeRowClampedAt` at `silu_out` on sampled rows of 1, 4, 16, 32 and 1328, n 40 and 32).
 
 ### `turboexl3_dense_dec0`
 
@@ -1314,7 +1342,7 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/prefill.zig:639` (`const Prefill`) |
+| made at | `src/core/prefill.zig:652` (`const Prefill`) |
 | inputs | `zd`, `inds`, `inv`, `scores`, `svh_d` |
 | outputs | `y` |
 | source | `text_finish` = `prefill/finish_1` ++ `prefill/finish_2` ++ `prefill/finish_3` ++ `prefill/finish_4` (1033 B, `e68b2ddd88ba`) |
@@ -1358,7 +1386,7 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/prefill.zig:652` (`const Prefill`) |
+| made at | `src/core/prefill.zig:667` (`const Prefill`) |
 | inputs | `zd`, `inds`, `inv`, `scores`, `svh_d` |
 | outputs | `y` |
 | source | `text_finish_v` = `prefill/finish_v` (1182 B, `72667b6b538d`) |
@@ -1390,7 +1418,7 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/prefill.zig:645` (`const Prefill`) |
+| made at | `src/core/prefill.zig:658` (`const Prefill`) |
 | inputs | `inds` |
 | outputs | `order`, `tiles` |
 | source | `text_froute` = `prefill/table_1` ++ `prefill/froute_count` ++ `prefill/table_2` (2416 B, `84e4298e16ea`) |
@@ -1425,7 +1453,7 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/prefill.zig:646` (`const Prefill`) |
+| made at | `src/core/prefill.zig:659` (`const Prefill`) |
 | inputs | `inds` |
 | outputs | `order`, `tiles` |
 | source | `text_froute_m` = `prefill/table_mixed_1` ++ `prefill/froute_count` ++ `prefill/table_mixed_2` (3328 B, `0ed55b2ce032`) |
@@ -1462,7 +1490,7 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/prefill.zig:633` (`const Prefill`) |
+| made at | `src/core/prefill.zig:644` (`const Prefill`) |
 | inputs | `tiles`, `x0`, `w0`, `xs0` |
 | outputs | `z0` |
 | source | `gemm1_text` = `prefill/gemm_1` ++ `prefill/gemm_2` ++ `prefill/gemm_3` ++ `prefill/gemm_op1_wx` ++ `prefill/gemm_4` ++ `prefill/gemm_op1_xsz` ++ `prefill/gemm_5` (6517 B, `dd6225a4d3f1`) |
@@ -1516,7 +1544,7 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/prefill.zig:644` (`const Prefill`) |
+| made at | `src/core/prefill.zig:657` (`const Prefill`) |
 | inputs | `tiles`, `x0`, `w0`, `xs0` |
 | outputs | `z0` |
 | source | `gemm1m_text` = `prefill/gemm_mixed_1` ++ `prefill/gemm_1` ++ `prefill/gemm_mixed_bs` ++ `prefill/gemm_3` ++ `prefill/gemm_op1_wx` ++ `prefill/gemm_4` ++ `prefill/gemm_op1_xsz` ++ `prefill/gemm_5` ++ `prefill/gemm_mixed_2` ++ `prefill/gemm_small_1` ++ `prefill/gemm_mixed_index` ++ `prefill/gemm_small_3` ++ `prefill/gemm_small_op1_wx` ++ `prefill/gemm_small_4` ++ `prefill/gemm_small_op1_xsz` ++ `prefill/gemm_small_5` ++ `prefill/gemm_mixed_3` (10642 B, `b717e7a11df7`) |
@@ -1571,7 +1599,7 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/prefill.zig:641` (`const Prefill`) |
+| made at | `src/core/prefill.zig:654` (`const Prefill`) |
 | inputs | `tiles`, `x0`, `w0`, `xs0` |
 | outputs | `z0` |
 | source | `gemm1s_text` = `prefill/gemm_small_1` ++ `prefill/gemm_small_2` ++ `prefill/gemm_small_3` ++ `prefill/gemm_small_op1_wx` ++ `prefill/gemm_small_4` ++ `prefill/gemm_small_op1_xsz` ++ `prefill/gemm_small_5` (3747 B, `34fd7442f5b6`) |
@@ -1614,7 +1642,7 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/prefill.zig:632` (`const Prefill`) |
+| made at | `src/core/prefill.zig:643` (`const Prefill`) |
 | inputs | `tiles`, `x0`, `x1`, `w0`, `w1`, `xs0`, `xs1` |
 | outputs | `z0`, `z1` |
 | source | `gemm2_text` = `prefill/gemm_1` ++ `prefill/gemm_2` ++ `prefill/gemm_3` ++ `prefill/gemm_op2_wx` ++ `prefill/gemm_4` ++ `prefill/gemm_op2_xsz` ++ `prefill/gemm_5` (6517 B, `f34c9fcb0bd3`) |
@@ -1663,7 +1691,7 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/prefill.zig:643` (`const Prefill`) |
+| made at | `src/core/prefill.zig:656` (`const Prefill`) |
 | inputs | `tiles`, `x0`, `x1`, `w0`, `w1`, `xs0`, `xs1` |
 | outputs | `z0`, `z1` |
 | source | `gemm2m_text` = `prefill/gemm_mixed_1` ++ `prefill/gemm_1` ++ `prefill/gemm_mixed_bs` ++ `prefill/gemm_3` ++ `prefill/gemm_op2_wx` ++ `prefill/gemm_4` ++ `prefill/gemm_op2_xsz` ++ `prefill/gemm_5` ++ `prefill/gemm_mixed_2` ++ `prefill/gemm_small_1` ++ `prefill/gemm_mixed_index` ++ `prefill/gemm_small_3` ++ `prefill/gemm_small_op2_wx` ++ `prefill/gemm_small_4` ++ `prefill/gemm_small_op2_xsz` ++ `prefill/gemm_small_5` ++ `prefill/gemm_mixed_3` (10642 B, `e19ee178960e`) |
@@ -1717,7 +1745,7 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/prefill.zig:640` (`const Prefill`) |
+| made at | `src/core/prefill.zig:653` (`const Prefill`) |
 | inputs | `tiles`, `x0`, `x1`, `w0`, `w1`, `xs0`, `xs1` |
 | outputs | `z0`, `z1` |
 | source | `gemm2s_text` = `prefill/gemm_small_1` ++ `prefill/gemm_small_2` ++ `prefill/gemm_small_3` ++ `prefill/gemm_small_op2_wx` ++ `prefill/gemm_small_4` ++ `prefill/gemm_small_op2_xsz` ++ `prefill/gemm_small_5` (3747 B, `430611958a11`) |
@@ -1760,7 +1788,7 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/prefill.zig:636` (`const Prefill`) |
+| made at | `src/core/prefill.zig:647` (`const Prefill`) |
 | inputs | `zg`, `zu`, `inds`, `order`, `svh_g`, `svh_u`, `suh_d` |
 | outputs | `xd`, `xsd` |
 | source | `text_mid` = `prefill/mid_1` ++ `prefill/mid_2` ++ `prefill/mid_3` ++ `prefill/mid_4` ++ `prefill/mid_swiglu` ++ `prefill/mid_5` (1402 B, `c03088145060`) |
@@ -1805,7 +1833,7 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/prefill.zig:649` (`const Prefill`) |
+| made at | `src/core/prefill.zig:662` (`const Prefill`) |
 | inputs | `zg`, `zu`, `inds`, `order`, `svh_g`, `svh_u`, `suh_d` |
 | outputs | `xd`, `xsd` |
 | source | `text_mid_v` = `prefill/mid_v_1` ++ `prefill/mid_swiglu` ++ `prefill/mid_v_2` (1759 B, `3e3c9dbef907`) |
@@ -1839,7 +1867,7 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/prefill.zig:651` (`const Prefill`) |
+| made at | `src/core/prefill.zig:664` (`const Prefill`) |
 | inputs | `zg`, `zu`, `inds`, `order`, `svh_g`, `svh_u`, `suh_d` |
 | outputs | `xd`, `xsd` |
 | source | `text_mid_vc` = `prefill/mid_v_1` ++ `prefill/mid_swiglu_clamp` ++ `prefill/mid_v_2` (2112 B, `31fe60881aaf`) |
@@ -1876,7 +1904,7 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/prefill.zig:638` (`const Prefill`) |
+| made at | `src/core/prefill.zig:649` (`const Prefill`) |
 | inputs | `zg`, `zu`, `inds`, `order`, `svh_g`, `svh_u`, `suh_d` |
 | outputs | `xd`, `xsd` |
 | source | `text_midc` = `prefill/mid_1` ++ `prefill/mid_2` ++ `prefill/mid_3` ++ `prefill/mid_4` ++ `prefill/mid_swiglu_clamp` ++ `prefill/mid_5` (1755 B, `d4c84b548820`) |
@@ -1914,7 +1942,7 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/prefill.zig:631` (`const Prefill`) |
+| made at | `src/core/prefill.zig:642` (`const Prefill`) |
 | inputs | `x`, `inds`, `order`, `suh_g`, `suh_u` |
 | outputs | `xg`, `xu`, `inv`, `xsg`, `xsu` |
 | source | `text_prep` = `prefill/prep` (1420 B, `cabcf76552d4`) |
@@ -1955,7 +1983,7 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/prefill.zig:647` (`const Prefill`) |
+| made at | `src/core/prefill.zig:660` (`const Prefill`) |
 | inputs | `x`, `inds`, `order`, `suh_g`, `suh_u` |
 | outputs | `xg`, `xu`, `inv`, `xsg`, `xsu` |
 | source | `text_prep_v` = `prefill/prep_v` (1808 B, `31abdef09b06`) |
@@ -1986,7 +2014,7 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/prefill.zig:584` (`const T128Kernels`) |
+| made at | `src/core/prefill.zig:593` (`const T128Kernels`) |
 | inputs | `tiles`, `x0`, `w0`, `xs0` |
 | outputs | `z0` |
 | source | `gemm1m_text` = `prefill/gemm_mixed_1` ++ `prefill/gemm_1` ++ `prefill/gemm_mixed_bs` ++ `prefill/gemm_3` ++ `prefill/gemm_op1_wx` ++ `prefill/gemm_4` ++ `prefill/gemm_op1_xsz` ++ `prefill/gemm_5` ++ `prefill/gemm_mixed_2` ++ `prefill/gemm_small_1` ++ `prefill/gemm_mixed_index` ++ `prefill/gemm_small_3` ++ `prefill/gemm_small_op1_wx` ++ `prefill/gemm_small_4` ++ `prefill/gemm_small_op1_xsz` ++ `prefill/gemm_small_5` ++ `prefill/gemm_mixed_3` (10642 B, `b717e7a11df7`) |
@@ -2038,7 +2066,7 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/prefill.zig:585` (`const T128Kernels`) |
+| made at | `src/core/prefill.zig:594` (`const T128Kernels`) |
 | inputs | `tiles`, `x0`, `w0`, `xs0` |
 | outputs | `z0` |
 | source | `gemm1_text` = `prefill/gemm_1` ++ `prefill/gemm_2` ++ `prefill/gemm_3` ++ `prefill/gemm_op1_wx` ++ `prefill/gemm_4` ++ `prefill/gemm_op1_xsz` ++ `prefill/gemm_5` (6517 B, `dd6225a4d3f1`) |
@@ -2088,7 +2116,7 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/prefill.zig:590` (`const T128Kernels`) |
+| made at | `src/core/prefill.zig:601` (`const T128Kernels`) |
 | inputs | `zd`, `inds`, `inv`, `scores`, `svh_d`, `zdt`, `xbase` |
 | outputs | `y` |
 | source | `text_finish_t128` = `prefill/finish_1` ++ `prefill/finish_t128_pick` ++ `prefill/finish_2` ++ `prefill/finish_t128_load` ++ `prefill/finish_4` (1099 B, `1aa1ff185322`) |
@@ -2125,7 +2153,7 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/prefill.zig:582` (`const T128Kernels`) |
+| made at | `src/core/prefill.zig:591` (`const T128Kernels`) |
 | inputs | `tiles`, `x0`, `x1`, `w0`, `w1`, `xs0`, `xs1` |
 | outputs | `z0`, `z1` |
 | source | `gemm2m_text` = `prefill/gemm_mixed_1` ++ `prefill/gemm_1` ++ `prefill/gemm_mixed_bs` ++ `prefill/gemm_3` ++ `prefill/gemm_op2_wx` ++ `prefill/gemm_4` ++ `prefill/gemm_op2_xsz` ++ `prefill/gemm_5` ++ `prefill/gemm_mixed_2` ++ `prefill/gemm_small_1` ++ `prefill/gemm_mixed_index` ++ `prefill/gemm_small_3` ++ `prefill/gemm_small_op2_wx` ++ `prefill/gemm_small_4` ++ `prefill/gemm_small_op2_xsz` ++ `prefill/gemm_small_5` ++ `prefill/gemm_mixed_3` (10642 B, `e19ee178960e`) |
@@ -2177,7 +2205,7 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/prefill.zig:583` (`const T128Kernels`) |
+| made at | `src/core/prefill.zig:592` (`const T128Kernels`) |
 | inputs | `tiles`, `x0`, `x1`, `w0`, `w1`, `xs0`, `xs1` |
 | outputs | `z0`, `z1` |
 | source | `gemm2_text` = `prefill/gemm_1` ++ `prefill/gemm_2` ++ `prefill/gemm_3` ++ `prefill/gemm_op2_wx` ++ `prefill/gemm_4` ++ `prefill/gemm_op2_xsz` ++ `prefill/gemm_5` (6517 B, `f34c9fcb0bd3`) |
@@ -2224,7 +2252,7 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/prefill.zig:587` (`const T128Kernels`) |
+| made at | `src/core/prefill.zig:596` (`const T128Kernels`) |
 | inputs | `zg`, `zu`, `inds`, `order`, `svh_g`, `svh_u`, `suh_d`, `zgt`, `zut`, `xbase` |
 | outputs | `xd`, `xsd` |
 | source | `text_mid_t128` = `prefill/mid_1` ++ `prefill/mid_t128_pick` ++ `prefill/mid_2` ++ `prefill/mid_t128_loads` ++ `prefill/mid_4` ++ `prefill/mid_swiglu` ++ `prefill/mid_5` (1531 B, `9fa53afb15db`) |
@@ -2263,7 +2291,7 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/prefill.zig:589` (`const T128Kernels`) |
+| made at | `src/core/prefill.zig:598` (`const T128Kernels`) |
 | inputs | `zg`, `zu`, `inds`, `order`, `svh_g`, `svh_u`, `suh_d`, `zgt`, `zut`, `xbase` |
 | outputs | `xd`, `xsd` |
 | source | `text_mid_t128c` = `prefill/mid_1` ++ `prefill/mid_t128_pick` ++ `prefill/mid_2` ++ `prefill/mid_t128_loads` ++ `prefill/mid_4` ++ `prefill/mid_swiglu_clamp` ++ `prefill/mid_5` (1884 B, `84c6b6a3cdb5`) |
@@ -2305,7 +2333,7 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/prefill.zig:581` (`const T128Kernels`) |
+| made at | `src/core/prefill.zig:590` (`const T128Kernels`) |
 | inputs | `inds` |
 | outputs | `order`, `tiles`, `tiles128`, `xbase` |
 | source | `text_froute_t128` = `prefill/froute_t128_1` ++ `prefill/froute_count` ++ `prefill/froute_t128_2` (4646 B, `107b10c53c14`) |
@@ -2346,7 +2374,7 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/prefill.zig:630` (`const Prefill`) |
+| made at | `src/core/prefill.zig:641` (`const Prefill`) |
 | inputs | `inds`, `order` |
 | outputs | `tiles` |
 | source | `text_table` = `prefill/table_1` ++ `prefill/table_bsearch` ++ `prefill/table_2` (1606 B, `ca3c8b5cc5f5`) |
@@ -2379,7 +2407,7 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/prefill.zig:642` (`const Prefill`) |
+| made at | `src/core/prefill.zig:655` (`const Prefill`) |
 | inputs | `inds`, `order` |
 | outputs | `tiles` |
 | source | `text_table_mixed` = `prefill/table_mixed_1` ++ `prefill/table_bsearch` ++ `prefill/table_mixed_2` (2518 B, `1a7088e45088`) |
@@ -2405,9 +2433,94 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
   `turboexl3_pf_froute_m`); `src/core/prefill.zig` "turboexl3 prefill metal sources: every kernel as a standalone
   translation unit (TURBOEXL3_METAL_DUMP=1)" (CPU print).
 
-## `src/core/unfused.zig`
+### `turboexl3_pf_mid_vco`
 
-The unfused decode chain: the separately launched steps the fused forms replace (not served).
+<!-- kernel-facts: turboexl3_pf_mid_vco -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/core/prefill.zig:666` (`const Prefill`) |
+| inputs | `zg`, `zu`, `inds`, `order`, `svh_g`, `svh_u`, `suh_d` |
+| outputs | `xd`, `xsd` |
+| source | `text_mid_vco` = `prefill/mid_v_1` ++ `prefill/mid_swiglu_clamp_out` ++ `prefill/mid_v_2` (2168 B, `a085e4763004`) |
+| header | `header_small` = `prefill/h128` ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` (20306 B, `574dba73f3cd`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** core: as `turboexl3_pf_midco`, in the vector-layout arm (`Options.aux` 8). Ling-3.1-flash
+  (`models/ling/api.zig`): its routed experts on layers 65 to 71 (`expert_swiglu_limit_list` 10), whose SwiGLU is
+  clamped after the SiLU: min(silu(g), L) · clamp(u, −L, L), exllamav3's `act_limit` with SiLU (inclusionAI's vLLM and
+  SGLang the same).
+- **Shapes and dtypes:** as `turboexl3_pf_mid_vc`.
+- **Grid and threadgroup:** as `turboexl3_pf_mid_v`.
+- **Template args:** the mid's three, then LIMIT (an integer 1 to 128, Ling-3.1's 10): the gate's SiLU clamped from
+  above at LIMIT and up to [−LIMIT, LIMIT], in f32 on the finished f16 values; a NaN passes through.
+- **Replaces:** `turboexl3_pf_mid_v`'s launch with Ling's clamp.
+- **Bits:** `turboexl3_pf_mid_v`'s statements but the SwiGLU line; where no value reaches the limit, its bytes.
+- **Pinned by:** `src/models/ling/ling_test.zig` "turboexl3 ling texts: each Ling kernel is its base text with the
+  SwiGLU line swapped for Ling's clamp ..." (CPU: this text is its base with the one swap, nothing else; only a clamp
+  reads LIMIT).
+
+### `turboexl3_pf_midco`
+
+<!-- kernel-facts: turboexl3_pf_midco -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/core/prefill.zig:651` (`const Prefill`) |
+| inputs | `zg`, `zu`, `inds`, `order`, `svh_g`, `svh_u`, `suh_d` |
+| outputs | `xd`, `xsd` |
+| source | `text_midco` = `prefill/mid_1` ++ `prefill/mid_2` ++ `prefill/mid_3` ++ `prefill/mid_4` ++ `prefill/mid_swiglu_clamp_out` ++ `prefill/mid_5` (1811 B, `31aaa1a3940b`) |
+| header | `header_small` = `prefill/h128` ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` (20306 B, `574dba73f3cd`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** core: `root.moeLing`'s prefill chain with a limit where the mixed chain runs without the 128-row tiles
+  (`prefill.Prefill` at a geometry with `limit` > 0 and `clamp` `silu_out`); `root` serves the 128-row tiles' mid
+  (`turboexl3_pf_t128_midco`). Ling-3.1-flash (`models/ling/api.zig`): its routed experts on layers 65 to 71
+  (`expert_swiglu_limit_list` 10), whose SwiGLU is clamped after the SiLU: min(silu(g), L) · clamp(u, −L, L),
+  exllamav3's `act_limit` with SiLU (inclusionAI's vLLM and SGLang the same).
+- **Shapes and dtypes:** as `turboexl3_pf_midc`.
+- **Grid and threadgroup:** as `turboexl3_pf_mid`.
+- **Template args:** the mid's three, then LIMIT (an integer 1 to 128, Ling-3.1's 10): the gate's SiLU clamped from
+  above at LIMIT and up to [−LIMIT, LIMIT], in f32 on the finished f16 values; a NaN passes through.
+- **Replaces:** `turboexl3_pf_mid`'s launch with Ling's clamp.
+- **Bits:** `turboexl3_pf_mid`'s statements but the SwiGLU line; where no value reaches the limit, its bytes.
+- **Pinned by:** `src/models/ling/ling_test.zig` "turboexl3 ling texts: each Ling kernel is its base text with the
+  SwiGLU line swapped for Ling's clamp ..." (CPU: this text is its base with the one swap, nothing else; only a clamp
+  reads LIMIT).
+
+### `turboexl3_pf_t128_midco`
+
+<!-- kernel-facts: turboexl3_pf_t128_midco -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/core/prefill.zig:600` (`const T128Kernels`) |
+| inputs | `zg`, `zu`, `inds`, `order`, `svh_g`, `svh_u`, `suh_d`, `zgt`, `zut`, `xbase` |
+| outputs | `xd`, `xsd` |
+| source | `text_mid_t128co` = `prefill/mid_1` ++ `prefill/mid_t128_pick` ++ `prefill/mid_2` ++ `prefill/mid_t128_loads` ++ `prefill/mid_4` ++ `prefill/mid_swiglu_clamp_out` ++ `prefill/mid_5` (1940 B, `c288bc44ac1b`) |
+| header | `header_small` = `prefill/h128` ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` (20306 B, `574dba73f3cd`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** core: `root.moeLing` at prefill rows (more than 16) with a limit: the served chain's mid (the 128-row
+  tiles), built in `turboexl3_pf_t128_mid`'s place at a geometry with `limit` > 0 and `clamp` `silu_out`. Ling-3.1-flash
+  (`models/ling/api.zig`): its routed experts on layers 65 to 71 (`expert_swiglu_limit_list` 10), whose SwiGLU is
+  clamped after the SiLU: min(silu(g), L) · clamp(u, −L, L), exllamav3's `act_limit` with SiLU (inclusionAI's vLLM and
+  SGLang the same).
+- **Shapes and dtypes:** as `turboexl3_pf_t128_midc`.
+- **Grid and threadgroup:** as `turboexl3_pf_t128_mid`.
+- **Template args:** the mid's three, then LIMIT (an integer 1 to 128, Ling-3.1's 10): the gate's SiLU clamped from
+  above at LIMIT and up to [−LIMIT, LIMIT], in f32 on the finished f16 values; a NaN passes through.
+- **Replaces:** `turboexl3_pf_t128_mid`'s launch with Ling's clamp.
+- **Bits:** byte-identical to `turboexl3_pf_t128_mid` where no value reaches the limit; with the clamp acting, within
+  5e-3 of `ref.moeRowClampedAt` at `silu_out` at Ling-3.1-flash's routed geometry (prefill rows 32 and 1328).
+- **Pinned by:** `src/models/ling/ling_test.zig` "turboexl3 ling texts: each Ling kernel is its base text with the
+  SwiGLU line swapped for Ling's clamp ..." (CPU: this text is its base with the one swap, nothing else; only a clamp
+  reads LIMIT); `src/models/ling/ling_test.zig` "turboexl3 gpu ling: root.moeLing at Ling-3.1-flash's routed geometry
+  ..." (GPU: at limit 128 with x ~ N(0, 1) `moe`'s bytes at rows 1, 16 and 400, bf16 and f32; at limits 0 and 10 with x
+  ~ N(0, 8^2) within 5e-3 of `ref.moeRowClampedAt` at `silu_out` on sampled rows of 1, 4, 16, 32 and 1328, n 40 and 32).
 
 ### `turboexl3_finish`
 
