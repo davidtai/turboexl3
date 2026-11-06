@@ -1457,7 +1457,18 @@ SPLIT_ADDED_KERNELS = {
     'turboexl3_ling_pair_dec1': ('Ling-3.1\'s pair: text_dec1 with the member chosen after its head (jsuh, jw) and Ripple\'s '
                                  'member tile address (jtile)'),
 }
+SPLIT_ADDED_KERNELS['turboexl3_gu8bg'] = ('gu8b (Config.banked_gu8): the banked grouped gate|up with its prepare inside '
+                                          '(form 8\'s gu8_1 and rk_line, prep2b\'s arithmetic over the span into threadgroup '
+                                          'memory, gu3bg\'s GEMV there, its planes)')
+SPLIT_ADDED_KERNELS['turboexl3_gu8bgm3'] = 'the same with hw4b\'s M = 3 member path (gu8bg_3m3)'
 SPLIT_CHANGED_CONSTS = {}
+# the Ling banked test selects each arm's texts (moeLingBankedSel): Config.banked_group set in the process selected nothing
+RENAMED_TESTS[('ling_test.zig', "turboexl3 gpu ling banked: every pair of moeLingBanked over three banks is moeLing's on "
+                                "its bank at top-1 with score 1, byte for byte, at limits 0 and 10 and banked groups 2 and "
+                                "4 (TURBOEXL3_GPU=1)")] = (
+    "turboexl3 gpu ling banked: every pair of moeLingBanked over three banks is moeLing's on its bank at top-1 with "
+    "score 1, byte for byte, at limits 0 and 10, on the configured texts (group 2), the grouped texts (g4) and the M = 3 "
+    "path (g4m3), each selected (TURBOEXL3_GPU=1)")
 
 def split_report(oprog, nprog, ounits, nunits, orig_dir, new_dir, problems, verbose):
     """--split (declarations moved between files, not only files): checks 1 to 4 over the whole tree instead of per file.
@@ -1542,7 +1553,11 @@ def split_report(oprog, nprog, ounits, nunits, orig_dir, new_dir, problems, verb
     print('4. tests (split): every test name kept')
     ot = {t for u in ounits.values() for t in u.tests}
     nt = {t for u in nunits.values() for t in u.tests}
+    renamed = {old: new for ((_rf, old), new) in RENAMED_TESTS.items()}
     for t in sorted(ot - nt):
+        if t in renamed and renamed[t] in nt:
+            print(f'   renamed (RENAMED_TESTS) "{t[:60]}" -> "{renamed[t][:60]}"')
+            continue
         problems.append(f'test "{t[:70]}" missing')
     print(f'   {len(ot)} tests before, {len(nt)} after, {len(nt - ot)} added\n')
 
