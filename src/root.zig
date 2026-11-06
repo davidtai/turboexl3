@@ -930,6 +930,11 @@ pub const moeLing = ling.moeLing;
 pub const moeLingBanked = ling.moeLingBanked;
 pub const moeLingBankedGateUp = ling.moeLingBankedGateUp;
 pub const moeLingBankedDown = ling.moeLingBankedDown;
+/// Ling-3.1-flash's shared expert at decode rows: the gate and the up in one launch with the host's SwiGLU and the down's
+/// prepare in its pairs' second finishes, then the down's GEMV (models/ling/shared.zig)
+pub const lingSharedExpert = ling.sharedExpert;
+pub const lingSharedTakes = ling.sharedTakes;
+pub const lingSigmoidTable = ling.sigmoidTable;
 
 test {
     _ = config;

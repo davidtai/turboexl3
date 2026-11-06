@@ -1208,6 +1208,12 @@ ADDED_FILES['models/ling/api.zig'] = ('Ling-3.1\'s entry points (moeLing, moeLin
 ADDED_FILES['ling_test.zig'] = ('Ling-3.1\'s tests: its texts\' compositions, the reference clamp and the refusals (CPU); '
                                 'moeLing against moe and the reference, moeLingBanked against moeLing byte for byte, and '
                                 'linear at every trunk shape (GPU)')
+# Ling-3.1-flash's shared expert at decode rows in two dependent launches (models/ling/shared.zig)
+ADDED_FILES['models/ling/shared.zig'] = ('Ling-3.1\'s shared expert at decode rows: the gate and the up in one DEC-ONE launch, '
+                                         'each in its own buffers, whose pairs of output blocks run the host\'s SwiGLU and the '
+                                         'down\'s prepare (turboexl3_ling_sgu, _sguco), then the down\'s DEC-ONE GEMV')
+ADDED_FILES['shared_test.zig'] = ('Ling-3.1\'s shared expert\'s tests: the texts\' compositions and pins (CPU); sharedExpert '
+                                  'against the composed chain word for word (GPU)')
 # Ling-3.1-flash's same-input trunk pairs in one DEC-ONE launch (models/ling/pair.zig)
 ADDED_FILES['models/ling/pair.zig'] = ('Ling-3.1\'s same-input trunk pairs (z | a, the shared and the dense gate | up) in one '
                                        'DEC-ONE GEMV launch, each member in its own buffers (turboexl3_ling_pair_prep, '
@@ -1441,6 +1447,9 @@ SPLIT_ADDED_KERNELS = {
     'turboexl3_fin7cob': 'the banked fin7 with Ling-3.1\'s clamp: fin7cb with fin7_swiglu_clamp_out in place of the clamp',
     'turboexl3_fin7bg': 'fin7b\'s grouped text (fin7cbg with fin7\'s own SwiGLU line)',
     'turboexl3_fin7cobg': 'fin7cob\'s grouped text (fin7cbg with fin7_swiglu_clamp_out)',
+    'turboexl3_ling_sgu': ('Ling-3.1\'s shared expert: text_dec1 over the gate and the up (msel, mtile) with the pair\'s '
+                           'SwiGLU and the down\'s prepare in its second finishes'),
+    'turboexl3_ling_sguco': 'the same with the clamp after the SiLU (sgu_swiglu_clamp_out)',
     'turboexl3_ling_pair_prep': ('Ling-3.1\'s same-input pair: dense\'s prep_sc for both members on the grid\'s z (jprep ++ '
                                  'text_prep_sc)'),
     'turboexl3_ling_pair_dec0': ('Ling-3.1\'s pair: text_dec0 with the member chosen after its head (jrows, jw) and Ripple\'s '
