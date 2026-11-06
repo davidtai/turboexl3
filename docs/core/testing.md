@@ -10,7 +10,7 @@ The library reads no environment, but the tests do. These variables turn on test
 | variable | file | what it runs |
 |---|---|---|
 | none | every file | the CPU tests: the kernel texts, the launch plans, the tables and the reference |
-| `TURBOEXL3_GPU=1` | `gpu_test.zig`, `prefill_test.zig`, `attn_io_test.zig`, `decb_test.zig`, `clamped_test.zig`, `deepseek_test.zig`, `topk_test.zig`, `bench.zig` | the GPU parity and byte tests, on a Metal device |
+| `TURBOEXL3_GPU=1` | `gpu_test.zig`, `prefill_test.zig`, `attn_io_test.zig`, `decb_test.zig`, `clamped_test.zig`, `deepseek_test.zig`, `glm53f_test.zig`, `routed_test.zig`, `topk_test.zig`, `bench.zig` | the GPU parity and byte tests, on a Metal device |
 | `TURBOEXL3_METAL_DUMP=1` | `prefill.zig` | prints each kernel of the routed prefill chain, with its option variants, as one standalone source file for an offline `xcrun metal` compile |
 | `TURBOEXL3_BENCH=1` | `bench.zig` | with `TURBOEXL3_GPU=1`: times the form-3 variants of the decode chain against Sushi's chain |
 | `TURBOEXL3_PF_TIME=1`, `TURBOEXL3_DEC_TIME=1` | `prefill_test.zig` | with `TURBOEXL3_GPU=1`: time the prefill and decode chains against Sushi's |
@@ -29,6 +29,8 @@ These variables set or narrow the cases of a test group. The comments of each fi
 | `TURBOEXL3_DENSE_TIME_PREFILL`, `_TAIL`, `_MULTI_ONLY` | `gpu_test.zig` | the dense timing: prompt-chunk rows, the rows of a snapshot tail, or the multi-row GEMV alone |
 | `TURBOEXL3_SHARED_V2` | `gpu_test.zig` | the configurations of the v2 shared heads |
 | `TURBOEXL3_ATTN_ROWS` | `attn_io_test.zig` | the row counts of the attention tests |
+| `TURBOEXL3_GLM_K` | `glm53f_test.zig` | the K values of GLM-5.3-Flash's dense shapes (a comma list) |
+| `TURBOEXL3_GLM_ROUTED_N`, `_ROUTED_ROWS`, `_BANKED_ROWS` | `routed_test.zig` | the routed rates (halfwords per tile), `moeClamped`'s row counts and the banked call's pair counts at GLM-5.3-Flash's routed geometry |
 | `TURBOEXL3_CLAMP_N`, `_ROWS` | `clamped_test.zig` | the rates (halfwords per tile) and row counts of the clamped SwiGLU's test at DeepSeek-V4.1-Flash's geometry |
 
 `python3 tools/check_texts.py <src before the change>` checks a refactor on the host. It fails on any Zig string that
