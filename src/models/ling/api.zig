@@ -44,6 +44,21 @@ pub fn moeLingBanked(s: mlx.mlx_stream, x: mlx.mlx_array, banks: *const [3]Bank,
     return moeLingBankedDown(s, h, banks, ids, dec, limit);
 }
 
+/// hw4b's selection of the banked texts a call runs (DeepSeek-V4.1's `BankedSel`): the configured ones (a geometry's
+/// `Config.banked_group` and `banked_m3` as they were at its first banked call), the grouped texts (g4) or the grouped
+/// texts with the M = 3 member path (g4m3). Every selection gives a pair the same bytes.
+pub const BankedSel = ds.BankedSel;
+
+/// `moeLingBanked` on `sel`'s texts at the configured variants (`moeClampedBankedSel`'s twin): a test names the texts it
+/// runs, which the kernel cache otherwise fixes at a geometry's first call.
+pub fn moeLingBankedSel(s: mlx.mlx_stream, x: mlx.mlx_array, banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, limit: c_int, sel: BankedSel) !mlx.mlx_array {
+    const a = try act(limit);
+    const h = try ds.bankedGateUpAct(s, x, banks, ids, dec, a, sel, root.config.get().banked_variant_gu);
+    defer freeArr(h.hd);
+    defer freeArr(h.hs);
+    return ds.bankedDownAct(s, h, banks, ids, dec, a, sel, root.config.get().banked_variant_dn);
+}
+
 /// `moeLingBanked`'s gate|up (prep2b, gu3b and fin7b or fin7cob, or their grouped texts): as `moeClampedBankedGateUp`.
 pub fn moeLingBankedGateUp(s: mlx.mlx_stream, x: mlx.mlx_array, banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, limit: c_int) !ds.BankedHalf {
     return ds.bankedGateUpAct(s, x, banks, ids, dec, try act(limit), .configured, root.config.get().banked_variant_gu);

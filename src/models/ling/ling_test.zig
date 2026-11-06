@@ -6,7 +6,9 @@
 //! - `root.moeLing` at a limit no value reaches gives `root.moe`'s bytes (decode and prefill rows), and at limits 0 and 10
 //!   equals `ref.moeRowClampedAt` (`silu_out`) on sampled rows of decode rows 1, 4, 16 and prefill rows 32, 1328;
 //! - every pair of `root.moeLingBanked` over three banks is `moeLing`'s on its bank at top-1 with score 1, byte for byte,
-//!   at limits 0 and 10, banked groups 2 and 4, rows 1, 2, 8, 16, 48;
+//!   at limits 0 and 10, rows 1, 2, 8, 16, 48, on the configured texts (banked group 2), the grouped texts (g4), the
+//!   M = 3 member path (g4m3) and each grouped set with gu8b (the prepare inside the gate|up launch, `Config.banked_gu8`;
+//!   also word for word against its twin without it), each selected (`moeLingBankedSel`) and checked to have run;
 //! - `root.linear` at every Ling trunk shape (K6; the dense FFN K4) equals the host reference;
 //! - a one-row call on two rows' launch shape (`Config.dec_one_row_wide`) gives one row's own bytes and the three-launch
 //!   chain's at every trunk shape, x f32 and bf16;
@@ -367,9 +369,13 @@ fn drawPairs(rnd: std.Random, bank: []u32, slot: []u32) void {
 
 // Ling's routed geometry over three banks of 20, 12 and 8 experts at each rate: every pair's row of moeLingBanked against
 // moeLing on its bank at top-1 with score 1 (at most 16 rows a call, so its decode launches), byte for byte, x bf16 and the
-// trellis I16 (the streamer's code arrays) and U16, at limits 0 (fin7b / fin7bg) and 10 (fin7cob / fin7cobg), under
-// `banked_group` 2 and 4. x ~ N(0, 8^2), so the clamp acts at 10.
-test "turboexl3 gpu ling banked: every pair of moeLingBanked over three banks is moeLing's on its bank at top-1 with score 1, byte for byte, at limits 0 and 10 and banked groups 2 and 4 (TURBOEXL3_GPU=1)" {
+// trellis I16 (the streamer's code arrays) and U16, at limits 0 (fin7b / fin7bg) and 10 (fin7cob / fin7cobg), on each
+// selection of the texts (`moeLingBankedSel`): the configured ones at the default configuration (banked group 2), the
+// grouped texts (g4), the grouped texts with the M = 3 member path (g4m3, the served set), and each grouped set with gu8b
+// (its gate|up's prepare inside the launch, also against its twin without it), each line checked to have run the texts
+// it names (the kernel cache fixes the configured texts at a geometry's first banked call, so setting
+// `Config.banked_group` in the process selects nothing). x ~ N(0, 8^2), so the clamp acts at 10.
+test "turboexl3 gpu ling banked: every pair of moeLingBanked over three banks is moeLing's on its bank at top-1 with score 1, byte for byte, at limits 0 and 10, on the configured texts (group 2), the grouped texts (g4) and the M = 3 path (g4m3), each selected (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
@@ -446,27 +452,47 @@ test "turboexl3 gpu ling banked: every pair of moeLingBanked over three banks is
                         for (P, 0..) |p, i| @memcpy(want[p * hidden ..][0..hidden], buf[i * hidden ..][0..hidden]);
                     }
                 }
-                for ([_]u32{ 2, 4 }) |group| {
-                    var cfg = saved;
-                    cfg.banked_group = group;
-                    try config.configure(cfg);
-                    const Arm = struct { banks: *const [3]root.Bank, name: []const u8 };
-                    for ([_]Arm{ .{ .banks = &rb_i, .name = "trellis=i16" }, .{ .banks = &rb_u, .name = "trellis=u16" } }) |arm| {
-                        const y = try g.adopt(try root.moeLingBanked(s, x32, arm.banks, ids_a, .mul1, lim));
+                // the banked state the calls run on (the geometry `moeLingBanked` builds), whose texts each line names
+                const geo: decode.Geometry = .{ .hidden = hidden, .inter = inter, .topk = 1, .rate = rate, .dec = .mul1, .limit = @intCast(lim), .clamp = .silu_out };
+                const k3 = try root.kernelsFor(geo, .float32);
+                // gu8b's arms (the prepare inside the gate|up launch) also against their twin without it, word for word
+                const Sel = struct { sel: root.BankedSel, want: banked.Banked.Texts, gu8: bool, twin: ?usize = null };
+                const sels = [_]Sel{
+                    .{ .sel = .configured, .want = .banked, .gu8 = false },
+                    .{ .sel = .g4, .want = .g4, .gu8 = false },
+                    .{ .sel = .g4m3, .want = .g4m3, .gu8 = false },
+                    .{ .sel = .g4gu8, .want = .g4, .gu8 = true, .twin = 1 },
+                    .{ .sel = .g4m3gu8, .want = .g4m3, .gu8 = true, .twin = 2 },
+                };
+                const Arm = struct { banks: *const [3]root.Bank, name: []const u8 };
+                for ([_]Arm{ .{ .banks = &rb_i, .name = "trellis=i16" }, .{ .banks = &rb_u, .name = "trellis=u16" } }) |arm| {
+                    var outs: [sels.len][]f32 = undefined;
+                    var n_outs: usize = 0;
+                    defer for (outs[0..n_outs]) |o| a.free(o);
+                    for (sels, 0..) |sa, si| {
+                        const y = try g.adopt(try root.moeLingBankedSel(s, x32, arm.banks, ids_a, .mul1, lim, sa.sel));
                         try testing.expectEqualSlices(c_int, &.{ ci(rows), ci(hidden) }, mlx.getShape(y));
-                        _ = try g.hostF32(y, got);
+                        const bst = try banked.forKernels(k3);
+                        const ran = bst.selTexts(sa.sel);
+                        const ran8 = bst.selGu8(k3, sa.sel, rows);
+                        outs[si] = try a.alloc(f32, rows * hidden);
+                        n_outs += 1;
+                        _ = try g.hostF32(y, outs[si]);
                         var d: usize = 0;
                         var bad: usize = 0;
-                        for (got, want) |u, v| {
+                        for (outs[si], want) |u, v| {
                             d += @intFromBool(@as(u32, @bitCast(u)) != @as(u32, @bitCast(v)));
                             bad += @intFromBool(!std.math.isFinite(u));
                         }
-                        const ok = d == 0 and bad == 0;
-                        std.debug.print("TURBOEXL3_LING_BANKED n={d} rows={d} limit={d} group={d} {s} differing={d}/{d} nonfinite={d} {s}\n", .{ n, rows, lim, group, arm.name, d, rows * hidden, bad, if (ok) "PASS" else "FAIL" });
+                        var dt: usize = 0;
+                        if (sa.twin) |tw| for (outs[si], outs[tw]) |u, v| {
+                            dt += @intFromBool(@as(u32, @bitCast(u)) != @as(u32, @bitCast(v)));
+                        };
+                        const ok = d == 0 and bad == 0 and dt == 0 and ran == sa.want and ran8 == sa.gu8;
+                        std.debug.print("TURBOEXL3_LING_BANKED n={d} rows={d} limit={d} arm={s} texts={s} gu8={} {s} differing={d}/{d} vs_twin={d} nonfinite={d} {s}\n", .{ n, rows, lim, @tagName(sa.sel), @tagName(ran), ran8, arm.name, d, rows * hidden, dt, bad, if (ok) "PASS" else "FAIL" });
                         if (!ok) failed = true;
                     }
                 }
-                try config.configure(saved);
             }
         }
     }

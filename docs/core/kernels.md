@@ -119,7 +119,7 @@ streamer's slot banks and its grouped variants DeepSeek-V4.1's ([its catalog](..
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/decode.zig:647` (`const Kernels5`) |
+| made at | `src/core/decode.zig:650` (`const Kernels5`) |
 | inputs | `zg`, `zu`, `xsg`, `xsu`, `slots`, `gate_svh`, `up_svh`, `down_suh`, `down_t`, `down_svh` |
 | outputs | `wv` |
 | source | `text_dn5` = `decode/dn5_head` ++ `decode/dn5_tail` (5054 B, `58b2ca539f44`) |
@@ -160,7 +160,7 @@ streamer's slot banks and its grouped variants DeepSeek-V4.1's ([its catalog](..
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/decode.zig:649` (`const Kernels5`) |
+| made at | `src/core/decode.zig:652` (`const Kernels5`) |
 | inputs | `zg`, `zu`, `xsg`, `xsu`, `slots`, `gate_svh`, `up_svh`, `down_suh`, `down_t`, `down_svh`, `cnt`, `scores` |
 | outputs | `wv`, `y` |
 | source | `text_dn6` = `decode/dn5_head` ++ `decode/dn6_tail` (6350 B, `020e3537b6a1`) |
@@ -479,7 +479,7 @@ streamer's slot banks and its grouped variants DeepSeek-V4.1's ([its catalog](..
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/decode.zig:646` (`const Kernels5`) |
+| made at | `src/core/decode.zig:649` (`const Kernels5`) |
 | inputs | `x`, `slots`, `gate_suh`, `up_suh`, `gate_t`, `up_t` |
 | outputs | `zg`, `zu`, `xsg`, `xsu`, `cnt` |
 | source | `text_gu5` = `decode/gu5` (4502 B, `fc4946388503`) |
@@ -608,7 +608,7 @@ streamer's slot banks and its grouped variants DeepSeek-V4.1's ([its catalog](..
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/decode.zig:648` (`const Kernels5`) |
+| made at | `src/core/decode.zig:651` (`const Kernels5`) |
 | inputs | `wv`, `scores` |
 | outputs | `y` |
 | source | `text_red5` = `decode/red5` (391 B, `71b235db1931`) |

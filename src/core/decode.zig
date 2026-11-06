@@ -589,7 +589,10 @@ pub const text_dfin7 = @embedFile("kernels/decode/dfin7.metal");
 /// 128-aligned: the host admits it only then) the four simdgroups first rotate for every member and both projections in
 /// prep2's arithmetic into threadgroup memory; then gu3's GEMV reads the input from there. The blk 0 threadgroups write
 /// each block's input sum (xsg / xsu [RK, hidden / 128]) for fin's deferred map. gu3's planes, so form 3's bytes.
-pub const text_gu8 = @embedFile("kernels/decode/gu8_1.metal") ++ rk_line ++ @embedFile("kernels/decode/gu8_2.metal");
+pub const text_gu8 = gu8_1 ++ rk_line ++ gu8_2;
+/// form 8's gate|up launch's constants (the banked decode's gu8 texts', `banked.text_gu8bg`, too) and its body
+pub const gu8_1 = @embedFile("kernels/decode/gu8_1.metal");
+pub const gu8_2 = @embedFile("kernels/decode/gu8_2.metal");
 pub const gu8_inputs = [_][*:0]const u8{ "x", "slots", "gate_suh", "up_suh", "gate_t", "up_t" };
 pub const gu8_outputs = [_][*:0]const u8{ "zg", "zu", "xsg", "xsu" };
 
