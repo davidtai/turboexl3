@@ -36,12 +36,13 @@ The routed experts:
 | `moeClamped` | `moe` with DeepSeek-V4's (and GLM's) clamped SwiGLU, `swiglu_limit` 1 to 128: the gate clamped from above and up to [−limit, limit] before SwiGLU; decode rows on fin7's clamped variant, prefill rows on the clamped mid |
 | `moeClampedBanked` (`moeClampedBankedGateUp`, `moeClampedBankedDown`) | DeepSeek-V4.1 (`models/deepseek_v41/api.zig`): `moeClamped`'s decode launches over an expert streamer's three slot banks: up to 64 routed pairs, each a row-slot whose id is packed (bank << 24 \| slot row), each pair's output at weight 1 with `moeClamped`'s bytes on its bank at top-1; the gate\|up and the down as two calls (the gate\|up half also reads the down's suh: it prepares the down's input) |
 
-Ling-3.1-flash's routed experts (`models/ling/api.zig`):
+Ling-3.1-flash's routed experts and shared expert (`models/ling/api.zig`):
 
 | name | what it does |
 |---|---|
 | `moeLing` | `moe` with Ling-3.1's SwiGLU: `limit` 0 none (`moe`'s bytes), 1 to 128 clamped after the SiLU, min(silu(g), L) · clamp(u, −L, L); decode rows on fin7's Ling variant, prefill rows on the Ling mid |
 | `moeLingBanked` (`moeLingBankedGateUp`, `moeLingBankedDown`) | `moeClampedBanked`'s launches with Ling-3.1's SwiGLU (`moeLing`'s `limit`, 0 included): each pair's bytes `moeLing`'s on its bank at top-1 with score 1 |
+| `lingSharedExpert` (`lingSharedTakes`, `lingSigmoidTable`) | the shared expert at decode rows 1 to 4: the gate and the up in one DEC-ONE launch (each in its own buffers) whose pairs of output blocks run the host's SwiGLU (`limit` 0: mlx-serve's fusedSwiGLU from the host's table; 1 to 128: the clamp after the SiLU in f32) and the down's prepare, then the down's DEC-ONE GEMV: the composed chain's bytes; error.Exl3EngineNotImplemented where `lingSharedTakes` does not hold |
 
 Qwen3.8's shared expert and router, at 1 to 4 decode rows (`models/qwen38/api.zig`):
 

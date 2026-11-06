@@ -2,7 +2,8 @@
 //! layers and clamped after the SiLU on the late ones (`expert_swiglu_limit_list`: min(silu(g), L) * clamp(u, -L, L),
 //! exllamav3's `act_limit` with SiLU), over a stacked bank (`moeLing`) and over an expert streamer's three slot banks
 //! (`moeLingBanked`). Every launch is root's routed chain or DeepSeek-V4.1's banked decode; only the SwiGLU line differs
-//! (`decode.text_fin7co`, `prefill.text_midco` and the banked `text_fin7b` / `text_fin7cob`).
+//! (`decode.text_fin7co`, `prefill.text_midco` and the banked `text_fin7b` / `text_fin7cob`). Its shared expert at decode
+//! rows runs in two dependent launches of its own (`sharedExpert`, shared.zig).
 const std = @import("std");
 const mlx = @import("sdk").mlx;
 const root = @import("../../root.zig");
@@ -10,6 +11,11 @@ const format = @import("../../core/format.zig");
 const ds = @import("../deepseek_v41/api.zig");
 const Bank = root.Bank;
 const freeArr = root.freeArr;
+/// The shared expert at decode rows in two dependent launches (`shared.zig`)
+pub const shared = @import("shared.zig");
+pub const sharedExpert = shared.sharedExpert;
+pub const sharedTakes = shared.sharedTakes;
+pub const sigmoidTable = shared.sigmoidTable;
 
 /// `root.moe` with Ling-3.1's SwiGLU: `limit` 0 none (`moe`'s bytes), 1..128 the clamp after the SiLU (each row-slot's
 /// gate SiLU clamped from above at `limit` and its up to [-limit, limit], in f32 on the projections' f16-rounded outputs);
@@ -44,3 +50,6 @@ fn act(limit: c_int) !ds.BankedAct {
     if (limit < 0 or limit > 128) return error.InvalidExl3Clamp;
     return .{ .limit = @intCast(limit), .clamp = .silu_out };
 }
+
+/// This file's module state (`Global`): what a host that shares its units' state registers.
+pub const shared_state = .{shared.shared_state};
