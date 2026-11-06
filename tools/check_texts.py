@@ -1219,6 +1219,12 @@ ADDED_FILES['models/ling/pair.zig'] = ('Ling-3.1\'s same-input trunk pairs (z | 
                                        'DEC-ONE GEMV launch, each member in its own buffers (turboexl3_ling_pair_prep, '
                                        '_pair_dec0, _pair_dec1: dense\'s prep_sc and DEC-ONE texts with the member chosen after '
                                        'their head, Ripple\'s member tile address)')
+# Ling-3.1-flash's routed combine at prompt rows (turboexl3_ling_combine, _combine_parts)
+ADDED_FILES['models/ling/combine.zig'] = ('Ling-3.1\'s wide routed call combine in one launch (combineRouted, combineParts: '
+                                          'MLX\'s sum(multiply(astype(routed, f32), expand_dims(weights, -1)), -2) word for '
+                                          'word, over a joined array or the call\'s JOINLESS sources) and its texts\' CPU test')
+ADDED_FILES['models/ling/combine_test.zig'] = ('the combine\'s GPU tests: both entries against MLX\'s composed combine word for '
+                                               'word, the refusals')
 
 def metal_strings(fn, toks, corpus):
     """(line, kind, value) of every literal in a .zig file that holds Metal"""
@@ -1456,6 +1462,9 @@ SPLIT_ADDED_KERNELS = {
                                  'member tile address (jtile)'),
     'turboexl3_ling_pair_dec1': ('Ling-3.1\'s pair: text_dec1 with the member chosen after its head (jsuh, jw) and Ripple\'s '
                                  'member tile address (jtile)'),
+    'turboexl3_ling_combine': 'Ling-3.1\'s routed combine over a joined array (models/ling/combine.zig): MLX\'s Multiply and '
+                              'col_reduce_small sum in one launch, word for word',
+    'turboexl3_ling_combine_parts': 'the same over a wide call\'s JOINLESS sources (each pair\'s (source, row))',
 }
 SPLIT_CHANGED_CONSTS = {}
 

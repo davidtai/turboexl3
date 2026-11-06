@@ -44,6 +44,7 @@ Ling-3.1-flash's routed experts, shared expert and trunk pairs (`models/ling/api
 | `moeLingBanked` (`moeLingBankedGateUp`, `moeLingBankedDown`) | `moeClampedBanked`'s launches with Ling-3.1's SwiGLU (`moeLing`'s `limit`, 0 included): each pair's bytes `moeLing`'s on its bank at top-1 with score 1 |
 | `ling.linearPair` | two EXL3 projections of one input (z \| a, the shared or the dense gate \| up), each in its own buffers, in one DEC-ONE GEMV launch at decode rows (1 to 16): y [rows, out_a + out_b], each member's columns its `linear` bytes; error.Exl3EngineNotImplemented where the members' K splits, forms or tiles differ |
 | `lingSharedExpert` (`lingSharedTakes`, `lingSigmoidTable`) | the shared expert at decode rows 1 to 4: the gate and the up in one DEC-ONE launch (each in its own buffers) whose pairs of output blocks run the host's SwiGLU (`limit` 0: mlx-serve's fusedSwiGLU from the host's table; 1 to 128: the clamp after the SiLU in f32) and the down's prepare, then the down's DEC-ONE GEMV: the composed chain's bytes; error.Exl3EngineNotImplemented where `lingSharedTakes` does not hold |
+| `ling.combineRouted`, `ling.combineParts` | a wide routed call's combine in one launch (`models/ling/combine.zig`): routed f32 [n, K, D] (or the call's unjoined outputs, at most 24, and each pair's (source, row): JOINLESS) times weights f32 [n, K], summed over K <= 8 -> f32 [n, D], the words of MLX's `sum(multiply(astype(routed, f32), expand_dims(weights, -1)), -2)` |
 
 Qwen3.8's shared expert and router, at 1 to 4 decode rows (`models/qwen38/api.zig`):
 

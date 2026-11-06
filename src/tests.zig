@@ -42,6 +42,8 @@ comptime {
     _ = @import("models/ricursive/ricursive_test.zig");
     _ = @import("models/ling/ling_test.zig");
     _ = @import("models/ling/shared_test.zig");
+    _ = @import("models/ling/combine.zig");
+    _ = @import("models/ling/combine_test.zig");
 }
 
 

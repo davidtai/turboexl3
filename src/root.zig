@@ -935,6 +935,8 @@ pub const moeLingBankedDown = ling.moeLingBankedDown;
 pub const lingSharedExpert = ling.sharedExpert;
 pub const lingSharedTakes = ling.sharedTakes;
 pub const lingSigmoidTable = ling.sigmoidTable;
+/// Ling-3.1-flash's routed combine at prompt rows, joined and JOINLESS (models/ling/combine.zig)
+pub const ling_combine = @import("models/ling/combine.zig");
 
 test {
     _ = config;
@@ -1003,4 +1005,5 @@ pub const shared_state = .{
     qwen38.shared_state,
     deepseek_v41.shared_state,
     ling.shared_state,
+    ling_combine.shared_state,
 };
