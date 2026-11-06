@@ -540,7 +540,7 @@ test "turboexl3 gpu prefill timing: the fused chain vs Sushi's prefill arm (TURB
         defer if (first) |f| a.free(f);
         // each engine's first call, timed alone: in the process's first case it includes compiling that engine's kernels (what
         // a server's first prefill pays), afterwards it is one plain call
-        for (arms, 0..) |arm, i| if (arm == .sushi) {
+        for (arms, 0..) |arm, i| if (has_sushi and arm == .sushi) {
             const t0 = nowNs();
             var ys = [_]mlx.mlx_array{try sushi.moe(s, c.x3, sushiBank(&c), c.inds3, c.sc3, sushiDec(), false)};
             try g.evalAll(&ys);
@@ -570,7 +570,7 @@ test "turboexl3 gpu prefill timing: the fused chain vs Sushi's prefill arm (TURB
                 for (ys[0..nc]) |*y| {
                     y.* = switch (arms[i]) {
                         .lib => try pfs[i].?.moe(s, c.x_bf, c.inds1, c.sc1, c.ops, rows, .bfloat16),
-                        .sushi => try sushi.moe(s, c.x3, sushiBank(&c), c.inds3, c.sc3, sushiDec(), false),
+                        .sushi => if (has_sushi) try sushi.moe(s, c.x3, sushiBank(&c), c.inds3, c.sc3, sushiDec(), false) else unreachable,
                     };
                 }
                 const t0 = nowNs();
