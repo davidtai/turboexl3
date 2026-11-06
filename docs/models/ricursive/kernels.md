@@ -16,7 +16,7 @@ The joined launches, the value residual's prepare and the MLP's clamped SwiGLU i
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/ricursive/ricursive.zig:103` (`fn kernelOf`) |
+| made at | `src/models/ricursive/ricursive.zig:104` (`fn kernelOf`) |
 | inputs | `xa`, `x0`, `blend`, `suh` |
 | outputs | `xp` |
 | source | `text_blend_prep` = `ricursive:ricursive/blend_struct` ++ `ricursive:ricursive/blend_all` ++ `dense/prep` (1795 B, `8f18f915cffe`) |
@@ -45,7 +45,7 @@ The joined launches, the value residual's prepare and the MLP's clamped SwiGLU i
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/ricursive/ricursive.zig:101` (`fn kernelOf`) |
+| made at | `src/models/ricursive/ricursive.zig:102` (`fn kernelOf`) |
 | inputs | `x`, `suh0`, `suh1`, `w`, `svh`, `cnt` |
 | outputs | `y`, `z`, `xsx` |
 | source | `text_jdec1` = `dense/dec_head` ++ `ricursive:ricursive/jsel` ++ `dense/dec_prep1` ++ `dense/dec_gemv1` ++ `dense/dec_gemv_arrive_1` ++ `ricursive:ricursive/jtile` ++ `dense/dec_gemv_arrive_2` ++ `dense/dec_xsum1` ++ `dense/dec_finish_v` ++ `dense/dec_finish_store` (8458 B, `6cf365048c9d`) |
@@ -90,7 +90,7 @@ The joined launches, the value residual's prepare and the MLP's clamped SwiGLU i
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/ricursive/ricursive.zig:102` (`fn kernelOf`) |
+| made at | `src/models/ricursive/ricursive.zig:103` (`fn kernelOf`) |
 | inputs | `xa`, `x0`, `blend`, `suh0`, `suh1`, `w`, `svh`, `cnt` |
 | outputs | `y`, `z`, `xsx` |
 | source | `text_jdec1_blend` = `dense/dec_head` ++ `ricursive:ricursive/jsel` ++ `ricursive:ricursive/blend_struct` ++ `ricursive:ricursive/blend_member` ++ `dense/dec_prep1` ++ `dense/dec_gemv1` ++ `dense/dec_gemv_arrive_1` ++ `ricursive:ricursive/jtile` ++ `dense/dec_gemv_arrive_2` ++ `dense/dec_xsum1` ++ `dense/dec_finish_v` ++ `dense/dec_finish_store` (9232 B, `81e42a4dcefc`) |
@@ -128,7 +128,7 @@ The joined launches, the value residual's prepare and the MLP's clamped SwiGLU i
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/ricursive/ricursive.zig:105` (`fn kernelOf`) |
+| made at | `src/models/ricursive/ricursive.zig:106` (`fn kernelOf`) |
 | inputs | `gate`, `up`, `sigtab`, `lim`, `suh` |
 | outputs | `xp` |
 | source | `text_swiglu_prep` = `ricursive:ricursive/swiglu_x` ++ `dense/prep` (2402 B, `a7d5131c1474`) |
@@ -157,7 +157,7 @@ The joined launches, the value residual's prepare and the MLP's clamped SwiGLU i
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/ricursive/ricursive.zig:104` (`fn kernelOf`) |
+| made at | `src/models/ricursive/ricursive.zig:105` (`fn kernelOf`) |
 | inputs | `gate`, `up`, `sigtab`, `lim`, `suh` |
 | outputs | `xp`, `xs`, `cnt` |
 | source | `text_swiglu_prep_sc` = `ricursive:ricursive/swiglu_x` ++ `dense/prep_s` ++ `dense/prep_sc` (2746 B, `59befcf1aeb4`) |

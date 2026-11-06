@@ -20,6 +20,10 @@ What it runs on turboexl3 (`root.ling`, `src/models/ling/api.zig`):
 | a routed layer's experts over a stacked bank, any rows | `moeLing` (`limit` 0 or the layer's clamp) | `moe`'s chain at limit 0; with a limit, decode form 9 with `turboexl3_fin7co` and the prefill chain with `turboexl3_pf_t128_midco` |
 | a decode wave's routed pairs over an expert streamer's three slot banks | `moeLingBanked` (`moeLingBankedGateUp`, `moeLingBankedDown`) | DeepSeek-V4.1's banked decode with `turboexl3_fin7b` (limit 0) or `turboexl3_fin7cob`, or their grouped texts (`fin7bg`, `fin7cobg`) under `Config.banked_group` 4 |
 | every trunk linear and the head | `root.linear` | the core's dense linear; a host's opt-in `Config.dec_one_row_wide` runs a one-row call on two rows' launch shape (the same bytes) |
+| a same-input pair at decode rows: a KDA layer's z \| a, the shared expert's and the dense FFN's gate \| up | `root.ling.linearPair` (a host's opt-in; each member in its own buffers) | `turboexl3_ling_pair_dec1` (after dense's counter zeroing) where the members' calls take the prepare inside, else `turboexl3_ling_pair_prep` then `turboexl3_ling_pair_dec0` ([kernels](kernels.md)): each member's `linear` bytes |
+
+The pairs share each member's K split (z \| a at KS 2, the shared gate \| up at KS 8, the dense gate \| up at KS 1);
+qkv (KS 1) and MLA's q_a (KS 8) \| kv_a (KS 16) cannot join a member of another K split byte for byte.
 
 The routed shape is new to the library: an expert width of 1280 is ten 128-blocks (the split-K planes, the fin7 grid
 and the prefill tiles take it as any multiple of 128), and 512 experts at top-8. Every kernel is a composition of the

@@ -2,7 +2,8 @@
 //! layers and clamped after the SiLU on the late ones (`expert_swiglu_limit_list`: min(silu(g), L) * clamp(u, -L, L),
 //! exllamav3's `act_limit` with SiLU), over a stacked bank (`moeLing`) and over an expert streamer's three slot banks
 //! (`moeLingBanked`). Every launch is root's routed chain or DeepSeek-V4.1's banked decode; only the SwiGLU line differs
-//! (`decode.text_fin7co`, `prefill.text_midco` and the banked `text_fin7b` / `text_fin7cob`).
+//! (`decode.text_fin7co`, `prefill.text_midco` and the banked `text_fin7b` / `text_fin7cob`). Its trunk's same-input
+//! linear pairs run in one DEC-ONE launch through `linearPair` (`pair.zig`), a host's opt-in.
 const std = @import("std");
 const mlx = @import("sdk").mlx;
 const root = @import("../../root.zig");
@@ -10,6 +11,14 @@ const format = @import("../../core/format.zig");
 const ds = @import("../deepseek_v41/api.zig");
 const Bank = root.Bank;
 const freeArr = root.freeArr;
+
+/// Same-input linear pairs in one DEC-ONE launch (`pair.zig`): z | a, the shared expert's and the dense FFN's
+/// gate | up, each member in its own buffers, each member's `linear` bytes (`linearPair`).
+pub const pair = @import("pair.zig");
+pub const linearPair = pair.linearPair;
+
+/// This file's module state (`Global`): what a host that shares its units' state registers.
+pub const shared_state = .{pair.shared_state};
 
 /// `root.moe` with Ling-3.1's SwiGLU: `limit` 0 none (`moe`'s bytes), 1..128 the clamp after the SiLU (each row-slot's
 /// gate SiLU clamped from above at `limit` and its up to [-limit, limit], in f32 on the projections' f16-rounded outputs);

@@ -56,7 +56,8 @@ pub const n_head: u32 = 96;
 /// the joined launches' member choice (the suh, trellis base and output tiles of the threadgroup's member) and the
 /// GEMV's tile address in that member's trellis (in place of `dense.dec_tile`)
 const jsel = @embedFile("kernels/ricursive/jsel.metal");
-const jtile = @embedFile("kernels/ricursive/jtile.metal");
+/// the GEMV's tile address in the threadgroup's member's trellis (Ling's split joint reads it too: ling/joint.zig)
+pub const jtile = @embedFile("kernels/ricursive/jtile.metal");
 /// the value residual's blend as the prepare reads x, and its two uses: member 1 of a joined launch, every element
 pub const blend_struct = @embedFile("kernels/ricursive/blend_struct.metal");
 pub const blend_member = @embedFile("kernels/ricursive/blend_member.metal");

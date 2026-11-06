@@ -1208,6 +1208,11 @@ ADDED_FILES['models/ling/api.zig'] = ('Ling-3.1\'s entry points (moeLing, moeLin
 ADDED_FILES['ling_test.zig'] = ('Ling-3.1\'s tests: its texts\' compositions, the reference clamp and the refusals (CPU); '
                                 'moeLing against moe and the reference, moeLingBanked against moeLing byte for byte, and '
                                 'linear at every trunk shape (GPU)')
+# Ling-3.1-flash's same-input trunk pairs in one DEC-ONE launch (models/ling/pair.zig)
+ADDED_FILES['models/ling/pair.zig'] = ('Ling-3.1\'s same-input trunk pairs (z | a, the shared and the dense gate | up) in one '
+                                       'DEC-ONE GEMV launch, each member in its own buffers (turboexl3_ling_pair_prep, '
+                                       '_pair_dec0, _pair_dec1: dense\'s prep_sc and DEC-ONE texts with the member chosen after '
+                                       'their head, Ripple\'s member tile address)')
 
 def metal_strings(fn, toks, corpus):
     """(line, kind, value) of every literal in a .zig file that holds Metal"""
@@ -1436,6 +1441,12 @@ SPLIT_ADDED_KERNELS = {
     'turboexl3_fin7cob': 'the banked fin7 with Ling-3.1\'s clamp: fin7cb with fin7_swiglu_clamp_out in place of the clamp',
     'turboexl3_fin7bg': 'fin7b\'s grouped text (fin7cbg with fin7\'s own SwiGLU line)',
     'turboexl3_fin7cobg': 'fin7cob\'s grouped text (fin7cbg with fin7_swiglu_clamp_out)',
+    'turboexl3_ling_pair_prep': ('Ling-3.1\'s same-input pair: dense\'s prep_sc for both members on the grid\'s z (jprep ++ '
+                                 'text_prep_sc)'),
+    'turboexl3_ling_pair_dec0': ('Ling-3.1\'s pair: text_dec0 with the member chosen after its head (jrows, jw) and Ripple\'s '
+                                 'member tile address (jtile)'),
+    'turboexl3_ling_pair_dec1': ('Ling-3.1\'s pair: text_dec1 with the member chosen after its head (jsuh, jw) and Ripple\'s '
+                                 'member tile address (jtile)'),
 }
 SPLIT_CHANGED_CONSTS = {}
 

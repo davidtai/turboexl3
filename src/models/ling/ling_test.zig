@@ -9,9 +9,11 @@
 //!   at limits 0 and 10, banked groups 2 and 4, rows 1, 2, 8, 16, 48;
 //! - `root.linear` at every Ling trunk shape (K6; the dense FFN K4) equals the host reference;
 //! - a one-row call on two rows' launch shape (`Config.dec_one_row_wide`) gives one row's own bytes and the three-launch
-//!   chain's at every trunk shape, x f32 and bf16.
+//!   chain's at every trunk shape, x f32 and bf16;
+//! - `root.ling.linearPair` (z | a, the shared and the dense gate | up) gives each member's `linear` bytes at decode
+//!   rows 1 to 16, the prepare inside and in its own launch.
 //! TURBOEXL3_LING_N (rates in halfwords per tile; default 40,32) narrows the routed tests. Lines: TURBOEXL3_LING_BYTES,
-//! TURBOEXL3_LING_PARITY, TURBOEXL3_LING_BANKED, TURBOEXL3_LING_DENSE, TURBOEXL3_LING_ONE_ROW.
+//! TURBOEXL3_LING_PARITY, TURBOEXL3_LING_BANKED, TURBOEXL3_LING_DENSE, TURBOEXL3_LING_ONE_ROW, TURBOEXL3_LING_PAIR.
 //! Timing (TURBOEXL3_LING_TIME=1 with TURBOEXL3_GPU=1; asserts nothing, guidance only): every trunk linear, `moeLing`
 //! and `moeLingBanked` at Ling's shapes and rows, and the decode forward's linears chained over the 72 layers. Lines:
 //! TURBOEXL3_LING_TIME, TURBOEXL3_LING_CHAIN.
@@ -613,6 +615,110 @@ test "turboexl3 gpu ling dense: a one-row call on two rows' launch shape (Config
             failed += @intFromBool(!ok);
         }
     }
+    try testing.expectEqual(@as(usize, 0), failed);
+}
+
+/// Ling-3.1-flash's same-input pairs (`root.ling.linearPair`): the KDA layers' z | a, the shared expert's and the dense
+/// FFN's gate | up
+const PairCase = struct { name: []const u8, in: u32, out: u32, n: u32 };
+const pair_cases = [_]PairCase{
+    .{ .name = "kda.z|a", .in = 4096, .out = 8192, .n = 96 },
+    .{ .name = "shared.gate|up", .in = 4096, .out = 1280, .n = 96 },
+    .{ .name = "dense.gate|up", .in = 4096, .out = 10240, .n = 64 },
+};
+/// DEC-ONE's rows (1 to 4), a verify's widest decode-lane call (6) and the GEMV chain's chunks past them (5, 8, 16)
+const pair_rows = [_]u32{ 1, 2, 3, 4, 5, 6, 8, 16 };
+
+fn synthProj(a: std.mem.Allocator, g: *G, rnd: std.Random, in: u32, out: u32, n: u32) !struct { lin: ref.Linear, p: root.Proj } {
+    var lin = try ref.synthLinear(a, rnd, 1, in, out, format.Rate.fromN(n).?, .mul1);
+    errdefer lin.deinit(a);
+    const p: root.Proj = .{
+        .trellis = try g.hostArray(std.mem.sliceAsBytes(lin.trellis), &.{ ci(in / 16), ci(out / 16), ci(n) }, .uint16),
+        .suh = try g.hostArray(std.mem.sliceAsBytes(lin.suh), &.{ci(in)}, .float16),
+        .svh = try g.hostArray(std.mem.sliceAsBytes(lin.svh), &.{ci(out)}, .float16),
+    };
+    return .{ .lin = lin, .p = p };
+}
+
+test "turboexl3 gpu ling pair: z | a and the shared and dense gate | up in one launch give each member's linear bytes, the prepare inside or in its own launch, at decode rows 1 to 16 (TURBOEXL3_GPU=1)" {
+    _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    const s = mlx.mlx_default_gpu_stream_new();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    const a = std.heap.page_allocator;
+    var g = try G.init(a, s);
+    defer g.deinit();
+    var failed: usize = 0;
+    var checks: usize = 0;
+    var forms = [2]usize{ 0, 0 };
+    for (pair_cases) |c| {
+        var prng = std.Random.DefaultPrng.init(0x7017 ^ (@as(u64, c.in) << 24) ^ c.out);
+        const rnd = prng.random();
+        const mark = g.mark();
+        defer g.resetTo(mark);
+        var m0 = try synthProj(a, &g, rnd, c.in, c.out, c.n);
+        defer m0.lin.deinit(a);
+        var m1 = try synthProj(a, &g, rnd, c.in, c.out, c.n);
+        defer m1.lin.deinit(a);
+        const sh = try root.ling.pair.pairShape(m0.p, m1.p);
+        const max_rows: u32 = 16;
+        const xs = try a.alloc(f32, max_rows * c.in);
+        defer a.free(xs);
+        for (xs) |*v| v.* = bfExact(rnd.floatNorm(f32));
+        const want = try a.alloc(f32, 2 * max_rows * c.out);
+        defer a.free(want);
+        const got = try a.alloc(f32, 2 * max_rows * c.out);
+        defer a.free(got);
+        for ([_]mlx.mlx_dtype{ .float32, .bfloat16 }) |dt| {
+            // the member's cached Dense decides the form; the wide arm gives one row two rows' launch shape
+            // (`Config.dec_one_row_wide`'s fields), so both forms run at one row
+            const d = try root.denseCached(.{ .in = c.in, .out = c.out, .rate = format.Rate.fromN(c.n).?, .dec = .mul1, .out_dtype = dt });
+            const saved_prep = d.dec_prep_rows;
+            const saved_bt = d.bt_set[1];
+            defer {
+                d.dec_prep_rows = saved_prep;
+                d.bt_set[1] = saved_bt;
+                d.resetCfgs();
+            }
+            for ([_]bool{ false, true }) |wide| {
+                d.dec_prep_rows = if (wide) 0 else 1;
+                d.bt_set[1] = if (wide) 2 else 0;
+                d.resetCfgs();
+                for (pair_rows) |rows| {
+                    const rm = g.mark();
+                    defer g.resetTo(rm);
+                    const x = try g.astype(try g.hostArray(std.mem.sliceAsBytes(xs[0 .. rows * c.in]), &.{ ci(rows), ci(c.in) }, .float32), dt);
+                    const n_out = rows * c.out;
+                    for ([_]root.Proj{ m0.p, m1.p }, 0..) |mp, k| {
+                        const y = try g.adopt(try root.linear(s, x, mp.trellis, mp.suh, mp.svh, .mul1));
+                        _ = try g.hostF32(try g.astype(y, .float32), want[k * n_out ..][0..n_out]);
+                    }
+                    const p = (try root.ling.pair.plan(sh, .mul1, rows, dt)) orelse {
+                        std.debug.print("TURBOEXL3_LING_PAIR {s} x={s} wide={} rows={d} not served FAIL\n", .{ c.name, @tagName(dt), wide, rows });
+                        failed += 1;
+                        continue;
+                    };
+                    const yp = try g.adopt(try root.ling.linearPair(s, x, m0.p, m1.p, .mul1));
+                    try testing.expectEqualSlices(c_int, &.{ ci(rows), ci(2 * c.out) }, mlx.getShape(yp));
+                    _ = try g.hostF32(try g.astype(yp, .float32), got[0 .. 2 * n_out]);
+                    // member m's columns of each row against member m's linear
+                    var differing: usize = 0;
+                    for (0..rows) |r| for (0..2) |k| {
+                        const gr = got[r * 2 * c.out + k * c.out ..][0..c.out];
+                        const wr = want[k * n_out + r * c.out ..][0..c.out];
+                        for (gr, wr) |u, w| differing += @intFromBool(@as(u32, @bitCast(u)) != @as(u32, @bitCast(w)));
+                    };
+                    const form_ok = p.inside == try d.decPrepInside(rows);
+                    const ok = form_ok and differing == 0;
+                    checks += 1;
+                    forms[@intFromBool(p.inside)] += 1;
+                    std.debug.print("TURBOEXL3_LING_PAIR {s} in={d} out={d}+{d} n={d} x={s} wide={} rows={d} prepare={s} ks={d} rb={d} bt={d} differing={d}/{d} {s}\n", .{ c.name, c.in, c.out, c.out, c.n, @tagName(dt), wide, rows, if (p.inside) "inside" else "own_launch", p.ks, p.rb, p.bt, differing, 2 * n_out, if (ok) "PASS" else "FAIL" });
+                    if (!ok) failed += 1;
+                }
+            }
+        }
+    }
+    std.debug.print("TURBOEXL3_LING_PAIR_DONE checks={d} inside={d} own_launch={d} {s}\n", .{ checks, forms[1], forms[0], if (failed == 0) "PASS" else "FAIL" });
+    try testing.expect(forms[0] > 0 and forms[1] > 0);
     try testing.expectEqual(@as(usize, 0), failed);
 }
 
