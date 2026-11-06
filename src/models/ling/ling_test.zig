@@ -7,9 +7,11 @@
 //!   equals `ref.moeRowClampedAt` (`silu_out`) on sampled rows of decode rows 1, 4, 16 and prefill rows 32, 1328;
 //! - every pair of `root.moeLingBanked` over three banks is `moeLing`'s on its bank at top-1 with score 1, byte for byte,
 //!   at limits 0 and 10, banked groups 2 and 4, rows 1, 2, 8, 16, 48;
-//! - `root.linear` at every Ling trunk shape (K6; the dense FFN K4) equals the host reference.
+//! - `root.linear` at every Ling trunk shape (K6; the dense FFN K4) equals the host reference;
+//! - a one-row call on two rows' launch shape (`Config.dec_one_row_wide`) gives one row's own bytes and the three-launch
+//!   chain's at every trunk shape, x f32 and bf16.
 //! TURBOEXL3_LING_N (rates in halfwords per tile; default 40,32) narrows the routed tests. Lines: TURBOEXL3_LING_BYTES,
-//! TURBOEXL3_LING_PARITY, TURBOEXL3_LING_BANKED, TURBOEXL3_LING_DENSE.
+//! TURBOEXL3_LING_PARITY, TURBOEXL3_LING_BANKED, TURBOEXL3_LING_DENSE, TURBOEXL3_LING_ONE_ROW.
 //! Timing (TURBOEXL3_LING_TIME=1 with TURBOEXL3_GPU=1; asserts nothing, guidance only): every trunk linear, `moeLing`
 //! and `moeLingBanked` at Ling's shapes and rows, and the decode forward's linears chained over the 72 layers. Lines:
 //! TURBOEXL3_LING_TIME, TURBOEXL3_LING_CHAIN.
@@ -546,6 +548,71 @@ test "turboexl3 gpu ling dense: root.linear equals the host reference at every L
     defer g.deinit();
     var failed: usize = 0;
     for (dense_cases) |c| failed += try denseCase(a, &g, s, c);
+    try testing.expectEqual(@as(usize, 0), failed);
+}
+
+test "turboexl3 gpu ling dense: a one-row call on two rows' launch shape (Config.dec_one_row_wide) gives one row's own bytes and the three-launch chain's at every Ling-3.1-flash trunk shape (TURBOEXL3_GPU=1)" {
+    _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    const s = mlx.mlx_default_gpu_stream_new();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    const a = std.heap.page_allocator;
+    var g = try G.init(a, s);
+    defer g.deinit();
+    const saved = config.get().*;
+    defer config.configure(saved) catch unreachable;
+    var narrow_cfg = saved;
+    narrow_cfg.dec_one_row_wide = false;
+    var wide_cfg = saved;
+    wide_cfg.dec_one_row_wide = true;
+    var failed: usize = 0;
+    for (dense_cases) |c| {
+        var prng = std.Random.DefaultPrng.init(0x1E0A ^ (@as(u64, c.in) << 24) ^ c.out);
+        const rnd = prng.random();
+        const rate = format.Rate.fromN(c.n).?;
+        var lin = try ref.synthLinear(a, rnd, 1, c.in, c.out, rate, .mul1);
+        defer lin.deinit(a);
+        const mark = g.mark();
+        defer g.resetTo(mark);
+        const trellis = try g.hostArray(std.mem.sliceAsBytes(lin.trellis), &.{ ci(c.in / 16), ci(c.out / 16), ci(c.n) }, .uint16);
+        const suh = try g.hostArray(std.mem.sliceAsBytes(lin.suh), &.{ci(c.in)}, .float16);
+        const svh = try g.hostArray(std.mem.sliceAsBytes(lin.svh), &.{ci(c.out)}, .float16);
+        const x = try a.alloc(f32, c.in);
+        defer a.free(x);
+        for (x) |*v| v.* = bfExact(rnd.floatNorm(f32));
+        const got = try a.alloc(f32, 3 * c.out);
+        defer a.free(got);
+        for ([_]mlx.mlx_dtype{ .float32, .bfloat16 }) |dt| {
+            const geo: dense.Shape = .{ .in = c.in, .out = c.out, .rate = rate, .dec = .mul1, .out_dtype = dt };
+            try config.configure(narrow_cfg);
+            var chain = try dense.Dense.init(geo);
+            defer chain.deinit();
+            chain.dec_on = false;
+            var own = try dense.Dense.init(geo);
+            defer own.deinit();
+            try config.configure(wide_cfg);
+            var wide = try dense.Dense.init(geo);
+            defer wide.deinit();
+            try config.configure(narrow_cfg);
+            const xr = try g.astype(try g.hostArray(std.mem.sliceAsBytes(x), &.{ 1, ci(c.in) }, .float32), dt);
+            for ([_]*dense.Dense{ &chain, &own, &wide }, 0..) |d, k| {
+                const y = try g.adopt(try d.linear(s, xr, trellis, suh, svh, 1));
+                _ = try g.hostF32(try g.astype(y, .float32), got[k * c.out ..][0..c.out]);
+            }
+            const own_in = try own.decPrepInside(1);
+            const wide_in = try wide.decPrepInside(1);
+            // the wide shape's launch: the prepare in prep_sc's launch above dec_prep_out outputs, BT 2
+            const shape_ok = wide.bt_set[1] == 2 and wide_in == (c.out <= wide.dec_prep_out);
+            var d_own: usize = 0;
+            var d_wide: usize = 0;
+            for (got[c.out..][0..c.out], got[2 * c.out ..][0..c.out], got[0..c.out]) |o, w, ch| {
+                d_own += @intFromBool(@as(u32, @bitCast(o)) != @as(u32, @bitCast(ch)));
+                d_wide += @intFromBool(@as(u32, @bitCast(w)) != @as(u32, @bitCast(ch)));
+            }
+            const ok = shape_ok and d_own == 0 and d_wide == 0;
+            std.debug.print("TURBOEXL3_LING_ONE_ROW {s} in={d} out={d} n={d} x={s} own_prepare={s} wide_prepare={s} wide_bt={d} own_vs_chain={d}/{d} wide_vs_chain={d}/{d} {s}\n", .{ c.name, c.in, c.out, c.n, @tagName(dt), if (own_in) "inside" else "own_launch", if (wide_in) "inside" else "own_launch", wide.bt_set[1], d_own, c.out, d_wide, c.out, if (ok) "PASS" else "FAIL" });
+            failed += @intFromBool(!ok);
+        }
+    }
     try testing.expectEqual(@as(usize, 0), failed);
 }
 

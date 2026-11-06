@@ -211,7 +211,7 @@ pub const Dense = struct {
     /// DEC-ONE (`Config.dec_one`): decode calls of up to `dec_rows` rows (4) run the GEMV with the finish in each output
     /// block's last-arriving threadgroup.
     /// The prepare runs inside that launch too (one GEMV launch, beside a counter-zeroing launch that waits on nothing) for
-    /// calls of up to `dec_prep_rows` rows (1) or of up to `dec_prep_out` outputs at any
+    /// calls of up to `dec_prep_rows` rows (1; 0 under `Config.dec_one_row_wide`, which also sets `bt_set[1]` to 2) or of up to `dec_prep_out` outputs at any
     /// decode width (1024: the small, latency-bound linears), where its threadgroup
     /// buffer fits; otherwise in prep_sc's launch (two launches). The defaults because every column group of a call redoes
     /// the rotation of its K slice (RB / (8 BT) rotations per tile decode, on an ALU-bound GEMV) and the slice's rows take
@@ -397,13 +397,23 @@ pub const Dense = struct {
             .gemm_rs = ks.newKernel("turboexl3_dense_rs_gemm", &prefill.gemm1_in, &prefill.gemm1_out, prefill.gemm1s_text, prefill.header_nax_small, true) orelse return error.KernelCreateFailed,
             .dec_on = config.get().dec_one,
             .dec_rows = 4,
-            .dec_prep_rows = 1,
+            // `Config.dec_one_row_wide`: a one-row call on two rows' launch shape (the prepare in prep_sc's launch above
+            // dec_prep_out outputs, BT 2), launch shape only
+            .dec_prep_rows = if (config.get().dec_one_row_wide) 0 else 1,
+            .bt_set = btSetInit(),
             .dec_prep_out = 1024,
             .dec0 = ks.newKernel("turboexl3_dense_dec0", &dec0_in, &dec0_out, text_dec0, decode.header5, true) orelse return error.KernelCreateFailed,
             .dec1 = ks.newKernel("turboexl3_dense_dec1", &dec1_in, &dec1_out, text_dec1, decode.header5, true) orelse return error.KernelCreateFailed,
             .prep_sc = ks.newKernel("turboexl3_dense_prep_sc", &prep_in, &prep_sc_out, text_prep_sc, decode.header, true) orelse return error.KernelCreateFailed,
             .dec_zero = ks.newKernel("turboexl3_dense_dec_zero", &dec_zero_in, &dec_zero_out, text_dec_zero, decode.header, true) orelse return error.KernelCreateFailed,
         };
+    }
+
+    /// `bt_set` as a Dense starts: none set, but a one-row call's 2 under `Config.dec_one_row_wide` (two rows' BT)
+    fn btSetInit() [decode.Kernels.max_rows + 1]u8 {
+        var b: [decode.Kernels.max_rows + 1]u8 = @splat(0);
+        if (config.get().dec_one_row_wide) b[1] = @intCast(btFor(2));
+        return b;
     }
 
     /// Whether DEC-ONE's prepare can run inside its launch for this geometry: the K slice whole 128-blocks (PER even), and the

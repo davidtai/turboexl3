@@ -29,6 +29,10 @@ pub const Config = struct {
     nax: bool = true,
     /// Dense decode linears in one launch (DEC-ONE); false the three-launch chain. The same bytes.
     dec_one: bool = true,
+    /// A one-row dense decode call on two rows' launch shape (`dense.Dense.init`): DEC-ONE's prepare in its own launch
+    /// (prep_sc) above `dense.Dense.dec_prep_out` outputs, and 2 output tiles per GEMV threadgroup (BT 2); false keeps
+    /// one row's own (the prepare inside the launch at any width, BT 4). Launch shape only: the same bytes.
+    dec_one_row_wide: bool = false,
     /// The row chunks of the dense decode GEMV chain: at most 8 rows, a chunk of 6 to 8 rows on the lean GEMV text (its
     /// codeword loop by input element); false keeps chunks of at most 5 rows, all on the plain GEMV text. The same bytes.
     dense_lean: bool = true,
@@ -110,6 +114,8 @@ test "turboexl3 config: the defaults are valid and served; an unserved form, sli
     try t.expect(!(Config{ .banked_group = 4, .banked_variant_dn = banked_variants }).valid());
     try t.expect(d.dense_lean);
     try t.expect(d.fused_fin_fold);
+    try t.expect(!d.dec_one_row_wide);
+    try t.expect((Config{ .dec_one_row_wide = true }).valid());
     const saved = current.get().*;
     defer current.get().* = saved;
     try t.expectError(error.InvalidTurboexl3Config, configure(.{ .decode_form = 4 }));
