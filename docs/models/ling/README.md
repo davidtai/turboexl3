@@ -30,4 +30,9 @@ reaches the limit. The tests (`src/models/ling/ling_test.zig`) hold `moeLing` to
 `turboexl3_pf_t128_midco`) and [DeepSeek-V4.1's](../deepseek_v41/kernels.md) (`turboexl3_fin7b`, `turboexl3_fin7cob`,
 `turboexl3_fin7bg`, `turboexl3_fin7cobg`).
 
+`TURBOEXL3_LING_TIME=1` (with `TURBOEXL3_GPU=1`) times the Ling kernels at the model's shapes for the serving plan: every
+trunk linear, `moeLing` and `moeLingBanked`, and the decode forward's linears chained over the 72 layers
+(`TURBOEXL3_LING_TIME` and `TURBOEXL3_LING_CHAIN` lines). It is a diagnostic: it asserts nothing, and its numbers steer
+work; they never decide it.
+
 No speed verdict comes from this repository: the standard test through the outside plugin decides.

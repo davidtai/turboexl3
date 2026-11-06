@@ -273,11 +273,11 @@ pub fn nowNs() u64 {
     return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
 }
 
-const Stat = struct { min: f64, med: f64 };
+pub const Stat = struct { min: f64, med: f64 };
 
 /// `ctx.call()` timed on the device: `calls` graphs per evaluation, 2 warm-up rounds, then the min and median us per call
-/// over 8 rounds.
-fn timeIt(g: *G, ctx: anytype, calls: usize) !Stat {
+/// over 8 rounds (also Ling's timing, ling_test.zig).
+pub fn timeIt(g: *G, ctx: anytype, calls: usize) !Stat {
     var samples: [8]f64 = undefined;
     for (0..samples.len + 2) |round| {
         var ys: [8]mlx.mlx_array = undefined;

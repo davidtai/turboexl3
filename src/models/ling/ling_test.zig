@@ -10,6 +10,9 @@
 //! - `root.linear` at every Ling trunk shape (K6; the dense FFN K4) equals the host reference.
 //! TURBOEXL3_LING_N (rates in halfwords per tile; default 40,32) narrows the routed tests. Lines: TURBOEXL3_LING_BYTES,
 //! TURBOEXL3_LING_PARITY, TURBOEXL3_LING_BANKED, TURBOEXL3_LING_DENSE.
+//! Timing (TURBOEXL3_LING_TIME=1 with TURBOEXL3_GPU=1; asserts nothing, guidance only): every trunk linear, `moeLing`
+//! and `moeLingBanked` at Ling's shapes and rows, and the decode forward's linears chained over the 72 layers. Lines:
+//! TURBOEXL3_LING_TIME, TURBOEXL3_LING_CHAIN.
 const std = @import("std");
 const sdk = @import("sdk");
 const mlx = sdk.mlx;
@@ -544,4 +547,384 @@ test "turboexl3 gpu ling dense: root.linear equals the host reference at every L
     var failed: usize = 0;
     for (dense_cases) |c| failed += try denseCase(a, &g, s, c);
     try testing.expectEqual(@as(usize, 0), failed);
+}
+
+// ── timing (TURBOEXL3_LING_TIME=1): guidance for the serving plan, never a speed verdict ──
+
+const ds_test = @import("../deepseek_v41/deepseek_test.zig");
+
+/// A serial decode step and the verify widths of 2 to 4 rows, the engine's prompt chunk and a layer-major call
+const time_rows = [_]u32{ 1, 2, 3, 4, 4096, 16384 };
+
+/// The outside plugin's prompt call: a wide call's pairs sorted by slot, at most this many a `moeLing` call at top-1
+/// (turboexl3_ling's `prefill_rows`)
+const plugin_call_pairs: u32 = 4096;
+
+/// Distinct values among `xs` (each below 2^16)
+fn distinctOf(xs: []const u32) usize {
+    var seen = std.StaticBitSet(1 << 16).empty;
+    for (xs) |v| seen.set(v);
+    return seen.count();
+}
+
+/// Each of `rows` rows' `k` distinct slots drawn from `pool`, written as banked ids (bank 0) to `ids` and each pair's
+/// row to `prow`
+fn drawDecodePairs(rnd: std.Random, rows: u32, k: u32, pool: []const u32, ids: []u32, prow: []u32) void {
+    for (0..rows) |r| {
+        var used: u64 = 0;
+        for (0..k) |j| {
+            var i = rnd.uintLessThan(usize, pool.len);
+            while ((used >> @as(u6, @intCast(i))) & 1 != 0) i = rnd.uintLessThan(usize, pool.len);
+            used |= @as(u64, 1) << @as(u6, @intCast(i));
+            ids[r * k + j] = pool[i];
+            prow[r * k + j] = @intCast(r);
+        }
+    }
+}
+
+// Ling-3.1-flash's projections and routed calls timed on the device (TURBOEXL3_LING_TIME=1 with TURBOEXL3_GPU=1; it
+// asserts nothing): guidance for the serving plan, never a speed verdict (the standard test through the outside plugin
+// decides speed). Random trellises (deepseek_test's draw: every pattern a codeword) at the packs' rates:
+// - `root.linear` at every trunk shape (`dense_cases`: K6, the dense FFN K4) at rows 1 to 4, 4096 and 16384, the head at
+//   rows 1 to 4; the weights' GB/s at decode rows (the 8 calls of an evaluation read one weight, so a shape that fits the
+//   GPU's cache reads part of it from there), TFLOPS at prompt rows;
+// - `root.moeLing` over a stacked bank of 512 experts at top-8, rows 1 to 4 and 4096 (`route`'s draw, sigma 1.5), and at
+//   top-1 with score 1 over the first 4096 of a call's pairs sorted by slot, the call of a 4096-token chunk and of a
+//   16384-token one (the outside plugin's prompt calls: about 64 and about 16 experts a call);
+// - `root.moeLingBanked` over one bank of 200 slot rows (the 2.60 pack's decode rows) at the pairs of 1, 2 and 3 decode
+//   rows, each row's 8 slots drawn from 24 of them (8, about 13 and about 17 distinct slots), banked group 4 with the M = 3
+//   texts (the plugin's configuration); the distinct records' GB/s.
+// Each line: min and median us per call (deepseek_test's timeIt). TURBOEXL3_LING_N (default 40,32) narrows the rates.
+test "turboexl3 gpu ling timing: every trunk linear, moeLing and moeLingBanked at Ling-3.1-flash's shapes (TURBOEXL3_LING_TIME=1)" {
+    _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    _ = std.c.getenv("TURBOEXL3_LING_TIME") orelse return error.SkipZigTest;
+    const s = mlx.mlx_default_gpu_stream_new();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    const a = std.heap.page_allocator;
+    var g = try G.init(a, s);
+    defer g.deinit();
+    const saved = config.get().*;
+    defer config.configure(saved) catch {};
+    var cfg = saved;
+    cfg.banked_group = 4;
+    cfg.banked_m3 = true;
+    try config.configure(cfg);
+    var prng = std.Random.DefaultPrng.init(0x11A671);
+    const rnd = prng.random();
+    for (dense_cases) |c| {
+        const mark = g.mark();
+        defer g.resetTo(mark);
+        defer _ = mlx.mlx_clear_cache();
+        const p = try ds_test.randProj(a, &g, rnd, null, c.in, c.out, c.n);
+        const wbytes = @as(f64, @floatFromInt(c.in)) * @as(f64, @floatFromInt(c.out)) * @as(f64, @floatFromInt(c.n)) / 128.0;
+        for (time_rows) |rows| {
+            if (c.head and rows > 4) continue;
+            const rm = g.mark();
+            defer g.resetTo(rm);
+            const Ctx = struct {
+                s: mlx.mlx_stream,
+                x: mlx.mlx_array,
+                p: root.Proj,
+                pub fn call(cx: @This()) !mlx.mlx_array {
+                    return root.linear(cx.s, cx.x, cx.p.trellis, cx.p.suh, cx.p.svh, .mul1);
+                }
+            };
+            const ctx: Ctx = .{ .s = s, .x = try ds_test.randBf16(a, &g, rnd, &.{ ci(rows), ci(c.in) }), .p = p };
+            const st = try ds_test.timeIt(&g, ctx, if (rows <= 16) 8 else 2);
+            const flops = 2.0 * @as(f64, @floatFromInt(rows)) * @as(f64, @floatFromInt(c.in)) * @as(f64, @floatFromInt(c.out));
+            std.debug.print("TURBOEXL3_LING_TIME linear {s} {d}x{d} n={d} rows={d} min_us={d:.1} med_us={d:.1} GBps={d:.0} tflops={d:.2}\n", .{ c.name, c.in, c.out, c.n, rows, st.min, st.med, wbytes / (st.min * 1e3), flops / (st.min * 1e6) });
+        }
+    }
+    var nbuf: [8]u32 = undefined;
+    const rates = envList("TURBOEXL3_LING_N", &.{ 40, 32 }, &nbuf);
+    for (rates) |n| {
+        const mark = g.mark();
+        defer g.resetTo(mark);
+        defer _ = mlx.mlx_clear_cache();
+        // one expert's three records (in * out * n / 128 bytes each)
+        const record = 3.0 * @as(f64, @floatFromInt(hidden)) * @as(f64, @floatFromInt(inter)) * @as(f64, @floatFromInt(n)) / 128.0;
+        const expert_flops = 2.0 * 3.0 * @as(f64, @floatFromInt(hidden)) * @as(f64, @floatFromInt(inter));
+        const bank: root.Bank = .{
+            .gate = try ds_test.randProj(a, &g, rnd, experts, hidden, inter, n),
+            .up = try ds_test.randProj(a, &g, rnd, experts, hidden, inter, n),
+            .down = try ds_test.randProj(a, &g, rnd, experts, inter, hidden, n),
+        };
+        const MoeCtx = struct {
+            s: mlx.mlx_stream,
+            x: mlx.mlx_array,
+            bank: root.Bank,
+            inds: mlx.mlx_array,
+            sc: mlx.mlx_array,
+            pub fn call(cx: @This()) !mlx.mlx_array {
+                return root.moeLing(cx.s, cx.x, cx.bank, cx.inds, cx.sc, .mul1, 0);
+            }
+        };
+        for ([_]u32{ 1, 2, 3, 4, 4096 }) |rows| {
+            const rm = g.mark();
+            defer g.resetTo(rm);
+            const slots = try a.alloc(u32, rows * top_k);
+            defer a.free(slots);
+            const scores = try a.alloc(f32, rows * top_k);
+            defer a.free(scores);
+            try route(a, rnd, rows, experts, top_k, 1.5, slots, scores);
+            const inds = try a.alloc(i32, rows * top_k);
+            defer a.free(inds);
+            for (slots, inds) |sl, *d| d.* = @intCast(sl);
+            const ctx: MoeCtx = .{
+                .s = s,
+                .x = try g.astype(try ds_test.randBf16(a, &g, rnd, &.{ 1, ci(rows), ci(hidden) }), .float32),
+                .bank = bank,
+                .inds = try g.hostArray(std.mem.sliceAsBytes(inds), &.{ 1, ci(rows), ci(top_k) }, .int32),
+                .sc = try g.hostArray(std.mem.sliceAsBytes(scores), &.{ 1, ci(rows), ci(top_k) }, .float32),
+            };
+            const st = try ds_test.timeIt(&g, ctx, if (rows <= 16) 8 else 2);
+            const distinct = distinctOf(slots);
+            std.debug.print("TURBOEXL3_LING_TIME moeLing n={d} topk=8 rows={d} distinct={d} min_us={d:.1} med_us={d:.1} GBps={d:.0} tflops={d:.2}\n", .{ n, rows, distinct, st.min, st.med, @as(f64, @floatFromInt(distinct)) * record / (st.min * 1e3), @as(f64, @floatFromInt(rows * top_k)) * expert_flops / (st.min * 1e6) });
+        }
+        for ([_]u32{ 4096, 16384 }) |tokens| {
+            const rm = g.mark();
+            defer g.resetTo(rm);
+            const slots = try a.alloc(u32, tokens * top_k);
+            defer a.free(slots);
+            const scores = try a.alloc(f32, tokens * top_k);
+            defer a.free(scores);
+            try route(a, rnd, tokens, experts, top_k, 1.5, slots, scores);
+            // the call's pairs by slot (a counting sort), its first plugin_call_pairs
+            var starts: [experts + 1]u32 = @splat(0);
+            for (slots) |sl| starts[sl + 1] += 1;
+            for (1..starts.len) |i| starts[i] += starts[i - 1];
+            const sorted = try a.alloc(i32, slots.len);
+            defer a.free(sorted);
+            for (slots) |sl| {
+                sorted[starts[sl]] = @intCast(sl);
+                starts[sl] += 1;
+            }
+            const call_slots = sorted[0..plugin_call_pairs];
+            const ones: [plugin_call_pairs]f32 = @splat(1.0);
+            var cs: [plugin_call_pairs]u32 = undefined;
+            for (call_slots, &cs) |sl, *d| d.* = @intCast(sl);
+            const ctx: MoeCtx = .{
+                .s = s,
+                .x = try g.astype(try ds_test.randBf16(a, &g, rnd, &.{ 1, ci(plugin_call_pairs), ci(hidden) }), .float32),
+                .bank = bank,
+                .inds = try g.hostArray(std.mem.sliceAsBytes(call_slots), &.{ 1, ci(plugin_call_pairs), 1 }, .int32),
+                .sc = try g.hostArray(std.mem.sliceAsBytes(ones[0..]), &.{ 1, ci(plugin_call_pairs), 1 }, .float32),
+            };
+            const st = try ds_test.timeIt(&g, ctx, 2);
+            std.debug.print("TURBOEXL3_LING_TIME moeLing n={d} topk=1 plugin_call pairs={d} of_tokens={d} distinct={d} min_us={d:.1} med_us={d:.1} tflops={d:.2}\n", .{ n, plugin_call_pairs, tokens, distinctOf(&cs), st.min, st.med, @as(f64, @floatFromInt(plugin_call_pairs)) * expert_flops / (st.min * 1e6) });
+        }
+        {
+            const rm = g.mark();
+            defer g.resetTo(rm);
+            const slot_rows: u32 = 200;
+            const sb: root.Bank = .{
+                .gate = try ds_test.randProj(a, &g, rnd, slot_rows, hidden, inter, n),
+                .up = try ds_test.randProj(a, &g, rnd, slot_rows, hidden, inter, n),
+                .down = try ds_test.randProj(a, &g, rnd, slot_rows, inter, hidden, n),
+            };
+            const banks = [3]root.Bank{ sb, sb, sb };
+            var pool: [24]u32 = undefined;
+            {
+                var used = std.StaticBitSet(256).empty;
+                for (&pool) |*p| {
+                    var v = rnd.uintLessThan(u32, slot_rows);
+                    while (used.isSet(v)) v = rnd.uintLessThan(u32, slot_rows);
+                    used.set(v);
+                    p.* = v;
+                }
+            }
+            const BankedCtx = struct {
+                s: mlx.mlx_stream,
+                x: mlx.mlx_array,
+                banks: *const [3]root.Bank,
+                ids: mlx.mlx_array,
+                pub fn call(cx: @This()) !mlx.mlx_array {
+                    return root.moeLingBanked(cx.s, cx.x, cx.banks, cx.ids, .mul1, 0);
+                }
+            };
+            for ([_]u32{ 1, 2, 3 }) |rows| {
+                const pm = g.mark();
+                defer g.resetTo(pm);
+                var ids: [24]u32 = undefined;
+                var prow: [24]u32 = undefined;
+                const np = rows * top_k;
+                drawDecodePairs(rnd, rows, top_k, &pool, ids[0..np], prow[0..np]);
+                const ctx: BankedCtx = .{
+                    .s = s,
+                    .x = try ds_test.randBf16(a, &g, rnd, &.{ ci(np), ci(hidden) }),
+                    .banks = &banks,
+                    .ids = try g.hostArray(std.mem.sliceAsBytes(ids[0..np]), &.{ci(np)}, .uint32),
+                };
+                const st = try ds_test.timeIt(&g, ctx, 8);
+                const distinct = distinctOf(ids[0..np]);
+                std.debug.print("TURBOEXL3_LING_TIME moeLingBanked n={d} rows={d} pairs={d} distinct={d} min_us={d:.1} med_us={d:.1} GBps={d:.0}\n", .{ n, rows, np, distinct, st.min, st.med, @as(f64, @floatFromInt(distinct)) * record / (st.min * 1e3) });
+            }
+        }
+    }
+}
+
+/// One layer of the chained decode forward: its mixer's projections, its dense FFN or shared expert, its routed bank
+const ChainLayer = struct {
+    mixer: union(enum) {
+        kda: struct { qkv: root.Proj, f: root.Proj, g: root.Proj, o: root.Proj },
+        mla: struct { q_a: root.Proj, q_b: root.Proj, kv_a: root.Proj, o: root.Proj },
+    },
+    ffn: ?[3]root.Proj = null,
+    shared: ?[3]root.Proj = null,
+    bank: ?root.Bank = null,
+};
+
+const ChainArm = enum { trunk, routed, layer };
+
+fn chainLin(g: *G, s: mlx.mlx_stream, x: mlx.mlx_array, p: root.Proj) !mlx.mlx_array {
+    return g.adopt(try root.linear(s, x, p.trellis, p.suh, p.svh, .mul1));
+}
+
+/// `x` [R, 8192]: the first 8192 columns of `y` [R, >= 8192]
+fn firstCols(g: *G, y: mlx.mlx_array, rows: u32) !mlx.mlx_array {
+    return g.slice(y, &.{ 0, 0 }, &.{ ci(rows), 8192 }, &.{ 1, 1 });
+}
+
+/// `silu(gate) * up` of the two projections of `h`, then the third
+fn chainSwiglu(g: *G, s: mlx.mlx_stream, h: mlx.mlx_array, p: [3]root.Proj) !mlx.mlx_array {
+    const gt = try chainLin(g, s, h, p[0]);
+    const up = try chainLin(g, s, h, p[1]);
+    return chainLin(g, s, try g.mul(try g.mul(try g.sigmoid(gt), gt), up), p[2]);
+}
+
+/// One decode forward of `rows` rows through `layers`, chained through the residual as the model's layers are: a KDA
+/// layer's qkv, f and g of h, then o on qkv's first 8192 columns (the attention output it stands in for); an MLA layer's
+/// q_a, then q_b on it, kv_a, then the output projection on q_b's first 8192 columns; each output that feeds nothing
+/// folded into h by its row mean; then the dense FFN or the shared expert; then the routed pairs (`ids[L]`, each pair's
+/// row `prow`) through moeLingBanked on the layer's bank, each row's pairs reduced (mean) into h. The attention cores, the
+/// KDA recurrence, the norms and the router are not in it.
+fn chainForward(g: *G, s: mlx.mlx_stream, layers: []const ChainLayer, ids: []const ?mlx.mlx_array, prow: mlx.mlx_array, x: mlx.mlx_array, rows: u32, arm: ChainArm, head: ?root.Proj) !mlx.mlx_array {
+    const R = ci(rows);
+    var h = x;
+    for (layers, ids) |ly, lids| {
+        if (arm != .routed) {
+            switch (ly.mixer) {
+                .kda => |k| {
+                    const qkv = try chainLin(g, s, h, k.qkv);
+                    const extra = try g.add(try g.mean(try chainLin(g, s, h, k.f), 1, true), try g.mean(try chainLin(g, s, h, k.g), 1, true));
+                    h = try g.add(try g.add(h, try chainLin(g, s, try firstCols(g, qkv, rows), k.o)), extra);
+                },
+                .mla => |m| {
+                    const qb = try chainLin(g, s, try chainLin(g, s, h, m.q_a), m.q_b);
+                    const extra = try g.mean(try chainLin(g, s, h, m.kv_a), 1, true);
+                    h = try g.add(try g.add(h, try chainLin(g, s, try firstCols(g, qb, rows), m.o)), extra);
+                },
+            }
+            if (ly.ffn) |p| h = try g.add(h, try chainSwiglu(g, s, h, p));
+            if (ly.shared) |p| h = try g.add(h, try chainSwiglu(g, s, h, p));
+        }
+        if (arm != .trunk) if (ly.bank) |b| {
+            const banks = [3]root.Bank{ b, b, b };
+            const xp = try g.take(h, prow, 0);
+            const y = try g.adopt(try root.moeLingBanked(s, xp, &banks, lids.?, .mul1, 0));
+            const yr = try g.mean(try g.reshape(y, &.{ R, ci(top_k), ci(hidden) }), 1, false);
+            h = try g.add(h, try g.astype(yr, mlx.mlx_array_dtype(h)));
+        };
+    }
+    if (head) |p| return chainLin(g, s, h, p);
+    return h;
+}
+
+// Ling-3.1-flash's decode forward's linears chained over its 72 layers in one evaluation (TURBOEXL3_LING_TIME=1 with
+// TURBOEXL3_GPU=1; it asserts nothing; guidance only): `chainForward` with each layer's weights in its own buffers (one
+// draw per shape, copied per layer): layers 7, 15, ..., 71 MLA, the others KDA; layers 0-3 the dense FFN (K4), 4-71 the
+// shared expert and a routed bank of 24 slot rows (K 2.5: the 2.60 pack), each row's 8 slots drawn from them (8, about 13
+// and about 17 distinct a layer at rows 1, 2 and 3); then the head. Arms: the trunk alone, the routed experts alone, the
+// whole layer plus the head; rows 1, 2 and 3 (a serial step and the MTP verify widths), banked group 4 with the M = 3
+// texts. Each line: the token's min and median ms (host graph build plus evaluation, as a decode step pays it), the
+// per-layer us at the min, and the median host graph-build ms. The served forward adds the attention cores, the KDA
+// recurrence and its gates, the norms, the router and the streamer's routing barriers.
+test "turboexl3 gpu ling timing: the decode forward's linears over 72 layers chained in one evaluation (TURBOEXL3_LING_TIME=1)" {
+    _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    _ = std.c.getenv("TURBOEXL3_LING_TIME") orelse return error.SkipZigTest;
+    const s = mlx.mlx_default_gpu_stream_new();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    const a = std.heap.page_allocator;
+    var g = try G.init(a, s);
+    defer g.deinit();
+    defer _ = mlx.mlx_clear_cache();
+    const saved = config.get().*;
+    defer config.configure(saved) catch {};
+    var cfg = saved;
+    cfg.banked_group = 4;
+    cfg.banked_m3 = true;
+    try config.configure(cfg);
+    var prng = std.Random.DefaultPrng.init(0x11A6C4);
+    const rnd = prng.random();
+    const nl = 72;
+    const bank_rows: u32 = 24;
+    const HostProj = ds_test.HostProj;
+    var hp = [_]HostProj{
+        try HostProj.draw(a, rnd, null, 4096, 24576, 96), // 0 KDA qkv
+        try HostProj.draw(a, rnd, null, 4096, 8192, 96), // 1 KDA f and g
+        try HostProj.draw(a, rnd, null, 8192, 4096, 96), // 2 KDA o and the MLA output projection
+        try HostProj.draw(a, rnd, null, 4096, 1536, 96), // 3 MLA q_a
+        try HostProj.draw(a, rnd, null, 1536, 12288, 96), // 4 MLA q_b
+        try HostProj.draw(a, rnd, null, 4096, 640, 96), // 5 MLA kv_a
+        try HostProj.draw(a, rnd, null, 4096, 10240, 64), // 6 dense FFN gate and up
+        try HostProj.draw(a, rnd, null, 10240, 4096, 64), // 7 dense FFN down
+        try HostProj.draw(a, rnd, null, 4096, 1280, 96), // 8 shared gate and up
+        try HostProj.draw(a, rnd, null, 1280, 4096, 96), // 9 shared down
+        try HostProj.draw(a, rnd, bank_rows, 4096, 1280, 40), // 10 routed gate and up
+        try HostProj.draw(a, rnd, bank_rows, 1280, 4096, 40), // 11 routed down
+        try HostProj.draw(a, rnd, null, 4096, 157184, 96), // 12 the head
+    };
+    defer for (&hp) |*h| h.deinit(a);
+    var layers: [nl]ChainLayer = undefined;
+    for (&layers, 0..) |*ly, li| {
+        ly.* = .{ .mixer = if (li % 8 == 7)
+            .{ .mla = .{ .q_a = try hp[3].upload(&g), .q_b = try hp[4].upload(&g), .kv_a = try hp[5].upload(&g), .o = try hp[2].upload(&g) } }
+        else
+            .{ .kda = .{ .qkv = try hp[0].upload(&g), .f = try hp[1].upload(&g), .g = try hp[1].upload(&g), .o = try hp[2].upload(&g) } } };
+        if (li < 4) {
+            ly.ffn = .{ try hp[6].upload(&g), try hp[6].upload(&g), try hp[7].upload(&g) };
+        } else {
+            ly.shared = .{ try hp[8].upload(&g), try hp[8].upload(&g), try hp[9].upload(&g) };
+            ly.bank = .{ .gate = try hp[10].upload(&g), .up = try hp[10].upload(&g), .down = try hp[11].upload(&g) };
+        }
+    }
+    const head = try hp[12].upload(&g);
+    var pool: [bank_rows]u32 = undefined;
+    for (&pool, 0..) |*p, i| p.* = @intCast(i);
+    for ([_]u32{ 1, 2, 3 }) |rows| {
+        const rm = g.mark();
+        defer g.resetTo(rm);
+        const np = rows * top_k;
+        var ids: [nl]?mlx.mlx_array = @splat(null);
+        var idb: [24]u32 = undefined;
+        var prb: [24]u32 = undefined;
+        var distinct: usize = 0;
+        for (layers, &ids) |ly, *d| if (ly.bank != null) {
+            drawDecodePairs(rnd, rows, top_k, &pool, idb[0..np], prb[0..np]);
+            distinct += distinctOf(idb[0..np]);
+            d.* = try g.hostArray(std.mem.sliceAsBytes(idb[0..np]), &.{ci(np)}, .uint32);
+        };
+        const prow = try g.hostArray(std.mem.sliceAsBytes(prb[0..np]), &.{ci(np)}, .uint32);
+        const x = try ds_test.randBf16(a, &g, rnd, &.{ ci(rows), 4096 });
+        for ([_]ChainArm{ .trunk, .routed, .layer }) |arm| {
+            var build: [5]f64 = undefined;
+            var total: [5]f64 = undefined;
+            for (0..build.len + 2) |round| {
+                const fm = g.mark();
+                defer g.resetTo(fm);
+                const t0 = ds_test.nowNs();
+                const y = try chainForward(&g, s, &layers, &ids, prow, x, rows, arm, if (arm == .layer) head else null);
+                const t1 = ds_test.nowNs();
+                try g.evalAll(&.{y});
+                const t2 = ds_test.nowNs();
+                if (round >= 2) {
+                    build[round - 2] = @as(f64, @floatFromInt(t1 - t0)) / 1000.0;
+                    total[round - 2] = @as(f64, @floatFromInt(t2 - t0)) / 1000.0;
+                }
+            }
+            std.mem.sort(f64, &build, {}, std.sort.asc(f64));
+            std.mem.sort(f64, &total, {}, std.sort.asc(f64));
+            std.debug.print("TURBOEXL3_LING_CHAIN arm={s} rows={d} distinct_per_layer={d:.1} token_min_ms={d:.2} token_med_ms={d:.2} per_layer_us={d:.1} graph_build_med_ms={d:.2}{s}\n", .{ @tagName(arm), rows, @as(f64, @floatFromInt(distinct)) / 68.0, total[0] / 1000.0, total[total.len / 2] / 1000.0, total[0] / @as(f64, nl), build[build.len / 2] / 1000.0, if (arm == .layer) " (the head included)" else "" });
+        }
+    }
 }
