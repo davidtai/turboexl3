@@ -1300,6 +1300,26 @@ ADDED[('root.zig', 'const moeLingBankedLutSel')] = 'the re-export of models/ling
 ADDED_FILES['models/ling/devlut_test.zig'] = ('moeLingBankedLut held to DEVROUTE\'s device wave (the LUT\'s take, the rows\' '
                                               'take, moeLingBanked) byte for byte at Ling\'s shapes on the streamer\'s banks, '
                                               'y and the ids, and prep2bgl\'s text (CPU)')
+# a KDA layer's b_proj (bf16) as a fourth member of kdaProj's GEMV launch (turboexl3_ling's MLX_SERVE_LING_KDA_BPROJ):
+# turboexl3_ling_kdaproj_dec0b, MLX's gemv over b's weight on the grid's threadgroups past the three members'
+ADDED_KERNELS[('models/ling/kdaproj.zig', 'turboexl3_ling_kdaproj_dec0b')] = ('dec0\'s text with b_proj\'s threadgroups before its head '
+                                                                 '(kdaproj/bmember: MLX\'s gemv at BM 1, BN 8 over each row)')
+ADDED[('models/ling/kdaproj.zig', 'const kdec0b_in')] = 'dec0b\'s operand names: dec0\'s, then x\'s rows and b\'s weight'
+ADDED[('models/ling/kdaproj.zig', 'const kdec0b_out')] = 'dec0b\'s outputs: dec0\'s, then b\'s'
+ADDED[('models/ling/kdaproj.zig', 'fn bTakes')] = 'where kdaProjB takes b\'s weight (bf16 [OUTB, in], the widths MLX\'s gemv runs at BM 1, BN 8)'
+ADDED[('models/ling/kdaproj.zig', 'fn kdaProjB')] = 'kdaProj with b_proj as a fourth member of its GEMV launch'
+ADDED[('models/ling/kdaproj.zig', 'fn prepare')] = 'kdaProj\'s prepare launch, moved out of it for kdaProjB (the same launch)'
+ADDED[('models/ling/kdaproj.zig', 'const BMember')] = 'b_proj\'s operands in the GEMV launch'
+ADDED[('models/ling/kdaproj.zig', 'fn gemvWith')] = 'gemv\'s body, and with b_proj its threadgroups after the members\' (dec0b)'
+CHANGED[('models/ling/kdaproj.zig', 'const Kind')] = 'adds dec0b'
+CHANGED[('models/ling/kdaproj.zig', 'const kernels')] = 'a slot for dec0b'
+CHANGED[('models/ling/kdaproj.zig', 'fn kernelOf')] = 'makes dec0b'
+CHANGED[('models/ling/kdaproj.zig', 'fn kdaProj')] = 'its prepare launch moved to prepare (the same launch and config)'
+CHANGED[('models/ling/kdaproj.zig', 'fn gemv')] = 'its body moved to gemvWith (without b_proj: the same launch and config)'
+ADDED[('models/ling/api.zig', 'const kdaProjB')] = 'the re-export of kdaproj.zig\'s kdaProjB'
+ADDED_FILES['models/ling/bproj_test.zig'] = ('kdaProjB held to the served b_proj (the one-row matmul, the exact verify\'s '
+                                             'denseRows) and kdaProj\'s members word for word at rows 1 to 8, and dec0b\'s '
+                                             'text (CPU)')
 
 def metal_strings(fn, toks, corpus):
     """(line, kind, value) of every literal in a .zig file that holds Metal"""
@@ -1579,6 +1599,11 @@ SPLIT_ADDED_KERNELS['turboexl3_ling_router_select'] = ('the host\'s fused router
                                                        '(router/select), TOUT bfloat16')
 SPLIT_ADDED_KERNELS['turboexl3_test_ling_router_host'] = ('test only: the host\'s fused router at its own config (TOUT f32), '
                                                           'the router test\'s reference')
+SPLIT_ADDED_KERNELS['turboexl3_ling_kdaproj_dec0b'] = ('kdaProj\'s GEMV launch with a KDA layer\'s b_proj (bf16) as a '
+                                                       'fourth member (kdaproj.zig text_kdec0b: kdaproj/bmember before '
+                                                       'text_kdec0): MLX\'s gemv at BM 1, BN 8 over b\'s weight on the '
+                                                       'threadgroups past the members\', each row the served one-row '
+                                                       'matmul\'s; ling.kdaProjB')
 SPLIT_ADDED_KERNELS['turboexl3_ling_router_logits_h'] = ('Ling-3.1\'s router logits over the loaded f16 weight (E10): '
                                                          'turboexl3_ling_router_logits with the table\'s read swapped for the '
                                                          'f16 word widened, then + 0 (router/logits_wh)')

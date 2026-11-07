@@ -33,6 +33,9 @@ pub const linearPair = pair.linearPair;
 pub const kdaproj = @import("kdaproj.zig");
 pub const kdaProj = kdaproj.kdaProj;
 pub const kdaProjPrepared = kdaproj.kdaProjPrepared;
+/// `kdaProj` with the layer's b_proj (bf16) as a fourth member of the GEMV launch, its output the served one-row
+/// matmul's bytes at every row (`kdaproj.zig`; `kdaproj.bTakes` says where it takes b's weight)
+pub const kdaProjB = kdaproj.kdaProjB;
 
 /// The residual add and RMSNorm folded into the next linears' prepare at a decode layer's mixer input (`addnorm.zig`):
 /// the residual, the normed rows and each EXL3 member's output from one launch of the add, the norm and the members'

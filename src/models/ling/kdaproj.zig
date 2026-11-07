@@ -10,6 +10,10 @@
 //!   arrival counters chosen after it (`kdaproj/member`).
 //! A host that prepares the input itself (a norm launch that also writes its readers' prepared rows) calls the GEMV
 //! alone (`kdaProjPrepared`) over that layout: the joined rows, their block sums and zeroed counters (`ncntFor`).
+//! `kdaProjB` adds the layer's b_proj (bf16, 4096 -> 64) as a fourth member of the GEMV launch
+//! (`turboexl3_ling_kdaproj_dec0b`: `kdaproj/bmember` before the head): the grid's threadgroups past the three
+//! members' run MLX's gemv over each row (the kernel MLX's matmul picks for b's one-row product), so b's output is the
+//! served one-row matmul's bytes at every row, and the three members' are `kdaProj`'s.
 //! Member m's output is its own `linear`'s bytes at every row count: each output is the same products in the same order
 //! (its K split's partial sums, summed in slice order by its block's last arrival), and neither the tiles per
 //! threadgroup nor where the prepare runs moves a byte of it (dense's DEC-ONE forms all give the three-launch chain's).
@@ -35,17 +39,23 @@ pub const kmember = @embedFile("kernels/kdaproj/member.metal");
 pub const text_kprep_sc: [:0]const u8 = kprep ++ dense.text_prep_sc;
 /// `dense.text_dec0` with its head (`dense.dec_head`) in the three-member head and the member choice
 pub const text_kdec0: [:0]const u8 = khead ++ kmember ++ dense.dec_gemv0 ++ dense.dec_gemv_arrive ++ dense.dec_xsum0 ++ dense.dec_finish_v ++ dense.dec_finish_store;
+/// b_proj as a bf16 member: the grid's threadgroups from FB on run MLX's gemv over b's weight, each row of their chunk
+pub const kbmember = @embedFile("kernels/kdaproj/bmember.metal");
+/// `text_kdec0` with b_proj's threadgroups before its head (`kdaProjB`)
+pub const text_kdec0b: [:0]const u8 = kbmember ++ text_kdec0;
 
 const kprep_in = [_][*:0]const u8{ "x", "suh0", "suh1", "suh2" };
 const kprep_out = [_][*:0]const u8{ "jxp", "jxs", "cnt" };
 const kdec0_in = [_][*:0]const u8{ "jxp", "jxs", "w0", "w1", "w2", "svh0", "svh1", "svh2", "jcnt" };
 const kdec0_out = [_][*:0]const u8{ "y0", "y1", "y2", "z0", "z1", "z2" };
+const kdec0b_in = kdec0_in ++ [_][*:0]const u8{ "xb", "wb" };
+const kdec0b_out = kdec0_out ++ [_][*:0]const u8{"yb"};
 
 // ── kernels: made at their first call ──
 
-const Kind = enum(u8) { kprep_sc, kdec0 };
+const Kind = enum(u8) { kprep_sc, kdec0, kdec0b };
 const kernel_lock = Global(std.atomic.Value(u32), "ling_kdaproj_kernel_lock", std.atomic.Value(u32).init(0));
-const kernels = Global([2]?mlx.mlx_fast_metal_kernel, "ling_kdaproj_kernels", @splat(null));
+const kernels = Global([3]?mlx.mlx_fast_metal_kernel, "ling_kdaproj_kernels", @splat(null));
 
 fn kernelOf(k: Kind) !mlx.mlx_fast_metal_kernel {
     while (kernel_lock.get().*.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
@@ -55,6 +65,7 @@ fn kernelOf(k: Kind) !mlx.mlx_fast_metal_kernel {
     const made = switch (k) {
         .kprep_sc => ks.newKernel("turboexl3_ling_kdaproj_prep", &kprep_in, &kprep_out, text_kprep_sc, decode.header, true),
         .kdec0 => ks.newKernel("turboexl3_ling_kdaproj_dec0", &kdec0_in, &kdec0_out, text_kdec0, decode.header5, true),
+        .kdec0b => ks.newKernel("turboexl3_ling_kdaproj_dec0b", &kdec0b_in, &kdec0b_out, text_kdec0b, decode.header5, true),
     } orelse return error.KernelCreateFailed;
     slot.* = made;
     return made;
@@ -152,9 +163,48 @@ pub fn kdaProj(s: mlx.mlx_stream, x: mlx.mlx_array, p: [3]root.Proj, dec: format
     const v = try root.rowsOf(x, sh.in, s);
     defer root.freeArr(v.x2);
     const pl = (try plan(sh, dec, v.rows, xd)) orelse return error.Exl3EngineNotImplemented;
+    const pre = try prepare(s, v.x2, p, sh, v.rows, pl);
+    defer for (pre) |arr| root.freeArr(arr);
+    return gemv(s, pre[0], pre[1], pre[2], p, sh, dec, v.rows, xd, pl);
+}
+
+/// The width of b_proj's output where `kdaProjB` takes its weight `wb` beside members of shape `sh` for x in `xd`, else
+/// null: x and w bf16, w [OUTB, in] (the host's loaded [in, OUTB] column-major view transposed back), OUTB a multiple
+/// of 4 below 4096, in a multiple of 1024 and at least 16 OUTB. There MLX's matmul runs b's one-row product as its gemv
+/// at BM 1, BN 8 over whole 1024-blocks, the statements `kdaproj/bmember` holds.
+pub fn bTakes(sh: Shape, xd: mlx.mlx_dtype, wb: mlx.mlx_array) ?u32 {
+    if (xd != .bfloat16 or mlx.mlx_array_dtype(wb) != .bfloat16) return null;
+    const ws = mlx.getShape(wb);
+    if (ws.len != 2 or ws[0] < 4 or ws[1] != @as(c_int, @intCast(sh.in))) return null;
+    const ob: u32 = @intCast(ws[0]);
+    if (ob % 4 != 0 or ob >= 4096 or sh.in % 1024 != 0 or sh.in < 16 * ob) return null;
+    return ob;
+}
+
+/// `kdaProj` with the layer's b_proj as a fourth member of its GEMV launch (`turboexl3_ling_kdaproj_dec0b`): b's weight
+/// `wb` bf16 [OUTB, in] row-major (`bTakes`), x bf16 [..., in]. b's output [rows, OUTB] bf16 is MLX's matmul's bytes of
+/// each row (the served one-row matmul's, and so each row of the exact verify's denseRows); the three members' outputs
+/// are `kdaProj`'s. The caller frees the four. Refusals before any launch: `kdaProj`'s, and
+/// error.Exl3EngineNotImplemented where `bTakes` does not hold (the caller runs `kdaProj` and b_proj apart).
+pub fn kdaProjB(s: mlx.mlx_stream, x: mlx.mlx_array, p: [3]root.Proj, wb: mlx.mlx_array, dec: format.Decode) ![4]mlx.mlx_array {
+    const xd = mlx.mlx_array_dtype(x);
+    if (xd != .bfloat16 and xd != .float16 and xd != .float32) return error.BadExl3Dtype;
+    const sh = try shapeOf(p);
+    const ob = bTakes(sh, xd, wb) orelse return error.Exl3EngineNotImplemented;
+    const v = try root.rowsOf(x, sh.in, s);
+    defer root.freeArr(v.x2);
+    const pl = (try plan(sh, dec, v.rows, xd)) orelse return error.Exl3EngineNotImplemented;
+    const pre = try prepare(s, v.x2, p, sh, v.rows, pl);
+    defer for (pre) |arr| root.freeArr(arr);
+    return gemvWith(s, pre[0], pre[1], pre[2], p, sh, dec, v.rows, xd, pl, .{ .x = v.x2, .w = wb, .out = ob });
+}
+
+/// The prepare launch (`turboexl3_ling_kdaproj_prep`) over x's rows x2 [rows, in]: the joined prepared rows, their
+/// block sums and the GEMV's zeroed counters; the caller frees the three
+fn prepare(s: mlx.mlx_stream, x2: mlx.mlx_array, p: [3]root.Proj, sh: Shape, rows: usize, pl: Plan) ![3]mlx.mlx_array {
     const nb = sh.in / 128;
-    const r: c_int = @intCast(v.rows);
-    const rows_u: u32 = @intCast(v.rows);
+    const r: c_int = @intCast(rows);
+    const rows_u: u32 = @intCast(rows);
     // dense's prep_sc for each member, the members on the grid's z; the GEMV's counters zeroed
     const pcfg = try ks.buildConfig(.{
         .grid = .{ nb * 32, rows_u, 3 },
@@ -171,11 +221,8 @@ pub fn kdaProj(s: mlx.mlx_stream, x: mlx.mlx_array, p: [3]root.Proj, dec: format
     });
     defer _ = mlx.mlx_fast_metal_kernel_config_free(pcfg);
     var pre: [3]mlx.mlx_array = @splat(.{ .ctx = null });
-    defer for (pre) |arr| if (arr.ctx != null) {
-        _ = mlx.mlx_array_free(arr);
-    };
-    try ks.applyConfig(try kernelOf(.kprep_sc), pcfg, &.{ v.x2, p[0].suh, p[1].suh, p[2].suh }, &pre, s);
-    return gemv(s, pre[0], pre[1], pre[2], p, sh, dec, v.rows, xd, pl);
+    try ks.applyConfig(try kernelOf(.kprep_sc), pcfg, &.{ x2, p[0].suh, p[1].suh, p[2].suh }, &pre, s);
+    return pre;
 }
 
 /// `kdaProj`'s GEMV alone over an input the host prepared: `jxp` f16 [3 * rows, in] (member m's rows m * rows.., each
@@ -194,6 +241,16 @@ pub fn kdaProjPrepared(s: mlx.mlx_stream, jxp: mlx.mlx_array, jxs: mlx.mlx_array
 }
 
 fn gemv(s: mlx.mlx_stream, jxp: mlx.mlx_array, jxs: mlx.mlx_array, cnt: mlx.mlx_array, p: [3]root.Proj, sh: Shape, dec: format.Decode, rows: usize, xd: mlx.mlx_dtype, pl: Plan) ![3]mlx.mlx_array {
+    const o = try gemvWith(s, jxp, jxs, cnt, p, sh, dec, rows, xd, pl, null);
+    return .{ o[0], o[1], o[2] };
+}
+
+/// b_proj's operands in the GEMV launch: x's rows [rows, in], its weight [out, in] (`bTakes`) and its width
+const BMember = struct { x: mlx.mlx_array, w: mlx.mlx_array, out: u32 };
+
+/// The GEMV launch over the three members, and with `b` b_proj's threadgroups after theirs (`kdaProjB`): the members'
+/// outputs, then b's [rows, out] in `xd` (null without `b`)
+fn gemvWith(s: mlx.mlx_stream, jxp: mlx.mlx_array, jxs: mlx.mlx_array, cnt: mlx.mlx_array, p: [3]root.Proj, sh: Shape, dec: format.Decode, rows: usize, xd: mlx.mlx_dtype, pl: Plan, b: ?BMember) ![4]mlx.mlx_array {
     const rate = format.Rate.fromN(sh.n) orelse return error.BadExl3Shape;
     const d0 = try root.denseCached(.{ .in = sh.in, .out = sh.out[0], .rate = rate, .dec = dec, .out_dtype = xd });
     const r: c_int = @intCast(rows);
@@ -212,24 +269,43 @@ fn gemv(s: mlx.mlx_stream, jxp: mlx.mlx_array, jxs: mlx.mlx_array, cnt: mlx.mlx_
         .{ .name = "ROWS", .value = .{ .int = r } },
         .{ .name = "DEFER", .value = .{ .int = if (d0.defer_affine) 1 else 0 } },
         .{ .name = "OUT_T", .value = .{ .dtype = xd } },
+        // b_proj's (`kdaProjB`): its first threadgroup and its width
+        .{ .name = "FB", .value = .{ .int = @intCast(pl.tgs) } },
+        .{ .name = "OUTB", .value = .{ .int = if (b) |m| @intCast(m.out) else 0 } },
     };
     const k0: c_int = @intCast(pl.ks0);
     const k1: c_int = @intCast(pl.ks1);
     const o0: c_int = @intCast(sh.out[0]);
     const o1: c_int = @intCast(sh.out[1]);
     const o2: c_int = @intCast(sh.out[2]);
+    if (b) |m| {
+        // the members' threadgroups, then b's: OUTB / 4 a row chunk (MLX's gemv's four outputs a threadgroup)
+        const ob: c_int = @intCast(m.out);
+        const cfg = try ks.buildConfig(.{
+            .grid = .{ (pl.tgs + m.out / 4) * 128, pl.chunks, 1 },
+            .threadgroup = .{ 128, 1, 1 },
+            .out_shapes = &.{ &[_]c_int{ r, o0 }, &[_]c_int{ r, o1 }, &[_]c_int{ r, o2 }, &[_]c_int{ k0 * r, o0 }, &[_]c_int{ k1 * r, o1 }, &[_]c_int{ k1 * r, o2 }, &[_]c_int{ r, ob } },
+            .out_dtypes = &.{ xd, xd, xd, .float32, .float32, .float32, xd },
+            .template = &tmpl,
+        });
+        defer _ = mlx.mlx_fast_metal_kernel_config_free(cfg);
+        var o: [7]mlx.mlx_array = undefined;
+        try ks.applyConfig(try kernelOf(.kdec0b), cfg, &.{ jxp, jxs, p[0].trellis, p[1].trellis, p[2].trellis, p[0].svh, p[1].svh, p[2].svh, cnt, m.x, m.w }, &o, s);
+        for (o[3..6]) |zm| _ = mlx.mlx_array_free(zm);
+        return .{ o[0], o[1], o[2], o[6] };
+    }
     const cfg = try ks.buildConfig(.{
         .grid = .{ pl.tgs * 128, pl.chunks, 1 },
         .threadgroup = .{ 128, 1, 1 },
         .out_shapes = &.{ &[_]c_int{ r, o0 }, &[_]c_int{ r, o1 }, &[_]c_int{ r, o2 }, &[_]c_int{ k0 * r, o0 }, &[_]c_int{ k1 * r, o1 }, &[_]c_int{ k1 * r, o2 } },
         .out_dtypes = &.{ xd, xd, xd, .float32, .float32, .float32 },
-        .template = &tmpl,
+        .template = tmpl[0 .. tmpl.len - 2],
     });
     defer _ = mlx.mlx_fast_metal_kernel_config_free(cfg);
     var o: [6]mlx.mlx_array = undefined;
     try ks.applyConfig(try kernelOf(.kdec0), cfg, &.{ jxp, jxs, p[0].trellis, p[1].trellis, p[2].trellis, p[0].svh, p[1].svh, p[2].svh, cnt }, &o, s);
     for (o[3..]) |zm| _ = mlx.mlx_array_free(zm);
-    return .{ o[0], o[1], o[2] };
+    return .{ o[0], o[1], o[2], .{ .ctx = null } };
 }
 
 // ── tests (CPU) ──

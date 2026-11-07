@@ -226,7 +226,7 @@ K split.
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/ling/kdaproj.zig:57` (`fn kernelOf`) |
+| made at | `src/models/ling/kdaproj.zig:67` (`fn kernelOf`) |
 | inputs | `jxp`, `jxs`, `w0`, `w1`, `w2`, `svh0`, `svh1`, `svh2`, `jcnt` |
 | outputs | `y0`, `y1`, `y2`, `z0`, `z1`, `z2` |
 | source | `text_kdec0` = `ling:kdaproj/head` ++ `ling:kdaproj/member` ++ `dense/dec_gemv0` ++ `dense/dec_gemv_arrive_1` ++ `dense/dec_tile` ++ `dense/dec_gemv_arrive_2` ++ `dense/dec_xsum0` ++ `dense/dec_finish_v` ++ `dense/dec_finish_store` (7971 B, `a9c43d427f96`) |
@@ -263,7 +263,7 @@ K split.
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/ling/kdaproj.zig:56` (`fn kernelOf`) |
+| made at | `src/models/ling/kdaproj.zig:66` (`fn kernelOf`) |
 | inputs | `x`, `suh0`, `suh1`, `suh2` |
 | outputs | `jxp`, `jxs`, `cnt` |
 | source | `text_kprep_sc` = `ling:kdaproj/prep` ++ `dense/prep_s` ++ `dense/prep_sc` (2057 B, `74bf60b729c3`) |
@@ -281,6 +281,28 @@ K split.
 - **Bits:** each member's prepared rows and block sums are the ones its own `turboexl3_dense_prep_sc` writes (its text
   after the member's suh and rows are chosen).
 - **Pinned by:** as `turboexl3_ling_kdaproj_dec0`'s.
+
+### `turboexl3_ling_kdaproj_dec0b`
+
+<!-- kernel-facts: turboexl3_ling_kdaproj_dec0b -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/ling/kdaproj.zig:68` (`fn kernelOf`) |
+| inputs | `jxp`, `jxs`, `w0`, `w1`, `w2`, `svh0`, `svh1`, `svh2`, `jcnt`, `xb`, `wb` |
+| outputs | `y0`, `y1`, `y2`, `z0`, `z1`, `z2`, `yb` |
+| source | `text_kdec0b` = `ling:kdaproj/bmember` ++ `ling:kdaproj/head` ++ `ling:kdaproj/member` ++ `dense/dec_gemv0` ++ `dense/dec_gemv_arrive_1` ++ `dense/dec_tile` ++ `dense/dec_gemv_arrive_2` ++ `dense/dec_xsum0` ++ `dense/dec_finish_v` ++ `dense/dec_finish_store` (10779 B, `869bb863886d`) |
+| header | `decode.header5` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` (26594 B, `41efbbbbd943`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** `kdaProjB` (`ling.kdaProjB`), the outside plugin turboexl3_ling's MLX_SERVE_LING_KDA_BPROJ: a KDA layer's q|k|v, f and g as `turboexl3_ling_kdaproj_dec0`, and its b_proj in the same launch.
+- **Shapes and dtypes:** dec0's operands, and xb bf16 [ROWS, IN] (x's rows), wb bf16 [OUTB, IN] row-major (the loader's [IN, OUTB] column-major view transposed back). Out: dec0's, and yb bf16 [ROWS, OUTB].
+- **Grid and threadgroup:** `((tgs + OUTB / 4) · 128, chunks, 1)` / `(128, 1, 1)`: dec0's threadgroups, then OUTB / 4 of b's a row chunk (four outputs each, MLX's gemv's blockM); in each of b's only simdgroup 0 works.
+- **Template args:** dec0's, FB (the members' threadgroups: b's first) and OUTB (b's width).
+- **Replaces:** b_proj's own launches: MLX's matmul at one row, the exact verify's denseRows (a concatenate and a batched matmul) at 2 to 8.
+- **Bits:** the members' are dec0's. b's are MLX's gemv's (gemv.h `GEMVKernel::run` at BM 1, BN 8, SM 1, SN 32, TM 4, TN 4, MLX 0.32): each K slice's products in its order, the simdgroup's shuffle-down sum, then the eight slices' sums added in simdgroup order, one simdgroup running the eight slices in turn; stored in bf16. It needs IN % 1024 == 0, OUTB % 4 == 0, OUTB < 4096 and IN >= 16 OUTB (`kdaproj.bTakes`), where MLX picks that kernel.
+- **Pinned by:** `src/models/ling/bproj_test.zig` "turboexl3 ling bproj texts: ..." (CPU: the composition and the gemv statements, `kernels/test/pins/bproj_texts.metal`) and "turboexl3 gpu ling bproj: ..." (GPU: b's output against the served one-row matmul and denseRows, the members against kdaProj's, word for word at rows 1 to 8).
 
 ## `src/models/ling/combine.zig`
 
