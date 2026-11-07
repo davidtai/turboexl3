@@ -16,10 +16,15 @@
 //! - `root.ling.linearPair` (z | a, the shared and the dense gate | up) gives each member's `linear` bytes at decode
 //!   rows 1 to 16, the prepare inside and in its own launch;
 //! - `root.ling.kdaProj` (a KDA layer's q|k|v, f and g in one launch) gives each member's `linear` bytes at decode rows
-//!   1 to 8 and 16, after its own prepare and over each member's own prep_sc rows joined (`kdaProjPrepared`).
+//!   1 to 8 and 16, after its own prepare and over each member's own prep_sc rows joined (`kdaProjPrepared`);
+//! - each row of a prompt call's `root.linear` (bf16 x) has a whole-prompt call's bytes where both calls run MLX's
+//!   regular matmul, at every EXL3 linear the 2.60 pack serves at prompt rows (`dense_cases` but the head, and the MTP
+//!   layer's eh_proj): the chunk loop's spans of the standard prompt's 18,380 rows, calls over its first 1 to 8,192
+//!   rows and an 8,192-row call's halves; the decode GEMVs (16 rows or fewer), the register-path GEMM (17 to 32) and
+//!   MLX's split-K matmul are reported, not asserted.
 //! TURBOEXL3_LING_N (rates in halfwords per tile; default 40,32) narrows the routed tests. Lines: TURBOEXL3_LING_BYTES,
 //! TURBOEXL3_LING_PARITY, TURBOEXL3_LING_BANKED, TURBOEXL3_LING_DENSE, TURBOEXL3_LING_ONE_ROW,
-//! TURBOEXL3_LING_ONE_ROW_TABLE, TURBOEXL3_LING_PAIR, TURBOEXL3_LING_KDA_PROJ.
+//! TURBOEXL3_LING_ONE_ROW_TABLE, TURBOEXL3_LING_PAIR, TURBOEXL3_LING_KDA_PROJ, TURBOEXL3_LING_ROWINV.
 //! Timing (TURBOEXL3_LING_TIME=1 with TURBOEXL3_GPU=1; asserts nothing, guidance only): every trunk linear, `moeLing`
 //! and `moeLingBanked` at Ling's shapes and rows, the decode forward's linears chained over the 72 layers, and the dense
 //! decode GEMV's launch shapes swept per trunk shape on that chain at rows 1 to 8 (asserting bytes only). Lines:
@@ -998,6 +1003,190 @@ test "turboexl3 gpu ling kda proj: q|k|v, f and g in one launch give each member
         try testing.expectError(error.BadExl3Shape, root.ling.kdaProjPrepared(s, bad, bad, bad, 1, P, .mul1, .bfloat16));
     }
     std.debug.print("TURBOEXL3_LING_KDA_PROJ_DONE checks={d} {s}\n", .{ checks, if (failed == 0) "PASS" else "FAIL" });
+    try testing.expectEqual(@as(usize, 0), failed);
+}
+
+// ── a prompt call's rows at any call width (a layer-major prompt pass runs the trunk linears over the whole prompt) ──
+
+/// The MTP layer's input projection (the 2.60 pack's `eh_proj`, K4): with `dense_cases` but the head, every EXL3 linear
+/// the pack's headers serve at prompt rows
+const eh_proj: DenseCase = .{ .name = "mtp.eh_proj", .in = 8192, .out = 4096, .n = 64 };
+/// The standard prompt's rows and the ends of the chunk loop's spans over them: 4,096-row chunks, the SSM snapshot
+/// backoff's span, then the last 31 rows; without checkpoints its last two spans end at 18,379 and 18,380
+const prompt_rows: u32 = 18380;
+const prompt_ends = [_]u32{ 4096, 8192, 12288, 16384, 18349, 18380 };
+const prompt_ends_nocp = [_]u32{ 18379, 18380 };
+/// Calls over the prompt's first rows: the decode GEMVs (1, 16), the register-path GEMM (17, 24, 32), and MLX's matmul on
+/// both sides of each threshold of its dispatch at these shapes (split K up to max(M, N) 1365 at K 4096; bk 64 below
+/// M + N = K at K 8192 and 10240)
+const prompt_firsts = [_]u32{ 1, 16, 17, 24, 32, 33, 64, 100, 512, 1024, 1365, 1366, 1965, 1995, 2048, 4095, 4096, 4097, 6143, 6144, 8192 };
+
+const PromptPath = enum { decode, register, matmul, split_k };
+
+/// MLX's matmul sums an M x N x K product's K in partitions (its NAX dispatch's split K) at K >= 3 max(M, N), or at
+/// max(M, N) <= 1024 with K > 2 max(M, N); its regular kernel sums K in one pass of 32-deep steps whatever its tiles.
+fn mlxSplitK(m: u32, n: u32, k: u32) bool {
+    const mx = @max(m, n);
+    return k >= 3 * mx or (mx <= 1024 and k > 2 * mx);
+}
+
+/// The path `root.linear` runs a call of `m` rows of `c` on (dense.zig's: the decode GEMVs, the register-path GEMM, then
+/// MLX's matmul against the dequantized trellis)
+fn promptPath(d: *const dense.Dense, c: DenseCase, m: u32) PromptPath {
+    if (m <= decode.Kernels.max_rows) return .decode;
+    if (m <= d.small_rows and !d.fused_prefill) return .register;
+    return if (mlxSplitK(m, c.out, c.in)) .split_k else .matmul;
+}
+
+/// Elements of `x` and `y` (one shape, a 2-byte dtype) whose bits differ, counted on the GPU
+fn wordDiff(g: *G, s: mlx.mlx_stream, x: mlx.mlx_array, y: mlx.mlx_array) !usize {
+    if (!std.mem.eql(c_int, mlx.getShape(x), mlx.getShape(y)) or mlx.mlx_array_dtype(x) != mlx.mlx_array_dtype(y)) return error.ShapeMismatch;
+    var xv = mlx.mlx_array_new();
+    try mlx.check(mlx.mlx_view(&xv, x, .uint16, s));
+    xv = try g.adopt(xv);
+    var yv = mlx.mlx_array_new();
+    try mlx.check(mlx.mlx_view(&yv, y, .uint16, s));
+    yv = try g.adopt(yv);
+    var eq = mlx.mlx_array_new();
+    try mlx.check(mlx.mlx_equal(&eq, xv, yv, s));
+    eq = try g.adopt(eq);
+    var same_a = mlx.mlx_array_new();
+    try mlx.check(mlx.mlx_sum(&same_a, try g.astype(eq, .int32), false, s));
+    same_a = try g.adopt(same_a);
+    try g.evalAll(&.{same_a});
+    var same: i32 = 0;
+    try mlx.check(mlx.mlx_array_item_int32(&same, same_a));
+    return mlx.mlx_array_size(x) - @as(usize, @intCast(same));
+}
+
+/// One prompt linear's inputs and the whole-prompt call's path
+const PromptLinear = struct {
+    g: *G,
+    s: mlx.mlx_stream,
+    c: DenseCase,
+    d: *const dense.Dense,
+    x: mlx.mlx_array,
+    trellis: mlx.mlx_array,
+    suh: mlx.mlx_array,
+    svh: mlx.mlx_array,
+
+    /// `root.linear` over rows [lo, hi) of x
+    fn call(p: PromptLinear, lo: u32, hi: u32) !mlx.mlx_array {
+        const xs = try p.g.slice(p.x, &.{ ci(lo), 0 }, &.{ ci(hi), ci(p.c.in) }, &.{ 1, 1 });
+        return p.g.adopt(try root.linear(p.s, xs, p.trellis, p.suh, p.svh, .mul1));
+    }
+
+    /// `got` (a call over rows [lo, hi) of x) against those rows of `whole` (a call over x's first `whole_rows`), word
+    /// for word: its line, and false where both calls run MLX's regular matmul and a word differs
+    fn check(p: PromptLinear, got: mlx.mlx_array, whole: mlx.mlx_array, whole_rows: u32, lo: u32, hi: u32) !bool {
+        const want = try p.g.slice(whole, &.{ ci(lo), 0 }, &.{ ci(hi), ci(p.c.out) }, &.{ 1, 1 });
+        const diff = try wordDiff(p.g, p.s, got, want);
+        const path = promptPath(p.d, p.c, hi - lo);
+        const asserted = path == .matmul and promptPath(p.d, p.c, whole_rows) == .matmul;
+        const status: []const u8 = if (asserted) (if (diff == 0) "PASS" else "FAIL") else if (diff == 0) "SAME" else "DIFFERS";
+        std.debug.print("TURBOEXL3_LING_ROWINV shape={s} K={d} N={d} n={d} rows=[{d},{d}) m={d} whole={d} path={s} differing={d}/{d} {s}\n", .{ p.c.name, p.c.in, p.c.out, p.c.n, lo, hi, hi - lo, whole_rows, @tagName(path), diff, (hi - lo) * p.c.out, status });
+        return !asserted or diff == 0;
+    }
+};
+
+// A layer-major prompt pass (an outside plugin's: each layer over the whole prompt, the chunk loop's spans kept where a
+// row's bytes need them) can run a trunk linear over the whole prompt only where each row's bytes do not depend on the
+// call's row count. At every EXL3 linear the 2.60 pack serves at prompt rows, bf16 x ~ N(0, 1): one call over the
+// standard prompt's 18,380 rows against the chunk loop's spans over them (with and without its checkpoints) and calls
+// over its first rows at widths across the paths' and MLX's dispatch thresholds, and an 8,192-row call against it and
+// against its two 4,096-row halves, word for word. Asserted where both calls run MLX's regular matmul; the decode GEMVs,
+// the register-path GEMM and MLX's split-K matmul sum in other orders, and their lines say whether the words still match.
+test "turboexl3 gpu ling prompt linears: a prompt call's rows of root.linear have the whole-prompt call's bytes at every EXL3 trunk shape the 2.60 pack serves at prompt rows, where both run MLX's regular matmul (TURBOEXL3_GPU=1)" {
+    _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    const s = mlx.mlx_default_gpu_stream_new();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    const a = std.heap.page_allocator;
+    var g = try G.init(a, s);
+    defer g.deinit();
+    var cases: [dense_cases.len]DenseCase = undefined;
+    var nc: usize = 0;
+    for (dense_cases) |c| if (!c.head) {
+        cases[nc] = c;
+        nc += 1;
+    };
+    cases[nc] = eh_proj;
+    nc += 1;
+    const nokey = mlx.mlx_array_new();
+    var failed: usize = 0;
+    var lines: usize = 0;
+    for (cases[0..nc]) |c| {
+        defer _ = mlx.mlx_clear_cache();
+        const mark = g.mark();
+        defer g.resetTo(mark);
+        var prng = std.Random.DefaultPrng.init(0x20A91B ^ (@as(u64, c.in) << 24) ^ (@as(u64, c.out) << 4) ^ c.n);
+        const rnd = prng.random();
+        const tbuf = try a.alloc(u16, (c.in / 16) * (c.out / 16) * c.n);
+        defer a.free(tbuf);
+        for (tbuf) |*v| v.* = rnd.int(u16);
+        const sbuf = try a.alloc(u16, c.in + c.out);
+        defer a.free(sbuf);
+        const out_scale: f32 = 1.0 / @sqrt(@as(f32, @floatFromInt(c.in)));
+        for (sbuf[0..c.in]) |*v| v.* = format.f32ToF16Bits(0.5 + rnd.float(f32));
+        for (sbuf[c.in..]) |*v| v.* = format.f32ToF16Bits((0.5 + rnd.float(f32)) * out_scale);
+        var xr = mlx.mlx_array_new();
+        try mlx.check(mlx.mlx_random_normal(&xr, &[_]c_int{ ci(prompt_rows), ci(c.in) }, 2, .bfloat16, 0, 1, nokey, s));
+        const p: PromptLinear = .{
+            .g = &g,
+            .s = s,
+            .c = c,
+            .d = try root.denseCached(.{ .in = c.in, .out = c.out, .rate = format.Rate.fromN(c.n).?, .dec = .mul1, .out_dtype = .bfloat16 }),
+            .x = try g.adopt(xr),
+            .trellis = try g.hostArray(std.mem.sliceAsBytes(tbuf), &.{ ci(c.in / 16), ci(c.out / 16), ci(c.n) }, .int16),
+            .suh = try g.hostArray(std.mem.sliceAsBytes(sbuf[0..c.in]), &.{ci(c.in)}, .float16),
+            .svh = try g.hostArray(std.mem.sliceAsBytes(sbuf[c.in..]), &.{ci(c.out)}, .float16),
+        };
+        const whole = try p.call(0, prompt_rows);
+        try g.evalAll(&.{ p.x, whole });
+        var checks: [prompt_ends.len + prompt_ends_nocp.len + prompt_firsts.len + 3]bool = undefined;
+        var n_checks: usize = 0;
+        // the chunk loop's spans, with its checkpoints, then the last two without
+        var lo: u32 = 0;
+        for (prompt_ends) |hi| {
+            const m = g.mark();
+            defer g.resetTo(m);
+            checks[n_checks] = try p.check(try p.call(lo, hi), whole, prompt_rows, lo, hi);
+            n_checks += 1;
+            lo = hi;
+        }
+        lo = prompt_ends[3];
+        for (prompt_ends_nocp) |hi| {
+            const m = g.mark();
+            defer g.resetTo(m);
+            checks[n_checks] = try p.check(try p.call(lo, hi), whole, prompt_rows, lo, hi);
+            n_checks += 1;
+            lo = hi;
+        }
+        // calls over the prompt's first rows
+        for (prompt_firsts) |hi| {
+            const m = g.mark();
+            defer g.resetTo(m);
+            checks[n_checks] = try p.check(try p.call(0, hi), whole, prompt_rows, 0, hi);
+            n_checks += 1;
+        }
+        // an 8,192-row call against the whole prompt's, and its two halves against it
+        {
+            const m = g.mark();
+            defer g.resetTo(m);
+            const half = try p.call(0, 8192);
+            try g.evalAll(&.{half});
+            checks[n_checks] = try p.check(half, whole, prompt_rows, 0, 8192);
+            n_checks += 1;
+            for ([_][2]u32{ .{ 0, 4096 }, .{ 4096, 8192 } }) |r| {
+                const m2 = g.mark();
+                defer g.resetTo(m2);
+                checks[n_checks] = try p.check(try p.call(r[0], r[1]), half, 8192, r[0], r[1]);
+                n_checks += 1;
+            }
+        }
+        for (checks[0..n_checks]) |ok| failed += @intFromBool(!ok);
+        lines += n_checks;
+    }
+    std.debug.print("TURBOEXL3_LING_ROWINV_DONE shapes={d} lines={d} failed={d} {s}\n", .{ nc, lines, failed, if (failed == 0) "PASS" else "FAIL" });
     try testing.expectEqual(@as(usize, 0), failed);
 }
 
