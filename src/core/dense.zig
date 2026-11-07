@@ -186,11 +186,17 @@ pub const one_row_table = [_]OneRow{
 
 /// `one_row_table`'s entry for `shape`, null for a shape it does not name
 pub fn oneRowFor(shape: Shape) ?OneRow {
-    for (one_row_table) |e| if (e.in == shape.in and e.out == shape.out and e.n == shape.rate.n) return e;
+    return if (oneRowIndex(shape)) |i| one_row_table[i] else null;
+}
+
+fn oneRowIndex(shape: Shape) ?u8 {
+    for (one_row_table, 0..) |e, i| if (e.in == shape.in and e.out == shape.out and e.n == shape.rate.n) return @intCast(i);
     return null;
 }
 
 const dec_said = Global(bool, "dense_dec_said", false);
+/// the `one_row_table` entries whose engagement line a one-row call has printed (bit i = entry i)
+const table_said = Global(u8, "dense_one_row_table_said", 0);
 
 /// The kernels of one dense linear shape; configs per row count (decode) plus the prefill set.
 pub const Dense = struct {
@@ -245,6 +251,8 @@ pub const Dense = struct {
     /// a one-row call's prepare: inside the launch (true, where its buffer fits) or in prep_sc's (false) whatever the row
     /// and width thresholds say; null keeps them (`Config.dec_one_row_table`'s entry for this shape, else null)
     one_prep_in: ?bool = null,
+    /// the `one_row_table` entry this Dense's one-row calls run under `Config.dec_one_row_table` (its engagement line)
+    one_row: ?u8 = null,
     dec0: mlx.mlx_fast_metal_kernel,
     dec1: mlx.mlx_fast_metal_kernel,
     prep_sc: mlx.mlx_fast_metal_kernel,
@@ -427,6 +435,7 @@ pub const Dense = struct {
             .dec_prep_rows = if (config.get().dec_one_row_wide) 0 else 1,
             .bt_set = btSetFor(config.get().*, shape),
             .one_prep_in = onePrepFor(config.get().*, shape),
+            .one_row = if (config.get().dec_one_row_table) oneRowIndex(shape) else null,
             .dec_prep_out = 1024,
             .dec0 = ks.newKernel("turboexl3_dense_dec0", &dec0_in, &dec0_out, text_dec0, decode.header5, true) orelse return error.KernelCreateFailed,
             .dec1 = ks.newKernel("turboexl3_dense_dec1", &dec1_in, &dec1_out, text_dec1, decode.header5, true) orelse return error.KernelCreateFailed,
@@ -535,6 +544,13 @@ pub const Dense = struct {
             dec_said.get().* = true;
             std.debug.print("[turboexl3] DEC-ONE engaged: one GEMV launch per dense linear at decode rows <= {d}\n", .{self.dec_rows});
         }
+        if (rows == 1) if (self.one_row) |i| {
+            const bit = @as(u8, 1) << @intCast(i);
+            if ((table_said.get().* & bit) == 0) {
+                table_said.get().* |= bit;
+                std.debug.print("[turboexl3] one-row table engaged: in={d} out={d} n={d} BT={d} prepare={s}\n", .{ self.shape.in, self.shape.out, self.shape.rate.n, self.btDec(1, 1), if (c.prep_in) "inside" else "own_launch" });
+            }
+        };
         if (c.prep_in) {
             const cnt = try one(self.dec_zero, c.prep, &.{svh}, s);
             defer _ = mlx.mlx_array_free(cnt);
