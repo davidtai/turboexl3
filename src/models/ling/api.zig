@@ -136,5 +136,11 @@ fn act(limit: c_int) !ds.BankedAct {
     return .{ .limit = @intCast(limit), .clamp = .silu_out };
 }
 
+/// A MoE layer's tail at decode and verify rows in one launch (`tail.zig`): the routed call's joined rows weighted and
+/// summed, rounded to the activation dtype, the shared expert added, then the residual add and the next norm, the words
+/// of the served chain (the source's sum, the block's astype and add, mlx-serve's add_norm).
+pub const tail = @import("tail.zig");
+pub const moeTail = tail.moeTail;
+
 /// This file's module state (`Global`): what a host that shares its units' state registers.
-pub const shared_state = .{ shared.shared_state, pair.shared_state, kdaproj.shared_state, addnorm.shared_state, router.shared_state };
+pub const shared_state = .{ shared.shared_state, pair.shared_state, kdaproj.shared_state, addnorm.shared_state, router.shared_state, tail.shared_state };
