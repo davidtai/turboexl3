@@ -59,11 +59,11 @@ const testing = std.testing;
 const hidden = routed.hidden;
 const inter = routed.inter;
 const limit = routed.limit;
-const sigma: f32 = 8;
+pub const sigma: f32 = 8;
 /// The prompt calls' slot bank: a base bank's rows (the plugin serves 100 to 145 prompt rows a layer at the 110 GiB ceiling)
-const prompt_slots: u32 = 100;
+pub const prompt_slots: u32 = 100;
 /// The layer activation's rows the prompt calls gather from
-const act_rows: u32 = 600;
+pub const act_rows: u32 = 600;
 
 fn ci(x: anytype) c_int {
     return @intCast(x);
@@ -85,7 +85,7 @@ test "turboexl3 glm53f fused texts: the row-map prepare is the prepare with its 
 }
 
 /// `x`'s 32-bit words (an f32 array's bits, or a bf16 array's bits through its exact f32 widening).
-fn bitsOf(g: *G, x: mlx.mlx_array, out: []f32) ![]const u32 {
+pub fn bitsOf(g: *G, x: mlx.mlx_array, out: []f32) ![]const u32 {
     const f = if (mlx.mlx_array_dtype(x) == .float32) x else try g.astype(x, .float32);
     _ = try g.hostF32(f, out);
     const p: [*]const u32 = @ptrCast(out.ptr);
@@ -94,7 +94,7 @@ fn bitsOf(g: *G, x: mlx.mlx_array, out: []f32) ![]const u32 {
 
 /// A prompt call's row-slots: each an x row (`rows`) and a slot (`slots`), the slots drawn over `n_experts` with lognormal
 /// popularity (sigma 1.5); `pads` trailing row-slots repeat row-slot 0 (the plugin's padding of a call of 16 rows or fewer)
-fn drawCall(rnd: std.Random, rows: []u32, slots: []u32, n_experts: u32, pads: usize) void {
+pub fn drawCall(rnd: std.Random, rows: []u32, slots: []u32, n_experts: u32, pads: usize) void {
     var logw: [512]f64 = undefined;
     for (logw[0..n_experts]) |*w| w.* = 1.5 * rnd.floatNorm(f64);
     for (rows, slots) |*r, *sl| {
@@ -306,7 +306,7 @@ fn drawWave(rnd: std.Random, ids: []u32) void {
 }
 
 /// The differing words of `got` against `want`, and the non-finite values of `vals` (got's values)
-fn countDiff(got: []const u32, want: []const u32, vals: []const f32) [2]usize {
+pub fn countDiff(got: []const u32, want: []const u32, vals: []const f32) [2]usize {
     var d: [2]usize = .{ 0, 0 };
     for (got, want, vals) |u, v, f| {
         d[0] += @intFromBool(u != v);
@@ -451,7 +451,7 @@ test "turboexl3 gpu glm53f banked schedules: the grouped texts (g4), hw4b's (g4m
 }
 
 /// A prompt call's row-slots as the plugin orders them (a stable counting sort by slot): `rows` and `slots` permuted
-fn sortBySlot(a: std.mem.Allocator, rows: []u32, slots: []u32, n_slots: u32) !void {
+pub fn sortBySlot(a: std.mem.Allocator, rows: []u32, slots: []u32, n_slots: u32) !void {
     const n = rows.len;
     const starts = try a.alloc(u32, n_slots + 1);
     defer a.free(starts);

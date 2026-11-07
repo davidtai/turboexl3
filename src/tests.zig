@@ -45,6 +45,7 @@ comptime {
     _ = @import("models/glm53f/fused_test.zig");
     _ = @import("models/glm53f/dense_dec_test.zig");
     _ = @import("models/glm53f/pf_stage_test.zig");
+    _ = @import("models/glm53f/zfit_test.zig");
 }
 
 

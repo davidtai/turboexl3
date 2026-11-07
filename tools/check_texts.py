@@ -1254,6 +1254,46 @@ CHANGED[('fused_test.zig', 'const pf_sets')] = 'tk and bk128.tk appended: the pr
 CHANGED[('fused_test.zig', 'fn pfOptsConfigure')] = 'sets Config.pf_t128_bk128 too'
 ADDED_FILES['pf_stage_test.zig'] = ('where the routed prefill takes its 128-row tile launches\' 128-deep stages and the depth '
                                     'each launch then runs (CPU); their bytes are fused_test.zig\'s prefill options test')
+# the mixed launch's outputs at the rows they hold (prefill.Options.t128_zfit, Config.pf_t128_zfit: the plugin's
+# TURBOEXL3_GLM53F_PF_ZFIT): the route's compact bases (zmb, the tables' fourth column), the mixed GEMMs storing there, mid
+# and finish reading there, root.moeClampedRowsFit naming the call's experts (zfit_test.zig)
+CHANGED[('config.zig', 'const Config')] += ('; pf_t128_zfit: beside the 128-row tiles, the mixed launch\'s outputs at the rows '
+                                            'they hold (prefill.Options.t128_zfit, the same bytes)')
+CHANGED[('prefill.zig', 'const Options')] += '; t128_zfit (taken beside t128)'
+CHANGED[('prefill.zig', 'const T128Kernels')] += ('; z (ZKernels): the compact mixed outputs\' route, mixed launches, mid and '
+                                                  'finish, made after the stock set with t128_zfit')
+CHANGED[('prefill.zig', 'const RouteT128')] = 'zmb (the compact bases, t128_zfit) and zcap (the mixed launch\'s output rows)'
+CHANGED[('prefill.zig', 'const ZT128')] = 'zmb, the route\'s compact bases borrowed for mid and finish'
+CHANGED[('prefill.zig', 'const Prefill')] += ('; t128_zfit: routeT128 returns the compact bases, t128Gemm sizes the mixed '
+                                              'launch\'s outputs at zcap rows, midT128 and finishT128 read through zmb, '
+                                              'moeT128With takes call_experts')
+for _key in ('fn gemmText', 'fn gemmSmallText', 'fn gemmMixedText'):
+    RECOMPOSED[('prefill.zig', _key)] = ('zb: the mixed launches\' stores at the table\'s fourth column '
+                                         '(gemm_*op*_xsz_zb.metal in place of gemm_*op*_xsz.metal); every text without it '
+                                         'keeps its value (2)')
+ADDED[('prefill.zig', 'fn t128ZCap')] = 'the compact mixed outputs\' rows for an S-slot call naming its experts or not'
+for _key in ('froute_t128z_out', 'mid_t128z_in', 'fin_t128z_in'):
+    ADDED[('prefill.zig', f'const {_key}')] = 'the compact mixed outputs\' kernels\' operand names (zmb)'
+CHANGED[('root.zig', 'fn pfOptions')] += '; t128_zfit from Config.pf_t128_zfit'
+CHANGED[('root.zig', 'fn prefillFor')] += '; t128_zfit off without the 128-row tiles, printed in the engage line'
+CHANGED[('root.zig', 'fn moeClampedRows')] = 'its body moved to clampedRows (no experts named)'
+ADDED[('root.zig', 'fn moeClampedRowsFit')] = 'moeClampedRows naming the call\'s experts (t128_zfit\'s compact outputs\' rows)'
+ADDED[('root.zig', 'fn clampedRows')] = 'moeClampedRows\' body with the named experts'
+for _key in ('const sigma', 'const prompt_slots', 'const act_rows', 'fn bitsOf', 'fn drawCall', 'fn countDiff', 'fn sortBySlot'):
+    CHANGED[('fused_test.zig', _key)] = 'pub: zfit_test.zig draws, sorts and compares its calls with them'
+for _name, _why in (('turboexl3_pf_t128z_route', 'text_froute_t128 with the compact bases (zmb, the tables\' fourth column) '
+                                                  'between its tables and their spare rows (froute_t128z_2)'),
+                    ('turboexl3_pf_t128z_gum', 'turboexl3_pf_t128_gum storing at the tables\' fourth column (gemm2mz_text)'),
+                    ('turboexl3_pf_t128z_dnm', 'turboexl3_pf_t128_dnm storing at the tables\' fourth column (gemm1mz_text)'),
+                    ('turboexl3_pf_t128z_mid', 'turboexl3_pf_t128_mid reading a remainder position at its compact row '
+                                               '(mid_t128z_pick, mid_t128z_loads)'),
+                    ('turboexl3_pf_t128z_midc', 'turboexl3_pf_t128_midc reading a remainder position at its compact row'),
+                    ('turboexl3_pf_t128z_fin', 'turboexl3_pf_t128_fin reading a remainder slot at its compact row '
+                                               '(finish_t128z_pick, finish_t128z_load)')):
+    ADDED_KERNELS[('prefill.zig', _name)] = 'the compact mixed outputs (t128_zfit): ' + _why
+ADDED_FILES['zfit_test.zig'] = ('the compact mixed outputs\' rows hold every remainder the route leaves (CPU), and moeClampedRows '
+                                'with t128_zfit, the experts named or not, gives the words it gives without under the served '
+                                'options, bk128 and bk128.tk (GPU)')
 
 
 def metal_strings(fn, toks, corpus):
