@@ -6,9 +6,10 @@
 //! that kernel; addnorm_test.zig checks the same pair). The operands are built as the plugin builds them: the joined rows
 //! are banked outputs (`moeLingBanked` over a 24-slot bank at n 40, the pack's I16 trellis words, limits 0 and 10),
 //! given as the join gives them ([R, 8, 4096]) and flat ([R * 8, 4096]); the weights are the router's select (bf16,
-//! normalized and scaled); the shared expert is SHARED_F3's two launches on the MoE input [1, R, 4096]. Then planted
-//! signed zeros: -0.0 in the rows and the shared expert, zeros in the residual. Every case compares the residual and
-//! the normed rows. Lines: TURBOEXL3_LING_TAIL.
+//! normalized and scaled); the shared expert is SHARED_F3's two launches on the MoE input [1, R, 4096] at the rows they
+//! take (1 to 4), and past them random bf16 rows [1, R, 4096] (the served path's stock chain there, any bf16 words to the
+//! tail). Then planted signed zeros: -0.0 in the rows and the shared expert, zeros in the residual. Every case compares
+//! the residual and the normed rows. Lines: TURBOEXL3_LING_TAIL.
 const std = @import("std");
 const sdk = @import("sdk");
 const mlx = sdk.mlx;
@@ -170,7 +171,11 @@ test "turboexl3 gpu ling tail: moeTail gives the served chain's words (the sourc
         const ids = try g.hostArray(std.mem.sliceAsBytes(ids_h[0..np]), &.{ci(np)}, .uint32);
         const xp = try g.take(try g.reshape(x, &.{ R, 4096 }), try g.hostArray(std.mem.sliceAsBytes(tok_h[0..np]), &.{ci(np)}, .int32), 0);
         const yr = try g.adopt(try root.moeLingBanked(s, xp, &banks, ids, .mul1, lim));
-        const shx = try g.adopt(try root.lingSharedExpert(s, x, sgp, sup, sdp, 0, tab, .mul1));
+        // the shared expert: SHARED_F3's launches where they take the call (rows 1 to 4), else bf16 rows of their own
+        const shx = if (try root.ling.sharedTakes(x, sgp, sup, sdp, .mul1))
+            try g.adopt(try root.lingSharedExpert(s, x, sgp, sup, sdp, 0, tab, .mul1))
+        else
+            try bf16Host(a, &g, xs[2 * rows * 4096 .. 3 * rows * 4096], &.{ 1, R, 4096 });
         for ([_]bool{ true, false }) |joined| {
             const ro = if (joined) try g.reshape(yr, &.{ R, 8, 4096 }) else yr;
             const d = try check(a, &g, s, hres, ro, wts, shx, wn, eps_a, rows);
