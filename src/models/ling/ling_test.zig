@@ -1,8 +1,8 @@
 //! Ling-3.1-flash (`models/ling/api.zig`). CPU (always): each Ling text is its base text with the SwiGLU line swapped for
 //! Ling's clamp piece (or, banked, DeepSeek's clamp piece swapped for fin7's own line or Ling's) and nothing else; the
-//! reference clamp's rule; the refusals; every trunk shape a width the dense kernels admit. GPU (TURBOEXL3_GPU=1, else
-//! skipped), at Ling's shapes (hidden 4096, expert width 1280: ten 128-blocks, 512 experts, top-8, MUL1 at n 40 = K 2.5
-//! and n 32 = K 2, the 2.60 and 2.10 packs' routed rates):
+//! reference clamp's rule; the refusals; every trunk shape a width the dense kernels admit; the one-row table's launch
+//! per trunk shape. GPU (TURBOEXL3_GPU=1, else skipped), at Ling's shapes (hidden 4096, expert width 1280: ten
+//! 128-blocks, 512 experts, top-8, MUL1 at n 40 = K 2.5 and n 32 = K 2, the 2.60 and 2.10 packs' routed rates):
 //! - `root.moeLing` at a limit no value reaches gives `root.moe`'s bytes (decode and prefill rows), and at limits 0 and 10
 //!   equals `ref.moeRowClampedAt` (`silu_out`) on sampled rows of decode rows 1, 4, 16 and prefill rows 32, 1328;
 //! - every pair of `root.moeLingBanked` over three banks is `moeLing`'s on its bank at top-1 with score 1, byte for byte,
@@ -12,10 +12,12 @@
 //! - `root.linear` at every Ling trunk shape (K6; the dense FFN K4) equals the host reference;
 //! - a one-row call on two rows' launch shape (`Config.dec_one_row_wide`) gives one row's own bytes and the three-launch
 //!   chain's at every trunk shape, x f32 and bf16;
+//! - a one-row call on its shape's `dense.one_row_table` launch (`Config.dec_one_row_table`) does too, on that launch;
 //! - `root.ling.linearPair` (z | a, the shared and the dense gate | up) gives each member's `linear` bytes at decode
 //!   rows 1 to 16, the prepare inside and in its own launch.
 //! TURBOEXL3_LING_N (rates in halfwords per tile; default 40,32) narrows the routed tests. Lines: TURBOEXL3_LING_BYTES,
-//! TURBOEXL3_LING_PARITY, TURBOEXL3_LING_BANKED, TURBOEXL3_LING_DENSE, TURBOEXL3_LING_ONE_ROW, TURBOEXL3_LING_PAIR.
+//! TURBOEXL3_LING_PARITY, TURBOEXL3_LING_BANKED, TURBOEXL3_LING_DENSE, TURBOEXL3_LING_ONE_ROW,
+//! TURBOEXL3_LING_ONE_ROW_TABLE, TURBOEXL3_LING_PAIR.
 //! Timing (TURBOEXL3_LING_TIME=1 with TURBOEXL3_GPU=1; asserts nothing, guidance only): every trunk linear, `moeLing`
 //! and `moeLingBanked` at Ling's shapes and rows, the decode forward's linears chained over the 72 layers, and the dense
 //! decode GEMV's launch shapes swept per trunk shape on that chain at rows 1 to 8 (asserting bytes only). Lines:
@@ -639,6 +641,120 @@ test "turboexl3 gpu ling dense: a one-row call on two rows' launch shape (Config
             }
             const ok = shape_ok and d_own == 0 and d_wide == 0;
             std.debug.print("TURBOEXL3_LING_ONE_ROW {s} in={d} out={d} n={d} x={s} own_prepare={s} wide_prepare={s} wide_bt={d} own_vs_chain={d}/{d} wide_vs_chain={d}/{d} {s}\n", .{ c.name, c.in, c.out, c.n, @tagName(dt), if (own_in) "inside" else "own_launch", if (wide_in) "inside" else "own_launch", wide.bt_set[1], d_own, c.out, d_wide, c.out, if (ok) "PASS" else "FAIL" });
+            failed += @intFromBool(!ok);
+        }
+    }
+    try testing.expectEqual(@as(usize, 0), failed);
+}
+
+/// `dense.one_row_table`'s one-row launch for each trunk shape (`dense_cases` by name): output tiles per threadgroup (0 =
+/// the served launch's) and the prepare inside or in its own launch (null = the served placement)
+const OneRowWant = struct { name: []const u8, bt: u8, prep_in: ?bool };
+const one_row_want = [_]OneRowWant{
+    .{ .name = "kda.qkv", .bt = 1, .prep_in = false },
+    .{ .name = "kda.f/g", .bt = 1, .prep_in = false },
+    .{ .name = "kda.o/mla.dense", .bt = 1, .prep_in = false },
+    .{ .name = "mla.q_a", .bt = 0, .prep_in = null },
+    .{ .name = "mla.q_b", .bt = 8, .prep_in = false },
+    .{ .name = "mla.kv_a", .bt = 2, .prep_in = false },
+    .{ .name = "shared.gate/up", .bt = 2, .prep_in = null },
+    .{ .name = "shared.down", .bt = 1, .prep_in = null },
+    .{ .name = "dense.gate/up", .bt = 0, .prep_in = null },
+    .{ .name = "dense.down", .bt = 0, .prep_in = null },
+    .{ .name = "head", .bt = 0, .prep_in = null },
+};
+
+fn oneRowWant(name: []const u8) OneRowWant {
+    for (one_row_want) |w| if (std.mem.eql(u8, w.name, name)) return w;
+    unreachable;
+}
+
+test "turboexl3 ling: Config.dec_one_row_table gives each Ling-3.1-flash trunk shape its one_row_table launch at one row only, and every other shape the rest of the configuration's" {
+    try testing.expectEqual(dense_cases.len, one_row_want.len);
+    const off: config.Config = .{};
+    const on: config.Config = .{ .dec_one_row_table = true };
+    const on_wide: config.Config = .{ .dec_one_row_table = true, .dec_one_row_wide = true };
+    for (dense_cases) |c| {
+        const w = oneRowWant(c.name);
+        const shape: dense.Shape = .{ .in = c.in, .out = c.out, .rate = format.Rate.fromN(c.n).?, .dec = .mul1, .out_dtype = .bfloat16 };
+        try testing.expectEqual(w.bt != 0, dense.oneRowFor(shape) != null);
+        const b_off = dense.Dense.btSetFor(off, shape);
+        const b_on = dense.Dense.btSetFor(on, shape);
+        const b_wide = dense.Dense.btSetFor(on_wide, shape);
+        try testing.expectEqual(@as(u8, 0), b_off[1]);
+        try testing.expectEqual(w.bt, b_on[1]);
+        try testing.expectEqual(if (w.bt != 0) w.bt else @as(u8, @intCast(dense.Dense.btFor(2))), b_wide[1]);
+        for (b_off[2..], b_on[2..], b_wide[2..]) |x, y, z| try testing.expect(x == 0 and y == 0 and z == 0);
+        try testing.expectEqual(@as(?bool, null), dense.Dense.onePrepFor(off, shape));
+        try testing.expectEqual(w.prep_in, dense.Dense.onePrepFor(on, shape));
+    }
+    // a table shape at another rate is not a table shape
+    const k4: dense.Shape = .{ .in = 4096, .out = 24576, .rate = format.Rate.fromN(64).?, .dec = .mul1, .out_dtype = .bfloat16 };
+    try testing.expect(dense.oneRowFor(k4) == null);
+    try testing.expectEqual(@as(u8, 0), dense.Dense.btSetFor(on, k4)[1]);
+}
+
+test "turboexl3 gpu ling dense: the one-row launch table (Config.dec_one_row_table) gives one row's own bytes and the three-launch chain's at every Ling-3.1-flash trunk shape, on its table launch (TURBOEXL3_GPU=1)" {
+    _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    const s = mlx.mlx_default_gpu_stream_new();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    const a = std.heap.page_allocator;
+    var g = try G.init(a, s);
+    defer g.deinit();
+    const saved = config.get().*;
+    defer config.configure(saved) catch unreachable;
+    var served_cfg = saved;
+    served_cfg.dec_one_row_wide = false;
+    served_cfg.dec_one_row_table = false;
+    var table_cfg = served_cfg;
+    table_cfg.dec_one_row_table = true;
+    var failed: usize = 0;
+    for (dense_cases) |c| {
+        const w = oneRowWant(c.name);
+        var prng = std.Random.DefaultPrng.init(0x1E0B ^ (@as(u64, c.in) << 24) ^ c.out);
+        const rnd = prng.random();
+        const rate = format.Rate.fromN(c.n).?;
+        var lin = try ref.synthLinear(a, rnd, 1, c.in, c.out, rate, .mul1);
+        defer lin.deinit(a);
+        const mark = g.mark();
+        defer g.resetTo(mark);
+        const trellis = try g.hostArray(std.mem.sliceAsBytes(lin.trellis), &.{ ci(c.in / 16), ci(c.out / 16), ci(c.n) }, .uint16);
+        const suh = try g.hostArray(std.mem.sliceAsBytes(lin.suh), &.{ci(c.in)}, .float16);
+        const svh = try g.hostArray(std.mem.sliceAsBytes(lin.svh), &.{ci(c.out)}, .float16);
+        const x = try a.alloc(f32, c.in);
+        defer a.free(x);
+        for (x) |*v| v.* = bfExact(rnd.floatNorm(f32));
+        const got = try a.alloc(f32, 3 * c.out);
+        defer a.free(got);
+        for ([_]mlx.mlx_dtype{ .float32, .bfloat16 }) |dt| {
+            const geo: dense.Shape = .{ .in = c.in, .out = c.out, .rate = rate, .dec = .mul1, .out_dtype = dt };
+            try config.configure(served_cfg);
+            var chain = try dense.Dense.init(geo);
+            defer chain.deinit();
+            chain.dec_on = false;
+            var own = try dense.Dense.init(geo);
+            defer own.deinit();
+            try config.configure(table_cfg);
+            var table = try dense.Dense.init(geo);
+            defer table.deinit();
+            try config.configure(served_cfg);
+            const xr = try g.astype(try g.hostArray(std.mem.sliceAsBytes(x), &.{ 1, ci(c.in) }, .float32), dt);
+            for ([_]*dense.Dense{ &chain, &own, &table }, 0..) |d, k| {
+                const y = try g.adopt(try d.linear(s, xr, trellis, suh, svh, 1));
+                _ = try g.hostF32(try g.astype(y, .float32), got[k * c.out ..][0..c.out]);
+            }
+            const own_in = try own.decPrepInside(1);
+            const table_in = try table.decPrepInside(1);
+            // the table's launch: its tiles per threadgroup, its prepare placement (null: the served one)
+            const shape_ok = table.bt_set[1] == w.bt and table_in == (w.prep_in orelse own_in);
+            var d_own: usize = 0;
+            var d_table: usize = 0;
+            for (got[c.out..][0..c.out], got[2 * c.out ..][0..c.out], got[0..c.out]) |o, t, ch| {
+                d_own += @intFromBool(@as(u32, @bitCast(o)) != @as(u32, @bitCast(ch)));
+                d_table += @intFromBool(@as(u32, @bitCast(t)) != @as(u32, @bitCast(ch)));
+            }
+            const ok = shape_ok and d_own == 0 and d_table == 0;
+            std.debug.print("TURBOEXL3_LING_ONE_ROW_TABLE {s} in={d} out={d} n={d} x={s} own_prepare={s} table_prepare={s} table_bt={d} own_vs_chain={d}/{d} table_vs_chain={d}/{d} {s}\n", .{ c.name, c.in, c.out, c.n, @tagName(dt), if (own_in) "inside" else "own_launch", if (table_in) "inside" else "own_launch", table.bt_set[1], d_own, c.out, d_table, c.out, if (ok) "PASS" else "FAIL" });
             failed += @intFromBool(!ok);
         }
     }
