@@ -609,7 +609,9 @@ test "turboexl3 gpu glm53f fused timing: each fused path against the chain it re
         defer a.free(slots);
         for (rows, slots, 0..) |*r, *sl, i| {
             r.* = rnd.uintLessThan(u32, act_rows);
-            sl.* = @intCast(@min(i / 455, 8) * 11);
+            // the run's index in u32 first: @min with a comptime bound narrows its type (u4 here), and 8 * 11 needs 7 bits
+            const run: u32 = @intCast(@min(i / 455, 8));
+            sl.* = run * 11;
         }
         const ones: [S]f32 = @splat(1.0);
         const c: RowsCtx = .{
@@ -762,7 +764,9 @@ test "turboexl3 gpu glm53f schedule timing: the banked decode's schedules at a v
         defer a.free(slots);
         for (rows, slots, 0..) |*r, *sl, i| {
             r.* = rnd.uintLessThan(u32, act_rows);
-            sl.* = @intCast(@min(i / 455, 35) * 2);
+            // the run's index in u32 first: @min with a comptime bound narrows its type (u6 here), and 35 * 2 needs 7 bits
+            const run: u32 = @intCast(@min(i / 455, 35));
+            sl.* = run * 2;
         }
         const ones_h = try a.alloc(f32, S);
         defer a.free(ones_h);
@@ -1186,7 +1190,9 @@ test "turboexl3 gpu glm53f prefill options timing: a 16384-row prompt bank call 
             try sortBySlot(a, rows, slots, prompt_slots);
         } else for (rows, slots, 0..) |*r, *sl, i| {
             r.* = rnd.uintLessThan(u32, act_rows);
-            sl.* = @intCast(@min(i / 455, 35) * 2);
+            // the run's index in u32 first: @min with a comptime bound narrows its type (u6 here), and 35 * 2 needs 7 bits
+            const run: u32 = @intCast(@min(i / 455, 35));
+            sl.* = run * 2;
         }
         for (pf_sets) |o| {
             try pfOptsConfigure(saved, o);
