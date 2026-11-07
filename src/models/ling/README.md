@@ -28,7 +28,8 @@ The code only Ling-3.1-flash uses, on the core's routed chain, DeepSeek-V4.1's b
 | `mla_latent_test.zig` | the host's f64 reference, absorbed against expanded (CPU); `decodeLatent` against it within tolerance, a call's rows against one-row calls and strided cache views against contiguous ones, byte for byte (GPU) |
 | `kernels/mla_latent/` | the three launches' texts and their header; `kernels/test/pins/` what the CPU test pins |
 | `mla_flash.zig` | `mlaFlashPrefill` (`api.zig` exports it): the MLA prompt attention as one causal flash launch, MLX's NAX attention kernel at Ling's head dims (qk 192, v 128) |
-| `kernels/mla_flash/` | the flash kernel's pieces: MLX's attention_nax body less its unused arms, its row ops, the kernel attribute's define and undefine |
+| `mla_flash_test.zig` | the flash kernel's text (CPU) and its standalone translation units (TURBOEXL3_METAL_DUMP=1); against MLX's fused SDPA word for word where MLX instantiates one, and within tolerance of an f64 reference at Ling's heads (GPU) |
+| `kernels/mla_flash/` | the flash kernel's pieces: MLX's attention_nax body less its unused arms, its row ops, the kernel attribute's define and undefine; `kernels/test/` its pin file and dump data |
 
 Ling's own Metal is the pairs', the shared expert's, the routed combine's, the mixer input's add and norm and the
 router's pieces (`kernels/pair/`, `kernels/shared/`, `kernels/combine/`, `kernels/addnorm/`, `kernels/router/`),

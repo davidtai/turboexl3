@@ -1335,6 +1335,8 @@ ADDED_FILES['models/ling/bproj_test.zig'] = ('kdaProjB held to the served b_proj
 # Ling-3.1-flash's MLA prompt attention as one causal flash launch (ling-flash)
 ADDED_FILES['models/ling/mla_flash.zig'] = ('Ling-3.1\'s MLA prompt attention in one launch (mlaFlashPrefill): MLX 0.32.5\'s '
                                             'attention_nax at qk 192, v 128, its parameters from the operands')
+ADDED_FILES['mla_flash_test.zig'] = ('the flash kernel\'s text, refusals and dump units (CPU); MLX\'s fused SDPA word for '
+                                     'word at 128 / 128 and 96 / 64, and an f64 reference at Ling\'s heads (GPU)')
 ADDED_KERNELS[('mla_flash.zig', 'turboexl3_ling_mla_flash')] = ('MLX\'s attention_nax less its mask, sinks, log-sum-exp '
                                                                 'and window arms (kernels/mla_flash/body.metal)')
 

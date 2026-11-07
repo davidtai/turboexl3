@@ -865,5 +865,12 @@ The MLA prompt attention as one causal flash launch (`root.ling.mlaFlashPrefill`
   accumulate in f32, P meets V in the NAX MMA and the output rounds once, where the composed path rounds the scaled
   query, the scores and the probabilities to the activation dtype. At a head-dim pair MLX instantiates its fused
   kernel for (qk = v = 128; qk 96, v 64) it is that kernel, word for word.
-- **Pinned by:** `src/models/ling/mla_flash.zig` "turboexl3 ling mla flash plan: MLX's grid and threadgroup, alignment by
-  whole tiles, the admitted head dims" (CPU, the plan).
+- **Pinned by:** `src/models/ling/mla_flash_test.zig` "turboexl3 gpu ling mla flash: at the head dims MLX instantiates
+  its fused NAX kernel for, the kernel gives MLX's fused causal SDPA's words (TURBOEXL3_GPU=1)" (GPU, words, against
+  `force_fused` SDPA, GQA and views of a wider cache included) and "... at Ling's heads (qk 192, v 128) the causal prompt
+  attention is within tolerance of an f64 host reference and no worse than MLX's composed path against it
+  (TURBOEXL3_GPU=1)" (GPU, 2.5e-2 beyond the output's rounding over the reference RMS, and an RMS and worst-element
+  error no worse than the composed path's against the same reference, bf16 and f16); "turboexl3 ling mla flash texts: the body is MLX's
+  attention_nax statements ..." (CPU, the texts; its pin file); "... metal source: the kernel as standalone translation
+  units (TURBOEXL3_METAL_DUMP=1)" (the offline compile); `src/models/ling/mla_flash.zig` "turboexl3 ling mla flash plan:
+  ..." (CPU, the plan).
