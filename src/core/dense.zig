@@ -168,6 +168,28 @@ const finishp_in = [_][*:0]const u8{ "zp0", "zp1", "zp2", "zp3", "svh", "R1", "R
 
 pub const Shape = struct { in: u32, out: u32, rate: format.Rate, dec: format.Decode, out_dtype: mlx.mlx_dtype };
 
+/// A trunk shape's one-row launch under `Config.dec_one_row_table`: output tiles per GEMV threadgroup, and DEC-ONE's
+/// prepare inside the GEMV launch (true), in prep_sc's (false) or where the rest of the configuration puts it (null).
+pub const OneRow = struct { in: u32, out: u32, n: u32, bt: u8, prep_in: ?bool };
+/// Ling-3.1-flash's trunk shapes at K6 (n 96) whose fastest one-row launch on the M5 Max is not the served one (the
+/// 72-layer chain at one row, TURBOEXL3_LING_TIME's sweep: 29.58 -> 27.20 ms with all of them); MLA q_a, the dense FFN
+/// and the head keep the served launch. Launch shape only.
+pub const one_row_table = [_]OneRow{
+    .{ .in = 4096, .out = 24576, .n = 96, .bt = 1, .prep_in = false }, // KDA q|k|v
+    .{ .in = 4096, .out = 8192, .n = 96, .bt = 1, .prep_in = false }, // KDA f, g, z and a
+    .{ .in = 8192, .out = 4096, .n = 96, .bt = 1, .prep_in = false }, // KDA o, MLA dense
+    .{ .in = 1536, .out = 12288, .n = 96, .bt = 8, .prep_in = false }, // MLA q_b
+    .{ .in = 4096, .out = 640, .n = 96, .bt = 2, .prep_in = false }, // MLA kv_a
+    .{ .in = 4096, .out = 1280, .n = 96, .bt = 2, .prep_in = null }, // the shared expert's gate and up
+    .{ .in = 1280, .out = 4096, .n = 96, .bt = 1, .prep_in = null }, // the shared expert's down
+};
+
+/// `one_row_table`'s entry for `shape`, null for a shape it does not name
+pub fn oneRowFor(shape: Shape) ?OneRow {
+    for (one_row_table) |e| if (e.in == shape.in and e.out == shape.out and e.n == shape.rate.n) return e;
+    return null;
+}
+
 const dec_said = Global(bool, "dense_dec_said", false);
 
 /// The kernels of one dense linear shape; configs per row count (decode) plus the prefill set.
@@ -220,6 +242,9 @@ pub const Dense = struct {
     dec_rows: u32,
     dec_prep_rows: u32,
     dec_prep_out: u32,
+    /// a one-row call's prepare: inside the launch (true, where its buffer fits) or in prep_sc's (false) whatever the row
+    /// and width thresholds say; null keeps them (`Config.dec_one_row_table`'s entry for this shape, else null)
+    one_prep_in: ?bool = null,
     dec0: mlx.mlx_fast_metal_kernel,
     dec1: mlx.mlx_fast_metal_kernel,
     prep_sc: mlx.mlx_fast_metal_kernel,
@@ -400,7 +425,8 @@ pub const Dense = struct {
             // `Config.dec_one_row_wide`: a one-row call on two rows' launch shape (the prepare in prep_sc's launch above
             // dec_prep_out outputs, BT 2), launch shape only
             .dec_prep_rows = if (config.get().dec_one_row_wide) 0 else 1,
-            .bt_set = btSetInit(),
+            .bt_set = btSetFor(config.get().*, shape),
+            .one_prep_in = onePrepFor(config.get().*, shape),
             .dec_prep_out = 1024,
             .dec0 = ks.newKernel("turboexl3_dense_dec0", &dec0_in, &dec0_out, text_dec0, decode.header5, true) orelse return error.KernelCreateFailed,
             .dec1 = ks.newKernel("turboexl3_dense_dec1", &dec1_in, &dec1_out, text_dec1, decode.header5, true) orelse return error.KernelCreateFailed,
@@ -409,11 +435,21 @@ pub const Dense = struct {
         };
     }
 
-    /// `bt_set` as a Dense starts: none set, but a one-row call's 2 under `Config.dec_one_row_wide` (two rows' BT)
-    fn btSetInit() [decode.Kernels.max_rows + 1]u8 {
+    /// `bt_set` as a Dense of `shape` starts under `cfg`: none set, but a one-row call's 2 under `Config.dec_one_row_wide`
+    /// (two rows' BT) and its `one_row_table` entry's under `Config.dec_one_row_table`
+    pub fn btSetFor(cfg: config.Config, shape: Shape) [decode.Kernels.max_rows + 1]u8 {
         var b: [decode.Kernels.max_rows + 1]u8 = @splat(0);
-        if (config.get().dec_one_row_wide) b[1] = @intCast(btFor(2));
+        if (cfg.dec_one_row_wide) b[1] = @intCast(btFor(2));
+        if (cfg.dec_one_row_table) if (oneRowFor(shape)) |e| {
+            b[1] = e.bt;
+        };
         return b;
+    }
+
+    /// `one_prep_in` as a Dense of `shape` starts under `cfg`
+    pub fn onePrepFor(cfg: config.Config, shape: Shape) ?bool {
+        if (!cfg.dec_one_row_table) return null;
+        return if (oneRowFor(shape)) |e| e.prep_in else null;
     }
 
     /// Whether DEC-ONE's prepare can run inside its launch for this geometry: the K slice whole 128-blocks (PER even), and the
@@ -443,7 +479,9 @@ pub const Dense = struct {
         const nb = self.shape.in / 128;
         // at least 8 counters: MLX binds an input of fewer than 8 elements in the constant address space (no atomics there)
         const ncnt: u32 = @max(nob * chunks, 8);
-        const inside = (rows_u <= self.dec_prep_rows or self.shape.out <= self.dec_prep_out) and decPrepFits(self.shape, self.ks_split, rb, bt);
+        const by_rule = rows_u <= self.dec_prep_rows or self.shape.out <= self.dec_prep_out;
+        const want_in = if (rows_u == 1) (self.one_prep_in orelse by_rule) else by_rule;
+        const inside = want_in and decPrepFits(self.shape, self.ks_split, rb, bt);
         const tmpl = [_]ks.TemplateArg{
             t[0], t[1], t[2],
             .{ .name = "IN", .value = .{ .int = IN } },

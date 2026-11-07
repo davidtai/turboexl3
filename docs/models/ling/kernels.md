@@ -121,7 +121,8 @@ A KDA layer's z | a, the shared expert's gate | up and the dense FFN's gate | up
 
 - **Used by:** Ling-3.1-flash: `root.ling.linearPair` at the decode rows (1 to 16) where the members' own `linear` calls
   take the prepare in a launch of its own (`Dense.decPrepInside` false: past one row, or at one row under
-  `Config.dec_one_row_wide`, at more than `dec_prep_out` (1024) outputs), after `turboexl3_ling_pair_prep`.
+  `Config.dec_one_row_wide`, at more than `dec_prep_out` (1024) outputs, or at a shape `Config.dec_one_row_table`'s
+  table runs that way), after `turboexl3_ling_pair_prep`.
 - **Shapes and dtypes:** jxp f16 [2 · rows, IN] and jxs f32 [2 · rows, IN/128] (member m's prepared rows and their
   128-block sums at rows m · rows.., from `turboexl3_ling_pair_prep`); w0, w1 each member's own trellis U16 or I16
   [IN/16, out_m/16, NHW] (one dtype); svh0, svh1 f16 [out_m]; cnt u32 [max(OUT/128 · chunks, 8)] (zeroed by the

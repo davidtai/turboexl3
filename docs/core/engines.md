@@ -350,7 +350,7 @@ The A layouts (`alay`):
 
 | rows | path | launches | levels |
 |---|---|---|---|
-| 1–4 (DEC-ONE's row cap) | DEC-ONE: one GEMV launch; the threadgroup that arrives last at its (output block, [row chunk](glossary.md#row-chunk)) runs the finish. The prepare runs inside that launch at 1 row, or at up to 1024 outputs, where its buffer fits; otherwise `prep_sc` runs it in a launch of its own (both thresholds are constants; `dec_one_row_wide` gives a 1-row call the 2-row launch shape: the prepare in `prep_sc` above 1024 outputs, 2 tiles per threadgroup) | 2 | 1 with the prepare inside, else 2 |
+| 1–4 (DEC-ONE's row cap) | DEC-ONE: one GEMV launch; the threadgroup that arrives last at its (output block, [row chunk](glossary.md#row-chunk)) runs the finish. The prepare runs inside that launch at 1 row, or at up to 1024 outputs, where its buffer fits; otherwise `prep_sc` runs it in a launch of its own (both thresholds are constants; `dec_one_row_wide` gives a 1-row call the 2-row launch shape: the prepare in `prep_sc` above 1024 outputs, 2 tiles per threadgroup; `dec_one_row_table` gives a 1-row call at a shape `dense.one_row_table` names that entry's tiles and prepare placement) | 2 | 1 with the prepare inside, else 2 |
 | 5–16, or `dec_one` false | `prep_s` → multi-row `dgemv` (`dgemv_lean` for chunks of 6 to 8 rows) → `dfinish` | 3 | 3 |
 | 17–32 (`small_rows`; 0 when `nax` is false) | `prep` → register-path GEMM `rs_gemm` → `finish` | 3 | 3 |
 | 33+ | `prep` and `dequant` → MLX matmul → `finish` | 4 | 3 |
