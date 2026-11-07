@@ -679,13 +679,37 @@ def value_of(prog, unit, a, b, env=None):
         return EvalError(f'{type(e).__name__}: {e}')
 
 
+def variant_entry(unit, table):
+    """{field: (a, b)}: the token span of each field of the first entry of the array const `table` in `unit`
+    (`[_]T{ .{ .field = value, ... }, ... }`); None without that const"""
+    t = unit.t
+    for (key, a, b) in unit.decls:
+        if key != f'const {table}':
+            continue
+        for k in range(a, b - 1):
+            if t[k].text == '.' and t[k + 1].text == '{':
+                out = {}
+                for (s, e) in unit.split_commas(k + 2, unit.match(k + 1)):
+                    if e - s >= 4 and t[s].text == '.' and t[s + 2].text == '=':
+                        out[t[s + 1].text] = (s + 3, e)
+                return out
+    return None
+
+
 def kernel_calls(prog, unit):
     """(name, line, source, header, token index) of every newKernel call in the unit (an EvalError where not evaluable)"""
     t, out = unit.t, []
+    # a call's `<v>.<field>` arguments where <v> is an entry of a variant table (VARIANT_TABLES): the first entry's values
+    variants = {v: variant_entry(unit, tbl) for ((f, v), tbl) in VARIANT_TABLES.items() if f == os.path.basename(unit.name)}
+
+    def span(a, b):
+        if b - a == 3 and t[a].kind == 'id' and t[a + 1].text == '.' and variants.get(t[a].text):
+            return variants[t[a].text].get(t[a + 2].text, (a, b))
+        return (a, b)
     for k in range(len(t) - 1):
         if t[k].text == 'newKernel' and t[k + 1].text == '(':
             close = unit.match(k + 1)
-            args = unit.split_commas(k + 2, close)
+            args = [span(a, b) for (a, b) in unit.split_commas(k + 2, close)]
             vals = []
             for (a, b) in (args[3], args[4]):
                 if b - a == 1 and t[a].kind == 'id' and t[a].text not in unit.consts:
@@ -1309,6 +1333,24 @@ for _t in ('turboexl3 gpu glm53f fused timing: each fused path against the chain
            'half_rows and both, in calls of 4096 and 16384 rows on each path, over 36 experts\' 455-row runs and over a '
            'drawn routing (TURBOEXL3_GLM_TIME=1)'):
     EDITED_TESTS[('fused_test.zig', _t)] = 'the 455-row runs\' slots in u32 (the narrowed @min overflowed their product)'
+
+# DEC-ONE's GEMV variants (Config.dense_variant, Config.dec_bt): dense.zig's Dense.init makes dec0 and dec1 from the variant
+# the configuration names (`dv`, an entry of `dec_variants`: its kernels' names, texts and header). Check 1 reads those
+# calls' `dv.<field>` arguments as the table's first entry's (name "", the default), so the default calls are held to the
+# original calls' names, texts and headers; the other entries are kernels of their own names, built only when the
+# configuration names them (t4 / t1 / t0: an EXL3_T1V define file before header5; ku / kut4: the ku texts)
+VARIANT_TABLES = {('dense.zig', 'dv'): 'dec_variants'}
+ADDED[('config.zig', 'const dense_variants')] = 'DEC-ONE\'s GEMV variant count (dense.dec_variants.len, checked there)'
+ADDED[('dense.zig', 'const DecVariant')] = 'a DEC-ONE GEMV variant: its name, its two kernels\' names, their texts and header'
+ADDED[('dense.zig', 'const dec_variants')] = ('DEC-ONE\'s GEMV variants: the first today\'s dec0 and dec1 (check 1 reads the '
+                                             'calls as it), then t4, t1, t0, ku and kut4')
+ADDED[('dense.zig', 'comptime #62')] = 'dec_variants.len checked against config.dense_variants'
+ADDED[('dense.zig', 'fn decVariantOf')] = 'dec_variants\' index by name (the plugin\'s TURBOEXL3_GLM53F_DEC)'
+ADDED_FILES['dense_dec_test.zig'] = ('DEC-ONE\'s schedules at sc_3.10\'s 20 dense shapes, rows 1 to 4, bf16 and f32: each variant '
+                                    'and output-tile count against the served configuration\'s bytes (GPU), and a verify\'s '
+                                    'trunk timed per class and schedule (TURBOEXL3_GLM_TIME=1)')
+EDITED_TESTS[('config.zig', 'turboexl3 config: the defaults are valid and served; an unserved form, slice count or layout is '
+              'refused')] = 'DEC-ONE\'s dense_variant and dec_bt: the defaults, every variant and tile count served, others refused'
 
 
 def metal_strings(fn, toks, corpus):
