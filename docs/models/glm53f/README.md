@@ -41,6 +41,7 @@ The plugin's opt-in fused paths (each off by default, each byte for byte the cha
 |---|---|---|---|
 | routed experts in a prompt call over a slot bank | `moeClampedRows` | the call's gather (`take`), its cast to f32 and the f32 output's cast to bf16 around `moeClamped` at top-1: the chain's prepare reads each row-slot's x row through a row map (`turboexl3_pf_prep_r`, `prefill.text_prep_rows`) and its finish stores bf16 | `TURBOEXL3_GLM53F_PF_ROWS=1` |
 | routed experts over the slot banks at decode rows | `moeClampedBankedAs` (bf16) | the f32 output's cast to bf16 after `moeClampedBanked`: the banked down finish stores bf16 | `TURBOEXL3_GLM53F_DEC_BF16=1` |
+| the shared expert's gate and up at decode rows | `glm53f.shared_gu.gateUp` | `linear` of the gate and of the up (two DEC-ONE calls, 4 launches): one DEC-ONE launch over both trellises as they lie, each member at its own K split (8, where the joined width would take 4), suh and svh (`turboexl3_glm53f_shared_gu`, `shared_gu_test.zig`) | `TURBOEXL3_GLM53F_SHARED_GU=1` |
 
 The plugin's opt-in schedules (each the default's bytes, `fused_test.zig`):
 
@@ -51,7 +52,8 @@ The plugin's opt-in schedules (each the default's bytes, `fused_test.zig`):
 | routed experts in a prompt call over a slot bank | `configure` (`pf_bk128`, `pf_half_rows`) | the routed prefill's down GEMM in 128-deep K stages, and a simdgroup whose rows end within its first 16 multiplying only that fragment row: the same MMAs in the same order | `TURBOEXL3_GLM53F_PF_OPTS=<bk128\|hr\|bk128.hr>` |
 | the trunk's linears at prefill rows | `pgemm.host_table` (from `glm53f.pg2Table`, `api.zig`) | pg2 at a tile a linear from `pgemm.candidates`: MLX's fused NAX GEMM loop at that tile with the finish as its epilogue, one launch for the matmul and the finish (the chain's words where MLX runs its regular kernel) | `TURBOEXL3_GLM53F_PG2=<one code a trunk linear>` |
 
-GLM-5.3-Flash has one kernel of its own, the row-map prepare (a composition of the core prepare's pieces). Its tests
+GLM-5.3-Flash has two kernels of its own: the row-map prepare (a composition of the core prepare's pieces) and the
+shared expert's gate | up launch (dense's DEC-ONE pieces around its member choice; [kernels.md](kernels.md)). Its tests
 (`src/models/glm53f/`) hold every shape and rate in the tables above: `glm53f_test.zig` holds each dense shape at each of
 its K against `format.project`, `routed_test.zig` holds the routed experts (`moeClamped`, at every routed rate) against
 the clamped reference and the banked decode against `moeClamped`, byte for byte, and `fused_test.zig` holds each fused

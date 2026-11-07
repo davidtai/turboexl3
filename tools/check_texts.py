@@ -1352,6 +1352,23 @@ ADDED_FILES['dense_dec_test.zig'] = ('DEC-ONE\'s schedules at sc_3.10\'s 20 dens
 EDITED_TESTS[('config.zig', 'turboexl3 config: the defaults are valid and served; an unserved form, slice count or layout is '
               'refused')] = 'DEC-ONE\'s dense_variant and dec_bt: the defaults, every variant and tile count served, others refused'
 
+# GLM-5.3-Flash's shared expert gate | up in one DEC-ONE launch (glm53f/shared_gu.zig, the plugin's
+# TURBOEXL3_GLM53F_SHARED_GU): dense's text_dec1 with the member chosen over two trellises after its head (jsel_pair) and
+# ricursive's tile address in the member's trellis (jtile), each member at its own K split, suh and svh
+ADDED_FILES['shared_gu.zig'] = ('the shared expert\'s gate | up in one DEC-ONE launch (turboexl3_glm53f_shared_gu: dense\'s '
+                                'DEC-ONE pieces with jsel_pair, ricursive\'s jtile and jstore_pair, over the two trellises as '
+                                'they lie, into two outputs), its plan, the svh join and its CPU tests')
+ADDED_FILES['shared_gu_test.zig'] = ('shared_gu.gateUp against root.linear of each member, word for word, at K6 and K4, decode rows '
+                                     '1 to 8 and 16, bf16 and f32 (GPU)')
+ADDED_KERNELS[('shared_gu.zig', 'turboexl3_glm53f_shared_gu')] = ('dense\'s text_dec1 with the member chosen over two trellises '
+                                                                  'after its head (jsel_pair), the tile read in the member\'s '
+                                                                  'trellis (ricursive\'s jtile) and the finish\'s value stored in '
+                                                                  'the member\'s own output (jstore_pair)')
+CHANGED[('ricursive.zig', 'const jsel')] = 'pub: glm53f/shared_gu.zig\'s text test holds its own member choice beside it'
+CHANGED[('ricursive.zig', 'const jtile')] = 'pub: glm53f/shared_gu.zig\'s text reads the member\'s tile through it'
+ADDED[('models/glm53f/api.zig', 'const shared_gu')] = 'shared_gu.zig, the shared expert\'s gate | up launch (root\'s glm53f.shared_gu)'
+CHANGED[('root.zig', 'const shared_state')] = 'registers glm53f.shared_gu.shared_state'
+
 
 def metal_strings(fn, toks, corpus):
     """(line, kind, value) of every literal in a .zig file that holds Metal"""

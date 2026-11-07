@@ -4,6 +4,8 @@
 //! times them, which is where a host's codes come from.
 const std = @import("std");
 const pgemm = @import("../../core/pgemm.zig");
+/// The shared expert's gate | up in one DEC-ONE launch (the plugin's TURBOEXL3_GLM53F_SHARED_GU)
+pub const shared_gu = @import("shared_gu.zig");
 
 /// One trunk linear at prefill rows: its name, in (K) and out (N)
 pub const Linear = struct { name: []const u8, k: u32, n: u32 };
