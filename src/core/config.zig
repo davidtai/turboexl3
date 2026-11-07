@@ -29,6 +29,10 @@ pub const Config = struct {
     /// Both routed prefill GEMMs' 128-row tile launches in 128-deep K stages, the mixed launches at their own depth
     /// (`prefill.Options.t128_bk128`; with `pf_t128`). The same bytes.
     pf_t128_bk128: bool = false,
+    /// Beside the 128-row tiles, the mixed launch's outputs at the rows they hold (`prefill.Options.t128_zfit`; with
+    /// `pf_t128`): each expert's remainder back to back, in arrays of `prefill.t128ZCap` rows where the caller names the
+    /// call's experts (`root.moeClampedRowsFit`). The same bytes.
+    pf_t128_zfit: bool = false,
     /// Routed prefill rows on the fused GEMM chain; false refuses them (`error.Exl3EngineNotImplemented`).
     prefill: bool = true,
     /// The device passes MLX's NAX gate (an M5-class GPU and macOS 26.2 or later), the consumer's to say. False keeps

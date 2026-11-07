@@ -692,6 +692,7 @@ fn pfOptions() prefill.Options {
     o.bk128 = config.get().pf_bk128;
     o.half_rows = config.get().pf_half_rows;
     o.t128_bk128 = config.get().pf_t128_bk128;
+    o.t128_zfit = config.get().pf_t128_zfit;
     return o;
 }
 
@@ -726,10 +727,12 @@ fn prefillFor(geo: prefill.Geometry) !*prefill.Prefill {
     if (o.small != .mixed or o.split != 1 or !o.froute or o.aux != 0 or o.bm != 64) o.t128 = false;
     // the 128-row tile launches' 128-deep stages: where those launches run, within 32 KB
     if (!o.t128 or o.stageBytes(128) > 32768) o.t128_bk128 = false;
+    // the compact mixed outputs: the 128-row tiles' mixed launch
+    if (!o.t128) o.t128_zfit = false;
     pf_cache.get().*[i] = try prefill.Prefill.init(geo, o);
     if (!pf_logged.get().*) {
         pf_logged.get().* = true;
-        std.debug.print("[turboexl3] prefill engaged: fused EXL3 GEMM chain (bm={d} dbuf={} unroll={} fragb={} intr={} sintr={} defer={} split={d} small={s} down_bk={d} down_ncb={d} froute={} aux={d} alay={d} t128={} t128_bk128={})\n", .{ o.bm, o.dbuf, o.unroll, o.fragb, o.intr, o.sintr, o.defer_affine, o.split, @tagName(o.small), o.downStage(), o.ncb, o.froute, o.aux, o.alay, o.t128, o.t128_bk128 });
+        std.debug.print("[turboexl3] prefill engaged: fused EXL3 GEMM chain (bm={d} dbuf={} unroll={} fragb={} intr={} sintr={} defer={} split={d} small={s} down_bk={d} down_ncb={d} froute={} aux={d} alay={d} t128={} t128_bk128={} t128_zfit={})\n", .{ o.bm, o.dbuf, o.unroll, o.fragb, o.intr, o.sintr, o.defer_affine, o.split, @tagName(o.small), o.downStage(), o.ncb, o.froute, o.aux, o.alay, o.t128, o.t128_bk128, o.t128_zfit });
     }
     return &pf_cache.get().*[i].?;
 }
@@ -930,6 +933,19 @@ const clamp_logged = Global(bool, "root_clamp_logged", false);
 /// f16 or f32; `limit` 1..128, else error.InvalidExl3Clamp. `Config.prefill` and `Config.nax` as `moe`'s prefill rows;
 /// gate, up and down at one rate.
 pub fn moeClampedRows(s: mlx.mlx_stream, x: mlx.mlx_array, rows: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array, scores: mlx.mlx_array, dec: format.Decode, limit: c_int, out_dtype: mlx.mlx_dtype) !mlx.mlx_array {
+    return clampedRows(s, x, rows, bank, inds, scores, dec, limit, out_dtype, null);
+}
+
+/// `moeClampedRows` over a call whose `inds` hold at most `call_experts` distinct slots (the caller's count, 1 or more;
+/// more slots than that in inds is the caller's error, not checked): with `Config.pf_t128_zfit` the mixed launch's compact
+/// outputs take `prefill.t128ZCap` rows (64 an expert, at most S) in place of S. The same bytes.
+pub fn moeClampedRowsFit(s: mlx.mlx_stream, x: mlx.mlx_array, rows: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array, scores: mlx.mlx_array, dec: format.Decode, limit: c_int, out_dtype: mlx.mlx_dtype, call_experts: u32) !mlx.mlx_array {
+    if (call_experts == 0) return error.BadExl3Shape;
+    return clampedRows(s, x, rows, bank, inds, scores, dec, limit, out_dtype, call_experts);
+}
+
+/// `moeClampedRows`' body; `call_experts` as `moeClampedRowsFit`'s (null: the call's row count bounds the compact outputs).
+fn clampedRows(s: mlx.mlx_stream, x: mlx.mlx_array, rows: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array, scores: mlx.mlx_array, dec: format.Decode, limit: c_int, out_dtype: mlx.mlx_dtype, call_experts: ?u32) !mlx.mlx_array {
     if (limit <= 0 or limit > 128) return error.InvalidExl3Clamp;
     if (!config.get().prefill or !config.get().nax) return error.Exl3EngineNotImplemented;
     const xsh = mlx.getShape(x);
@@ -962,7 +978,7 @@ pub fn moeClampedRows(s: mlx.mlx_stream, x: mlx.mlx_array, rows: mlx.mlx_array, 
         .down_suh = bank.down.suh,
         .down_svh = bank.down.svh,
     };
-    if (pf.opts.t128) return pf.moeT128With(s, x, inds, scores, ops, S, out_dtype, rows);
+    if (pf.opts.t128) return pf.moeT128With(s, x, inds, scores, ops, S, out_dtype, rows, call_experts);
     return pf.moeWith(s, x, inds, scores, ops, S, out_dtype, rows);
 }
 
