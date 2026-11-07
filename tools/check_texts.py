@@ -1237,6 +1237,17 @@ ADDED_FILES['models/ling/addnorm_test.zig'] = ('addNormLinears against MLX\'s ad
                                                'linear word for word at decode rows 1 to 8, 12 and 16, the refusals (GPU)')
 ADDED_FILES['models/ling/combine_test.zig'] = ('the combine\'s GPU tests: both entries against MLX\'s composed combine word for '
                                                'word, the refusals')
+# Ling-3.1-flash's MoE tail at decode rows in one launch (turboexl3_ling_moe_tail): the routed sum, its astype, the shared
+# expert's add and mlx-serve's add_norm (turboexl3_ling's MLX_SERVE_LING_MOE_TAIL)
+ADDED_FILES['models/ling/tail.zig'] = ('Ling-3.1\'s MoE tail at decode rows 1 to 8 in one launch (moeTail: mlx-serve\'s '
+                                      'add_norm text cut at its delta, tail_1 ++ tail_delta ++ tail_2, the delta the '
+                                      'routed sum in the combine\'s statements, rounded to T, plus the shared expert)')
+ADDED_FILES['models/ling/tail_test.zig'] = ('moeTail against the chain it replaces (the source\'s routed sum, the astype, '
+                                           'the shared add, MLX\'s add and fast rms_norm) word for word at rows 1 to 8, '
+                                           'limits 0 and 10, the joined and flat rows, planted signed zeros (GPU)')
+ADDED[('models/ling/api.zig', 'const tail')] = 'tail.zig, a MoE layer\'s tail at decode rows in one launch'
+ADDED[('models/ling/api.zig', 'const moeTail')] = 'the re-export of tail.zig\'s moeTail'
+CHANGED[('models/ling/api.zig', 'const shared_state')] = 'registers the module state of the files the change added'
 # Ling-3.1-flash's MoE router at decode rows with the read-ahead predictor's scores (turboexl3_ling_router_*)
 ADDED_FILES['models/ling/router.zig'] = ('Ling-3.1\'s MoE router at decode rows 1 to 8 in two launches (routerLogits: MLX\'s '
                                          'one-row gemv_t for the logits beside its gemv / gemv_wide for the read-ahead '
@@ -1553,6 +1564,10 @@ SPLIT_ADDED_KERNELS['turboexl3_gu8bg'] = ('gu8b (Config.banked_gu8): the banked 
                                           '(form 8\'s gu8_1 and rk_line, prep2b\'s arithmetic over the span into threadgroup '
                                           'memory, gu3bg\'s GEMV there, its planes)')
 SPLIT_ADDED_KERNELS['turboexl3_gu8bgm3'] = 'the same with hw4b\'s M = 3 member path (gu8bg_3m3)'
+SPLIT_ADDED_KERNELS['turboexl3_ling_moe_tail'] = ('Ling-3.1\'s MoE tail at decode rows (models/ling/tail.zig): mlx-serve\'s '
+                                                  'add_norm (the plain arm) with its delta the routed sum over the call\'s '
+                                                  'joined rows in the combine\'s statements, rounded to T, plus the shared '
+                                                  'expert (tail_1 ++ tail_delta ++ tail_2); ling.moeTail')
 SPLIT_ADDED_KERNELS['turboexl3_ling_router_logits'] = ('Ling-3.1\'s router logits at decode rows (models/ling/router.zig): '
                                                        'MLX\'s one-row gemv over the loader\'s column-major table a row '
                                                        '(router/head ++ logits_1 ++ logits_w ++ logits_2 ++ close)')

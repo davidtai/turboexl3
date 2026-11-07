@@ -351,6 +351,51 @@ statement, then the fold in that order.
   join builds (TURBOEXL3_GPU=1)" (GPU, words); `src/models/ling/combine.zig` "turboexl3 ling combine texts: ..." (CPU,
   the texts).
 
+## `src/models/ling/tail.zig`
+
+A MoE layer's end at decode and verify rows in one launch: the routed sum over the call's joined rows, its cast to the
+activation dtype, the shared expert's add, then the residual add and the next layer's input norm (the final norm after
+the last layer). The text is mlx-serve's `add_norm` (`add_norm.fmt.metal`, its plain arm) word for word, cut at its
+delta (`tail_1`, `tail_2`): one threadgroup of D / 4 threads a row, four columns a thread, the simdgroups' sums of
+squares folded through a 32-slot table, `precise::rsqrt`, `w * T(x * inv)`. In place of `delta = float(X[at]);` the
+delta (`tail_delta`) is the routed sum in `turboexl3_ling_combine`'s statements (each product rounded to f32 alone, the
+K values folded in `col_reduce_small`'s order, contraction off in that block), rounded to T, plus the shared expert,
+rounded to T again: the MoE block's astype and add.
+
+### `turboexl3_ling_moe_tail`
+
+<!-- kernel-facts: turboexl3_ling_moe_tail -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/ling/tail.zig:49` (`fn kernelOf`) |
+| inputs | `H`, `Y`, `WT`, `XS`, `W`, `eps` |
+| outputs | `H_NEW`, `HN` |
+| source | `text` = `ling:tail/tail_1` ++ `ling:tail/tail_delta` ++ `ling:tail/tail_2` (2241 B, `ebc2e07ccb65`) |
+| header | `""` = (empty) (0 B, `e3b0c44298fc`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** Ling-3.1-flash: `root.ling.moeTail`, a MoE layer's end at decode and verify rows (1 to 8) after its
+  routed call's join; the outside plugin's opt-in (turboexl3_ling's `MLX_SERVE_LING_MOE_TAIL=1`).
+- **Shapes and dtypes:** H bf16 or f16 [..., D] (the residual; rows 1 to 8, D a multiple of 4 up to 4096), Y f32 [rows, K, D]
+  or [rows · K, D] (the call's joined rows, each pair's expert output at weight 1), WT bf16, f16 or f32 [rows, K] (the
+  routes' weights, K 1 to 8), XS [..., D] in H's dtype (the shared expert's output), W [D] in H's dtype (the next
+  layer's input norm, or the final norm), eps f32 0-dim. Out: H_NEW and HN in H's shape and dtype.
+- **Grid and threadgroup:** `(D / 4 · rows, 1, 1)` / `(D / 4, 1, 1)`: mlx-serve's add_norm config, one threadgroup a
+  row, four columns a thread.
+- **Template args:** T (H's dtype), D (the width), TN (D / 4), K (the top-k).
+- **Replaces:** the source's routed sum (the weights' astype to f32, MLX's Multiply and the sum's `col_reduce_small`),
+  the MoE block's astype of the sum to T and its add of the shared expert, and mlx-serve's add_norm (`msv_add_norm`):
+  6 launches with 1.
+- **Bits:** the chain's words: each product `Y · float(WT)` rounded to f32 alone, the K values folded in
+  `col_reduce_small`'s order (`t = p_0 + 0`, then `t = (p_k + 0) + t`: the words of `p_k + t`, as `t` is never -0.0),
+  rounded to T, plus the shared expert, rounded to T; then the add_norm's statements, so the residual is MLX's add's
+  words and the normed rows MLX's fast rms_norm's.
+- **Pinned by:** `src/models/ling/tail_test.zig` "turboexl3 gpu ling tail: moeTail gives the served chain's words ..."
+  (GPU, words: the residual and the normed rows at rows 1 to 8, limits 0 and 10, the joined and flat rows, planted
+  signed zeros).
+
 ## `src/models/ling/addnorm.zig`
 
 A decode layer's mixer input in one launch: the residual add `h + delta`, its RMSNorm with the next layer's input norm,
