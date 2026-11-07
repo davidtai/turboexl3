@@ -34,7 +34,9 @@ The routed shape is new to the library: an expert width of 1280 is ten 128-block
 and the prefill tiles take it as any multiple of 128), and 512 experts at top-8. Every routed-expert kernel is a composition of the
 core's or DeepSeek-V4.1's pieces with one SwiGLU line swapped, so its bytes are the base launch's wherever no value
 reaches the limit. The combine is Ling's own kernel, held to MLX's three ops word for word (`combine_test.zig`), and so is the router's pair of launches, held to the host's nine (`router_test.zig`). The tests (`src/models/ling/ling_test.zig`) hold `moeLing` to `ref.moeRowClampedAt` at `silu_out`,
-`moeLingBanked` to `moeLing` byte for byte, and `linear` to the host reference at every trunk shape. The kernels:
+`moeLingBanked` to `moeLing` byte for byte, `linear` to the host reference at every trunk shape, and each row of a
+prompt call's `linear` to the same row of a whole-prompt call wherever both calls run MLX's regular matmul (a
+layer-major prompt pass's trunk linears; `TURBOEXL3_LING_ROWINV` lines). The kernels:
 [the core's catalog](../../core/kernels.md) (`turboexl3_fin7co`, `turboexl3_pf_midco`, `turboexl3_pf_mid_vco`,
 `turboexl3_pf_t128_midco`) and [DeepSeek-V4.1's](../deepseek_v41/kernels.md) (`turboexl3_fin7b`, `turboexl3_fin7cob`,
 `turboexl3_fin7bg`, `turboexl3_fin7cobg`).
