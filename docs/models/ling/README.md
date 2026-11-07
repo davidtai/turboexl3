@@ -28,6 +28,7 @@ What it runs on turboexl3 (`root.ling`, `src/models/ling/api.zig`):
 | a KDA layer's q\|k\|v, f and g at decode rows | `root.ling.kdaProj` (a host's opt-in; each member in its own buffers at its own K split), `root.ling.kdaProjPrepared` over the host's prepared rows, `root.ling.kdaProjB` with the layer's b_proj (bf16) as a fourth member | `turboexl3_ling_kdaproj_prep` then `turboexl3_ling_kdaproj_dec0` ([kernels](kernels.md)): each member's `linear` bytes; with b_proj `turboexl3_ling_kdaproj_dec0b`, b's rows the served one-row matmul's |
 | a decode layer's mixer input (rows 1 to 16): the residual add, its RMSNorm and the mixer's EXL3 projections (KDA's qkv, f and g; MLA's q_a and kv_a) | `root.ling.addNormLinears` (a host's opt-in; `addNormPrepare` for a GEMV that reads the prepared rows itself) | `turboexl3_ling_addnorm1`, `2` or `3` (the add, the norm and each member's prepare, one threadgroup a row), then each member's `turboexl3_dense_dec0` (or the chain's GEMV and finish past DEC-ONE's rows) ([kernels](kernels.md)): MLX's add, MLX's rms_norm and each member's `linear`, word for word |
 | a MoE layer's router at decode rows (1 to 8) with the read-ahead predictor's scores (the next MoE layer's router on the call's rows) | `root.ling.router.route` (`routerLogits`, `select`, `tableF32`; a host's opt-in) | `turboexl3_ling_router_pred` (DeepSeek's sqrt(softplus(z)) + bias), `turboexl3_ling_router_pred_sig` (Ling's sigmoid(z) + bias) or, on the last MoE layer, `turboexl3_ling_router_logits`, each over the loader's f32 table (or its `_h` twin over the loaded f16 weight), then `turboexl3_ling_router_select` ([kernels](kernels.md)): the host's logits, scores, ids and bf16 weights word for word |
+| an MLA layer's attention at decode rows (1 to 16) over a latent cache (each token's normed 512-wide latent and 64-wide roped shared key) | `mlaLatentDecode` (`mla_latent.zig`) | three of its own: `turboexl3_ling_mla_qabs`, `turboexl3_ling_mla_attn`, `turboexl3_ling_mla_vabs` ([the Ling catalog](kernels.md)) |
 
 The pairs share each member's K split (z \| a at KS 2, the shared gate \| up at KS 8, the dense gate \| up at KS 1);
 qkv (KS 1) and MLA's q_a (KS 8) \| kv_a (KS 16) cannot join a member of another K split byte for byte.
@@ -58,5 +59,10 @@ in pairs (the gate's 128-block and the up's), run the host's SwiGLU and the down
 finish, then the down's DEC-ONE GEMV. Its bytes are the composed chain's: each member's `linear`, mlx-serve's
 fusedSwiGLU (the sigmoid from the host's table) or the plugin's swigluClampOut (in f32, MLX's f32 sigmoid from a
 table of every 16-bit gate), and `linear(down)` (`src/models/ling/shared_test.zig`, word for word).
+
+The MLA attention in the latent reads a layer's cache once at 1,152 B a token (the expanded cache: 40,960). It computes
+in f32 and sums in its own orders, so it is within tolerance of the host's composed latent attention, not byte for
+byte, and a verify call's rows have the bits of one-row calls at
+their positions (the key groups and sub-chunks count from position 0).
 
 No speed verdict comes from this repository: the standard test through the outside plugin decides.

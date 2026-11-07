@@ -24,9 +24,12 @@ The code only Ling-3.1-flash uses, on the core's routed chain, DeepSeek-V4.1's b
 | `router_test.zig` | the logits, both predictor scores, the ids and the weights against the host's served path word for word at rows 1 to 8 (every operand built as the host builds it: the loaded f16 weight, the loader's column-major table, the MoE input, denseRows), a weight holding every finite f16 word, the rebuilt table at the stock widths, with `TURBOEXL3_LING_PACK=<pack dir>` every router weight of the pack as stored (the MoE layers' and the NextN layer's), the refusals (GPU) |
 | `bproj_test.zig` | `kdaProjB`'s b_proj member against the served b_proj (the one-row matmul, the exact verify's denseRows) and its three members against `kdaProj`'s word for word at rows 1 to 8, operands as the loader keeps them; the refusals (GPU); the member's text and gemv statements (CPU) |
 | `kernels/router/` | the router's pieces: launch 1's head, MLX's gemv statements cut at the table's read (an f32 word, or an f16 word widened then + 0), the predictor's branch (gemv at one row, gemv_wide at 2 to 8), the two scores (headers) and the host's fused router text (`select.metal`) |
+| `mla_latent.zig` | `decodeLatent` (`mlaLatentDecode`): the MLA attention at decode rows in the latent, three launches (the query absorbed into the latent, the attention's partials over the latent cache, the merge and the value half); its texts and plan (CPU tests) |
+| `kernels/mla_latent/` | the three launches' texts and their header; `kernels/test/pins/` what the CPU test pins |
 
 Ling's own Metal is the pairs', the shared expert's, the routed combine's, the mixer input's add and norm and the
-router's pieces (`kernels/pair/`, `kernels/shared/`, `kernels/combine/`, `kernels/addnorm/`, `kernels/router/`;
+router's pieces (`kernels/pair/`, `kernels/shared/`, `kernels/combine/`, `kernels/addnorm/`, `kernels/router/`),
+and the MLA attention in the latent's three launches (`kernels/mla_latent/`;
 `kernels/test/pins/` what the CPU tests pin); the routed experts' clamp pieces are the core's
 (`kernels/decode/fin7_swiglu_clamp_out.metal`, `kernels/prefill/mid_swiglu_clamp_out.metal`). docs/models/ling/
 describes the model's needs and its kernels.

@@ -716,3 +716,108 @@ no pragma: they compile as MLX's own do. `tableF32` rebuilds the loader's table 
 - **Bits:** the host's: its text (`router.text_select`) and config.
 - **Pinned by:** `src/models/ling/router_test.zig` "turboexl3 gpu ling router: ..." (GPU, as the reference). No test pins
   its text beyond `text_select`'s.
+
+## The MLA attention in the latent
+
+Ling's own too: the MLA attention at decode rows in the latent (`mla_latent.zig`, root's `ling.mlaLatentDecode`).
+
+`mlaLatentDecode` attends a decode or verify call's rows (1 to 16) over a layer's latent cache: each cached token's
+normed KV latent (512) and roped shared key (64). The query's non-positional half is absorbed into the latent through
+kv_b's key half (launch 1), the attention runs over the latent and the rope key (launch 2, the cache read once a
+layer: 1,152 B a token where the expanded cache is 40,960), and the latent output leaves through kv_b's value half
+(launch 3). Every value is f32 from the exact operands, so the call is within tolerance of the host's composed latent
+attention (MLX's matmuls and softmax), not byte for byte. A row's values depend on its own operands and its key
+position only, so a verify call's rows have the bits of one-row calls at their positions.
+
+## `src/models/ling/mla_latent.zig`
+
+### `turboexl3_ling_mla_attn`
+
+<!-- kernel-facts: turboexl3_ling_mla_attn -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/ling/mla_latent.zig:87` (`fn kernelOf`) |
+| inputs | `ql`, `qr`, `lat`, `rot`, `scale`, `dims` |
+| outputs | `pm`, `pl`, `po` |
+| source | `text_attn` = `ling:mla_latent/attn` (8673 B, `7d50732448a0`) |
+| header | `text_header` = `ling:mla_latent/header` (175 B, `0f02dd5ef698`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** Ling-3.1-flash: `ling.mlaLatentDecode`, launch 2 of 3 (after `turboexl3_ling_mla_qabs`).
+- **Shapes and dtypes:** ql f32 [S, H, 512] (launch 1's); qr [1, H, S, 64] (q_rot, roped, made row-contiguous) in QT; lat
+  [1, 1, T, 512] and rot [1, 1, T, 64] in CT (the cache views after the step's append, read through `lat_strides` and
+  `rot_strides`); scale f32 [1]; dims int32 [2] (T, NJ). Out: pm, pl f32 [S·H·NJ] (each row's max and sum per key group),
+  po f32 [S·H·NJ, 512] (its weighted sums). Query row s sits at key position T - S + s.
+- **Grid and threadgroup:** `(512, NJ, S·H/32)` / `(512, 1, 1)`: a threadgroup for each (key group of 256 keys, 32 heads of
+  one row), 16 simdgroups: 4 M tiles of 8 rows, each across 4 simdgroups (a score tile of 8 keys each; 128 of the 512
+  sums each). NJ = ceil(T / 256).
+- **Template args:** H, S, DL 512, DR 64, KPT 256 (keys a group), CK 32 (keys a sub-chunk), QT, CT. KPT and CK are part of
+  the arithmetic (fixed).
+- **Replaces:** the host's composed latent scores, softmax and value product: f32 copies of the latent cache and rope keys a
+  call, `matmul(q_lat, latentᵀ) + matmul(q_rope, ropeᵀ)`, the scale, the verify mask, `softmax`, `matmul(probs,
+  latent)`.
+- **Bits:** f32 on 8 × 8 simdgroup matrices from the exact operands: a score sums the latent's dims then the rope's; the online
+  softmax runs sub-chunk by sub-chunk (the max, exp, a 16-lane butterfly sum); a key past the row's position (or the
+  group) reads as 0 and scores -inf. Key groups and sub-chunks count from position 0, so a row's values depend on its
+  operands and position only (a verify row has a one-row call's bits). Within tolerance of the composed path.
+- **Pinned by:** `src/models/ling/mla_latent.zig` "turboexl3 ling mla latent texts: ..." (CPU: the operands, the strides, the
+  position arithmetic from the pin file).
+
+### `turboexl3_ling_mla_qabs`
+
+<!-- kernel-facts: turboexl3_ling_mla_qabs -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/ling/mla_latent.zig:86` (`fn kernelOf`) |
+| inputs | `qn`, `w` |
+| outputs | `ql` |
+| source | `text_qabs` = `ling:mla_latent/qabs` (1347 B, `184aa655ae1b`) |
+| header | `text_header` = `ling:mla_latent/header` (175 B, `0f02dd5ef698`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** Ling-3.1-flash: `ling.mlaLatentDecode` (`mla_latent.decodeLatent`), launch 1 of 3: a decode or verify
+  call's rows through the MLA layers' latent cache (the outside plugin's MLX_SERVE_LING_MLA_FUSED=1 over its
+  MLX_SERVE_LING_MLA_LATENT=1 cache).
+- **Shapes and dtypes:** qn [1, H, S, 128] (q_nope, made row-contiguous) in QT (bf16, f16 or f32); w kv_b [H·256, 512] in WT
+  (head h's key half rows h·256 .. h·256 + 127). Out: ql f32 [S, H, 512].
+- **Grid and threadgroup:** `(H·128, 1, 1)` / `(32, 1, 1)`: a thread for 4 columns of one head, every row in turn.
+- **Template args:** H (heads, a multiple of 32), S (rows, 1 to 16), DN 128, DV 128, DL 512, QT, WT.
+- **Replaces:** the host's composed latent query: `matmul(astype(q_nope, f32), astype(Wk, f32))` (two copies of kv_b's key half
+  in f32 a call).
+- **Bits:** f32: each term one fma of the exact operands, d ascending from 0; a row's values its own (any rows beside it).
+  Within tolerance of the host's matmul (another summation order).
+- **Pinned by:** `src/models/ling/mla_latent.zig` "turboexl3 ling mla latent texts: each text reads every operand it binds and
+  ..." (CPU: operands, constants, no strides).
+
+### `turboexl3_ling_mla_vabs`
+
+<!-- kernel-facts: turboexl3_ling_mla_vabs -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/ling/mla_latent.zig:88` (`fn kernelOf`) |
+| inputs | `pm`, `pl`, `po`, `w`, `dims` |
+| outputs | `out` |
+| source | `text_vabs` = `ling:mla_latent/vabs` (2335 B, `d1d2a8e2e320`) |
+| header | `text_header` = `ling:mla_latent/header` (175 B, `0f02dd5ef698`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** Ling-3.1-flash: `ling.mlaLatentDecode`, launch 3 of 3 (after `turboexl3_ling_mla_attn`).
+- **Shapes and dtypes:** pm, pl f32 [S·H·NJ], po f32 [S·H·NJ, 512] (launch 2's); w kv_b [H·256, 512] in WT (head h's value half
+  rows h·256 + 128 .. h·256 + 255); dims int32 [2] (T, NJ). Out: out [1, H, S, 128] in OT (q_nope's dtype): the
+  attention's output per head, before the host's transpose.
+- **Grid and threadgroup:** `(128, H, S)` / `(128, 1, 1)`: a threadgroup for each (head, row); each thread merges 4 of the 512
+  latent columns, each of 4 simdgroups takes 32 of the 128 outputs.
+- **Template args:** H, S, DL 512, DN 128, DV 128, KPT 256, WT, OT.
+- **Replaces:** the host's composed latent output: `matmul(o_lat, astype(Wvᵀ, f32))`, `astype` to the activation dtype (and the
+  softmax's normalization, here the merge's division).
+- **Bits:** f32: the merge takes the key groups holding a key the row sees (j·256 <= its position), in group order, by fma;
+  each output a 512-term dot (a lane's 16 columns by fma, then `simd_sum`), cast to OT. A row's values its own. Within
+  tolerance of the composed path.
+- **Pinned by:** `src/models/ling/mla_latent.zig` "turboexl3 ling mla latent texts: ..." (CPU: the merge's group bound from the
+  pin file).

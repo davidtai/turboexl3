@@ -1271,6 +1271,15 @@ ADDED[('models/ling/api.zig', 'fn moeLingRows')] = ('moeLing\'s prompt call over
 ADDED_FILES['models/ling/rows_test.zig'] = ('moeLingRows held to turboexl3_ling\'s prompt chunk (take, bf16, f32, moeLing at '
                                             'top-1) byte for byte at Ling\'s shapes, the row-map prepare\'s text (CPU), and '
                                             'its timing against that chunk (TURBOEXL3_LING_TIME)')
+# Ling-3.1-flash's MLA attention at decode rows in the latent (ling-latent): mlaLatentDecode's three launches
+ADDED_FILES['models/ling/mla_latent.zig'] = ('Ling-3.1\'s MLA attention at decode rows over a latent cache (decodeLatent, '
+                                             'takes): the query absorbed into the latent, the attention\'s partials, their '
+                                             'merge and the value half, in f32')
+ADDED_KERNELS[('models/ling/mla_latent.zig', 'turboexl3_ling_mla_qabs')] = 'q_nope through kv_b\'s key half into the latent'
+ADDED_KERNELS[('models/ling/mla_latent.zig', 'turboexl3_ling_mla_attn')] = ('the attention\'s partials over the latent cache, '
+                                                                           'key groups of 256 from position 0')
+ADDED_KERNELS[('models/ling/mla_latent.zig', 'turboexl3_ling_mla_vabs')] = ('a row\'s group partials merged in group order, '
+                                                                           'then kv_b\'s value half')
 # DEVROUTE's device wave in one call (turboexl3_ling's MLX_SERVE_LING_DEVWAVE_LUT): the banked prepare reading x's rows by
 # token and each row-slot's id through the layer's LUT (turboexl3_prep2bgl), ds.bankedGateUpLutAct and ling.moeLingBankedLut
 ADDED_KERNELS[('models/deepseek_v41/banked.zig', 'turboexl3_prep2bgl')] = ('prep2bg with its skip and expert lines reading '
@@ -1616,6 +1625,13 @@ SPLIT_ADDED_KERNELS['turboexl3_prep2bgl'] = ('DEVROUTE\'s device wave in the gat
                                              'layer\'s LUT at its routed expert and written for the call\'s other launches, '
                                              'its x row at its token (TOPK the call\'s top-k); ds.bankedGateUpLutAct, '
                                              'ling.moeLingBankedLut')
+SPLIT_ADDED_KERNELS['turboexl3_ling_mla_qabs'] = ('Ling-3.1\'s MLA attention at decode rows in the latent '
+                                                  '(models/ling/mla_latent.zig): q_nope through kv_b\'s key half, f32')
+SPLIT_ADDED_KERNELS['turboexl3_ling_mla_attn'] = ('the same: the attention\'s partials over the latent cache (latents and '
+                                                  'roped shared keys), key groups of 256 and 32-key sub-chunks from position '
+                                                  '0, an online softmax a row')
+SPLIT_ADDED_KERNELS['turboexl3_ling_mla_vabs'] = ('the same: a row\'s group partials merged in group order, then kv_b\'s '
+                                                  'value half')
 SPLIT_CHANGED_CONSTS = {
     'head': 'models/ling/router.zig: launch 1\'s router threadgroups at 512 / 16 a row (MLX\'s gemv tiles)',
     'pred_open': 'models/ling/router.zig: the predictor\'s threadgroups after 512 / 16 a row of the router\'s',

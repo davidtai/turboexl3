@@ -7,7 +7,8 @@
 //! linear pairs run in one DEC-ONE launch through `linearPair` (`pair.zig`), its shared expert at decode rows in two
 //! dependent launches of its own (`sharedExpert`, shared.zig), a wide routed call's combine in one launch
 //! (`combineRouted`, `combineParts`, combine.zig), and its MoE router at decode rows with the read-ahead predictor's
-//! scores in two launches (`router.route`, router.zig): each a host's opt-in.
+//! scores in two launches (`router.route`, router.zig): each a host's opt-in. Its MLA attention
+//! at decode rows in the latent is `mlaLatentDecode` (`mla_latent.zig`, three launches of its own).
 const std = @import("std");
 const mlx = @import("sdk").mlx;
 const root = @import("../../root.zig");
@@ -48,6 +49,12 @@ pub const addNormPrepare = addnorm.addNormPrepare;
 /// router's logits and the predictor's scores in one launch (`router.routerLogits`), the host's fused router over them
 /// (`router.select`), or both (`router.route`), the host's ids, bf16 weights and scores word for word.
 pub const router = @import("router.zig");
+
+/// The MLA attention at decode rows in the latent (`mla_latent.zig`): the absorbed form over a cache of normed latents and
+/// roped shared keys, in f32 (within tolerance of the host's composed latent attention), each row's bits its own.
+pub const mla_latent = @import("mla_latent.zig");
+pub const mlaLatentDecode = mla_latent.decodeLatent;
+pub const mlaLatentTakes = mla_latent.takes;
 
 /// `root.moe` with Ling-3.1's SwiGLU: `limit` 0 none (`moe`'s bytes), 1..128 the clamp after the SiLU (each row-slot's
 /// gate SiLU clamped from above at `limit` and its up to [-limit, limit], in f32 on the projections' f16-rounded outputs);
@@ -146,4 +153,4 @@ pub const tail = @import("tail.zig");
 pub const moeTail = tail.moeTail;
 
 /// This file's module state (`Global`): what a host that shares its units' state registers.
-pub const shared_state = .{ shared.shared_state, pair.shared_state, kdaproj.shared_state, addnorm.shared_state, router.shared_state, tail.shared_state };
+pub const shared_state = .{ shared.shared_state, pair.shared_state, kdaproj.shared_state, addnorm.shared_state, router.shared_state, tail.shared_state, mla_latent.shared_state };

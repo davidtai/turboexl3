@@ -992,6 +992,8 @@ pub const lingSharedTakes = ling.sharedTakes;
 pub const lingSigmoidTable = ling.sigmoidTable;
 /// Ling-3.1-flash's routed combine at prompt rows, joined and JOINLESS (models/ling/combine.zig)
 pub const ling_combine = @import("models/ling/combine.zig");
+/// Ling-3.1-flash's MLA attention at decode rows in the latent (models/ling/mla_latent.zig)
+pub const mlaLatentDecode = ling.mlaLatentDecode;
 
 test {
     _ = config;
