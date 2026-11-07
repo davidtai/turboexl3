@@ -47,6 +47,8 @@ pub const ricursive = @import("models/ricursive/ricursive.zig");
 /// The model entry points (root re-exports each under its own name)
 pub const qwen38 = @import("models/qwen38/api.zig");
 pub const deepseek_v41 = @import("models/deepseek_v41/api.zig");
+/// GLM-5.3-Flash's trunk linears at prefill rows and the pg2 table a host builds from their tile codes
+pub const glm53f = @import("models/glm53f/api.zig");
 /// DeepSeek-V4.1's shared expert's fused SwiGLU (models/deepseek_v41/api.zig)
 pub const sharedSwigluTakes = deepseek_v41.sharedSwigluTakes;
 pub const sharedSwiglu = deepseek_v41.sharedSwiglu;
@@ -687,6 +689,8 @@ fn pfOptions() prefill.Options {
     var o: prefill.Options = .{ .bm = 64, .small = .mixed, .dbuf = true, .unroll = true, .fragb = true, .intr = true, .defer_affine = true, .ncb = 4, .sintr = true, .froute = true };
     o.alay = config.get().pf_alay;
     o.t128 = config.get().pf_t128;
+    o.bk128 = config.get().pf_bk128;
+    o.half_rows = config.get().pf_half_rows;
     return o;
 }
 

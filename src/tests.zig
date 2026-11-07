@@ -39,6 +39,7 @@ comptime {
     _ = @import("models/deepseek_v41/f3_test.zig");
     _ = @import("core/chains_test.zig");
     _ = @import("models/ricursive/ricursive_test.zig");
+    _ = @import("models/glm53f/api.zig");
     _ = @import("models/glm53f/glm53f_test.zig");
     _ = @import("models/glm53f/routed_test.zig");
     _ = @import("models/glm53f/fused_test.zig");

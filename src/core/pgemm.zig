@@ -90,6 +90,28 @@ pub const table = [_]Entry{
     .{ .k = 5120, .n = 512, .tile = .{ .bm = 64, .bn = 256, .bk = 512, .wm = 2, .wn = 4, .swz = 2 } },
 };
 
+/// Tiles a host times on its own machine, to pick one a (K, N) for `host_table` (each admitted, every N that is a
+/// multiple of 512 divisible by its BN): `table`'s, their BK and swizzle neighbors, and wider and taller tiles. A
+/// host names them by index, so the order is fixed: new tiles go at the end.
+pub const candidates = [_]Tile{
+    .{ .bm = 32, .bn = 256, .bk = 256, .wm = 1, .wn = 4, .swz = 2 },
+    .{ .bm = 32, .bn = 256, .bk = 512, .wm = 1, .wn = 4, .swz = 2 },
+    .{ .bm = 64, .bn = 256, .bk = 256, .wm = 2, .wn = 4, .swz = 2 },
+    .{ .bm = 64, .bn = 256, .bk = 512, .wm = 2, .wn = 4, .swz = 2 },
+    .{ .bm = 64, .bn = 128, .bk = 512, .wm = 2, .wn = 2, .swz = 2 },
+    .{ .bm = 128, .bn = 128, .bk = 512, .wm = 4, .wn = 4, .swz = 2 },
+    .{ .bm = 128, .bn = 128, .bk = 256, .wm = 4, .wn = 2, .swz = 2 },
+    .{ .bm = 32, .bn = 512, .bk = 256, .wm = 1, .wn = 8, .swz = 2 },
+    .{ .bm = 32, .bn = 256, .bk = 512, .wm = 1, .wn = 4, .swz = 1 },
+    .{ .bm = 32, .bn = 256, .bk = 512, .wm = 1, .wn = 4, .swz = 3 },
+    .{ .bm = 64, .bn = 256, .bk = 512, .wm = 1, .wn = 4, .swz = 2 },
+    .{ .bm = 32, .bn = 128, .bk = 512, .wm = 1, .wn = 4, .swz = 2 },
+};
+
+/// A host's own tiles a (K, N), from `candidates` as timed on its machine (a model's linears), looked up before `table`;
+/// null: `table` alone. Set at load, before the first prompt, with `mode`; the slice outlives every call.
+pub const host_table = Global(?[]const Entry, "pgemm_host_table", null);
+
 /// The host's switch: off, on, check (set at load, before the first prompt)
 pub const Mode = enum(u8) { off, on, check };
 pub const mode = Global(Mode, "pgemm_mode", .off);
@@ -121,6 +143,12 @@ pub fn tileFor(xp: A, w: A) ?Tile {
     const k: u32 = @intCast(xs[1]);
     const n: u32 = @intCast(wsh[1]);
     if (!mlxRegular(m, n, k)) return null;
+    return tileOf(k, n);
+}
+
+/// The tile a (K, N): the host's table first, then `table`; null where neither holds an admitted tile for it
+pub fn tileOf(k: u32, n: u32) ?Tile {
+    if (host_table.get().*) |ht| for (ht) |e| if (e.k == k and e.n == n) return if (e.tile.admitted() and n % e.tile.bn == 0) e.tile else null;
     for (table) |e| if (e.k == k and e.n == n) return if (e.tile.admitted() and n % e.tile.bn == 0) e.tile else null;
     return null;
 }
@@ -192,11 +220,13 @@ pub fn check(s: mlx.mlx_stream, xp: A, w: A, svh: A, out_dtype: mlx.mlx_dtype, w
     hook(s, want, got);
 }
 
-/// At load (on or check): every tabled tile's kernel (or `only`'s (K, N)) compiled for `out_dtype` (M aligned and not, N
-/// and K as the entry's), on small zero operands, evaluated here, so a prompt's first call pays no JIT
+/// At load (on or check): every tabled tile's kernel (the host's table's and `table`'s, or `only`'s (K, N)) compiled for
+/// `out_dtype` (M aligned and not, N and K as the entry's), on small zero operands, evaluated here, so a prompt's first
+/// call pays no JIT
 pub fn warm(s: mlx.mlx_stream, out_dtype: mlx.mlx_dtype, only: ?[2]u32) !void {
     if (mode.get().* == .off or !config.get().nax) return;
-    for (table) |e| {
+    const hosts: []const Entry = host_table.get().* orelse &.{};
+    for ([_][]const Entry{ hosts, &table }) |entries| for (entries) |e| {
         const t = e.tile;
         if (!t.admitted()) continue;
         if (only) |kn| if (kn[0] != e.k or kn[1] != e.n) continue;
@@ -213,7 +243,7 @@ pub fn warm(s: mlx.mlx_stream, out_dtype: mlx.mlx_dtype, only: ?[2]u32) !void {
             defer _ = mlx.mlx_array_free(y);
             try mlx.check(mlx.mlx_array_eval(y));
         }
-    }
+    };
     // the warm launches are not the prompt's
     calls.get().*.store(0, .monotonic);
     elems.get().*.store(0, .monotonic);

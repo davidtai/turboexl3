@@ -1219,9 +1219,24 @@ ADDED[('models/deepseek_v41/api.zig', 'fn moeClampedBankedAs')] = ('moeClampedBa
 ADDED_FILES['fused_test.zig'] = ('GLM-5.3-Flash\'s fused paths held to the chains they replace byte for byte: the row-map '
                                  'prepare\'s text (CPU), moeClampedRows and moeClampedBankedAs at bf16 (GPU); the plugin\'s '
                                  'schedules held to the default\'s (the banked texts and GEMV variants, the prompt call '
-                                 'sizes; GPU); their timing (TURBOEXL3_GLM_TIME)')
+                                 'sizes, the routed prefill\'s bk128 and half_rows; GPU); every pg2 candidate tile at '
+                                 'every trunk linear held to the chain\'s words (GPU); their timing (TURBOEXL3_GLM_TIME)')
 for _key in ('const bank_experts', 'fn bfExact', 'fn rootBank', 'fn envList', 'fn drawPairs'):
     CHANGED[('routed_test.zig', _key)] = 'pub: fused_test.zig reuses it'
+# GLM-5.3-Flash's trunk at prefill rows on pg2 (a host's own tiles, pgemm.host_table from pgemm.candidates by the codes of
+# models/glm53f/api.zig) and the routed prefill's bk128 / half_rows options reachable from Config (the plugin's
+# TURBOEXL3_GLM53F_PG2 and _PF_OPTS)
+ADDED_FILES['models/glm53f/api.zig'] = ('GLM-5.3-Flash\'s trunk linears at prefill rows and the pg2 table a host builds from '
+                                        'one tile code a linear (pg2Table), with its CPU tests')
+ADDED[('root.zig', 'const glm53f')] = 'GLM-5.3-Flash\'s host helpers (models/glm53f/api.zig)'
+ADDED[('pgemm.zig', 'const candidates')] = 'the tiles a host times on its machine to fill host_table (named by index)'
+ADDED[('pgemm.zig', 'const host_table')] = 'a host\'s own tiles a (K, N), looked up before table'
+ADDED[('pgemm.zig', 'fn tileOf')] = 'the tile a (K, N): the host\'s table first, then table (tileFor\'s lookup)'
+CHANGED[('pgemm.zig', 'fn tileFor')] = 'its table lookup moved to tileOf (the host\'s table first)'
+CHANGED[('pgemm.zig', 'fn warm')] = 'compiles the host\'s table\'s tiles too'
+CHANGED[('config.zig', 'const Config')] += ('; pf_bk128 and pf_half_rows: the routed prefill\'s bk128 and half_rows '
+                                            '(prefill.Options, the same bytes) from the configuration')
+CHANGED[('root.zig', 'fn pfOptions')] = 'takes bk128 and half_rows from Config.pf_bk128 and pf_half_rows'
 
 
 def metal_strings(fn, toks, corpus):

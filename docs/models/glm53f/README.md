@@ -48,12 +48,15 @@ The plugin's opt-in schedules (each the default's bytes, `fused_test.zig`):
 |---|---|---|---|
 | routed experts over the slot banks at decode rows | `configure` (`banked_group` 4, `banked_m3`, `banked_variant_gu`, `banked_variant_dn`) | the banked decode on the grouped texts (a weight's read and decode shared by up to four row-slots of one expert) and the grouped GEMVs' variants but `sh` and `pfsh` (their EXL3_GSH schedule gives other bytes at the K5 rate): the same reads, decodes and sums | `TURBOEXL3_GLM53F_BANKED=<texts>[.<gu>[.<dn>]]` |
 | routed experts in a prompt call over a slot bank | `moeClamped`, `moeClampedRows` | the call's rows at most (2048 to 16384): a row's bytes do not depend on its call | `TURBOEXL3_GLM53F_PF_CALL_ROWS=<n>` |
+| routed experts in a prompt call over a slot bank | `configure` (`pf_bk128`, `pf_half_rows`) | the routed prefill's down GEMM in 128-deep K stages, and a simdgroup whose rows end within its first 16 multiplying only that fragment row: the same MMAs in the same order | `TURBOEXL3_GLM53F_PF_OPTS=<bk128\|hr\|bk128.hr>` |
+| the trunk's linears at prefill rows | `pgemm.host_table` (from `glm53f.pg2Table`, `api.zig`) | pg2 at a tile a linear from `pgemm.candidates`: MLX's fused NAX GEMM loop at that tile with the finish as its epilogue, one launch for the matmul and the finish (the chain's words where MLX runs its regular kernel) | `TURBOEXL3_GLM53F_PG2=<one code a trunk linear>` |
 
 GLM-5.3-Flash has one kernel of its own, the row-map prepare (a composition of the core prepare's pieces). Its tests
 (`src/models/glm53f/`) hold every shape and rate in the tables above: `glm53f_test.zig` holds each dense shape at each of
 its K against `format.project`, `routed_test.zig` holds the routed experts (`moeClamped`, at every routed rate) against
 the clamped reference and the banked decode against `moeClamped`, byte for byte, and `fused_test.zig` holds each fused
-path to the chain it replaces and each schedule to the default's, byte for byte. [Tests](../../core/testing.md) gives their variables.
+path to the chain it replaces and each schedule to the default's, byte for byte, and every pg2 candidate tile at every
+trunk linear of `api.zig` to the chain's words; its timing gives the tile code a linear gets on this machine. [Tests](../../core/testing.md) gives their variables.
 
 turboexl3 compiles each geometry's kernels once and keeps them for the process, in fixed caches (`src/root.zig`:
 `dense_cache_slots` 64, `engine_cache_slots` 16 for the decode chains, `prefill_cache_slots` 16). One served pack

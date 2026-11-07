@@ -15,7 +15,12 @@
 //!   them (`configure`, a geometry's banked state made after it: y f32, and bf16 from `moeClampedBankedAs`), against the
 //!   served call (`banked_group` 2), over waves of 1 to 64 pairs (a verify's rows drawn routing the same experts);
 //! - a prompt call in calls of 2048, 8192 or 16384 row-slots (the plugin's TURBOEXL3_GLM53F_PF_CALL_ROWS) against its
-//!   4096-row calls, 16384 row-slots in the plugin's slot order, on the default path and on `moeClampedRows`.
+//!   4096-row calls, 16384 row-slots in the plugin's slot order, on the default path and on `moeClampedRows`;
+//! - the same call (4096-row calls) under the routed prefill's bk128, half_rows and both (`Config.pf_bk128`,
+//!   `pf_half_rows`: the plugin's TURBOEXL3_GLM53F_PF_OPTS) against the served options;
+//! - every pg2 candidate tile (`pgemm.candidates`, as the plugin's TURBOEXL3_GLM53F_PG2 names them by code) at every
+//!   trunk linear of `api.zig` (`root.glm53f.trunk`) against the chain (dequantize, MLX's matmul, the finish), word for
+//!   word, bf16 x and y, at 100, 2048, 4100 and 8200 rows where MLX runs its regular kernel.
 //! - CPU (always): the row-map prepare's text is the prepare's with its one row line swapped for the row map's, and the
 //!   prepare's own text is unchanged by the cut.
 //! - GPU (TURBOEXL3_GPU=1, else skipped): the bytes above, x ~ N(0, 8^2) bf16-exact (about a tenth of the gates and a
@@ -23,16 +28,20 @@
 //!   32,40,48,56,64,80) narrows both; TURBOEXL3_GLM_ROWS_S (default 17,64,1328,4096) the prompt calls' row-slots,
 //!   TURBOEXL3_GLM_BANKED_ROWS (default 1,2,7,8,16,32,48,64; the schedules' 1,2,7,8,16,24,32,48,64) the decode waves'
 //!   pairs. Each rate's engines are freed after it. Lines: TURBOEXL3_GLM_FUSED_ROWS_BYTES, TURBOEXL3_GLM_FUSED_BANKED_BYTES,
-//!   TURBOEXL3_GLM_BANKED_SCHED_BYTES, TURBOEXL3_GLM_PF_CHUNK_BYTES.
+//!   TURBOEXL3_GLM_BANKED_SCHED_BYTES, TURBOEXL3_GLM_PF_CHUNK_BYTES, TURBOEXL3_GLM_PF_OPTS_BYTES, TURBOEXL3_GLM_PG2_BYTES.
 //! - TURBOEXL3_GLM_TIME=1 (with TURBOEXL3_GPU=1, else skipped): each fused path against its chain on the device at the
 //!   served shapes (a 4096-row prompt call over 9 experts of a 100-slot bank; a 4-row verify's 32 pairs), and every
 //!   sc_3.10bpw trunk linear (K6, `root.linear`) at decode rows 1 and 4 and a 16384-row prompt chunk with its count in a
 //!   forward (the trunk's share of a forward: each linear alone, so launch overlap and the forward's other ops are not in
 //!   it); min and median us per call over 8 rounds after 2 warm. Also the banked decode's schedules at a verify's 24 and
 //!   32 pairs (the served call, then each texts at each variant for both GEMVs), and a 16384-row prompt bank call (36
-//!   experts' runs of about 455 rows) in calls of 2048 to 16384 rows on each path. It asserts nothing (a microbenchmark
-//!   steers, the standard test decides). Lines: TURBOEXL3_GLM_FUSED_TIME, TURBOEXL3_GLM_TRUNK_TIME,
-//!   TURBOEXL3_GLM_TRUNK_TOTAL, TURBOEXL3_GLM_BANKED_SCHED_TIME, TURBOEXL3_GLM_PF_CHUNK_TIME.
+//!   experts' runs of about 455 rows) in calls of 2048 to 16384 rows on each path; that call (and one over a drawn
+//!   routing) under the served options, bk128, half_rows and both, in calls of 4096 and 16384 rows; each pg2 candidate
+//!   tile against the chain at every trunk linear at 2048, 8192 and 16384 rows, and the code each linear gets by pg2u's
+//!   rule (pgemm.zig: at or below the chain at every row count, the fastest at 16384). It asserts nothing (a
+//!   microbenchmark steers, the standard test decides). Lines: TURBOEXL3_GLM_FUSED_TIME, TURBOEXL3_GLM_TRUNK_TIME,
+//!   TURBOEXL3_GLM_TRUNK_TOTAL, TURBOEXL3_GLM_BANKED_SCHED_TIME, TURBOEXL3_GLM_PF_CHUNK_TIME, TURBOEXL3_GLM_PF_OPTS_TIME,
+//!   TURBOEXL3_GLM_PG2_TIME, TURBOEXL3_GLM_PG2_PICK, TURBOEXL3_GLM_PG2_CODES.
 const std = @import("std");
 const sdk = @import("sdk");
 const mlx = sdk.mlx;
@@ -860,5 +869,347 @@ test "turboexl3 gpu glm53f trunk timing: every sc_3.10bpw trunk linear (K6) at d
             root.releaseEngines();
         }
         std.debug.print("TURBOEXL3_GLM_TRUNK_TOTAL rows={d} forward_ms={d:.2} (each linear alone, min of 8, times its count; the head at decode rows only)\n", .{ rows, total_ms });
+    }
+}
+
+/// A trunk linear's K6 projection for the pg2 tests: random words (every pattern a codeword), suh in [0.5, 1.5], svh in
+/// [0.5, 1.5] / sqrt(in), the trunk timing's values
+fn trunkProj(g: *G, a: std.mem.Allocator, rnd: std.Random, in: u32, out: u32) !root.Proj {
+    const n: u32 = 96; // K6
+    const tw = try a.alloc(u16, (in / 16) * (out / 16) * n);
+    defer a.free(tw);
+    rnd.bytes(std.mem.sliceAsBytes(tw));
+    const su = try a.alloc(u16, in);
+    defer a.free(su);
+    for (su) |*v| v.* = format.f32ToF16Bits(0.5 + rnd.float(f32));
+    const sv = try a.alloc(u16, out);
+    defer a.free(sv);
+    for (sv) |*v| v.* = format.f32ToF16Bits((0.5 + rnd.float(f32)) / @sqrt(@as(f32, @floatFromInt(in))));
+    const p: root.Proj = .{
+        .trellis = try g.hostArray(std.mem.sliceAsBytes(tw), &.{ ci(in / 16), ci(out / 16), ci(n) }, .uint16),
+        .suh = try g.hostArray(std.mem.sliceAsBytes(su), &.{ci(in)}, .float16),
+        .svh = try g.hostArray(std.mem.sliceAsBytes(sv), &.{ci(out)}, .float16),
+    };
+    try g.evalAll(&.{ p.trellis, p.suh, p.svh });
+    return p;
+}
+
+/// A trunk linear's x: bf16 [rows, in] from `pool`'s bf16-exact normals in turn
+fn trunkX(g: *G, a: std.mem.Allocator, pool: []const f32, rows: u32, in: u32) !mlx.mlx_array {
+    const xh = try a.alloc(f32, @as(usize, rows) * in);
+    defer a.free(xh);
+    for (xh, 0..) |*v, i| v.* = pool[i % pool.len];
+    const x = try g.astype(try g.hostArray(std.mem.sliceAsBytes(xh), &.{ ci(rows), ci(in) }, .float32), .bfloat16);
+    try g.evalAll(&.{x});
+    return x;
+}
+
+/// root.linear at the pg2 switch `on` with `entry` the host's table (one linear's tile), restored after; whether the
+/// fused launch served it
+fn pg2Linear(g: *G, c: LinCtx, entry: ?*const [1]root.pgemm.Entry) !struct { y: mlx.mlx_array, fused: bool } {
+    const saved_mode = root.pgemm.mode.get().*;
+    const saved_table = root.pgemm.host_table.get().*;
+    defer {
+        root.pgemm.mode.get().* = saved_mode;
+        root.pgemm.host_table.get().* = saved_table;
+    }
+    root.pgemm.mode.get().* = if (entry != null) .on else .off;
+    root.pgemm.host_table.get().* = if (entry) |e| @as([]const root.pgemm.Entry, e) else null;
+    const before = root.pgemm.calls.get().*.load(.monotonic);
+    const y = try g.adopt(try root.linear(c.s, c.x, c.p.trellis, c.p.suh, c.p.svh, .mul1));
+    try g.evalAll(&.{y});
+    return .{ .y = y, .fused = root.pgemm.calls.get().*.load(.monotonic) > before };
+}
+
+/// The pg2 tests' rows: unaligned and aligned M; a row count runs where MLX would run its regular kernel
+/// (`pgemm.mlxRegular`), the only rows pg2 takes (dsa.o_proj, K 16384, from 5462 rows)
+const pg2_rows = [_]u32{ 100, 2048, 4100, 8200 };
+
+test "turboexl3 gpu glm53f pg2: every candidate tile at every GLM-5.3-Flash trunk linear gives the chain's words (dequantize, MLX's matmul, the finish), bf16 x and y, at the rows MLX runs its regular kernel (TURBOEXL3_GPU=1)" {
+    _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    const s = mlx.mlx_default_gpu_stream_new();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    const a = std.heap.page_allocator;
+    var g = try G.init(a, s);
+    defer g.deinit();
+    defer _ = mlx.mlx_clear_cache();
+    defer root.releaseEngines();
+    var prng = std.Random.DefaultPrng.init(0x9632F4);
+    const rnd = prng.random();
+    var pool: [8191]f32 = undefined;
+    for (&pool) |*v| v.* = routed.bfExact(rnd.floatNorm(f32));
+    var max_words: usize = 0;
+    for (root.glm53f.trunk) |l| max_words = @max(max_words, @as(usize, pg2_rows[pg2_rows.len - 1]) * l.n);
+    const want_buf = try a.alloc(f32, max_words);
+    defer a.free(want_buf);
+    const got_buf = try a.alloc(f32, max_words);
+    defer a.free(got_buf);
+    var failed = false;
+    for (root.glm53f.trunk) |l| {
+        defer root.releaseEngines();
+        const mark = g.mark();
+        defer g.resetTo(mark);
+        const p = try trunkProj(&g, a, rnd, l.k, l.n);
+        var fused_at: [root.pgemm.candidates.len]usize = @splat(0);
+        for (pg2_rows) |rows| {
+            if (!root.pgemm.mlxRegular(rows, l.n, l.k)) continue;
+            const rm = g.mark();
+            defer g.resetTo(rm);
+            const c: LinCtx = .{ .s = s, .x = try trunkX(&g, a, &pool, rows, l.k), .p = p };
+            const words = @as(usize, rows) * l.n;
+            const want = try pg2Linear(&g, c, null);
+            const wb = try bitsOf(&g, want.y, want_buf[0..words]);
+            for (root.pgemm.candidates, 0..) |t, ti| {
+                const cm = g.mark();
+                defer g.resetTo(cm);
+                const entry = [1]root.pgemm.Entry{.{ .k = l.k, .n = l.n, .tile = t }};
+                const got = try pg2Linear(&g, c, &entry);
+                const gb = try bitsOf(&g, got.y, got_buf[0..words]);
+                const d = countDiff(gb, wb, got_buf[0..words]);
+                const ok = got.fused and d[0] == 0 and d[1] == 0;
+                fused_at[ti] += @intFromBool(got.fused);
+                std.debug.print("TURBOEXL3_GLM_PG2_BYTES name={s} k={d} n={d} tile={c} rows={d} fused={} differing={d}/{d} nonfinite={d} {s}\n", .{ l.name, l.k, l.n, root.glm53f.codeOf(ti), rows, got.fused, d[0], words, d[1], if (ok) "PASS" else "FAIL" });
+                if (!ok) failed = true;
+            }
+        }
+        for (fused_at, 0..) |f, ti| if (f == 0) {
+            std.debug.print("TURBOEXL3_GLM_PG2_BYTES name={s} k={d} n={d} tile={c} no row count fused FAIL\n", .{ l.name, l.k, l.n, root.glm53f.codeOf(ti) });
+            failed = true;
+        };
+    }
+    try testing.expect(!failed);
+}
+
+/// The pg2 timing's rows (pgemm.zig's pg2u rule: a tile at or below the chain at each of them)
+const pg2_time_rows = [_]u32{ 2048, 8192, 16384 };
+
+test "turboexl3 gpu glm53f pg2 timing: each candidate tile against the chain at every GLM-5.3-Flash trunk linear, at 2048, 8192 and 16384 rows, and the tile code a linear gets by pg2u's rule (TURBOEXL3_GLM_TIME=1)" {
+    _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    _ = std.c.getenv("TURBOEXL3_GLM_TIME") orelse return error.SkipZigTest;
+    const s = mlx.mlx_default_gpu_stream_new();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    const a = std.heap.page_allocator;
+    var g = try G.init(a, s);
+    defer g.deinit();
+    defer _ = mlx.mlx_clear_cache();
+    defer root.releaseEngines();
+    var prng = std.Random.DefaultPrng.init(0x96327E);
+    const rnd = prng.random();
+    var pool: [8191]f32 = undefined;
+    for (&pool) |*v| v.* = routed.bfExact(rnd.floatNorm(f32));
+    const nc = root.pgemm.candidates.len;
+    var codes: [root.glm53f.trunk.len]u8 = undefined;
+    var saved_ms: f64 = 0;
+    for (root.glm53f.trunk, &codes) |l, *code| {
+        defer root.releaseEngines();
+        const mark = g.mark();
+        defer g.resetTo(mark);
+        const p = try trunkProj(&g, a, rnd, l.k, l.n);
+        var per_forward: u32 = 0;
+        for (trunk_shapes) |t| if (std.mem.eql(u8, t.name, l.name)) {
+            per_forward = t.per_forward;
+        };
+        var chain: [pg2_time_rows.len]f64 = undefined;
+        var tt: [nc][pg2_time_rows.len]f64 = undefined;
+        var taken: [pg2_time_rows.len]bool = undefined;
+        for (pg2_time_rows, 0..) |rows, ri| {
+            const rm = g.mark();
+            defer g.resetTo(rm);
+            const c: LinCtx = .{ .s = s, .x = try trunkX(&g, a, &pool, rows, l.k), .p = p };
+            taken[ri] = root.pgemm.mlxRegular(rows, l.n, l.k);
+            const flops = 2.0 * @as(f64, @floatFromInt(rows)) * @as(f64, @floatFromInt(l.k)) * @as(f64, @floatFromInt(l.n));
+            chain[ri] = (try timeCall(&g, c, struct {
+                fn f(gg: *G, cc: LinCtx) !mlx.mlx_array {
+                    return (try pg2Linear(gg, cc, null)).y;
+                }
+            }.f))[0];
+            std.debug.print("TURBOEXL3_GLM_PG2_TIME name={s} k={d} n={d} tile=chain rows={d} min_us={d:.1} tflops={d:.2}\n", .{ l.name, l.k, l.n, rows, chain[ri], flops / (chain[ri] * 1e6) });
+            for (root.pgemm.candidates, 0..) |t, ti| {
+                if (!taken[ri]) {
+                    tt[ti][ri] = chain[ri];
+                    continue;
+                }
+                const Ctx = struct { c: LinCtx, e: *const [1]root.pgemm.Entry };
+                const entry = [1]root.pgemm.Entry{.{ .k = l.k, .n = l.n, .tile = t }};
+                tt[ti][ri] = (try timeCall(&g, Ctx{ .c = c, .e = &entry }, struct {
+                    fn f(gg: *G, cc: Ctx) !mlx.mlx_array {
+                        const r = try pg2Linear(gg, cc.c, cc.e);
+                        if (!r.fused) return error.Pg2NotFused;
+                        return r.y;
+                    }
+                }.f))[0];
+                std.debug.print("TURBOEXL3_GLM_PG2_TIME name={s} k={d} n={d} tile={c} rows={d} min_us={d:.1} tflops={d:.2} ratio={d:.3}\n", .{ l.name, l.k, l.n, root.glm53f.codeOf(ti), rows, tt[ti][ri], flops / (tt[ti][ri] * 1e6), tt[ti][ri] / chain[ri] });
+            }
+        }
+        // pg2u's rule: a tile at or below the chain at every row count it takes, the fastest at the widest of them
+        const last = pg2_time_rows.len - 1;
+        var best: ?usize = null;
+        for (0..nc) |ti| {
+            var ok = true;
+            for (0..pg2_time_rows.len) |ri| ok = ok and tt[ti][ri] <= chain[ri];
+            if (ok and taken[last] and (best == null or tt[ti][last] < tt[best.?][last])) best = ti;
+        }
+        code.* = if (best) |b| root.glm53f.codeOf(b) else '0';
+        const cut_ms = if (best) |b| (chain[last] - tt[b][last]) * @as(f64, @floatFromInt(per_forward)) / 1000.0 else 0;
+        saved_ms += cut_ms;
+        std.debug.print("TURBOEXL3_GLM_PG2_PICK name={s} k={d} n={d} tile={c} ratios={d:.3}/{d:.3}/{d:.3} per_forward={d} forward_ms_cut={d:.2}\n", .{ l.name, l.k, l.n, code.*, if (best) |b| tt[b][0] / chain[0] else 1.0, if (best) |b| tt[b][1] / chain[1] else 1.0, if (best) |b| tt[b][last] / chain[last] else 1.0, per_forward, cut_ms });
+    }
+    std.debug.print("TURBOEXL3_GLM_PG2_CODES codes={s} forward_ms_cut={d:.2} (one code a linear in root.glm53f.trunk's order; each linear alone at 16384 rows times its count in a forward)\n", .{ &codes, saved_ms });
+}
+
+/// The routed prefill's opt-in options (the plugin's TURBOEXL3_GLM53F_PF_OPTS): `bk128`, `half_rows`, both
+const PfOpts = struct { name: []const u8, bk128: bool, half_rows: bool };
+const pf_opts = [_]PfOpts{ .{ .name = "bk128", .bk128 = true, .half_rows = false }, .{ .name = "hr", .bk128 = false, .half_rows = true }, .{ .name = "bk128.hr", .bk128 = true, .half_rows = true } };
+/// The served options (null), then each of `pf_opts`
+const pf_sets = [_]?PfOpts{ null, pf_opts[0], pf_opts[1], pf_opts[2] };
+
+/// `configure` with the routed prefill options `o` (null: the served ones), every engine released first so the next
+/// call's prefill engine is made under them
+fn pfOptsConfigure(saved: root.config.Config, o: ?PfOpts) !void {
+    root.releaseEngines();
+    var c = saved;
+    c.pf_bk128 = if (o) |v| v.bk128 else saved.pf_bk128;
+    c.pf_half_rows = if (o) |v| v.half_rows else saved.pf_half_rows;
+    try root.configure(c);
+}
+
+test "turboexl3 gpu glm53f prefill options: bk128, half_rows and both give a prompt call's served words, 16384 row-slots in 4096-row calls on the plugin's default path and on moeClampedRows, at every SC rate (TURBOEXL3_GPU=1)" {
+    _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    const s = mlx.mlx_default_gpu_stream_new();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    const a = std.heap.page_allocator;
+    var g = try G.init(a, s);
+    defer g.deinit();
+    const saved = root.config.get().*;
+    defer pfOptsConfigure(saved, null) catch unreachable;
+    var nbuf: [8]u32 = undefined;
+    const rates = routed.envList("TURBOEXL3_GLM_ROUTED_N", &routed.rates_n, &nbuf);
+    const S: usize = 16384;
+    const chunk: usize = 4096;
+    const want_buf = try a.alloc(f32, S * hidden);
+    defer a.free(want_buf);
+    const got_buf = try a.alloc(f32, S * hidden);
+    defer a.free(got_buf);
+    const ones_h = try a.alloc(f32, S);
+    defer a.free(ones_h);
+    @memset(ones_h, 1.0);
+    var failed = false;
+    for (rates) |n| {
+        defer _ = mlx.mlx_clear_cache();
+        defer root.releaseEngines();
+        const rate = format.Rate.fromN(n) orelse return error.Exl3RateUnsupported;
+        const mark = g.mark();
+        defer g.resetTo(mark);
+        var prng = std.Random.DefaultPrng.init(0x61F0B7 ^ @as(u64, n));
+        const rnd = prng.random();
+        var bank = try ref.synthBank(a, rnd, prompt_slots, hidden, inter, rate);
+        defer bank.deinit(a);
+        const rb = try routed.rootBank(&g, &bank, .uint16);
+        const xh = try a.alloc(f32, act_rows * hidden);
+        defer a.free(xh);
+        for (xh) |*v| v.* = routed.bfExact(sigma * rnd.floatNorm(f32));
+        const x = try g.astype(try g.hostArray(std.mem.sliceAsBytes(xh), &.{ ci(act_rows), ci(hidden) }, .float32), .bfloat16);
+        try g.evalAll(&.{x});
+        const rows = try a.alloc(u32, S);
+        defer a.free(rows);
+        const slots = try a.alloc(u32, S);
+        defer a.free(slots);
+        drawCall(rnd, rows, slots, prompt_slots, 0);
+        try sortBySlot(a, rows, slots, prompt_slots);
+        for ([_]bool{ false, true }) |on_rows| {
+            // the served options' words, then each option set's
+            for (pf_sets) |o| {
+                try pfOptsConfigure(saved, o);
+                const buf = if (o == null) want_buf else got_buf;
+                var c0: usize = 0;
+                while (c0 < S) : (c0 += chunk) {
+                    const c1 = @min(c0 + chunk, S);
+                    const m2 = g.mark();
+                    defer g.resetTo(m2);
+                    const y = try chunkCall(&g, s, x, rb, rows[c0..c1], slots[c0..c1], ones_h, on_rows);
+                    _ = try bitsOf(&g, y, buf[c0 * hidden .. c1 * hidden]);
+                }
+                const v = o orelse continue;
+                const want: []const u32 = @as([*]const u32, @ptrCast(want_buf.ptr))[0 .. S * hidden];
+                const got: []const u32 = @as([*]const u32, @ptrCast(got_buf.ptr))[0 .. S * hidden];
+                const d = countDiff(got, want, got_buf);
+                const ok = d[0] == 0 and d[1] == 0;
+                std.debug.print("TURBOEXL3_GLM_PF_OPTS_BYTES n={d} S={d} path={s} opts={s} against=served differing={d}/{d} nonfinite={d} {s}\n", .{ n, S, if (on_rows) "rows" else "chain", v.name, d[0], S * hidden, d[1], if (ok) "PASS" else "FAIL" });
+                if (!ok) failed = true;
+            }
+        }
+        try pfOptsConfigure(saved, null);
+    }
+    try testing.expect(!failed);
+}
+
+test "turboexl3 gpu glm53f prefill options timing: a 16384-row prompt bank call under the served options, bk128, half_rows and both, in calls of 4096 and 16384 rows on each path, over 36 experts' 455-row runs and over a drawn routing (TURBOEXL3_GLM_TIME=1)" {
+    _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    _ = std.c.getenv("TURBOEXL3_GLM_TIME") orelse return error.SkipZigTest;
+    const s = mlx.mlx_default_gpu_stream_new();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    const a = std.heap.page_allocator;
+    var g = try G.init(a, s);
+    defer g.deinit();
+    defer _ = mlx.mlx_clear_cache();
+    const saved = root.config.get().*;
+    defer pfOptsConfigure(saved, null) catch unreachable;
+    var prng = std.Random.DefaultPrng.init(0x61F0B8);
+    const rnd = prng.random();
+    // K3, the sc_3.10bpw pack's routed layers
+    const n: u32 = 48;
+    const rate = format.Rate.fromN(n) orelse return error.Exl3RateUnsupported;
+    const mark = g.mark();
+    defer g.resetTo(mark);
+    var bank = try ref.synthBank(a, rnd, prompt_slots, hidden, inter, rate);
+    defer bank.deinit(a);
+    const rb = try routed.rootBank(&g, &bank, .uint16);
+    const xh = try a.alloc(f32, act_rows * hidden);
+    defer a.free(xh);
+    for (xh) |*v| v.* = routed.bfExact(sigma * rnd.floatNorm(f32));
+    const x = try g.astype(try g.hostArray(std.mem.sliceAsBytes(xh), &.{ ci(act_rows), ci(hidden) }, .float32), .bfloat16);
+    try g.evalAll(&.{x});
+    const S: usize = 16384;
+    const ones_h = try a.alloc(f32, S);
+    defer a.free(ones_h);
+    @memset(ones_h, 1.0);
+    for ([_][]const u8{ "runs455", "drawn" }) |routing| {
+        const rows = try a.alloc(u32, S);
+        defer a.free(rows);
+        const slots = try a.alloc(u32, S);
+        defer a.free(slots);
+        if (std.mem.eql(u8, routing, "drawn")) {
+            drawCall(rnd, rows, slots, prompt_slots, 0);
+            try sortBySlot(a, rows, slots, prompt_slots);
+        } else for (rows, slots, 0..) |*r, *sl, i| {
+            r.* = rnd.uintLessThan(u32, act_rows);
+            sl.* = @intCast(@min(i / 455, 35) * 2);
+        }
+        for (pf_sets) |o| {
+            try pfOptsConfigure(saved, o);
+            for ([_]bool{ false, true }) |on_rows| for ([_]usize{ 4096, 16384 }) |chunk| {
+                var t: [8]f64 = undefined;
+                for (0..t.len + 2) |round| {
+                    const m = g.mark();
+                    defer g.resetTo(m);
+                    var outs: [8]mlx.mlx_array = undefined;
+                    var no: usize = 0;
+                    const t0 = nowNs();
+                    var c0: usize = 0;
+                    while (c0 < S) : (c0 += chunk) {
+                        const c1 = @min(c0 + chunk, S);
+                        outs[no] = try chunkCall(&g, s, x, rb, rows[c0..c1], slots[c0..c1], ones_h, on_rows);
+                        no += 1;
+                    }
+                    try g.evalAll(outs[0..no]);
+                    const dt = nowNs() - t0;
+                    if (round >= 2) t[round - 2] = @as(f64, @floatFromInt(dt)) / 1e6;
+                }
+                std.mem.sort(f64, &t, {}, std.sort.asc(f64));
+                const flops = 2.0 * 3.0 * @as(f64, @floatFromInt(S)) * @as(f64, @floatFromInt(hidden)) * @as(f64, @floatFromInt(inter));
+                std.debug.print("TURBOEXL3_GLM_PF_OPTS_TIME n={d} S={d} routing={s} path={s} chunk={d} opts={s} min_ms={d:.2} med_ms={d:.2} tflops={d:.2}\n", .{ n, S, routing, if (on_rows) "rows" else "chain", chunk, if (o) |v| v.name else "served", t[0], t[t.len / 2], flops / (t[0] * 1e9) });
+            };
+        }
+        try pfOptsConfigure(saved, null);
     }
 }

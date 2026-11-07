@@ -1269,7 +1269,7 @@ pg2: a dense linear's prefill matmul and finish as one launch.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/pgemm.zig:135` (`fn kernelGet`) |
+| made at | `src/core/pgemm.zig:163` (`fn kernelGet`) |
 | inputs | `x`, `w`, `svh` |
 | outputs | `y` |
 | source | `body` = `pg2/gemm_fused` ++ text '\n#undef kernel\n' (4974 B, `5d135c7c939d`) |
@@ -1282,7 +1282,10 @@ pg2: a dense linear's prefill matmul and finish as one launch.
   holds, xp and W are f16 and MLX would run its regular fused NAX kernel (`mlxRegular`: no split K). In `check` mode it
   runs beside the chain and the host's `check_hook` gets both outputs; `pgemm.warm` compiles each tile at load. The
   table's six shapes are DeepSeek-V4.1's: wq_b (1280 -> 32768), wo_b (8192 -> 5120), the shared expert's w1 and w3 (5120
-  -> 2304) and w2 (2304 -> 5120), wq_a (5120 -> 1280), wkv and the compressors' wkv and wgate (5120 -> 512).
+  -> 2304) and w2 (2304 -> 5120), wq_a (5120 -> 1280), wkv and the compressors' wkv and wgate (5120 -> 512). A host's own
+  tiles (`pgemm.host_table`, looked up first: `tileOf`) come from `pgemm.candidates` as timed on its machine; GLM-5.3-Flash's
+  plugin builds its table from one code a trunk linear (`glm53f.pg2Table`, models/glm53f/api.zig), and
+  models/glm53f/fused_test.zig holds every candidate at every one of those linears to the chain's words.
 - **Shapes and dtypes:** x f16 [M, K] (the prepared rows, natural order); w f16 [K, N] (W_hat, dequantized or resident);
   svh f16 [N]. Out: y OUT_T [M, N] (x's dtype).
 - **Grid and threadgroup:** `(tiles_n · 2^SWZ · 32, ceil(tiles_m / 2^SWZ) · WN, WM)` / `(32, WN, WM)` (MLX's own

@@ -20,6 +20,12 @@ pub const Config = struct {
     pf_alay: u8 = 2,
     /// Each expert's full 128-row runs in 128-row prefill tiles. The same bytes.
     pf_t128: bool = true,
+    /// The routed prefill's down GEMM in 128-deep K stages (`prefill.Options.bk128`: two 64-deep sub-stages per buffer
+    /// between barriers). The same bytes.
+    pf_bk128: bool = false,
+    /// A routed prefill simdgroup whose rows end within its first 16 multiplies only that fragment row
+    /// (`prefill.Options.half_rows`). The same bytes.
+    pf_half_rows: bool = false,
     /// Routed prefill rows on the fused GEMM chain; false refuses them (`error.Exl3EngineNotImplemented`).
     prefill: bool = true,
     /// The device passes MLX's NAX gate (an M5-class GPU and macOS 26.2 or later), the consumer's to say. False keeps
