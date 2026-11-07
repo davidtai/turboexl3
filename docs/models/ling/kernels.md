@@ -763,7 +763,13 @@ position only, so a verify call's rows have the bits of one-row calls at their p
   group) reads as 0 and scores -inf. Key groups and sub-chunks count from position 0, so a row's values depend on its
   operands and position only (a verify row has a one-row call's bits). Within tolerance of the composed path.
 - **Pinned by:** `src/models/ling/mla_latent.zig` "turboexl3 ling mla latent texts: ..." (CPU: the operands, the strides, the
-  position arithmetic from the pin file).
+  position arithmetic from the pin file); `src/models/ling/mla_latent_test.zig` "turboexl3 gpu ling mla latent:
+  decodeLatent at Ling's widths is within tolerance ..." (GPU: within 1e-4 of the f64 reference in f32, 1e-2 in bf16)
+  and "turboexl3 gpu ling mla latent: a call's every row has the bits of a one-row call at its position, ..." (GPU,
+  bytes: rows against one-row calls, strided views against contiguous),
+  and "turboexl3 gpu ling mla latent: no worse than the served expanded attention ..." (GPU: bf16, the RMS error
+  within 10% and the worst element within 25% of the served expanded path's, against the same f64 reference, rows 1 to
+  4 at keys to 18,480).
 
 ### `turboexl3_ling_mla_qabs`
 
@@ -791,7 +797,8 @@ position only, so a verify call's rows have the bits of one-row calls at their p
 - **Bits:** f32: each term one fma of the exact operands, d ascending from 0; a row's values its own (any rows beside it).
   Within tolerance of the host's matmul (another summation order).
 - **Pinned by:** `src/models/ling/mla_latent.zig` "turboexl3 ling mla latent texts: each text reads every operand it binds and
-  ..." (CPU: operands, constants, no strides).
+  ..." (CPU: operands, constants, no strides); `src/models/ling/mla_latent_test.zig` "turboexl3 gpu ling mla latent:
+  decodeLatent at Ling's widths is within tolerance of the host's f64 absorbed attention, ..." (GPU, the call).
 
 ### `turboexl3_ling_mla_vabs`
 
@@ -820,7 +827,7 @@ position only, so a verify call's rows have the bits of one-row calls at their p
   each output a 512-term dot (a lane's 16 columns by fma, then `simd_sum`), cast to OT. A row's values its own. Within
   tolerance of the composed path.
 - **Pinned by:** `src/models/ling/mla_latent.zig` "turboexl3 ling mla latent texts: ..." (CPU: the merge's group bound from the
-  pin file).
+  pin file); `src/models/ling/mla_latent_test.zig`'s three GPU tests (the call).
 
 ## `src/models/ling/mla_flash.zig`
 

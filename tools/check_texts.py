@@ -1280,6 +1280,9 @@ ADDED_KERNELS[('models/ling/mla_latent.zig', 'turboexl3_ling_mla_attn')] = ('the
                                                                            'key groups of 256 from position 0')
 ADDED_KERNELS[('models/ling/mla_latent.zig', 'turboexl3_ling_mla_vabs')] = ('a row\'s group partials merged in group order, '
                                                                            'then kv_b\'s value half')
+ADDED_FILES['models/ling/mla_latent_test.zig'] = ('decodeLatent against an f64 reference within tolerance, its rows '
+                                                  'against one-row calls and strided views against contiguous ones byte for '
+                                                  'byte, and no worse than the served expanded attention (GPU)')
 # DEVROUTE's device wave in one call (turboexl3_ling's MLX_SERVE_LING_DEVWAVE_LUT): the banked prepare reading x's rows by
 # token and each row-slot's id through the layer's LUT (turboexl3_prep2bgl), ds.bankedGateUpLutAct and ling.moeLingBankedLut
 ADDED_KERNELS[('models/deepseek_v41/banked.zig', 'turboexl3_prep2bgl')] = ('prep2bg with its skip and expert lines reading '

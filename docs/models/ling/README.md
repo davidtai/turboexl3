@@ -72,7 +72,7 @@ table of every 16-bit gate), and `linear(down)` (`src/models/ling/shared_test.zi
 
 The MLA attention in the latent reads a layer's cache once at 1,152 B a token (the expanded cache: 40,960). It computes
 in f32 and sums in its own orders, so it is within tolerance of the host's composed latent attention, not byte for
-byte, and a verify call's rows have the bits of one-row calls at
+byte (`mla_latent_test.zig`: against an f64 reference), and a verify call's rows have the bits of one-row calls at
 their positions (the key groups and sub-chunks count from position 0).
 
 No speed verdict comes from this repository: the standard test through the outside plugin decides.
