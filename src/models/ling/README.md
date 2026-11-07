@@ -19,8 +19,12 @@ The code only Ling-3.1-flash uses, on the core's routed chain, DeepSeek-V4.1's b
 | `addnorm.zig` | `addNormLinears` (a decode layer's mixer input: the residual add, its RMSNorm and up to three EXL3 members' prepares in one launch, then each member's GEMV over its prepared rows) and `addNormPrepare` (the launch alone), the texts' CPU test |
 | `addnorm_test.zig` | `addNormLinears` against MLX's add, MLX's fast rms_norm and each member's `linear` word for word at decode rows 1 to 8, 12 and 16, in bf16 and f16, each member's own `linear` with its prepare inside or in its own launch; the refusals (GPU) |
 | `kernels/addnorm/` | the launch's pieces: the member's prepare (a function in its header), the add and norm, each member's call and the counters |
+| `router.zig` | `route`, `routerLogits` and `select` (a MoE layer's router at decode rows 1 to 8 in two launches: MLX's one-row gemv_t for the logits beside its gemv / gemv_wide for the read-ahead predictor's scores, then the host's fused router text over the logits with its weights in bf16), the texts' and the plan's CPU tests |
+| `router_test.zig` | the logits, both predictor scores, the ids and the weights against the host's launches word for word at rows 1 to 8, the refusals (GPU) |
+| `kernels/router/` | the router's pieces: launch 1's head, MLX's gemv_t statements, the predictor's branch (gemv at one row, gemv_wide at 2 to 8), the two scores (headers) and the host's fused router text (`select.metal`) |
 
-Ling's own Metal is the pairs', the shared expert's, the routed combine's and the mixer input's add and norm pieces
-(`kernels/pair/`, `kernels/shared/`, `kernels/combine/`, `kernels/addnorm/`; `kernels/test/pins/` what the CPU tests pin); the routed experts' clamp pieces are the core's
+Ling's own Metal is the pairs', the shared expert's, the routed combine's, the mixer input's add and norm and the
+router's pieces (`kernels/pair/`, `kernels/shared/`, `kernels/combine/`, `kernels/addnorm/`, `kernels/router/`;
+`kernels/test/pins/` what the CPU tests pin); the routed experts' clamp pieces are the core's
 (`kernels/decode/fin7_swiglu_clamp_out.metal`, `kernels/prefill/mid_swiglu_clamp_out.metal`). docs/models/ling/
 describes the model's needs and its kernels.

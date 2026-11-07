@@ -4,8 +4,9 @@
 //! (`moeLingBanked`). Every launch is root's routed chain or DeepSeek-V4.1's banked decode; only the SwiGLU line differs
 //! (`decode.text_fin7co`, `prefill.text_midco` and the banked `text_fin7b` / `text_fin7cob`). Its trunk's same-input
 //! linear pairs run in one DEC-ONE launch through `linearPair` (`pair.zig`), its shared expert at decode rows in two
-//! dependent launches of its own (`sharedExpert`, shared.zig), and a wide routed call's combine in one launch
-//! (`combineRouted`, `combineParts`, combine.zig): each a host's opt-in.
+//! dependent launches of its own (`sharedExpert`, shared.zig), a wide routed call's combine in one launch
+//! (`combineRouted`, `combineParts`, combine.zig), and its MoE router at decode rows with the read-ahead predictor's
+//! scores in two launches (`router.route`, router.zig): each a host's opt-in.
 const std = @import("std");
 const mlx = @import("sdk").mlx;
 const root = @import("../../root.zig");
@@ -38,6 +39,11 @@ pub const kdaProjPrepared = kdaproj.kdaProjPrepared;
 pub const addnorm = @import("addnorm.zig");
 pub const addNormLinears = addnorm.addNormLinears;
 pub const addNormPrepare = addnorm.addNormPrepare;
+
+/// The MoE router at decode rows 1 to 8 in two launches, with the read-ahead predictor's scores (`router.zig`): the
+/// router's logits and the predictor's scores in one launch (`router.routerLogits`), the host's fused router over them
+/// (`router.select`), or both (`router.route`), the host's ids, bf16 weights and scores word for word.
+pub const router = @import("router.zig");
 
 /// `root.moe` with Ling-3.1's SwiGLU: `limit` 0 none (`moe`'s bytes), 1..128 the clamp after the SiLU (each row-slot's
 /// gate SiLU clamped from above at `limit` and its up to [-limit, limit], in f32 on the projections' f16-rounded outputs);
@@ -97,4 +103,4 @@ fn act(limit: c_int) !ds.BankedAct {
 }
 
 /// This file's module state (`Global`): what a host that shares its units' state registers.
-pub const shared_state = .{ shared.shared_state, pair.shared_state, kdaproj.shared_state, addnorm.shared_state };
+pub const shared_state = .{ shared.shared_state, pair.shared_state, kdaproj.shared_state, addnorm.shared_state, router.shared_state };

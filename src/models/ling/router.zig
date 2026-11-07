@@ -1,0 +1,302 @@
+//! Ling-3.1-flash's MoE router at decode rows 1 to 8 in two launches, with the read-ahead predictor's scores (the next
+//! MoE layer's router on this call's rows), the host's words. The host (turboexl3_ling) spends nine launches a MoE
+//! layer: MLX's astype of x to f32 and its f32 gemv_t over the router table; the served fused router kernel
+//! (`sigmoid_bias_grouped`: sigmoid + expert bias, the top-8 of the 4 best of 8 groups of 64 by the sum of each group's
+//! two best, the weights normalized and scaled by routed_scaling_factor) and the astype of its f32 weights to bf16; and
+//! the predictor's bf16 gemv over the next layer's bf16 router, its astype to f32, logaddexp(z, 0), sqrt and the bias
+//! add (the streamer's `nextScores`). Here:
+//! - `routerLogits`: one launch. The router's threadgroups each run MLX's gemv_t statements for 64 logits of a row (x
+//!   widened to f32 in registers: the astype's values). With a `Predictor`, the predictor's threadgroups run MLX's gemv
+//!   statements at one row and gemv_wide's at 2 to 8 (MLX's route there on M3 and later), round each word to bf16, widen
+//!   it and score it: DeepSeek's sqrt(softplus(z)) + bias (`turboexl3_ling_router_pred`) or Ling's sigmoid(z) + bias
+//!   (`turboexl3_ling_router_pred_sig`, candidate C1). The last MoE layer has no next router (`turboexl3_ling_router_logits`).
+//! - `select`: the served kernel's text verbatim over those logits, its weights stored in bf16 (TOUT bfloat16: the
+//!   astype folded into its store; `turboexl3_ling_router_select`).
+//! - `route`: both.
+//! Every row of every call is that row's own: the logits are MLX's one-row gemv_t words at any row count (at 2 to 8 rows
+//! the words of the host's exact verify, turboexl3_ling's MLX_SERVE_LING_EXACT_VERIFY=1 denseRows; MLX's own matmul of
+//! several rows takes a steel GEMM there, another order), and the predictor's are MLX's own at the call's row count.
+const std = @import("std");
+const mlx = @import("sdk").mlx;
+const ks = @import("sdk").kernel_launch;
+const Global = @import("../../core/global.zig").Global;
+const decode = @import("../../core/decode.zig");
+
+/// The launch's threadgroups (the router's, then the predictor's) and the router branch's row and tile
+pub const head = @embedFile("kernels/router/head.metal");
+/// MLX's gemv_t statements for 64 logits of one row (x widened in registers)
+pub const logits_gemv = @embedFile("kernels/router/logits.metal");
+/// The predictor branch's opening: the threadgroup's index among the predictor's
+pub const pred_open = @embedFile("kernels/router/pred_open.metal");
+/// One row: MLX's gemv statements for 16 rows of the next router, each word rounded to bf16 and scored
+pub const pred_one = @embedFile("kernels/router/pred_one.metal");
+/// 2 to 8 rows: MLX's gemv_wide statements (k_lanes 32 to 5 rows, 16 past), each word rounded to bf16 and scored
+pub const pred_wide = @embedFile("kernels/router/pred_wide.metal");
+/// The branch's close
+pub const close = @embedFile("kernels/router/close.metal");
+/// The predictor's score of each word, a header each: DeepSeek's sqrt(softplus(z)) + bias (the host's today) ...
+pub const score_softplus_sqrt = @embedFile("kernels/router/score_softplus_sqrt.metal");
+/// ... or Ling's own sigmoid(z) + bias (candidate C1)
+pub const score_sigmoid = @embedFile("kernels/router/score_sigmoid.metal");
+
+/// The router's logits alone (the last MoE layer): x bf16 [R, HK], w f32 [HK, NE] -> logits f32 [R, NE]
+pub const text_logits: [:0]const u8 = head ++ logits_gemv ++ close;
+/// The router's logits and the predictor's scores (its score the header's): x, w, pw bf16 [NE, HK], pb f32 [NE] ->
+/// logits, scores f32 [R, NE]
+pub const text_pred: [:0]const u8 = head ++ logits_gemv ++ pred_open ++ pred_one ++ pred_wide ++ close;
+/// The host's fused router kernel at `sigmoid_bias_grouped` (sdk/blocks/moe/router_kernel.zig `moeRouterSource`, the
+/// MLX kernel "mlxserve_moe_router_sigmoid_grouped"), byte for byte; turboexl3_ling's test pins this copy to the host's
+/// source. Inputs logits, bias, scale (0-dim); outputs inds, scores; template TOUT, NE, NK, TG, NORM, NG, GSZ, TOPKG.
+pub const text_select: [:0]const u8 = @embedFile("kernels/router/select.metal");
+
+/// Ling-3.1-flash's routing, the only one these launches take: 512 experts, top-8 of the 4 best of 8 groups, the
+/// weights normalized (norm_topk_prob)
+pub const n_experts: c_int = 512;
+pub const top_k: c_int = 8;
+pub const n_group: c_int = 8;
+pub const topk_group: c_int = 4;
+/// The rows a call takes: decode's one and a verify's 2 to 8 (the streamer's read-ahead `max_rows`)
+pub const max_rows: c_int = 8;
+/// The select's threads a row: the host's `moeRouterThreadGroup` at 512 experts
+pub const select_threads: c_int = 256;
+/// Launch 1's threads a threadgroup: MLX's gemv_t, gemv and gemv_wide (k_lanes 32) tiles' 128
+const threads: u32 = 128;
+const max_rows_u: usize = @intCast(max_rows);
+const n_experts_u: u32 = @intCast(n_experts);
+
+const logits_in = [_][*:0]const u8{ "x", "w" };
+const logits_out = [_][*:0]const u8{"logits"};
+const pred_in = [_][*:0]const u8{ "x", "w", "pw", "pb" };
+const pred_out = [_][*:0]const u8{ "logits", "scores" };
+/// The select's operands (the host's)
+pub const select_in = [_][*:0]const u8{ "logits", "bias", "scale" };
+pub const select_out = [_][*:0]const u8{ "inds", "scores" };
+
+/// The predictor's score of each word z of x times the next router (f32, after the bf16 rounding)
+pub const Score = enum {
+    /// DeepSeek's sqrt(softplus(z)) + bias: MLX's add(sqrt(logaddexp(z, 0)), bias), the host streamer's `nextScores`
+    softplus_sqrt,
+    /// Ling's sigmoid(z) + bias: MLX's add(sigmoid(z), bias) (candidate C1, turboexl3_ling's MLX_SERVE_LING_PREDICTOR=1)
+    sigmoid,
+};
+
+/// The read-ahead predictor of a MoE layer's call: the next MoE layer's router and bias
+pub const Predictor = struct {
+    /// bf16 [512, hidden] row-major (the host's `router_raw`: the gate weight in bf16), the product's b transposed
+    w: mlx.mlx_array,
+    /// f32 [512], the next layer's expert bias
+    bias: mlx.mlx_array,
+    score: Score = .softplus_sqrt,
+};
+
+/// `routerLogits`' outputs: the logits f32 [R, 512], and with a predictor its scores f32 [R, 512]. The caller frees them.
+pub const Logits = struct { logits: mlx.mlx_array, scores: ?mlx.mlx_array };
+/// `select`'s outputs: the ids u32 [R, 8] (in the selection's order) and their weights bf16 [R, 8]. The caller frees them.
+pub const Selected = struct { inds: mlx.mlx_array, weights: mlx.mlx_array };
+/// `route`'s outputs: `Selected`'s and the predictor's scores. The caller frees them.
+pub const Routes = struct { inds: mlx.mlx_array, weights: mlx.mlx_array, scores: ?mlx.mlx_array };
+
+const Kind = enum(u2) { logits, pred, pred_sig, select };
+const Kernels = struct {
+    logits: mlx.mlx_fast_metal_kernel,
+    pred: mlx.mlx_fast_metal_kernel,
+    pred_sig: mlx.mlx_fast_metal_kernel,
+    select: mlx.mlx_fast_metal_kernel,
+};
+/// A cached launch config (it bakes the row count's output shapes and grid, and the hidden size)
+const Slot = struct { hidden: c_int, cfg: mlx.mlx_fast_metal_kernel_config };
+const lock = Global(std.atomic.Value(u32), "ling_router_lock", std.atomic.Value(u32).init(0));
+const kernels = Global(?Kernels, "ling_router_kernels", null);
+const cfgs = Global([4][max_rows_u]?Slot, "ling_router_cfgs", @splat(@splat(null)));
+
+/// This file's module state (`Global`): what a host that shares its units' state registers.
+pub const shared_state = .{ lock, kernels, cfgs };
+
+/// Whether the launches take x [rows, hidden]: rows 1 to `max_rows`; hidden a multiple of 1024 below 8192, where MLX's
+/// tiles are the texts' (gemv_t at BN 4, SM 8, SN 4 and gemv at BM 4 for 512 outputs) and none has a leftover block
+/// (gemv_t's K step 32, gemv's 128, gemv_wide's 4 * k_lanes * 8).
+pub fn takes(rows: c_int, hidden: c_int) bool {
+    return rows >= 1 and rows <= max_rows and hidden >= 1024 and hidden < 8192 and @rem(hidden, 1024) == 0;
+}
+
+/// Launch 1's threadgroups at `rows` rows: the router's 512 / 64 a row (MLX's gemv_t tiles, 64 logits each), then the
+/// predictor's: 512 / 16 at one row (gemv's tiles, 16 rows of the next router each), 512 / 4 at 2 to 5 rows and 512 / 8
+/// at 6 to 8 (gemv_wide at k_lanes 32 or 16: 1 or 2 rows of the next router a simdgroup, 4 simdgroups each).
+pub fn threadgroups(rows: u32, pred: bool) u32 {
+    const router = rows * (n_experts_u / 64);
+    if (!pred) return router;
+    const per: u32 = if (rows == 1) 16 else if ((rows + 4) / 5 == 1) 4 else 8;
+    return router + n_experts_u / per;
+}
+
+/// The four kernels, made at the first call (the caller holds the lock)
+fn kernelsFor() !Kernels {
+    if (kernels.get().*) |k| return k;
+    const l = ks.newKernel("turboexl3_ling_router_logits", &logits_in, &logits_out, text_logits, "", true) orelse return error.KernelCreateFailed;
+    errdefer decode.freeKernel(l);
+    const p = ks.newKernel("turboexl3_ling_router_pred", &pred_in, &pred_out, text_pred, score_softplus_sqrt, true) orelse return error.KernelCreateFailed;
+    errdefer decode.freeKernel(p);
+    const ps = ks.newKernel("turboexl3_ling_router_pred_sig", &pred_in, &pred_out, text_pred, score_sigmoid, true) orelse return error.KernelCreateFailed;
+    errdefer decode.freeKernel(ps);
+    const sel = ks.newKernel("turboexl3_ling_router_select", &select_in, &select_out, text_select, "", true) orelse return error.KernelCreateFailed;
+    kernels.get().* = .{ .logits = l, .pred = p, .pred_sig = ps, .select = sel };
+    return kernels.get().*.?;
+}
+
+/// The select's launch: the host's config (a threadgroup of 256 a row; TOUT bfloat16 in place of its f32)
+fn selectCfg(rows: c_int) !mlx.mlx_fast_metal_kernel_config {
+    const out = [_]c_int{ rows, top_k };
+    return ks.buildConfig(.{
+        .grid = .{ @intCast(select_threads), @intCast(rows), 1 },
+        .threadgroup = .{ @intCast(select_threads), 1, 1 },
+        .out_shapes = &.{ &out, &out },
+        .out_dtypes = &.{ .uint32, .bfloat16 },
+        .template = &.{
+            .{ .name = "TOUT", .value = .{ .dtype = .bfloat16 } },
+            .{ .name = "NE", .value = .{ .int = n_experts } },
+            .{ .name = "NK", .value = .{ .int = top_k } },
+            .{ .name = "TG", .value = .{ .int = select_threads } },
+            .{ .name = "NORM", .value = .{ .int = 1 } },
+            .{ .name = "NG", .value = .{ .int = n_group } },
+            .{ .name = "GSZ", .value = .{ .int = @divExact(n_experts, n_group) } },
+            .{ .name = "TOPKG", .value = .{ .int = topk_group } },
+        },
+    });
+}
+
+/// Launch 1's: `threadgroups` of 128 on x, its outputs f32 [rows, 512] (the logits, and the scores with a predictor)
+fn gemvCfg(rows: c_int, hidden: c_int, pred: bool) !mlx.mlx_fast_metal_kernel_config {
+    const out = [_]c_int{ rows, n_experts };
+    const tmpl = [_]ks.TemplateArg{
+        .{ .name = "R", .value = .{ .int = rows } },
+        .{ .name = "NE", .value = .{ .int = n_experts } },
+        .{ .name = "HK", .value = .{ .int = hidden } },
+    };
+    const grid: [3]u32 = .{ threadgroups(@intCast(rows), pred) * threads, 1, 1 };
+    if (pred) return ks.buildConfig(.{ .grid = grid, .threadgroup = .{ threads, 1, 1 }, .out_shapes = &.{ &out, &out }, .out_dtypes = &.{ .float32, .float32 }, .template = &tmpl });
+    return ks.buildConfig(.{ .grid = grid, .threadgroup = .{ threads, 1, 1 }, .out_shapes = &.{&out}, .out_dtypes = &.{.float32}, .template = &tmpl });
+}
+
+const Launch = struct { k: mlx.mlx_fast_metal_kernel, c: mlx.mlx_fast_metal_kernel_config };
+
+/// The kernel of `kind` and its config at `rows` (and `hidden`: 0 for the select), each made once
+fn launchFor(kind: Kind, rows: c_int, hidden: c_int) !Launch {
+    while (lock.get().*.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
+    defer lock.get().*.store(0, .release);
+    const k = try kernelsFor();
+    const kern = switch (kind) {
+        .logits => k.logits,
+        .pred => k.pred,
+        .pred_sig => k.pred_sig,
+        .select => k.select,
+    };
+    const slot = &cfgs.get().*[@intFromEnum(kind)][@intCast(rows - 1)];
+    if (slot.*) |cached| {
+        if (cached.hidden == hidden) return .{ .k = kern, .c = cached.cfg };
+        _ = mlx.mlx_fast_metal_kernel_config_free(cached.cfg);
+        slot.* = null;
+    }
+    const c = if (kind == .select) try selectCfg(rows) else try gemvCfg(rows, hidden, kind != .logits);
+    slot.* = .{ .hidden = hidden, .cfg = c };
+    return .{ .k = kern, .c = c };
+}
+
+/// Launch 1: the router's logits of x bf16 [rows, hidden] (`takes`) over the f32 router table w [hidden, 512] (row-major:
+/// the array the host's matmul reads), f32 [rows, 512], each row MLX's one-row `matmul(astype(x_r, f32), w)` words
+/// (gemv_t); with `pred`, the predictor's scores f32 [rows, 512], the words of MLX's `matmul(x, transpose(pred.w))`
+/// (bf16: gemv at one row, gemv_wide at 2 to 8, M3 and later), widened to f32 and scored (`Score`) with `pred.bias`.
+/// error.BadExl3Shape / error.BadExl3Dtype on anything else. The caller frees the outputs.
+pub fn routerLogits(s: mlx.mlx_stream, x: mlx.mlx_array, w: mlx.mlx_array, pred: ?Predictor) !Logits {
+    const xs = mlx.getShape(x);
+    if (xs.len != 2 or !takes(xs[0], xs[1])) return error.BadExl3Shape;
+    const rows = xs[0];
+    const hidden = xs[1];
+    const ws = mlx.getShape(w);
+    if (ws.len != 2 or ws[0] != hidden or ws[1] != n_experts) return error.BadExl3Shape;
+    if (mlx.mlx_array_dtype(x) != .bfloat16 or mlx.mlx_array_dtype(w) != .float32) return error.BadExl3Dtype;
+    const p = pred orelse {
+        const lo = try launchFor(.logits, rows, hidden);
+        var o1: [1]mlx.mlx_array = undefined;
+        try ks.applyConfig(lo.k, lo.c, &.{ x, w }, &o1, s);
+        return .{ .logits = o1[0], .scores = null };
+    };
+    const ps = mlx.getShape(p.w);
+    const bs = mlx.getShape(p.bias);
+    if (ps.len != 2 or ps[0] != n_experts or ps[1] != hidden or bs.len != 1 or bs[0] != n_experts) return error.BadExl3Shape;
+    if (mlx.mlx_array_dtype(p.w) != .bfloat16 or mlx.mlx_array_dtype(p.bias) != .float32) return error.BadExl3Dtype;
+    const lp = try launchFor(if (p.score == .sigmoid) .pred_sig else .pred, rows, hidden);
+    var o2: [2]mlx.mlx_array = undefined;
+    try ks.applyConfig(lp.k, lp.c, &.{ x, w, p.w, p.bias }, &o2, s);
+    return .{ .logits = o2[0], .scores = o2[1] };
+}
+
+/// Launch 2: the host's fused router (`sigmoid_bias_grouped`, its text and config) over logits f32 [rows, 512] (rows 1
+/// to `max_rows`) with the expert bias f32 [512] and routed_scaling_factor `scale`: the ids u32 [rows, 8] and their
+/// weights in bf16 [rows, 8], the words of the host's f32 weights after MLX's astype to bf16. error.BadExl3Shape /
+/// error.BadExl3Dtype on anything else. The caller frees the outputs.
+pub fn select(s: mlx.mlx_stream, logits: mlx.mlx_array, bias: mlx.mlx_array, scale: f32) !Selected {
+    const ls = mlx.getShape(logits);
+    const bs = mlx.getShape(bias);
+    if (ls.len != 2 or ls[0] < 1 or ls[0] > max_rows or ls[1] != n_experts or bs.len != 1 or bs[0] != n_experts) return error.BadExl3Shape;
+    if (mlx.mlx_array_dtype(logits) != .float32 or mlx.mlx_array_dtype(bias) != .float32) return error.BadExl3Dtype;
+    const l = try launchFor(.select, ls[0], 0);
+    // a 0-dim input: MLX binds it as a scalar reference (the text's `scale`)
+    const sc = mlx.mlx_array_new_float(scale);
+    defer _ = mlx.mlx_array_free(sc);
+    var o: [2]mlx.mlx_array = undefined;
+    try ks.applyConfig(l.k, l.c, &.{ logits, bias, sc }, &o, s);
+    return .{ .inds = o[0], .weights = o[1] };
+}
+
+/// The router of x [rows, hidden] in two launches: `routerLogits` then `select` (`bias` the layer's expert bias, `scale`
+/// its routed_scaling_factor, `pred` the next MoE layer's router or null). The caller frees the outputs.
+pub fn route(s: mlx.mlx_stream, x: mlx.mlx_array, w: mlx.mlx_array, bias: mlx.mlx_array, scale: f32, pred: ?Predictor) !Routes {
+    const l = try routerLogits(s, x, w, pred);
+    defer _ = mlx.mlx_array_free(l.logits);
+    errdefer if (l.scores) |sc| {
+        _ = mlx.mlx_array_free(sc);
+    };
+    const sel = try select(s, l.logits, bias, scale);
+    return .{ .inds = sel.inds, .weights = sel.weights, .scores = l.scores };
+}
+
+test "turboexl3 ling router texts: the logits and predictor texts are one composition, the predictor's branch spliced before the close; MLX's GEMV statements carry no contraction pragma and the scores' headers do; the select text is the host's statements; every operand a name its text reads" {
+    const t = std.testing;
+    const pin = comptime @import("../../core/test_support.zig").pins(@embedFile("kernels/test/pins/router.metal"));
+    const has = struct {
+        fn f(hay: []const u8, needle: []const u8) bool {
+            return std.mem.indexOf(u8, hay, needle) != null;
+        }
+    }.f;
+    try t.expect(std.mem.eql(u8, text_logits, head ++ logits_gemv ++ close));
+    try t.expect(std.mem.eql(u8, text_pred, head ++ logits_gemv ++ pred_open ++ pred_one ++ pred_wide ++ close));
+    // MLX's GEMV statements compile as MLX's own (no pragma); each score's sums keep their roundings (the pragma)
+    try t.expect(!has(text_pred, pin[0]));
+    try t.expect(has(score_softplus_sqrt, pin[0]) and has(score_sigmoid, pin[0]));
+    // gemv_t's accumulate and shuffle tree (the router), gemv's accumulate and its bf16 word scored (one row), gemv_wide's
+    // k_lanes, dot and its bf16 word scored (2 to 8 rows)
+    try t.expect(has(logits_gemv, pin[1]) and has(logits_gemv, pin[2]));
+    try t.expect(has(pred_one, pin[3]) and has(pred_one, pin[4]));
+    for (pin[5..8]) |line| try t.expect(has(pred_wide, line));
+    // DeepSeek's score: MLX's log1p product on the precise log, LogAddExp, the precise sqrt; Ling's: MLX's sigmoid
+    for (pin[8..11]) |line| try t.expect(has(score_softplus_sqrt, line));
+    try t.expect(has(score_sigmoid, pin[11]) and !has(score_softplus_sqrt, pin[11]));
+    // the host's sigmoid (MLX's two-sided form, precise exp) and its TOUT store
+    try t.expect(has(text_select, pin[12]) and has(text_select, pin[13]));
+    for ([_][:0]const u8{ text_logits, text_pred, text_select }, [_][]const [*:0]const u8{ &(logits_in ++ logits_out), &(pred_in ++ pred_out), &(select_in ++ select_out) }) |txt, names| {
+        for (names) |n| try t.expect(has(txt, std.mem.span(n)));
+        for ([_][]const u8{ "_shape", "_strides", "_ndim" }) |suf| try t.expect(!has(txt, suf));
+    }
+}
+
+test "turboexl3 ling router plan: launch 1's threadgroups per row count (the router's 8 a row; the predictor's 32 at one row, 128 at 2 to 5 rows, 64 at 6 to 8) and the shapes the launches take (rows 1 to 8, hidden a multiple of 1024 below 8192)" {
+    const t = std.testing;
+    try t.expectEqual(@as(u32, 8), threadgroups(1, false));
+    try t.expectEqual(@as(u32, 64), threadgroups(8, false));
+    try t.expectEqual(@as(u32, 8 + 32), threadgroups(1, true));
+    var r: u32 = 2;
+    while (r <= 5) : (r += 1) try t.expectEqual(8 * r + 128, threadgroups(r, true));
+    while (r <= 8) : (r += 1) try t.expectEqual(8 * r + 64, threadgroups(r, true));
+    for ([_]c_int{ 1, 2, 5, 6, 8 }) |rows| for ([_]c_int{ 1024, 4096, 7168 }) |h| try t.expect(takes(rows, h));
+    for ([_][2]c_int{ .{ 0, 4096 }, .{ 9, 4096 }, .{ 1, 8192 }, .{ 1, 4000 }, .{ 1, 512 }, .{ 1, 0 }, .{ -1, 4096 } }) |c| try t.expect(!takes(c[0], c[1]));
+}
