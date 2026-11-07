@@ -2,11 +2,12 @@
 //! TURBOEXL3_GLM53F_PF_ZFIT), at GLM-5.3-Flash's routed geometry:
 //! - CPU: the rows `prefill.t128ZCap` gives a call hold every remainder the 128-row tiles' route leaves (its CPU rule,
 //!   `prefill.t128Tables`), over every remainder edge and random calls; the option needs t128 and is off by default.
-//! - GPU (TURBOEXL3_GPU=1): a prompt call on `root.moeClampedRows` with t128_zfit gives the served words, with the call's
-//!   experts named (`root.moeClampedRowsFit`: outputs of t128ZCap rows) and without (S rows), 16384 row-slots in
-//!   4096-row calls over a drawn routing, 36 experts' 455-row runs and the remainder edges, at every SC rate. One line a
-//!   rate, routing and naming: TURBOEXL3_GLM_PF_ZFIT_BYTES (zcap_min the smallest call's rows: below 4096 where the
-//!   outputs shrank).
+//! - GPU (TURBOEXL3_GPU=1): a prompt call on `root.moeClampedRows` with t128_zfit gives the words it gives without, with
+//!   the call's experts named (`root.moeClampedRowsFit`: outputs of t128ZCap rows) and without (S rows), under the served
+//!   options, bk128 and bk128.tk (the plugin's PF_OPTS values it serves or A/Bs; fused_test.zig holds those to the served
+//!   words), 16384 row-slots in 4096-row calls over a drawn routing, 36 experts' 455-row runs and the remainder edges, at
+//!   every SC rate. One line a rate, option set, routing and naming: TURBOEXL3_GLM_PF_ZFIT_BYTES (zcap_min the smallest
+//!   call's rows: below 4096 where the outputs shrank).
 const std = @import("std");
 const sdk = @import("sdk");
 const mlx = sdk.mlx;
@@ -73,12 +74,26 @@ test "turboexl3 glm53f prefill t128_zfit: every remainder the 128-row tiles' rou
     try testing.expect((config.Config{ .pf_t128_zfit = true }).valid());
 }
 
-/// `configure` with Config.pf_t128_zfit `on`, every engine released first so the next call's prefill engine is made under it
-fn zfitConfigure(saved: config.Config, on: bool) !void {
+/// The routed prefill options the plugin serves or A/Bs (its TURBOEXL3_GLM53F_PF_OPTS: unset, bk128, bk128.tk), each
+/// checked with t128_zfit against itself without it
+const ZOpts = struct { name: []const u8, bk128: bool, t128_bk128: bool };
+const zopts = [_]ZOpts{ .{ .name = "served", .bk128 = false, .t128_bk128 = false }, .{ .name = "bk128", .bk128 = true, .t128_bk128 = false }, .{ .name = "bk128.tk", .bk128 = true, .t128_bk128 = true } };
+
+/// `configure` with the options `o` and Config.pf_t128_zfit `on` (every other field `saved`'s), every engine released
+/// first so the next call's prefill engine is made under them
+fn zfitConfigure(saved: config.Config, o: ZOpts, on: bool) !void {
     root.releaseEngines();
     var c = saved;
+    c.pf_bk128 = o.bk128;
+    c.pf_t128_bk128 = o.t128_bk128;
     c.pf_t128_zfit = on;
     try root.configure(c);
+}
+
+/// `saved` configured again, every engine released first
+fn zfitRestore(saved: config.Config) !void {
+    root.releaseEngines();
+    try root.configure(saved);
 }
 
 /// The distinct slots of a slot-sorted call: the plugin's count for `moeClampedRowsFit`
@@ -98,7 +113,10 @@ fn zfitCall(g: *G, s: mlx.mlx_stream, x: mlx.mlx_array, bank: root.Bank, rows: [
     return g.adopt(try root.moeClampedRows(s, x, rows_a, bank, inds, ones, .mul1, limit, .bfloat16));
 }
 
-test "turboexl3 gpu glm53f prefill zfit: the mixed launch's outputs at the rows they hold give a prompt call's served words on moeClampedRows, with the call's experts named (moeClampedRowsFit) and without, 16384 row-slots in 4096-row calls over drawn, 455-row and remainder-edge routings, at every SC rate (TURBOEXL3_GPU=1)" {
+/// The routings a rate's calls take: a drawn routing (slot-sorted), 36 experts' 455-row runs, the remainder edges
+const routings = [_][]const u8{ "drawn", "runs455", "edges" };
+
+test "turboexl3 gpu glm53f prefill zfit: the mixed launch's outputs at the rows they hold give a prompt call's words on moeClampedRows, with the call's experts named (moeClampedRowsFit) and without, under the served options, bk128 and bk128.tk, 16384 row-slots in 4096-row calls over drawn, 455-row and remainder-edge routings, at every SC rate (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
@@ -106,22 +124,30 @@ test "turboexl3 gpu glm53f prefill zfit: the mixed launch's outputs at the rows 
     var g = try G.init(a, s);
     defer g.deinit();
     const saved = config.get().*;
-    defer zfitConfigure(saved, saved.pf_t128_zfit) catch unreachable;
+    defer zfitRestore(saved) catch unreachable;
     var nbuf: [8]u32 = undefined;
     const rates = routed.envList("TURBOEXL3_GLM_ROUTED_N", &routed.rates_n, &nbuf);
     const S: usize = 16384;
     const chunk: usize = 4096;
-    const want_buf = try a.alloc(f32, S * hidden);
-    defer a.free(want_buf);
+    // each routing's words without t128_zfit, then one call set's with it
+    var want_bufs: [routings.len][]f32 = undefined;
+    for (&want_bufs) |*w| w.* = try a.alloc(f32, S * hidden);
+    defer for (want_bufs) |w| a.free(w);
     const got_buf = try a.alloc(f32, S * hidden);
     defer a.free(got_buf);
     const ones_h = try a.alloc(f32, S);
     defer a.free(ones_h);
     @memset(ones_h, 1.0);
-    const rows = try a.alloc(u32, S);
-    defer a.free(rows);
-    const slots = try a.alloc(u32, S);
-    defer a.free(slots);
+    var rows_r: [routings.len][]u32 = undefined;
+    var slots_r: [routings.len][]u32 = undefined;
+    for (&rows_r, &slots_r) |*r, *sl| {
+        r.* = try a.alloc(u32, S);
+        sl.* = try a.alloc(u32, S);
+    }
+    defer for (rows_r, slots_r) |r, sl| {
+        a.free(r);
+        a.free(sl);
+    };
     var failed = false;
     for (rates) |n| {
         defer _ = mlx.mlx_clear_cache();
@@ -139,54 +165,54 @@ test "turboexl3 gpu glm53f prefill zfit: the mixed launch's outputs at the rows 
         for (xh) |*v| v.* = routed.bfExact(fused.sigma * rnd.floatNorm(f32));
         const x = try g.astype(try g.hostArray(std.mem.sliceAsBytes(xh), &.{ ci(fused.act_rows), ci(hidden) }, .float32), .bfloat16);
         try g.evalAll(&.{x});
-        for ([_][]const u8{ "drawn", "runs455", "edges" }) |routing| {
-            if (std.mem.eql(u8, routing, "drawn")) {
-                fused.drawCall(rnd, rows, slots, fused.prompt_slots, 0);
-                try fused.sortBySlot(a, rows, slots, fused.prompt_slots);
-            } else if (std.mem.eql(u8, routing, "runs455")) {
-                for (rows, slots, 0..) |*r, *sl, i| {
-                    r.* = rnd.uintLessThan(u32, fused.act_rows);
-                    sl.* = @intCast(@min(i / 455, 35) * 2);
-                }
-            } else {
-                // expert e takes edges[e % 14] rows in turn (98 experts over the 16384 row-slots)
-                var e: u32 = 0;
-                var left: u32 = edges[0];
-                for (rows, slots) |*r, *sl| {
-                    while (left == 0) {
-                        e += 1;
-                        left = edges[e % edges.len];
-                    }
-                    r.* = rnd.uintLessThan(u32, fused.act_rows);
-                    sl.* = @min(e, fused.prompt_slots - 1);
-                    left -= 1;
-                }
+        // drawn (slot-sorted); 36 experts' 455-row runs; expert e taking edges[e % 14] rows in turn (98 experts)
+        fused.drawCall(rnd, rows_r[0], slots_r[0], fused.prompt_slots, 0);
+        try fused.sortBySlot(a, rows_r[0], slots_r[0], fused.prompt_slots);
+        for (rows_r[1], slots_r[1], 0..) |*r, *sl, i| {
+            r.* = rnd.uintLessThan(u32, fused.act_rows);
+            // the run's index in u32 first: @min with a comptime bound narrows its type, and 35 * 2 needs 7 bits
+            const run: u32 = @intCast(@min(i / 455, 35));
+            sl.* = run * 2;
+        }
+        var e: u32 = 0;
+        var left: u32 = edges[0];
+        for (rows_r[2], slots_r[2]) |*r, *sl| {
+            while (left == 0) {
+                e += 1;
+                left = edges[e % edges.len];
             }
-            // the served words (t128_zfit off), then t128_zfit with the calls' experts named and without
+            r.* = rnd.uintLessThan(u32, fused.act_rows);
+            sl.* = @min(e, fused.prompt_slots - 1);
+            left -= 1;
+        }
+        for (zopts) |o| {
+            // the options' words without t128_zfit, then with it, the calls' experts named and not
             for ([_]u8{ 0, 1, 2 }) |mode| {
-                try zfitConfigure(saved, mode != 0);
-                const buf = if (mode == 0) want_buf else got_buf;
-                var cap_min: u32 = std.math.maxInt(u32);
-                var c0: usize = 0;
-                while (c0 < S) : (c0 += chunk) {
-                    const c1 = @min(c0 + chunk, S);
-                    const m2 = g.mark();
-                    defer g.resetTo(m2);
-                    const named: ?u32 = if (mode == 1) sortedDistinct(slots[c0..c1]) else null;
-                    cap_min = @min(cap_min, prefill.t128ZCap(@intCast(c1 - c0), named));
-                    const y = try zfitCall(&g, s, x, rb, rows[c0..c1], slots[c0..c1], ones_h, named);
-                    _ = try fused.bitsOf(&g, y, buf[c0 * hidden .. c1 * hidden]);
+                try zfitConfigure(saved, o, mode != 0);
+                for (routings, 0..) |routing, ri| {
+                    const buf = if (mode == 0) want_bufs[ri] else got_buf;
+                    var cap_min: u32 = std.math.maxInt(u32);
+                    var c0: usize = 0;
+                    while (c0 < S) : (c0 += chunk) {
+                        const c1 = @min(c0 + chunk, S);
+                        const m2 = g.mark();
+                        defer g.resetTo(m2);
+                        const named: ?u32 = if (mode == 1) sortedDistinct(slots_r[ri][c0..c1]) else null;
+                        cap_min = @min(cap_min, prefill.t128ZCap(@intCast(c1 - c0), named));
+                        const y = try zfitCall(&g, s, x, rb, rows_r[ri][c0..c1], slots_r[ri][c0..c1], ones_h, named);
+                        _ = try fused.bitsOf(&g, y, buf[c0 * hidden .. c1 * hidden]);
+                    }
+                    if (mode == 0) continue;
+                    const want: []const u32 = @as([*]const u32, @ptrCast(want_bufs[ri].ptr))[0 .. S * hidden];
+                    const got: []const u32 = @as([*]const u32, @ptrCast(got_buf.ptr))[0 .. S * hidden];
+                    const dd = fused.countDiff(got, want, got_buf);
+                    const ok = dd[0] == 0 and dd[1] == 0;
+                    std.debug.print("TURBOEXL3_GLM_PF_ZFIT_BYTES n={d} S={d} opts={s} routing={s} chunk={d} experts={s} zcap_min={d} against=zfit_off differing={d}/{d} nonfinite={d} {s}\n", .{ n, S, o.name, routing, chunk, if (mode == 1) "named" else "unnamed", cap_min, dd[0], S * hidden, dd[1], if (ok) "PASS" else "FAIL" });
+                    if (!ok) failed = true;
                 }
-                if (mode == 0) continue;
-                const want: []const u32 = @as([*]const u32, @ptrCast(want_buf.ptr))[0 .. S * hidden];
-                const got: []const u32 = @as([*]const u32, @ptrCast(got_buf.ptr))[0 .. S * hidden];
-                const dd = fused.countDiff(got, want, got_buf);
-                const ok = dd[0] == 0 and dd[1] == 0;
-                std.debug.print("TURBOEXL3_GLM_PF_ZFIT_BYTES n={d} S={d} routing={s} chunk={d} experts={s} zcap_min={d} against=served differing={d}/{d} nonfinite={d} {s}\n", .{ n, S, routing, chunk, if (mode == 1) "named" else "unnamed", cap_min, dd[0], S * hidden, dd[1], if (ok) "PASS" else "FAIL" });
-                if (!ok) failed = true;
             }
         }
-        try zfitConfigure(saved, saved.pf_t128_zfit);
+        try zfitRestore(saved);
     }
     try testing.expect(!failed);
 }

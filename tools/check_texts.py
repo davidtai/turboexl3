@@ -1292,7 +1292,8 @@ for _name, _why in (('turboexl3_pf_t128z_route', 'text_froute_t128 with the comp
                                                '(finish_t128z_pick, finish_t128z_load)')):
     ADDED_KERNELS[('prefill.zig', _name)] = 'the compact mixed outputs (t128_zfit): ' + _why
 ADDED_FILES['zfit_test.zig'] = ('the compact mixed outputs\' rows hold every remainder the route leaves (CPU), and moeClampedRows '
-                                'with t128_zfit, the experts named or not, gives the served words (GPU)')
+                                'with t128_zfit, the experts named or not, gives the words it gives without under the served '
+                                'options, bk128 and bk128.tk (GPU)')
 
 
 def metal_strings(fn, toks, corpus):
