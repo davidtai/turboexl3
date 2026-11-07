@@ -13,9 +13,12 @@
 //! - a one-row call on two rows' launch shape (`Config.dec_one_row_wide`) gives one row's own bytes and the three-launch
 //!   chain's at every trunk shape, x f32 and bf16;
 //! - `root.ling.linearPair` (z | a, the shared and the dense gate | up) gives each member's `linear` bytes at decode
-//!   rows 1 to 16, the prepare inside and in its own launch.
+//!   rows 1 to 16, the prepare inside and in its own launch;
+//! - `root.ling.kdaProj` (a KDA layer's q|k|v, f and g in one launch) gives each member's `linear` bytes at decode rows
+//!   1 to 8 and 16, after its own prepare and over each member's own prep_sc rows joined (`kdaProjPrepared`).
 //! TURBOEXL3_LING_N (rates in halfwords per tile; default 40,32) narrows the routed tests. Lines: TURBOEXL3_LING_BYTES,
-//! TURBOEXL3_LING_PARITY, TURBOEXL3_LING_BANKED, TURBOEXL3_LING_DENSE, TURBOEXL3_LING_ONE_ROW, TURBOEXL3_LING_PAIR.
+//! TURBOEXL3_LING_PARITY, TURBOEXL3_LING_BANKED, TURBOEXL3_LING_DENSE, TURBOEXL3_LING_ONE_ROW, TURBOEXL3_LING_PAIR,
+//! TURBOEXL3_LING_KDA_PROJ.
 //! Timing (TURBOEXL3_LING_TIME=1 with TURBOEXL3_GPU=1; asserts nothing, guidance only): every trunk linear, `moeLing`
 //! and `moeLingBanked` at Ling's shapes and rows, the decode forward's linears chained over the 72 layers, and the dense
 //! decode GEMV's launch shapes swept per trunk shape on that chain at rows 1 to 8 (asserting bytes only). Lines:
@@ -746,6 +749,140 @@ test "turboexl3 gpu ling pair: z | a and the shared and dense gate | up in one l
     }
     std.debug.print("TURBOEXL3_LING_PAIR_DONE checks={d} inside={d} own_launch={d} {s}\n", .{ checks, forms[1], forms[0], if (failed == 0) "PASS" else "FAIL" });
     try testing.expect(forms[0] > 0 and forms[1] > 0);
+    try testing.expectEqual(@as(usize, 0), failed);
+}
+
+/// A KDA layer's three projections of one input (`root.ling.kdaProj`): q|k|v, f and g at Ling's widths, K6
+const kdaproj_outs = [3]u32{ 24576, 8192, 8192 };
+/// the decode rows a KDA layer's call takes (a verify's up to 8) and DEC-ONE's widest
+const kdaproj_rows = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 16 };
+
+test "turboexl3 gpu ling kda proj: q|k|v, f and g in one launch give each member's linear bytes, after its own prepare and over each member's own prep_sc rows joined, at decode rows 1 to 8 and 16 (TURBOEXL3_GPU=1)" {
+    _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    const s = mlx.mlx_default_gpu_stream_new();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    const a = std.heap.page_allocator;
+    const ks = sdk.kernel_launch;
+    var g = try G.init(a, s);
+    defer g.deinit();
+    var prng = std.Random.DefaultPrng.init(0xe1e1_4096);
+    const rnd = prng.random();
+    const in: u32 = 4096;
+    var m0 = try synthProj(a, &g, rnd, in, kdaproj_outs[0], 96);
+    defer m0.lin.deinit(a);
+    var m1 = try synthProj(a, &g, rnd, in, kdaproj_outs[1], 96);
+    defer m1.lin.deinit(a);
+    var m2 = try synthProj(a, &g, rnd, in, kdaproj_outs[2], 96);
+    defer m2.lin.deinit(a);
+    const P = [3]root.Proj{ m0.p, m1.p, m2.p };
+    const sh = try root.ling.kdaproj.shapeOf(P);
+    const max_rows: u32 = 16;
+    const xs = try a.alloc(f32, max_rows * in);
+    defer a.free(xs);
+    for (xs) |*v| v.* = bfExact(rnd.floatNorm(f32));
+    var want: [3][]f32 = undefined;
+    var got: [3][]f32 = undefined;
+    for (&want, &got, kdaproj_outs) |*w, *gt, o| {
+        w.* = try a.alloc(f32, max_rows * o);
+        gt.* = try a.alloc(f32, max_rows * o);
+    }
+    defer for (want, got) |w, gt| {
+        a.free(w);
+        a.free(gt);
+    };
+    var failed: usize = 0;
+    var checks: usize = 0;
+    for ([_]mlx.mlx_dtype{ .float32, .bfloat16 }) |dt| {
+        var d: [3]*dense.Dense = undefined;
+        var saved: [3]struct { prep: u32, bt1: u8 } = undefined;
+        for (&d, &saved, kdaproj_outs) |*dm, *sv, o| {
+            dm.* = try root.denseCached(.{ .in = in, .out = o, .rate = format.Rate.fromN(96).?, .dec = .mul1, .out_dtype = dt });
+            sv.* = .{ .prep = dm.*.dec_prep_rows, .bt1 = dm.*.bt_set[1] };
+        }
+        defer for (d, saved) |dm, sv| {
+            dm.dec_prep_rows = sv.prep;
+            dm.bt_set[1] = sv.bt1;
+            dm.resetCfgs();
+        };
+        // the members' forms at one row: served; one row on two rows' launch shape (`Config.dec_one_row_wide`'s fields);
+        // the prepare in its own launch at one output tile a threadgroup. The call's tiles follow member 0's.
+        const arms = [_]struct { name: []const u8, prep: u32, bt1: u8 }{ .{ .name = "served", .prep = 1, .bt1 = 0 }, .{ .name = "wide", .prep = 0, .bt1 = 2 }, .{ .name = "bt1", .prep = 0, .bt1 = 1 } };
+        for (arms) |arm| {
+            for (d) |dm| {
+                dm.dec_prep_rows = arm.prep;
+                dm.bt_set[1] = arm.bt1;
+                dm.resetCfgs();
+            }
+            for (kdaproj_rows) |rows| {
+                const rm = g.mark();
+                defer g.resetTo(rm);
+                const x = try g.astype(try g.hostArray(std.mem.sliceAsBytes(xs[0 .. rows * in]), &.{ ci(rows), ci(in) }, .float32), dt);
+                for (P, want, kdaproj_outs) |mp, w, o| {
+                    const y = try g.adopt(try root.linear(s, x, mp.trellis, mp.suh, mp.svh, .mul1));
+                    _ = try g.hostF32(try g.astype(y, .float32), w[0 .. rows * o]);
+                }
+                const p = (try root.ling.kdaproj.plan(sh, .mul1, rows, dt)) orelse {
+                    std.debug.print("TURBOEXL3_LING_KDA_PROJ x={s} arm={s} rows={d} not served FAIL\n", .{ @tagName(dt), arm.name, rows });
+                    failed += 1;
+                    continue;
+                };
+                // after its own prepare
+                const ys = try root.ling.kdaProj(s, x, P, .mul1);
+                var differing_own: usize = 0;
+                for (ys, got, want, kdaproj_outs) |y, gt, w, o| {
+                    const ya = try g.adopt(y);
+                    try testing.expectEqualSlices(c_int, &.{ ci(rows), ci(o) }, mlx.getShape(ya));
+                    _ = try g.hostF32(try g.astype(ya, .float32), gt[0 .. rows * o]);
+                    for (gt[0 .. rows * o], w[0 .. rows * o]) |u, v| differing_own += @intFromBool(@as(u32, @bitCast(u)) != @as(u32, @bitCast(v)));
+                }
+                // over each member's own prep_sc rows (its prepare in its own launch), joined as the prepared entry takes them
+                var xps: [3]mlx.mlx_array = undefined;
+                var xss: [3]mlx.mlx_array = undefined;
+                for (d, P, &xps, &xss) |dm, mp, *xpm, *xsm| {
+                    const sv_prep = dm.dec_prep_rows;
+                    dm.dec_prep_rows = 0;
+                    dm.resetCfgs();
+                    defer {
+                        dm.dec_prep_rows = sv_prep;
+                        dm.resetCfgs();
+                    }
+                    const c = try dm.decCfgs(rows);
+                    var po: [3]mlx.mlx_array = undefined;
+                    try ks.applyConfig(dm.prep_sc, c.prep, &.{ x, mp.suh }, &po, s);
+                    xpm.* = try g.adopt(po[0]);
+                    xsm.* = try g.adopt(po[1]);
+                    _ = mlx.mlx_array_free(po[2]);
+                }
+                const jxp = try g.concat(&xps, 0);
+                const jxs = try g.concat(&xss, 0);
+                const cnt = try g.zeros(&.{ci(root.ling.kdaproj.ncntFor(sh, rows))}, .uint32);
+                const yp = try root.ling.kdaProjPrepared(s, jxp, jxs, cnt, rows, P, .mul1, dt);
+                var differing_prep: usize = 0;
+                for (yp, got, want, kdaproj_outs) |y, gt, w, o| {
+                    const ya = try g.adopt(y);
+                    _ = try g.hostF32(try g.astype(ya, .float32), gt[0 .. rows * o]);
+                    for (gt[0 .. rows * o], w[0 .. rows * o]) |u, v| differing_prep += @intFromBool(@as(u32, @bitCast(u)) != @as(u32, @bitCast(v)));
+                }
+                const ok = differing_own == 0 and differing_prep == 0;
+                checks += 1;
+                const n_out = rows * (kdaproj_outs[0] + kdaproj_outs[1] + kdaproj_outs[2]);
+                std.debug.print("TURBOEXL3_LING_KDA_PROJ x={s} arm={s} rows={d} ks={d},{d},{d} rb={d} bt={d} own_prepare_differing={d}/{d} prepared_differing={d}/{d} {s}\n", .{ @tagName(dt), arm.name, rows, p.ks0, p.ks1, p.ks1, p.rb, p.bt, differing_own, n_out, differing_prep, n_out, if (ok) "PASS" else "FAIL" });
+                if (!ok) failed += 1;
+            }
+        }
+    }
+    // the refusals, before any launch
+    {
+        const x = try g.astype(try g.hostArray(std.mem.sliceAsBytes(xs[0 .. 17 * 128]), &.{ 17, 128 }, .float32), .bfloat16);
+        try testing.expectError(error.BadExl3Shape, root.ling.kdaProj(s, x, P, .mul1));
+        const big = try g.zeros(&.{ ci(max_rows + 1), ci(in) }, .bfloat16);
+        try testing.expectError(error.Exl3EngineNotImplemented, root.ling.kdaProj(s, big, P, .mul1));
+        const narrow = [3]root.Proj{ m0.p, m1.p, .{ .trellis = m2.p.trellis, .suh = m2.p.suh, .svh = m1.p.suh } };
+        try testing.expectError(error.BadExl3Shape, root.ling.kdaProj(s, try g.zeros(&.{ 1, ci(in) }, .bfloat16), narrow, .mul1));
+        const bad = try g.zeros(&.{ 2, ci(in) }, .float16);
+        try testing.expectError(error.BadExl3Shape, root.ling.kdaProjPrepared(s, bad, bad, bad, 1, P, .mul1, .bfloat16));
+    }
+    std.debug.print("TURBOEXL3_LING_KDA_PROJ_DONE checks={d} {s}\n", .{ checks, if (failed == 0) "PASS" else "FAIL" });
     try testing.expectEqual(@as(usize, 0), failed);
 }
 

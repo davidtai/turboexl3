@@ -25,6 +25,13 @@ pub const sigmoidTable = shared.sigmoidTable;
 pub const pair = @import("pair.zig");
 pub const linearPair = pair.linearPair;
 
+/// A KDA layer's q|k|v, f and g in one DEC-ONE GEMV launch (`kdaproj.zig`), each member in its own buffers at its own
+/// K split, each member's `linear` bytes: after its own prepare launch (`kdaProj`) or over the host's prepared rows
+/// (`kdaProjPrepared`).
+pub const kdaproj = @import("kdaproj.zig");
+pub const kdaProj = kdaproj.kdaProj;
+pub const kdaProjPrepared = kdaproj.kdaProjPrepared;
+
 /// `root.moe` with Ling-3.1's SwiGLU: `limit` 0 none (`moe`'s bytes), 1..128 the clamp after the SiLU (each row-slot's
 /// gate SiLU clamped from above at `limit` and its up to [-limit, limit], in f32 on the projections' f16-rounded outputs);
 /// else error.InvalidExl3Clamp. Decode rows run form 9's launches (fin7's Ling variant where it clamps), prefill rows the
@@ -83,4 +90,4 @@ fn act(limit: c_int) !ds.BankedAct {
 }
 
 /// This file's module state (`Global`): what a host that shares its units' state registers.
-pub const shared_state = .{ shared.shared_state, pair.shared_state };
+pub const shared_state = .{ shared.shared_state, pair.shared_state, kdaproj.shared_state };

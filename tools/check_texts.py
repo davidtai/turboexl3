@@ -1219,6 +1219,11 @@ ADDED_FILES['models/ling/pair.zig'] = ('Ling-3.1\'s same-input trunk pairs (z | 
                                        'DEC-ONE GEMV launch, each member in its own buffers (turboexl3_ling_pair_prep, '
                                        '_pair_dec0, _pair_dec1: dense\'s prep_sc and DEC-ONE texts with the member chosen after '
                                        'their head, Ripple\'s member tile address)')
+# Ling-3.1-flash's KDA projections in one DEC-ONE launch (models/ling/kdaproj.zig)
+ADDED_FILES['models/ling/kdaproj.zig'] = ('Ling-3.1\'s KDA decode projections (q|k|v, f and g of one input) in one DEC-ONE '
+                                          'GEMV launch, each member in its own buffers at its own K split '
+                                          '(turboexl3_ling_kdaproj_prep, _kdaproj_dec0: dense\'s prep_sc with the member chosen '
+                                          'first, dense\'s text_dec0 under a three-member head), and its CPU tests')
 # Ling-3.1-flash's routed combine at prompt rows (turboexl3_ling_combine, _combine_parts)
 ADDED_FILES['models/ling/combine.zig'] = ('Ling-3.1\'s wide routed call combine in one launch (combineRouted, combineParts: '
                                           'MLX\'s sum(multiply(astype(routed, f32), expand_dims(weights, -1)), -2) word for '
@@ -1462,6 +1467,10 @@ SPLIT_ADDED_KERNELS = {
                                  'member tile address (jtile)'),
     'turboexl3_ling_pair_dec1': ('Ling-3.1\'s pair: text_dec1 with the member chosen after its head (jsuh, jw) and Ripple\'s '
                                  'member tile address (jtile)'),
+    'turboexl3_ling_kdaproj_prep': ('Ling-3.1\'s KDA projections: dense\'s prep_sc for the three members on the grid\'s z '
+                                    '(kdaproj/prep ++ text_prep_sc)'),
+    'turboexl3_ling_kdaproj_dec0': ('Ling-3.1\'s KDA projections: text_dec0 after its head under the three-member head and '
+                                    'the member choice (kdaproj/head, kdaproj/member), each member at its own K split'),
     'turboexl3_ling_combine': 'Ling-3.1\'s routed combine over a joined array (models/ling/combine.zig): MLX\'s Multiply and '
                               'col_reduce_small sum in one launch, word for word',
     'turboexl3_ling_combine_parts': 'the same over a wide call\'s JOINLESS sources (each pair\'s (source, row))',
