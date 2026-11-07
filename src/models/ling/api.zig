@@ -1,7 +1,8 @@
 //! Ling-3.1-flash's entry points (root re-exports each under its own name): its routed experts' SwiGLU, unclamped on most
 //! layers and clamped after the SiLU on the late ones (`expert_swiglu_limit_list`: min(silu(g), L) * clamp(u, -L, L),
 //! exllamav3's `act_limit` with SiLU), over a stacked bank (`moeLing`) and over an expert streamer's three slot banks
-//! (`moeLingBanked`). Every launch is root's routed chain or DeepSeek-V4.1's banked decode; only the SwiGLU line differs
+//! (`moeLingBanked`), and over a streamer's slot bank with the prompt rows gathered in the chain's prepare (`moeLingRows`).
+//! Every launch is root's routed chain or DeepSeek-V4.1's banked decode; only the SwiGLU line differs
 //! (`decode.text_fin7co`, `prefill.text_midco` and the banked `text_fin7b` / `text_fin7cob`). Its trunk's same-input
 //! linear pairs run in one DEC-ONE launch through `linearPair` (`pair.zig`), its shared expert at decode rows in two
 //! dependent launches of its own (`sharedExpert`, shared.zig), a wide routed call's combine in one launch
@@ -52,6 +53,18 @@ pub const router = @import("router.zig");
 pub fn moeLing(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array, scores: mlx.mlx_array, dec: format.Decode, limit: c_int) !mlx.mlx_array {
     if (limit < 0 or limit > 128) return error.InvalidExl3Clamp;
     return root.moeSwiglu(s, x, bank, inds, scores, dec, @intCast(limit), .silu_out);
+}
+
+/// `moeLing`'s prompt call over gathered rows (an expert streamer's slot bank: the outside plugin turboexl3_ling's prompt
+/// calls under MLX_SERVE_LING_ROWS_PATH=1): row-slot p reads x's row `rows[p]` (x [n, hidden], the layer's MoE input) in
+/// the chain's prepare and runs the expert at slot `inds[p]` at weight `scores[p]`; y [S, hidden] in `out_dtype`
+/// (`root.moeSwigluRows` with Ling-3.1's SwiGLU, `moeLing`'s `limit`: 0 none, 1..128 the clamp after the SiLU, else
+/// error.InvalidExl3Clamp). Row p is, bit for bit, row p of `moeLing` at top-1 over `take(x, rows)` in any float dtype
+/// holding the same values, its y rounded once to `out_dtype`: the plugin's take, its casts and its call in one call with
+/// no gathered copy. The operands and refusals as `root.moeSwigluRows` takes them.
+pub fn moeLingRows(s: mlx.mlx_stream, x: mlx.mlx_array, rows: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array, scores: mlx.mlx_array, dec: format.Decode, limit: c_int, out_dtype: mlx.mlx_dtype) !mlx.mlx_array {
+    if (limit < 0 or limit > 128) return error.InvalidExl3Clamp;
+    return root.moeSwigluRows(s, x, rows, bank, inds, scores, dec, @intCast(limit), .silu_out, out_dtype);
 }
 
 /// `moeClampedBanked` with Ling-3.1's SwiGLU (`moeLing`'s `limit`): each pair x's row r through the expert at `ids[r]`

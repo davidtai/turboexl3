@@ -18,6 +18,7 @@ What it runs on turboexl3 (`root.ling`, `src/models/ling/api.zig`):
 | part | entry point | kernels |
 |---|---|---|
 | a routed layer's experts over a stacked bank, any rows | `moeLing` (`limit` 0 or the layer's clamp) | `moe`'s chain at limit 0; with a limit, decode form 9 with `turboexl3_fin7co` and the prefill chain with `turboexl3_pf_t128_midco` |
+| a prompt call's routed pairs over an expert streamer's slot bank, the rows gathered from the layer's MoE input | `moeLingRows` (`limit` 0 or the layer's clamp) | `moeLing`'s prefill chain with the row-map prepare `turboexl3_pf_prep_r` in place of `turboexl3_pf_prep`: no gathered copy of x, y in the caller's dtype, `moeLing`'s bytes over `take(x, rows)` |
 | a decode wave's routed pairs over an expert streamer's three slot banks | `moeLingBanked` (`moeLingBankedGateUp`, `moeLingBankedDown`; `moeLingBankedSel` on a selection of the texts) | DeepSeek-V4.1's banked decode with `turboexl3_fin7b` (limit 0) or `turboexl3_fin7cob`, or their grouped texts (`fin7bg`, `fin7cobg`) under `Config.banked_group` 4; with `Config.banked_gu8` the gate\|up's prepare inside its launch (`turboexl3_gu8bg`, `turboexl3_gu8bgm3`, the same bytes) |
 | every trunk linear and the head | `root.linear` | the core's dense linear; a host's opt-in `Config.dec_one_row_wide` runs a one-row call on two rows' launch shape, and `Config.dec_one_row_table` on its trunk shape's `dense.one_row_table` launch (the same bytes) |
 | a wide (prompt) routed call's combine: the routed rows times their routing weights, summed over the top-8 | `root.ling.combineRouted` (a joined array), `root.ling.combineParts` (the call's unjoined outputs, JOINLESS) | Ling's own: `turboexl3_ling_combine`, `turboexl3_ling_combine_parts` ([kernels.md](kernels.md)), the words of the host's `sum(multiply(astype(routed, f32), expand_dims(weights, -1)), -2)` |
@@ -36,14 +37,17 @@ core's or DeepSeek-V4.1's pieces with one SwiGLU line swapped, so its bytes are 
 reaches the limit. The combine is Ling's own kernel, held to MLX's three ops word for word (`combine_test.zig`), and so is the router's pair of launches, held to the host's nine (`router_test.zig`). The tests (`src/models/ling/ling_test.zig`) hold `moeLing` to `ref.moeRowClampedAt` at `silu_out`,
 `moeLingBanked` to `moeLing` byte for byte, `linear` to the host reference at every trunk shape, and each row of a
 prompt call's `linear` to the same row of a whole-prompt call wherever both calls run MLX's regular matmul (a
-layer-major prompt pass's trunk linears; `TURBOEXL3_LING_ROWINV` lines). The kernels:
+layer-major prompt pass's trunk linears; `TURBOEXL3_LING_ROWINV` lines); `rows_test.zig` holds `moeLingRows` to the outside
+plugin's prompt chunk (its take, its casts and `moeLing` at top-1) byte for byte on the loader's views, every chunk of
+a prompt layer's call and a padded one (`TURBOEXL3_LING_ROWS` lines). The kernels:
 [the core's catalog](../../core/kernels.md) (`turboexl3_fin7co`, `turboexl3_pf_midco`, `turboexl3_pf_mid_vco`,
 `turboexl3_pf_t128_midco`) and [DeepSeek-V4.1's](../deepseek_v41/kernels.md) (`turboexl3_fin7b`, `turboexl3_fin7cob`,
 `turboexl3_fin7bg`, `turboexl3_fin7cobg`).
 
 `TURBOEXL3_LING_TIME=1` (with `TURBOEXL3_GPU=1`) times the Ling kernels at the model's shapes for the serving plan: every
 trunk linear, `moeLing` and `moeLingBanked`, and the decode forward's linears chained over the 72 layers
-(`TURBOEXL3_LING_TIME` and `TURBOEXL3_LING_CHAIN` lines). It is a diagnostic: it asserts nothing, and its numbers steer
+(`TURBOEXL3_LING_TIME` and `TURBOEXL3_LING_CHAIN` lines), and the prompt call over gathered rows against the plugin's
+chunk at its call shape (`TURBOEXL3_LING_ROWS_TIME` lines). It is a diagnostic: it asserts nothing, and its numbers steer
 work; they never decide it.
 
 The shared expert (`src/models/ling/shared.zig`) takes the composed chain's four dependent levels at decode rows (the

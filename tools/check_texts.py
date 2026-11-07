@@ -1244,6 +1244,22 @@ ADDED_FILES['models/ling/router.zig'] = ('Ling-3.1\'s MoE router at decode rows 
                                          'stored in bf16; route: both) and its texts\' CPU tests')
 ADDED_FILES['models/ling/router_test.zig'] = ('the router\'s GPU tests: the logits, both predictor scores, the ids and the '
                                               'weights against the host\'s launches word for word at rows 1 to 8, the refusals')
+# Ling-3.1-flash's prompt call over gathered rows (glm53f-fused b0f22c9's library part, ported): the prepare with a row map
+# (turboexl3_pf_prep_r), root.moeSwigluRows and ling.moeLingRows
+ADDED_KERNELS[('prefill.zig', 'turboexl3_pf_prep_r')] = ('the prepare with its row line swapped for the row map\'s '
+                                                        '(text_prep_rows: prep_1, prep_rmap, prep_2): each slot\'s x row '
+                                                        'read through rmap, an expert streamer\'s prompt rows gathered '
+                                                        'in the prepare')
+ADDED[('prefill.zig', 'const prep_rows_in')] = 'the row-map prepare\'s operand names (the prepare\'s, then rmap)'
+ADDED[('root.zig', 'fn moeSwigluRows')] = ('moeSwiglu\'s prefill chain at top-1 over gathered rows (the row-map prepare), y '
+                                         'in a chosen dtype, limit 0 to 128 at either clamp: an expert streamer\'s prompt '
+                                         'calls')
+ADDED[('root.zig', 'const moeLingRows')] = 'the re-export of models/ling/api.zig\'s moeLingRows'
+ADDED[('models/ling/api.zig', 'fn moeLingRows')] = ('moeLing\'s prompt call over gathered rows: root.moeSwigluRows at '
+                                                  'Ling-3.1\'s SwiGLU (the clamp after the SiLU)')
+ADDED_FILES['models/ling/rows_test.zig'] = ('moeLingRows held to turboexl3_ling\'s prompt chunk (take, bf16, f32, moeLing at '
+                                            'top-1) byte for byte at Ling\'s shapes, the row-map prepare\'s text (CPU), and '
+                                            'its timing against that chunk (TURBOEXL3_LING_TIME)')
 
 def metal_strings(fn, toks, corpus):
     """(line, kind, value) of every literal in a .zig file that holds Metal"""
@@ -1495,6 +1511,9 @@ SPLIT_ADDED_KERNELS = {
     'turboexl3_ling_combine': 'Ling-3.1\'s routed combine over a joined array (models/ling/combine.zig): MLX\'s Multiply and '
                               'col_reduce_small sum in one launch, word for word',
     'turboexl3_ling_combine_parts': 'the same over a wide call\'s JOINLESS sources (each pair\'s (source, row))',
+    'turboexl3_pf_prep_r': ('the prepare with its row line swapped for the row map\'s (text_prep_rows: prep_1, prep_rmap, '
+                            'prep_2): each slot\'s x row read through rmap, an expert streamer\'s prompt rows gathered in '
+                            'the prepare (root.moeSwigluRows, ling.moeLingRows; glm53f-fused b0f22c9\'s port)'),
     'turboexl3_ling_addnorm1': ('Ling-3.1\'s residual add and RMSNorm (mlx-serve\'s add_norm statements) with one EXL3 '
                                 'member\'s DEC-ONE prepare (text_prep_s\'s statements on the row in threadgroup memory) and '
                                 'prep_sc\'s counters, one threadgroup a row (an_norm ++ an_m0 ++ an_cnt)'),

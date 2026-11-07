@@ -905,6 +905,56 @@ pub fn moeClamped(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx.mlx
 }
 const clamp_logged = Global(bool, "root_clamp_logged", false);
 
+/// `moeSwiglu`'s prefill chain at top-1 over gathered rows (an expert streamer's prompt calls over its slot bank:
+/// Ling-3.1's `ling.moeLingRows`): row-slot p reads x's row `rows[p]` (x [n, hidden], the layer's activation) in the
+/// chain's prepare (`prefill.text_prep_rows`), runs the expert at slot `inds[p]` at weight `scores[p]`, and y [S, hidden]
+/// in `out_dtype` holds row-slot p's output at row p. No gathered copy of x is made, and the prepare rounds every x value
+/// to f16 through f32 whatever x's dtype, so row p is, bit for bit, row p of `moeSwiglu` at top-1 over `take(x, rows)` in
+/// any float dtype holding the same values (x [1, S, hidden], inds and scores [1, S, 1]), its y rounded once to
+/// `out_dtype` (the chain's finish stores the one f32 sum in `out_dtype`, as an astype of an f32 y does): the same
+/// geometry, so the same cached engine and launches but the prepare. x [n, hidden] bf16, f16 or f32; rows u32 [S], each
+/// below n (not checked: the caller's routing); inds u32 or i32 [S] (slots of the bank); scores f32, bf16 or f16 [S]; S
+/// more than `kernels.DECODE_ROWS_MAX` (a caller pads a smaller call, as `moe`'s prefill callers do); `out_dtype` bf16,
+/// f16 or f32; `limit` 0 (none) to 128 at `clamp`, as `moeSwiglu` takes them, else error.InvalidExl3Clamp.
+/// `Config.prefill` and `Config.nax` as `moe`'s prefill rows; gate, up and down at one rate. GLM-5.3-Flash's
+/// `moeClampedRows` (glm53f-fused) is this chain at `limit` 1 to 128 and `gate_in`.
+pub fn moeSwigluRows(s: mlx.mlx_stream, x: mlx.mlx_array, rows: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array, scores: mlx.mlx_array, dec: format.Decode, limit: u32, clamp: format.ClampAt, out_dtype: mlx.mlx_dtype) !mlx.mlx_array {
+    if (limit > 128) return error.InvalidExl3Clamp;
+    if (!config.get().prefill or !config.get().nax) return error.Exl3EngineNotImplemented;
+    const xsh = mlx.getShape(x);
+    const rs = mlx.getShape(rows);
+    if (xsh.len != 2 or xsh[0] <= 0 or xsh[1] <= 0 or @mod(xsh[1], 128) != 0) return error.BadExl3Shape;
+    if (rs.len != 1 or rs[0] <= 0 or !std.mem.eql(c_int, rs, mlx.getShape(inds)) or !std.mem.eql(c_int, rs, mlx.getShape(scores))) return error.BadExl3Shape;
+    const S: usize = @intCast(rs[0]);
+    if (S <= kernels.DECODE_ROWS_MAX) return error.Exl3EngineNotImplemented;
+    const xd = mlx.mlx_array_dtype(x);
+    const id = mlx.mlx_array_dtype(inds);
+    const sd = mlx.mlx_array_dtype(scores);
+    if ((xd != .bfloat16 and xd != .float32 and xd != .float16) or mlx.mlx_array_dtype(rows) != .uint32 or
+        (id != .uint32 and id != .int32) or (sd != .float32 and sd != .bfloat16 and sd != .float16) or
+        (out_dtype != .bfloat16 and out_dtype != .float32 and out_dtype != .float16)) return error.BadExl3Dtype;
+    const geo = try bankGeometry(bank, xsh[1]);
+    if (geo.gate_up.n != geo.down.n) return error.Exl3EngineNotImplemented;
+    if (limit != 0 and !clamp_logged.get().*) {
+        clamp_logged.get().* = true;
+        std.debug.print("[turboexl3] clamped SwiGLU engaged (swiglu_limit {d}, clamp {t}): fin7's and the prefill mid's clamped variants\n", .{ limit, clamp });
+    }
+    const pf = try prefillFor(.{ .hidden = @intCast(geo.hidden), .inter = @intCast(geo.width), .topk = 1, .experts = @intCast(geo.experts), .rate = geo.gate_up, .dec = dec, .limit = limit, .clamp = clamp });
+    const ops: prefill.Operands = .{
+        .gate_t = bank.gate.trellis,
+        .gate_suh = bank.gate.suh,
+        .gate_svh = bank.gate.svh,
+        .up_t = bank.up.trellis,
+        .up_suh = bank.up.suh,
+        .up_svh = bank.up.svh,
+        .down_t = bank.down.trellis,
+        .down_suh = bank.down.suh,
+        .down_svh = bank.down.svh,
+    };
+    if (pf.opts.t128) return pf.moeT128With(s, x, inds, scores, ops, S, out_dtype, rows);
+    return pf.moeWith(s, x, inds, scores, ops, S, out_dtype, rows);
+}
+
 /// DeepSeek-V4.1's clamped routed experts over an expert streamer's slot banks (models/deepseek_v41/api.zig)
 pub const banked_rows_max = deepseek_v41.banked_rows_max;
 pub const banked_skip_id = deepseek_v41.banked_skip_id;
@@ -925,8 +975,10 @@ pub const moeClampedBankedDownSel = deepseek_v41.moeClampedBankedDownSel;
 pub const moeClampedBankedDownV = deepseek_v41.moeClampedBankedDownV;
 pub const moeClampedBankedDownSelV = deepseek_v41.moeClampedBankedDownSelV;
 
-/// Ling-3.1-flash's routed experts: unclamped, or clamped after the SiLU, stacked and banked (models/ling/api.zig)
+/// Ling-3.1-flash's routed experts: unclamped, or clamped after the SiLU, stacked and banked, and a streamer's prompt call
+/// over gathered rows (models/ling/api.zig)
 pub const moeLing = ling.moeLing;
+pub const moeLingRows = ling.moeLingRows;
 pub const moeLingBanked = ling.moeLingBanked;
 pub const moeLingBankedSel = ling.moeLingBankedSel;
 pub const moeLingBankedGateUp = ling.moeLingBankedGateUp;

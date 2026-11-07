@@ -82,7 +82,18 @@ pub const text_froute_m: [:0]const u8 = sentinel(@embedFile("kernels/prefill/tab
 /// one simdgroup per (block, sorted position), BPT blocks per threadgroup; inv u32 [S]: inv[order[p]] = p. ALAY
 /// (`Options.alay`): each 32-block's element j at slot `turboexl3_alay(j)` (1) or `turboexl3_alay16(j)` (2) of its block; the
 /// block sums are the same.
-pub const text_prep = @embedFile("kernels/prefill/prep.metal");
+pub const text_prep = prep_1 ++ prep_row ++ prep_2;
+/// `text_prep` in the pieces its row-map variant composes: prep_1 ends at the slot's line (`src`), prep_row is the slot's x
+/// row (src / TOPK), prep_2 the rest
+pub const prep_1 = @embedFile("kernels/prefill/prep_1.metal");
+pub const prep_row = @embedFile("kernels/prefill/prep_row.metal");
+pub const prep_2 = @embedFile("kernels/prefill/prep_2.metal");
+/// `text_prep` with each slot's x row read from a row map (rmap u32 [S]: slot src reads x's row rmap[src]) in prep_row's
+/// place, every other statement `text_prep`'s: a slot's gate and up inputs are `text_prep`'s of x's row rmap[src], so a call
+/// over gathered rows (an expert streamer's prompt rows, `take(x, rows)` then the chain) runs as one call over x with the
+/// gather in the prepare (`root.moeClampedRows`).
+pub const text_prep_rows = prep_1 ++ prep_rmap ++ prep_2;
+pub const prep_rmap = @embedFile("kernels/prefill/prep_rmap.metal");
 
 /// gate|up finish, SwiGLU and the down input, per (128-block of inter, sorted position): xd half [S, INTER] (ALAY: in
 /// `text_prep`'s A layout).
@@ -299,6 +310,8 @@ const froute_in = [_][*:0]const u8{"inds"};
 const froute_out = [_][*:0]const u8{ "order", "tiles" };
 const prep_in = [_][*:0]const u8{ "x", "inds", "order", "suh_g", "suh_u" };
 const prep_out = [_][*:0]const u8{ "xg", "xu", "inv", "xsg", "xsu" };
+/// `text_prep_rows`' inputs: the prepare's, then the row map
+const prep_rows_in = prep_in ++ [_][*:0]const u8{"rmap"};
 const gemm2_in = [_][*:0]const u8{ "tiles", "x0", "x1", "w0", "w1", "xs0", "xs1" };
 const gemm2_out = [_][*:0]const u8{ "z0", "z1" };
 pub const gemm1_in = [_][*:0]const u8{ "tiles", "x0", "w0", "xs0" };
@@ -631,6 +644,8 @@ pub const Prefill = struct {
     fin_v: mlx.mlx_fast_metal_kernel,
     /// the 128-row tiles' kernels (`moeT128`); made only with `opts.t128`
     t128_k: ?T128Kernels = null,
+    /// the row-map prepare (`text_prep_rows`, `prepWith`), made at its first call
+    prep_r: ?mlx.mlx_fast_metal_kernel = null,
 
     pub fn init(geo: Geometry, opts: Options) !Prefill {
         if (!geo.admitted() or !opts.valid() or (opts.intr and geo.rate.n % 16 != 0) or (opts.defer_affine and geo.dec.codebook != .mul1) or
@@ -672,6 +687,15 @@ pub const Prefill = struct {
     pub fn deinit(self: *Prefill) void {
         inline for (.{ self.table, self.prep_k, self.gemm2, self.gemm1, self.mid_k, self.fin, self.gemm2s, self.gemm1s, self.table_m, self.gemm2m, self.gemm1m, self.froute, self.froute_m, self.prep_v, self.mid_v, self.fin_v }) |k| decode.freeKernel(k);
         if (self.t128_k) |k| k.deinit();
+        if (self.prep_r) |k| decode.freeKernel(k);
+    }
+
+    /// The row-map prepare's kernel (`text_prep_rows`), made at its first call.
+    fn prepRowsKernel(self: *Prefill) !mlx.mlx_fast_metal_kernel {
+        if (self.prep_r) |made| return made;
+        const k = ks.newKernel("turboexl3_pf_prep_r", &prep_rows_in, &prep_out, text_prep_rows, header_small, true) orelse return error.KernelCreateFailed;
+        self.prep_r = k;
+        return k;
     }
 
     fn decTempl(self: *const Prefill) [3]ks.TemplateArg {
@@ -716,11 +740,20 @@ pub const Prefill = struct {
     /// xg, xu half [S, hidden] in sorted order, inv u32 [S], and xsg, xsu f32 [S, hidden / 128]: each 128-block's sum of the
     /// rounded inputs (the deferred MUL1 map's C term).
     pub fn prep(self: *Prefill, s: mlx.mlx_stream, x: mlx.mlx_array, inds: mlx.mlx_array, order: mlx.mlx_array, b: Operands, S: u32) ![5]mlx.mlx_array {
+        return self.prepWith(s, x, inds, order, b, S, null);
+    }
+
+    /// `prep` with slot src's x row read from `rmap` (u32 [S]: x's row rmap[src], each below x's rows) instead of src / topk:
+    /// `text_prep_rows` on its own kernel (`prep_r`), the same grid, threadgroup and templates, so each slot's outputs are
+    /// `prep`'s over x's rows gathered by `rmap` first. rmap null: `prep` itself. The vector layout (`Options.aux`) has no
+    /// row-map text: error.Exl3EngineNotImplemented, nothing launched.
+    pub fn prepWith(self: *Prefill, s: mlx.mlx_stream, x: mlx.mlx_array, inds: mlx.mlx_array, order: mlx.mlx_array, b: Operands, S: u32, rmap: ?mlx.mlx_array) ![5]mlx.mlx_array {
         const g = self.geo;
         const H: c_int = @intCast(g.hidden);
         const bpt = bptFor(g.hidden / 128);
         var po: [5]mlx.mlx_array = undefined;
         const sums = [_]c_int{ @intCast(S), @intCast(g.hidden / 128) };
+        if (rmap != null and self.opts.aux != 0) return error.Exl3EngineNotImplemented;
         if (self.opts.aux != 0) {
             const asg: u32 = self.opts.aux;
             const tgs = (S * (g.hidden / 128) + asg - 1) / asg;
@@ -732,12 +765,21 @@ pub const Prefill = struct {
             } }, &.{ x, inds, order, b.gate_suh, b.up_suh }, &po, s);
             return po;
         }
-        try run(self.prep_k, .{ .grid = .{ (g.hidden / 128 / bpt) * 32 * bpt, S, 1 }, .threadgroup = .{ 32 * bpt, 1, 1 }, .out_shapes = &.{ &[_]c_int{ @intCast(S), H }, &[_]c_int{ @intCast(S), H }, &[_]c_int{@intCast(S)}, &sums, &sums }, .out_dtypes = &.{ .float16, .float16, .uint32, .float32, .float32 }, .template = &.{
+        // the launch's arrays named here, so the one launch serves either kernel
+        const xs = [_]c_int{ @intCast(S), H };
+        const ivs = [_]c_int{@intCast(S)};
+        const shapes = [_][]const c_int{ &xs, &xs, &ivs, &sums, &sums };
+        const dtypes = [_]mlx.mlx_dtype{ .float16, .float16, .uint32, .float32, .float32 };
+        const tmpl = [_]ks.TemplateArg{
             .{ .name = "HID", .value = .{ .int = H } },
             .{ .name = "TOPK", .value = .{ .int = @intCast(g.topk) } },
             .{ .name = "BPT", .value = .{ .int = @intCast(bpt) } },
             .{ .name = "ALAY", .value = .{ .int = self.opts.alay } },
-        } }, &.{ x, inds, order, b.gate_suh, b.up_suh }, &po, s);
+        };
+        const launch: ks.Launch = .{ .grid = .{ (g.hidden / 128 / bpt) * 32 * bpt, S, 1 }, .threadgroup = .{ 32 * bpt, 1, 1 }, .out_shapes = &shapes, .out_dtypes = &dtypes, .template = &tmpl };
+        if (rmap) |rm| {
+            try run(try self.prepRowsKernel(), launch, &.{ x, inds, order, b.gate_suh, b.up_suh, rm }, &po, s);
+        } else try run(self.prep_k, launch, &.{ x, inds, order, b.gate_suh, b.up_suh }, &po, s);
         return po;
     }
 
@@ -890,10 +932,16 @@ pub const Prefill = struct {
 
     /// y [rows, hidden] in `out_dtype` for x [rows, hidden], inds / scores [rows * topk] (the host's dtypes).
     pub fn moe(self: *Prefill, s: mlx.mlx_stream, x: mlx.mlx_array, inds: mlx.mlx_array, scores: mlx.mlx_array, b: Operands, rows: usize, out_dtype: mlx.mlx_dtype) !mlx.mlx_array {
+        return self.moeWith(s, x, inds, scores, b, rows, out_dtype, null);
+    }
+
+    /// `moe` with each slot's x row from `rmap` (`prepWith`): y [rows, hidden] for x [n, hidden] (any n), inds / scores /
+    /// rmap [rows * topk]; row r's bytes are `moe`'s over x's rows gathered by `rmap`. rmap null: `moe` itself.
+    pub fn moeWith(self: *Prefill, s: mlx.mlx_stream, x: mlx.mlx_array, inds: mlx.mlx_array, scores: mlx.mlx_array, b: Operands, rows: usize, out_dtype: mlx.mlx_dtype, rmap: ?mlx.mlx_array) !mlx.mlx_array {
         const S: u32 = @intCast(rows * self.geo.topk);
         const r = try self.route(s, inds, S);
         defer r.deinit();
-        const po = try self.prep(s, x, inds, r.order, b, S);
+        const po = try self.prepWith(s, x, inds, r.order, b, S, rmap);
         defer for (po) |a| {
             _ = mlx.mlx_array_free(a);
         };
@@ -1015,11 +1063,16 @@ pub const Prefill = struct {
     /// `moe`'s y through the 128-row tiles (`routeT128`, `prep`, `gemmGUT128`, `midT128`, `gemmDT128`, `finishT128`): its
     /// bytes. Refused (error.Exl3EngineNotImplemented, nothing launched) without `opts.t128`.
     pub fn moeT128(self: *Prefill, s: mlx.mlx_stream, x: mlx.mlx_array, inds: mlx.mlx_array, scores: mlx.mlx_array, b: Operands, rows: usize, out_dtype: mlx.mlx_dtype) !mlx.mlx_array {
+        return self.moeT128With(s, x, inds, scores, b, rows, out_dtype, null);
+    }
+
+    /// `moeT128` with each slot's x row from `rmap` (`prepWith`), as `moeWith` is `moe`'s. rmap null: `moeT128` itself.
+    pub fn moeT128With(self: *Prefill, s: mlx.mlx_stream, x: mlx.mlx_array, inds: mlx.mlx_array, scores: mlx.mlx_array, b: Operands, rows: usize, out_dtype: mlx.mlx_dtype, rmap: ?mlx.mlx_array) !mlx.mlx_array {
         if (self.t128_k == null) return error.Exl3EngineNotImplemented;
         const S: u32 = @intCast(rows * self.geo.topk);
         const rt = try self.routeT128(s, inds, S);
         defer rt.deinit();
-        const po = try self.prep(s, x, inds, rt.order, b, S);
+        const po = try self.prepWith(s, x, inds, rt.order, b, S, rmap);
         defer for (po) |a| {
             _ = mlx.mlx_array_free(a);
         };
