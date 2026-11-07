@@ -561,6 +561,7 @@ pub const Banked = struct {
             _ = mlx.mlx_array_free(a);
         };
         var z: [2]mlx.mlx_array = undefined; // the split-K gate|up planes
+        if (variant != 0) sayVariant(.gate_up, variant, set.texts);
         try ks.applyConfig(k.gu, c.gu, &.{ xp[0], xp[1], ids, b[0].gate_t, b[1].gate_t, b[2].gate_t, b[0].up_t, b[1].up_t, b[2].up_t }, &z, s);
         defer for (z) |a| {
             _ = mlx.mlx_array_free(a);
@@ -595,6 +596,7 @@ pub const Banked = struct {
         const c = set.c;
         const ones = try self.bankedOnes();
         const b = banks;
+        if (variant != 0) sayVariant(.down, variant, set.texts);
         const zd = try one(k.down, c.down, &.{ hd, ids, b[0].down_t, b[1].down_t, b[2].down_t }, s);
         defer _ = mlx.mlx_array_free(zd);
         return one(k.dfin, c.dfin, &.{ zd, ids, ones, b[0].down_svh, b[1].down_svh, b[2].down_svh, hs }, s);
@@ -633,6 +635,19 @@ pub fn forKernels(k3: *const Kernels3) !*Banked {
     return &cache.get().*[i].?.b;
 }
 
+/// The grouped GEMVs whose variant a banked call has run (bit v: the gate and up GEMV on `group_variants[v]`; bit 16 + v:
+/// the down GEMV), each engagement line printed once.
+const variant_said = Global(u32, "deepseek_v41_banked_variant_said", 0);
+
+/// A banked call's engagement line for its grouped GEMV on `variant` (not 0), printed at the first call of each half
+/// on each variant, where the call runs it.
+fn sayVariant(half: enum { gate_up, down }, variant: u8, texts: Banked.Texts) void {
+    const bit = @as(u32, 1) << @intCast(@as(u32, variant) + @as(u32, if (half == .down) 16 else 0));
+    if ((variant_said.get().* & bit) != 0) return;
+    variant_said.get().* |= bit;
+    std.debug.print("[turboexl3] banked variant engaged: the grouped {s} GEMV on variant {s} ({s} texts)\n", .{ @tagName(half), group_variants[variant].name, @tagName(texts) });
+}
+
 /// This file's module state (`Global`): what a host that shares its units' state registers.
-pub const shared_state = .{ cache_lock, cache };
+pub const shared_state = .{ cache_lock, cache, variant_said };
 
