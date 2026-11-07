@@ -1,7 +1,8 @@
 #pragma METAL fp contract(off)
-result[tn] += vc * inter[tn];
-result[tn] += simd_shuffle_down(result[tn], 4 * sm);
+inter[tn] = static_cast<float>(mat[mat_offset + bn + tn]);
+inter[tn] = static_cast<float>(mat[mat_offset + bn + tn]) + 0.0f;
 result[tm] += inter[tn] * v_coeff[tn];
+logits[(size_t)row * NE + out_row + tm] = static_cast<float>(result[tm]);
 scores[e] = turboexl3_ling_score(static_cast<float>(static_cast<bfloat16_t>(result[tm])), pb[e]);
 constexpr int KL = (R + 4) / 5 == 1 ? 32 : 16;
 acc += dot(wf[i], vec<float, 4>(x4[v * x_ld4 + base + i * KL + k_lane]));

@@ -1462,7 +1462,14 @@ def rekey_tables(units):
 # whose values it changes, each with what changed (anything else that differs fails). They hold one change's entries
 # while it is checked against its base and are emptied after it lands, so a later run allows nothing by them (aa0222f's
 # joint layout used them: turboexl3_ric_jdec1 and _blend changed, the two interleaved test references added)
-SPLIT_CHANGED_KERNELS = {}
+SPLIT_CHANGED_KERNELS = {
+    'turboexl3_ling_router_logits': ('Ling-3.1\'s router logits: MLX\'s gemv (BM 4, SN 32: 32 threadgroups a row) over the '
+                                     'loader\'s column-major table, read as [512, hidden] row-major (router/logits_1 ++ '
+                                     'logits_w ++ logits_2), in place of gemv_t over a row-major table, which MLX copied the '
+                                     'table to and the served matmul never runs'),
+    'turboexl3_ling_router_pred': 'the same router half beside the unchanged predictor (head and pred_open at 32 a row)',
+    'turboexl3_ling_router_pred_sig': 'the same router half beside the unchanged predictor (head and pred_open at 32 a row)',
+}
 SPLIT_ADDED_KERNELS = {
     'turboexl3_fin7co': 'Ling-3.1\'s clamp after the SiLU: text_fin7 with its SwiGLU line swapped for fin7_swiglu_clamp_out',
     'turboexl3_pf_midco': 'Ling-3.1\'s clamp: text_mid with its SwiGLU line swapped for mid_swiglu_clamp_out',
@@ -1499,7 +1506,8 @@ SPLIT_ADDED_KERNELS['turboexl3_gu8bg'] = ('gu8b (Config.banked_gu8): the banked 
                                           'memory, gu3bg\'s GEMV there, its planes)')
 SPLIT_ADDED_KERNELS['turboexl3_gu8bgm3'] = 'the same with hw4b\'s M = 3 member path (gu8bg_3m3)'
 SPLIT_ADDED_KERNELS['turboexl3_ling_router_logits'] = ('Ling-3.1\'s router logits at decode rows (models/ling/router.zig): '
-                                                       'MLX\'s one-row gemv_t statements a row (router/head ++ logits ++ close)')
+                                                       'MLX\'s one-row gemv over the loader\'s column-major table a row '
+                                                       '(router/head ++ logits_1 ++ logits_w ++ logits_2 ++ close)')
 SPLIT_ADDED_KERNELS['turboexl3_ling_router_pred'] = ('the same beside the read-ahead predictor\'s threadgroups (pred_open, '
                                                      'pred_one: MLX\'s gemv at one row, pred_wide: its gemv_wide at 2 to 8), '
                                                      'DeepSeek\'s sqrt(softplus(z)) + bias (header score_softplus_sqrt)')
@@ -1508,7 +1516,19 @@ SPLIT_ADDED_KERNELS['turboexl3_ling_router_select'] = ('the host\'s fused router
                                                        '(router/select), TOUT bfloat16')
 SPLIT_ADDED_KERNELS['turboexl3_test_ling_router_host'] = ('test only: the host\'s fused router at its own config (TOUT f32), '
                                                           'the router test\'s reference')
-SPLIT_CHANGED_CONSTS = {}
+SPLIT_ADDED_KERNELS['turboexl3_ling_router_logits_h'] = ('Ling-3.1\'s router logits over the loaded f16 weight (E10): '
+                                                         'turboexl3_ling_router_logits with the table\'s read swapped for the '
+                                                         'f16 word widened, then + 0 (router/logits_wh)')
+SPLIT_ADDED_KERNELS['turboexl3_ling_router_pred_h'] = 'turboexl3_ling_router_pred over the loaded f16 weight (router/logits_wh)'
+SPLIT_ADDED_KERNELS['turboexl3_ling_router_pred_sig_h'] = ('turboexl3_ling_router_pred_sig over the loaded f16 weight '
+                                                           '(router/logits_wh)')
+SPLIT_CHANGED_CONSTS = {
+    'head': 'models/ling/router.zig: launch 1\'s router threadgroups at 512 / 16 a row (MLX\'s gemv tiles)',
+    'pred_open': 'models/ling/router.zig: the predictor\'s threadgroups after 512 / 16 a row of the router\'s',
+    'logits_gemv': 'models/ling/router.zig: MLX\'s gemv over the loader\'s column-major table (logits_1 ++ logits_w ++ logits_2)',
+    'text_logits': 'models/ling/router.zig: the router half as MLX\'s gemv over the loader\'s table',
+    'text_pred': 'models/ling/router.zig: the router half as MLX\'s gemv over the loader\'s table',
+}
 # the Ling banked test selects each arm's texts (moeLingBankedSel): Config.banked_group set in the process selected nothing
 RENAMED_TESTS[('ling_test.zig', "turboexl3 gpu ling banked: every pair of moeLingBanked over three banks is moeLing's on "
                                 "its bank at top-1 with score 1, byte for byte, at limits 0 and 10 and banked groups 2 and "
@@ -1516,6 +1536,25 @@ RENAMED_TESTS[('ling_test.zig', "turboexl3 gpu ling banked: every pair of moeLin
     "turboexl3 gpu ling banked: every pair of moeLingBanked over three banks is moeLing's on its bank at top-1 with "
     "score 1, byte for byte, at limits 0 and 10, on the configured texts (group 2), the grouped texts (g4) and the M = 3 "
     "path (g4m3), each selected (TURBOEXL3_GPU=1)")
+
+# the router's column-major table (E2's fix) and its f16 weight (E10): the router tests' names say what they now hold
+RENAMED_TESTS[('router.zig', ("turboexl3 ling router texts: the logits and predictor texts are one composition, the predictor's "
+    "branch spliced before the close; MLX's GEMV statements carry no contraction pragma and the scores' "
+    "headers do; the select text is the host's statements; every operand a name its text reads"))] = ('turboexl3 ling router texts: the logits and predictor texts are one composition per weight dtype, '
+    "the table's read the only piece the f16 texts swap and the predictor's branch spliced before the "
+    "close; MLX's GEMV statements carry no contraction pragma and the scores' headers do; the select "
+    "text is the host's statements; every operand a name its text reads")
+RENAMED_TESTS[('router.zig', ("turboexl3 ling router plan: launch 1's threadgroups per row count (the router's 8 a row; the "
+    "predictor's 32 at one row, 128 at 2 to 5 rows, 64 at 6 to 8) and the shapes the launches take (rows "
+    '1 to 8, hidden a multiple of 1024 below 8192)'))] = ("turboexl3 ling router plan: launch 1's threadgroups per row count (the router's 32 a row; the "
+    "predictor's 32 at one row, 128 at 2 to 5 rows, 64 at 6 to 8) and the shapes the launches take (rows "
+    '1 to 8, hidden a multiple of 1024 below 8192)')
+RENAMED_TESTS[('router_test.zig', ("turboexl3 gpu ling router: routerLogits, select and route give the host's logits (one-row gemv_t a "
+    "row), predictor scores (DeepSeek's and Ling's, gemv at one row and gemv_wide at 2 to 8) and ids and "
+    'bf16 weights (its fused router, then the astype) word for word at rows 1 to 8 (TURBOEXL3_GPU=1)'))] = ("turboexl3 gpu ling router: routerLogits, select and route over the loader's table (f32, transposed "
+    'back) and over the loaded f16 weight give the served logits (one-row gemv over the column-major '
+    "table, denseRows at 2 to 8), predictor scores (DeepSeek's and Ling's, gemv at one row and gemv_wide "
+    'at 2 to 8) and ids and bf16 weights word for word at rows 1 to 8 (TURBOEXL3_GPU=1)')
 
 def split_report(oprog, nprog, ounits, nunits, orig_dir, new_dir, problems, verbose):
     """--split (declarations moved between files, not only files): checks 1 to 4 over the whole tree instead of per file.
