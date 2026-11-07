@@ -1225,6 +1225,13 @@ ADDED_FILES['models/ling/combine.zig'] = ('Ling-3.1\'s wide routed call combine 
                                           'word, over a joined array or the call\'s JOINLESS sources) and its texts\' CPU test')
 ADDED_FILES['models/ling/combine_test.zig'] = ('the combine\'s GPU tests: both entries against MLX\'s composed combine word for '
                                                'word, the refusals')
+# Ling-3.1-flash's MoE router at decode rows with the read-ahead predictor's scores (turboexl3_ling_router_*)
+ADDED_FILES['models/ling/router.zig'] = ('Ling-3.1\'s MoE router at decode rows 1 to 8 in two launches (routerLogits: MLX\'s '
+                                         'one-row gemv_t for the logits beside its gemv / gemv_wide for the read-ahead '
+                                         'predictor\'s scores; select: the host\'s fused router text verbatim, its weights '
+                                         'stored in bf16; route: both) and its texts\' CPU tests')
+ADDED_FILES['models/ling/router_test.zig'] = ('the router\'s GPU tests: the logits, both predictor scores, the ids and the '
+                                              'weights against the host\'s launches word for word at rows 1 to 8, the refusals')
 
 def metal_strings(fn, toks, corpus):
     """(line, kind, value) of every literal in a .zig file that holds Metal"""
@@ -1470,6 +1477,16 @@ SPLIT_ADDED_KERNELS['turboexl3_gu8bg'] = ('gu8b (Config.banked_gu8): the banked 
                                           '(form 8\'s gu8_1 and rk_line, prep2b\'s arithmetic over the span into threadgroup '
                                           'memory, gu3bg\'s GEMV there, its planes)')
 SPLIT_ADDED_KERNELS['turboexl3_gu8bgm3'] = 'the same with hw4b\'s M = 3 member path (gu8bg_3m3)'
+SPLIT_ADDED_KERNELS['turboexl3_ling_router_logits'] = ('Ling-3.1\'s router logits at decode rows (models/ling/router.zig): '
+                                                       'MLX\'s one-row gemv_t statements a row (router/head ++ logits ++ close)')
+SPLIT_ADDED_KERNELS['turboexl3_ling_router_pred'] = ('the same beside the read-ahead predictor\'s threadgroups (pred_open, '
+                                                     'pred_one: MLX\'s gemv at one row, pred_wide: its gemv_wide at 2 to 8), '
+                                                     'DeepSeek\'s sqrt(softplus(z)) + bias (header score_softplus_sqrt)')
+SPLIT_ADDED_KERNELS['turboexl3_ling_router_pred_sig'] = 'the same with Ling\'s sigmoid(z) + bias (header score_sigmoid)'
+SPLIT_ADDED_KERNELS['turboexl3_ling_router_select'] = ('the host\'s fused router at sigmoid_bias_grouped, its text verbatim '
+                                                       '(router/select), TOUT bfloat16')
+SPLIT_ADDED_KERNELS['turboexl3_test_ling_router_host'] = ('test only: the host\'s fused router at its own config (TOUT f32), '
+                                                          'the router test\'s reference')
 SPLIT_CHANGED_CONSTS = {}
 # the Ling banked test selects each arm's texts (moeLingBankedSel): Config.banked_group set in the process selected nothing
 RENAMED_TESTS[('ling_test.zig', "turboexl3 gpu ling banked: every pair of moeLingBanked over three banks is moeLing's on "

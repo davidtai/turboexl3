@@ -14,8 +14,11 @@ The code only Ling-3.1-flash uses, on the core's routed chain, DeepSeek-V4.1's b
 | `combine.zig` | `combineRouted` and `combineParts` (a wide routed call's combine in one launch, over a joined array or the call's unjoined outputs), the texts' CPU test |
 | `combine_test.zig` | both against MLX's composed combine word for word, the refusals (GPU) |
 | `kernels/combine/` | the combine's pieces: the contract pragma, the source choice, the fold's head, each text's row read, the fold and store |
+| `router.zig` | `route`, `routerLogits` and `select` (a MoE layer's router at decode rows 1 to 8 in two launches: MLX's one-row gemv_t for the logits beside its gemv / gemv_wide for the read-ahead predictor's scores, then the host's fused router text over the logits with its weights in bf16), the texts' and the plan's CPU tests |
+| `router_test.zig` | the logits, both predictor scores, the ids and the weights against the host's launches word for word at rows 1 to 8, the refusals (GPU) |
+| `kernels/router/` | the router's pieces: launch 1's head, MLX's gemv_t statements, the predictor's branch (gemv at one row, gemv_wide at 2 to 8), the two scores (headers) and the host's fused router text (`select.metal`) |
 
-Ling's own Metal is the pairs', the shared expert's and the routed combine's pieces (`kernels/pair/`, `kernels/shared/`,
-`kernels/combine/`; `kernels/test/pins/` what the CPU tests pin); the routed experts' clamp pieces are the core's
+Ling's own Metal is the pairs', the shared expert's, the routed combine's and the router's pieces (`kernels/pair/`,
+`kernels/shared/`, `kernels/combine/`, `kernels/router/`; `kernels/test/pins/` what the CPU tests pin); the routed experts' clamp pieces are the core's
 (`kernels/decode/fin7_swiglu_clamp_out.metal`, `kernels/prefill/mid_swiglu_clamp_out.metal`). docs/models/ling/
 describes the model's needs and its kernels.

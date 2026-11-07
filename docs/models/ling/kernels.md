@@ -2,8 +2,9 @@
 
 The kernels made in `src/models/ling/`. Ling's routed experts run the core's and DeepSeek-V4.1's kernels with one
 SwiGLU line swapped ([the core's catalog](../../core/kernels.md), [DeepSeek-V4.1's](../deepseek_v41/kernels.md)); the
-kernels here are Ling's own: a wide (prompt) routed call's combine (`combine.zig`, below), and its shared expert's at
-decode rows and its same-input trunk pairs'. Those two are DEC-ONE texts over two members of one input, each member in
+kernels here are Ling's own: a wide (prompt) routed call's combine (`combine.zig`), its MoE router at decode rows with
+the read-ahead predictor's scores (`router.zig`), both below, and its shared expert's at decode rows and its same-input
+trunk pairs'. Those two are DEC-ONE texts over two members of one input, each member in
 its own buffers, with the member chosen after its head and the GEMV's tile address read in the member's trellis:
 - the shared expert's (`shared.zig`): DEC-ONE with the prepare inside (`turboexl3_dense_dec1`'s text) over the gate and
   the up; its finish stores the member's output, and the second finish of each pair of 128-blocks (the gate's and the
@@ -273,3 +274,155 @@ statement, then the fold in that order.
   outputs (5 read in place; 40 through the streamer's merge rule) gives the composed combine's bytes on the array the
   join builds (TURBOEXL3_GPU=1)" (GPU, words); `src/models/ling/combine.zig` "turboexl3 ling combine texts: ..." (CPU,
   the texts).
+
+## `src/models/ling/router.zig`
+
+The MoE router at decode rows 1 to 8 with the read-ahead predictor's scores (the next MoE layer's router on the call's
+rows), in two launches in place of the host's nine: launch 1 runs MLX's GEMV statements for the router's logits and the
+predictor's words; launch 2 runs the host's fused router over those logits. Each output keeps the host's reduction order
+and roundings. The router's logits are MLX's one-row gemv_t (`gemv.h` GEMVTKernel at BM 1, BN 4, SM 8, SN 4, TM 4, TN 4)
+over x widened to f32, every row its own. The predictor's words are MLX's gemv at one row (GEMVKernel at BM 4, BN 1,
+SM 1, SN 32, TM 4, TN 4) and its gemv_wide at 2 to 8 rows (k_lanes 32 to 5 rows, 16 past; MLX's route on M3 and later),
+each rounded to bf16 (the product's dtype), widened, then scored with the statements of MLX's elementwise kernels. MLX's
+metallib is built `-fno-fast-math`, so its bare exp, log and sqrt are the precise ones: the scores spell them precise,
+and their headers keep each statement's rounding (`#pragma METAL fp contract(off)`). The GEMV statements carry no
+pragma: they compile as MLX's own do.
+
+### `turboexl3_ling_router_logits`
+
+<!-- kernel-facts: turboexl3_ling_router_logits -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/ling/router.zig:135` (`fn kernelsFor`) |
+| inputs | `x`, `w` |
+| outputs | `logits` |
+| source | `text_logits` = `ling:router/head` ++ `ling:router/logits` ++ `ling:router/close` (2286 B, `0553fdc70481`) |
+| header | `""` = (empty) (0 B, `e3b0c44298fc`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** Ling-3.1-flash: `root.ling.router.routerLogits` (and `route`) without a predictor: the last MoE layer
+  (no next router); the outside plugin's opt-in (turboexl3_ling's `MLX_SERVE_LING_ROUTER_FUSED=1`).
+- **Shapes and dtypes:** x bf16 [R, HK] (R 1 to 8; HK a multiple of 1024 below 8192), w f32 [HK, 512] row-major (the
+  router's f32 table, the array the host's matmul reads). Out: logits f32 [R, 512].
+- **Grid and threadgroup:** `(8R · 128, 1, 1)` / `(128, 1, 1)`: 8 threadgroups a row, each one of MLX's gemv_t tiles of
+  64 logits.
+- **Template args:** R (the rows), NE (512, the experts), HK (the hidden size).
+- **Replaces:** MLX's astype of x to f32 and its gemv_t: 2 launches with 1.
+- **Bits:** each row the words of MLX's one-row `matmul(astype(x_r, f32), w)` (gemv_t's statements in order, x widened
+  in registers to the astype's values). At 2 to 8 rows those are the host's exact verify's words (turboexl3_ling's
+  `denseRows`); MLX's own matmul of several rows takes a steel GEMM there, another order.
+- **Pinned by:** `src/models/ling/router_test.zig` "turboexl3 gpu ling router: routerLogits, select and route give the
+  host's logits ..." (GPU, words at rows 1 to 8, with and without a predictor); `src/models/ling/router.zig`
+  "turboexl3 ling router texts: ..." (CPU, the texts) and "turboexl3 ling router plan: ..." (CPU, the grid).
+
+### `turboexl3_ling_router_pred`
+
+<!-- kernel-facts: turboexl3_ling_router_pred -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/ling/router.zig:137` (`fn kernelsFor`) |
+| inputs | `x`, `w`, `pw`, `pb` |
+| outputs | `logits`, `scores` |
+| source | `text_pred` = `ling:router/head` ++ `ling:router/logits` ++ `ling:router/pred_open` ++ `ling:router/pred_one` ++ `ling:router/pred_wide` ++ `ling:router/close` (6545 B, `8f360560eb72`) |
+| header | `score_softplus_sqrt` = `ling:router/score_softplus_sqrt` (1499 B, `0f43a7203e4b`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** Ling-3.1-flash: `root.ling.router.routerLogits` (and `route`) with a `Predictor` at its default score
+  (`.softplus_sqrt`): every MoE layer but the last; the outside plugin's opt-in.
+- **Shapes and dtypes:** x and w as `turboexl3_ling_router_logits`'s; pw bf16 [512, HK] row-major (the next MoE layer's
+  router: the host's `router_raw`), pb f32 [512] (its expert bias). Out: logits f32 [R, 512]; scores f32 [R, 512].
+- **Grid and threadgroup:** `((8R + P) · 128, 1, 1)` / `(128, 1, 1)`: the router's 8R threadgroups, then the
+  predictor's P: 32 at one row (gemv's tiles, 16 rows of pw each), 128 at 2 to 5 rows (gemv_wide at k_lanes 32: a row of
+  pw a simdgroup) and 64 at 6 to 8 (k_lanes 16: two rows a simdgroup).
+- **Template args:** R, NE, HK.
+- **Replaces:** the router's 2 launches and the predictor's 5 (MLX's gemv or gemv_wide, its astype to f32, logaddexp,
+  sqrt and add): 7 launches with 1.
+- **Bits:** the logits as `turboexl3_ling_router_logits`'s; the scores the words of the host streamer's `nextScores`,
+  MLX's `add(sqrt(logaddexp(astype(matmul(x, transpose(pw)), f32), 0)), pb)` at the call's row count: gemv's (one row)
+  or gemv_wide's (2 to 8 rows) statements, the bf16 rounding, then LogAddExp with utils.h's log1p, Sqrt and Add.
+- **Pinned by:** `src/models/ling/router_test.zig` "turboexl3 gpu ling router: ..." (GPU, words at rows 1 to 8, the
+  logits and the scores); `src/models/ling/router.zig` "turboexl3 ling router texts: ..." (CPU, the texts and the
+  score's statements).
+
+### `turboexl3_ling_router_pred_sig`
+
+<!-- kernel-facts: turboexl3_ling_router_pred_sig -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/ling/router.zig:139` (`fn kernelsFor`) |
+| inputs | `x`, `w`, `pw`, `pb` |
+| outputs | `logits`, `scores` |
+| source | `text_pred` = `ling:router/head` ++ `ling:router/logits` ++ `ling:router/pred_open` ++ `ling:router/pred_one` ++ `ling:router/pred_wide` ++ `ling:router/close` (6545 B, `8f360560eb72`) |
+| header | `score_sigmoid` = `ling:router/score_sigmoid` (522 B, `765e609d7b4e`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** Ling-3.1-flash: the same with `Predictor.score = .sigmoid`, Ling's own read-ahead score (candidate C1,
+  turboexl3_ling's `MLX_SERVE_LING_PREDICTOR=1`, whose pick runs on the host).
+- **Shapes and dtypes:** `turboexl3_ling_router_pred`'s.
+- **Grid and threadgroup:** `turboexl3_ling_router_pred`'s.
+- **Template args:** R, NE, HK.
+- **Replaces:** the router's 2 launches and the predictor's 4 (MLX's gemv or gemv_wide, its astype to f32, sigmoid and
+  add): 6 launches with 1.
+- **Bits:** the logits as `turboexl3_ling_router_logits`'s; the scores MLX's `add(sigmoid(astype(matmul(x,
+  transpose(pw)), f32)), pb)` word for word (MLX's two-sided Sigmoid on the precise exp).
+- **Pinned by:** `src/models/ling/router_test.zig` "turboexl3 gpu ling router: ..." (GPU, words at rows 1 to 8);
+  `src/models/ling/router.zig` "turboexl3 ling router texts: ..." (CPU, the texts).
+
+### `turboexl3_ling_router_select`
+
+<!-- kernel-facts: turboexl3_ling_router_select -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/ling/router.zig:141` (`fn kernelsFor`) |
+| inputs | `logits`, `bias`, `scale` |
+| outputs | `inds`, `scores` |
+| source | `text_select` = `ling:router/select` (3430 B, `f8657dcb970c`) |
+| header | `""` = (empty) (0 B, `e3b0c44298fc`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** Ling-3.1-flash: `root.ling.router.select` (and `route`): a MoE layer's top-8 after launch 1; the outside
+  plugin's opt-in.
+- **Shapes and dtypes:** logits f32 [R, 512] (R 1 to 8), bias f32 [512] (the layer's expert bias), scale f32 0-dim
+  (routed_scaling_factor, 2.5 for Ling). Out: inds u32 [R, 8] (in the selection's order); scores bf16 [R, 8].
+- **Grid and threadgroup:** `(256, R, 1)` / `(256, 1, 1)`: the host's config (`moeRouterThreadGroup(512)`).
+- **Template args:** TOUT (bfloat16; the host's launch runs float32), NE (512), NK (8), TG (256), NORM (1), NG (8),
+  GSZ (64), TOPKG (4).
+- **Replaces:** the host's fused router launch and the MoE block's astype of its f32 weights to bf16: 2 launches with 1.
+- **Bits:** the host's text byte for byte (`text_select`: sdk/blocks/moe/router_kernel.zig
+  `moeRouterSource(.sigmoid_bias_grouped)`; turboexl3_ling's build checks the copy against its source). TOUT bf16
+  rounds each f32 weight to bf16 at its store, as MLX's astype does.
+- **Pinned by:** `src/models/ling/router_test.zig` "turboexl3 gpu ling router: ..." (GPU, the ids and weights against
+  the host's launch then the astype, alone and in `route`, rows 1 to 8); `src/models/ling/router.zig` "turboexl3 ling
+  router texts: ..." (CPU, the host's statements).
+
+### `turboexl3_test_ling_router_host`
+
+<!-- kernel-facts: turboexl3_test_ling_router_host -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/ling/router_test.zig:172` (`test turboexl3 gpu ling router: routerLogits, select and route give the host's logits (one-row gemv_t a row), predictor scores (DeepSeek's and Ling's, gemv at one row and gemv_wide at 2 to 8) and ids and bf16 weights (its fused router, then the astype) word for word at rows 1 to 8 (TURBOEXL3_GPU=1)`) |
+| inputs | `logits`, `bias`, `scale` |
+| outputs | `inds`, `scores` |
+| source | `router.text_select` = `ling:router/select` (3430 B, `f8657dcb970c`) |
+| header | `""` = (empty) (0 B, `e3b0c44298fc`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** test only: the reference in `src/models/ling/router_test.zig`: the host's fused router at the host's own
+  config (TOUT float32), whose weights the test casts to bf16 with MLX's astype (the MoE block's).
+- **Shapes and dtypes:** logits f32 [R, 512], bias f32 [512], scale f32 0-dim. Out: inds u32 [R, 8]; scores f32 [R, 8].
+- **Grid and threadgroup:** `(256, R, 1)` / `(256, 1, 1)`.
+- **Template args:** TOUT (float32), NE, NK, TG, NORM, NG, GSZ, TOPKG as `turboexl3_ling_router_select`'s.
+- **Replaces:** nothing: a reference, the host's launch.
+- **Bits:** the host's: its text (`router.text_select`) and config.
+- **Pinned by:** `src/models/ling/router_test.zig` "turboexl3 gpu ling router: ..." (GPU, as the reference). No test pins
+  its text beyond `text_select`'s.

@@ -23,6 +23,7 @@ What it runs on turboexl3 (`root.ling`, `src/models/ling/api.zig`):
 | a wide (prompt) routed call's combine: the routed rows times their routing weights, summed over the top-8 | `root.ling.combineRouted` (a joined array), `root.ling.combineParts` (the call's unjoined outputs, JOINLESS) | Ling's own: `turboexl3_ling_combine`, `turboexl3_ling_combine_parts` ([kernels.md](kernels.md)), the words of the host's `sum(multiply(astype(routed, f32), expand_dims(weights, -1)), -2)` |
 | the shared expert at decode rows (1 to 4) | `ling.sharedExpert` (`root.lingSharedExpert`; `sharedTakes`, `sigmoidTable`) | `turboexl3_ling_sgu` (no clamp) or `turboexl3_ling_sguco` (the clamp after the SiLU), then the core's `turboexl3_dense_dec0` ([its catalog](kernels.md)) |
 | a same-input pair at decode rows: a KDA layer's z \| a, the shared expert's and the dense FFN's gate \| up | `root.ling.linearPair` (a host's opt-in; each member in its own buffers) | `turboexl3_ling_pair_dec1` (after dense's counter zeroing) where the members' calls take the prepare inside, else `turboexl3_ling_pair_prep` then `turboexl3_ling_pair_dec0` ([kernels](kernels.md)): each member's `linear` bytes |
+| a MoE layer's router at decode rows (1 to 8) with the read-ahead predictor's scores (the next MoE layer's router on the call's rows) | `root.ling.router.route` (`routerLogits`, `select`; a host's opt-in) | `turboexl3_ling_router_pred` (DeepSeek's sqrt(softplus(z)) + bias), `turboexl3_ling_router_pred_sig` (Ling's sigmoid(z) + bias) or, on the last MoE layer, `turboexl3_ling_router_logits`, then `turboexl3_ling_router_select` ([kernels](kernels.md)): the host's logits, scores, ids and bf16 weights word for word |
 
 The pairs share each member's K split (z \| a at KS 2, the shared gate \| up at KS 8, the dense gate \| up at KS 1);
 qkv (KS 1) and MLA's q_a (KS 8) \| kv_a (KS 16) cannot join a member of another K split byte for byte.
@@ -30,7 +31,7 @@ qkv (KS 1) and MLA's q_a (KS 8) \| kv_a (KS 16) cannot join a member of another 
 The routed shape is new to the library: an expert width of 1280 is ten 128-blocks (the split-K planes, the fin7 grid
 and the prefill tiles take it as any multiple of 128), and 512 experts at top-8. Every routed-expert kernel is a composition of the
 core's or DeepSeek-V4.1's pieces with one SwiGLU line swapped, so its bytes are the base launch's wherever no value
-reaches the limit. The combine is Ling's own kernel, held to MLX's three ops word for word (`combine_test.zig`). The tests (`src/models/ling/ling_test.zig`) hold `moeLing` to `ref.moeRowClampedAt` at `silu_out`,
+reaches the limit. The combine is Ling's own kernel, held to MLX's three ops word for word (`combine_test.zig`), and so is the router's pair of launches, held to the host's nine (`router_test.zig`). The tests (`src/models/ling/ling_test.zig`) hold `moeLing` to `ref.moeRowClampedAt` at `silu_out`,
 `moeLingBanked` to `moeLing` byte for byte, and `linear` to the host reference at every trunk shape. The kernels:
 [the core's catalog](../../core/kernels.md) (`turboexl3_fin7co`, `turboexl3_pf_midco`, `turboexl3_pf_mid_vco`,
 `turboexl3_pf_t128_midco`) and [DeepSeek-V4.1's](../deepseek_v41/kernels.md) (`turboexl3_fin7b`, `turboexl3_fin7cob`,
