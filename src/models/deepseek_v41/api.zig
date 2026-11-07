@@ -231,6 +231,39 @@ pub fn bankedGateUpAct(s: mlx.mlx_stream, x: mlx.mlx_array, banks: *const [3]Ban
     return .{ .hd = hd[0], .hs = hd[1] };
 }
 
+/// The LUT-routed gate|up's result (`bankedGateUpLutAct`): the half, then the row-slots' packed ids, the down's `ids`.
+/// The caller frees all three.
+pub const BankedLutHalf = struct { hd: mlx.mlx_array, hs: mlx.mlx_array, slots: mlx.mlx_array };
+
+/// The banked gate|up with DEVROUTE's two takes in its prepare (`banked.Banked.bankedGateUpLutSelV`): x [tokens, hidden]
+/// (bf16, f16 or f32), `idx` [tokens, topk] or [tokens · topk] (i32 or u32) the routed experts, every one below `lut`'s
+/// length, and `lut` u32 [experts] the layer's packed ids (bank << 24 | slot row) by expert. Row-slot r is token
+/// r / topk's pair r % topk, and its bytes are `bankedGateUpAct`'s over x's rows taken per pair with ids the LUT taken at
+/// `idx`; `slots` holds those ids. Rows 1..banked_rows_max; the grouped texts without gu8b, else
+/// error.Exl3EngineNotImplemented.
+pub fn bankedGateUpLutAct(s: mlx.mlx_stream, x: mlx.mlx_array, idx: mlx.mlx_array, lut: mlx.mlx_array, banks: *const [3]Bank, dec: format.Decode, act: BankedAct, sel: BankedSel, variant: u8) !BankedLutHalf {
+    if (act.limit > 128) return error.InvalidExl3Clamp;
+    const xs = mlx.getShape(x);
+    if (xs.len != 2 or xs[0] < 1) return error.BadExl3Shape;
+    const xd = mlx.mlx_array_dtype(x);
+    if (xd != .bfloat16 and xd != .float32 and xd != .float16) return error.BadExl3Dtype;
+    const is = mlx.getShape(idx);
+    if (is.len < 1 or is.len > 2 or is[0] < 1 or (is.len == 2 and is[0] != xs[0])) return error.BadExl3Shape;
+    const idd = mlx.mlx_array_dtype(idx);
+    if (idd != .uint32 and idd != .int32) return error.BadExl3Dtype;
+    const tokens: usize = @intCast(xs[0]);
+    const rows: usize = mlx.mlx_array_size(idx);
+    if (rows > banked_rows_max or rows % tokens != 0) return error.BadExl3Shape;
+    const ls = mlx.getShape(lut);
+    if (ls.len != 1 or ls[0] < 1) return error.BadExl3Shape;
+    if (mlx.mlx_array_dtype(lut) != .uint32) return error.BadExl3Dtype;
+    const c = try bankedCallRows(banks, rows, dec, act);
+    if (xs[1] != @as(c_int, @intCast(c.geo.hidden))) return error.BadExl3Shape;
+    const k3 = try kernelsFor(c.geo, .float32);
+    const r = try (try banked.forKernels(k3)).bankedGateUpLutSelV(k3, s, x, idx, lut, @intCast(rows / tokens), &c.kb, rows, sel, variant);
+    return .{ .hd = r[0], .hs = r[1], .slots = r[2] };
+}
+
 /// `moeClampedBanked`'s down: down3b and dfin3b (`decode.Kernels3.bankedDown`) over the gate|up's `h` -> y f32 [rows,
 /// hidden]; the caller frees y (and `h`).
 pub fn moeClampedBankedDown(s: mlx.mlx_stream, h: BankedHalf, banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, limit: c_int) !mlx.mlx_array {
@@ -275,6 +308,11 @@ fn bankedCall(banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, act
     if (is.len != 1 or is[0] < 1 or is[0] > banked_rows_max) return error.BadExl3Shape;
     const idd = mlx.mlx_array_dtype(ids);
     if (idd != .uint32 and idd != .int32) return error.BadExl3Dtype;
+    return bankedCallRows(banks, @intCast(is[0]), dec, act);
+}
+
+/// `bankedCall` at `rows` row-slots, the ids checked by the caller
+fn bankedCallRows(banks: *const [3]Bank, rows: usize, dec: format.Decode, act: BankedAct) !BankedCall {
     const geo = try bankedGeometry(banks);
     if (geo.gate_up.n != geo.down.n) return error.Exl3EngineNotImplemented;
     var kb: [3]decode.Kernels.Bank = undefined;
@@ -291,7 +329,7 @@ fn bankedCall(banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, act
     };
     return .{
         .geo = .{ .hidden = @intCast(geo.hidden), .inter = @intCast(geo.width), .topk = 1, .rate = geo.gate_up, .dec = dec, .limit = act.limit, .clamp = act.clamp },
-        .rows = @intCast(is[0]),
+        .rows = rows,
         .kb = kb,
     };
 }

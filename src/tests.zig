@@ -50,6 +50,7 @@ comptime {
     _ = @import("models/ling/router.zig");
     _ = @import("models/ling/router_test.zig");
     _ = @import("models/ling/rows_test.zig");
+    _ = @import("models/ling/devlut_test.zig");
 }
 
 
