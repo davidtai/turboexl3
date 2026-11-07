@@ -1103,6 +1103,9 @@ RENAMED_TESTS = {
                   "rows 1/4/8 (TURBOEXL3_BENCH=1)"):
         "turboexl3 bench: form-3 variants vs Sushi's chain, K2..K8 (+ n40), Qwen geometry, rows 1/4/8 (TURBOEXL3_BENCH=1)",
 }
+# tests a change edited on purpose, by file and test name, with the reason: check 4 lists them in place of aligning
+# their bodies token for token (their strings are still checked against the kernels they name)
+EDITED_TESTS = {}
 # DeepSeek-V4.1's trunk: the grouped linear (wo_a), the bias helper, their host reference and tests
 ADDED_FILES['grouped.zig'] = ('the grouped linear at decode rows (turboexl3_grouped_prep / _gemv / _finish: dense\'s '
                               'prep_s, the routed down3 and dfin3 texts with their own template arguments)')
@@ -1294,6 +1297,18 @@ for _name, _why in (('turboexl3_pf_t128z_route', 'text_froute_t128 with the comp
 ADDED_FILES['zfit_test.zig'] = ('the compact mixed outputs\' rows hold every remainder the route leaves (CPU), and moeClampedRows '
                                 'with t128_zfit, the experts named or not, gives the words it gives without under the served '
                                 'options, bk128 and bk128.tk (GPU)')
+
+# the timing tests' 455-row runs: each run's slot computed in u32. @min with a comptime bound narrows its result type (u4
+# for 8, u6 for 35), so the run index times the slot stride overflowed it (undefined in the ReleaseFast gpu-test): the
+# routing the tests name, 9 experts 11 slots apart and 36 experts 2 apart
+for _t in ('turboexl3 gpu glm53f fused timing: each fused path against the chain it replaces at the served shapes '
+           '(TURBOEXL3_GLM_TIME=1)',
+           'turboexl3 gpu glm53f schedule timing: the banked decode\'s schedules at a verify\'s waves, and a prompt bank call '
+           'in calls of 2048 to 16384 rows (TURBOEXL3_GLM_TIME=1)',
+           'turboexl3 gpu glm53f prefill options timing: a 16384-row prompt bank call under the served options, bk128, '
+           'half_rows and both, in calls of 4096 and 16384 rows on each path, over 36 experts\' 455-row runs and over a '
+           'drawn routing (TURBOEXL3_GLM_TIME=1)'):
+    EDITED_TESTS[('fused_test.zig', _t)] = 'the 455-row runs\' slots in u32 (the narrowed @min overflowed their product)'
 
 
 def metal_strings(fn, toks, corpus):
@@ -1498,7 +1513,7 @@ def path_of(base, units):
 
 def rekey_tables(units):
     """the tables of earlier changes name files by their name in src/: key them by the file's path"""
-    for tbl in (RECUT, RECOMPOSED, REMOVED, ADDED, CHANGED, ADDED_KERNELS, RENAMED_TESTS):
+    for tbl in (RECUT, RECOMPOSED, REMOVED, ADDED, CHANGED, ADDED_KERNELS, RENAMED_TESTS, EDITED_TESTS):
         items = list(tbl.items())
         tbl.clear()
         tbl.update({(path_of(f, units), x): v for ((f, x), v) in items})
@@ -1869,6 +1884,9 @@ def main():
                 if nname != name:
                     print(f'   {f:13s} renamed "{name[:70]}" -> "{nname[:70]}"')
                 if name in DUMP_TESTS:
+                    continue
+                if (f, nname) in EDITED_TESTS:
+                    print(f'   {f:13s} edited   "{nname[:70]}": {EDITED_TESTS[(f, nname)]}')
                     continue
                 n_tests += 1
                 moved, frees, err = align_test(name, nname, f, ou, nu, oprog, nprog)
