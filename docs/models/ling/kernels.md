@@ -675,10 +675,10 @@ no pragma: they compile as MLX's own do. `tableF32` rebuilds the loader's table 
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/ling/router.zig:161` (`fn kernelsFor`) |
+| made at | `src/models/ling/router.zig:180` (`fn kernelsFor`) |
 | inputs | `x`, `w` |
 | outputs | `logits` |
-| source | `text_logits` = `ling:router/head` ++ `ling:router/logits_1` ++ `ling:router/logits_w` ++ `ling:router/logits_2` ++ `ling:router/close` (2372 B, `0d948b7632c5`) |
+| source | `text_logits` = `ling:router/head_1` ++ `ling:router/head_2` ++ `ling:router/logits_1a` ++ `ling:router/logits_x` ++ `ling:router/logits_1b` ++ `ling:router/logits_w` ++ `ling:router/logits_2` ++ `ling:router/close` (2372 B, `0d948b7632c5`) |
 | header | `""` = (empty) (0 B, `e3b0c44298fc`) |
 
 <!-- /kernel-facts -->
@@ -697,10 +697,10 @@ no pragma: they compile as MLX's own do. `tableF32` rebuilds the loader's table 
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/ling/router.zig:163` (`fn kernelsFor`) |
+| made at | `src/models/ling/router.zig:182` (`fn kernelsFor`) |
 | inputs | `x`, `w`, `pw`, `pb` |
 | outputs | `logits`, `scores` |
-| source | `text_pred` = `ling:router/head` ++ `ling:router/logits_1` ++ `ling:router/logits_w` ++ `ling:router/logits_2` ++ `ling:router/pred_open` ++ `ling:router/pred_one` ++ `ling:router/pred_wide` ++ `ling:router/close` (6631 B, `fb59ac42e0eb`) |
+| source | `text_pred` = `ling:router/head_1` ++ `ling:router/head_2` ++ `ling:router/logits_1a` ++ `ling:router/logits_x` ++ `ling:router/logits_1b` ++ `ling:router/logits_w` ++ `ling:router/logits_2` ++ `ling:router/pred_open` ++ `ling:router/pred_one_a` ++ `ling:router/pred_one_x` ++ `ling:router/pred_one_b` ++ `ling:router/pred_wide_a` ++ `ling:router/pred_wide_x` ++ `ling:router/pred_wide_b` ++ `ling:router/close` (6631 B, `fb59ac42e0eb`) |
 | header | `score_softplus_sqrt` = `ling:router/score_softplus_sqrt` (1499 B, `0f43a7203e4b`) |
 
 <!-- /kernel-facts -->
@@ -719,10 +719,10 @@ no pragma: they compile as MLX's own do. `tableF32` rebuilds the loader's table 
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/ling/router.zig:165` (`fn kernelsFor`) |
+| made at | `src/models/ling/router.zig:184` (`fn kernelsFor`) |
 | inputs | `x`, `w`, `pw`, `pb` |
 | outputs | `logits`, `scores` |
-| source | `text_pred` = `ling:router/head` ++ `ling:router/logits_1` ++ `ling:router/logits_w` ++ `ling:router/logits_2` ++ `ling:router/pred_open` ++ `ling:router/pred_one` ++ `ling:router/pred_wide` ++ `ling:router/close` (6631 B, `fb59ac42e0eb`) |
+| source | `text_pred` = `ling:router/head_1` ++ `ling:router/head_2` ++ `ling:router/logits_1a` ++ `ling:router/logits_x` ++ `ling:router/logits_1b` ++ `ling:router/logits_w` ++ `ling:router/logits_2` ++ `ling:router/pred_open` ++ `ling:router/pred_one_a` ++ `ling:router/pred_one_x` ++ `ling:router/pred_one_b` ++ `ling:router/pred_wide_a` ++ `ling:router/pred_wide_x` ++ `ling:router/pred_wide_b` ++ `ling:router/close` (6631 B, `fb59ac42e0eb`) |
 | header | `score_sigmoid` = `ling:router/score_sigmoid` (522 B, `765e609d7b4e`) |
 
 <!-- /kernel-facts -->
@@ -741,10 +741,10 @@ no pragma: they compile as MLX's own do. `tableF32` rebuilds the loader's table 
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/ling/router.zig:167` (`fn kernelsFor`) |
+| made at | `src/models/ling/router.zig:186` (`fn kernelsFor`) |
 | inputs | `x`, `w` |
 | outputs | `logits` |
-| source | `text_logits_h` = `ling:router/head` ++ `ling:router/logits_1` ++ `ling:router/logits_wh` ++ `ling:router/logits_2` ++ `ling:router/close` (2550 B, `ce985411885e`) |
+| source | `text_logits_h` = `ling:router/head_1` ++ `ling:router/head_2` ++ `ling:router/logits_1a` ++ `ling:router/logits_x` ++ `ling:router/logits_1b` ++ `ling:router/logits_wh` ++ `ling:router/logits_2` ++ `ling:router/close` (2550 B, `ce985411885e`) |
 | header | `""` = (empty) (0 B, `e3b0c44298fc`) |
 
 <!-- /kernel-facts -->
@@ -763,10 +763,10 @@ no pragma: they compile as MLX's own do. `tableF32` rebuilds the loader's table 
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/ling/router.zig:169` (`fn kernelsFor`) |
+| made at | `src/models/ling/router.zig:188` (`fn kernelsFor`) |
 | inputs | `x`, `w`, `pw`, `pb` |
 | outputs | `logits`, `scores` |
-| source | `text_pred_h` = `ling:router/head` ++ `ling:router/logits_1` ++ `ling:router/logits_wh` ++ `ling:router/logits_2` ++ `ling:router/pred_open` ++ `ling:router/pred_one` ++ `ling:router/pred_wide` ++ `ling:router/close` (6809 B, `44f1b8043a90`) |
+| source | `text_pred_h` = `ling:router/head_1` ++ `ling:router/head_2` ++ `ling:router/logits_1a` ++ `ling:router/logits_x` ++ `ling:router/logits_1b` ++ `ling:router/logits_wh` ++ `ling:router/logits_2` ++ `ling:router/pred_open` ++ `ling:router/pred_one_a` ++ `ling:router/pred_one_x` ++ `ling:router/pred_one_b` ++ `ling:router/pred_wide_a` ++ `ling:router/pred_wide_x` ++ `ling:router/pred_wide_b` ++ `ling:router/close` (6809 B, `44f1b8043a90`) |
 | header | `score_softplus_sqrt` = `ling:router/score_softplus_sqrt` (1499 B, `0f43a7203e4b`) |
 
 <!-- /kernel-facts -->
@@ -785,10 +785,10 @@ no pragma: they compile as MLX's own do. `tableF32` rebuilds the loader's table 
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/ling/router.zig:171` (`fn kernelsFor`) |
+| made at | `src/models/ling/router.zig:190` (`fn kernelsFor`) |
 | inputs | `x`, `w`, `pw`, `pb` |
 | outputs | `logits`, `scores` |
-| source | `text_pred_h` = `ling:router/head` ++ `ling:router/logits_1` ++ `ling:router/logits_wh` ++ `ling:router/logits_2` ++ `ling:router/pred_open` ++ `ling:router/pred_one` ++ `ling:router/pred_wide` ++ `ling:router/close` (6809 B, `44f1b8043a90`) |
+| source | `text_pred_h` = `ling:router/head_1` ++ `ling:router/head_2` ++ `ling:router/logits_1a` ++ `ling:router/logits_x` ++ `ling:router/logits_1b` ++ `ling:router/logits_wh` ++ `ling:router/logits_2` ++ `ling:router/pred_open` ++ `ling:router/pred_one_a` ++ `ling:router/pred_one_x` ++ `ling:router/pred_one_b` ++ `ling:router/pred_wide_a` ++ `ling:router/pred_wide_x` ++ `ling:router/pred_wide_b` ++ `ling:router/close` (6809 B, `44f1b8043a90`) |
 | header | `score_sigmoid` = `ling:router/score_sigmoid` (522 B, `765e609d7b4e`) |
 
 <!-- /kernel-facts -->
@@ -807,7 +807,7 @@ no pragma: they compile as MLX's own do. `tableF32` rebuilds the loader's table 
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/ling/router.zig:173` (`fn kernelsFor`) |
+| made at | `src/models/ling/router.zig:192` (`fn kernelsFor`) |
 | inputs | `logits`, `bias`, `scale` |
 | outputs | `inds`, `scores` |
 | source | `text_select` = `ling:router/select` (3430 B, `f8657dcb970c`) |
@@ -1103,3 +1103,185 @@ that GEMM alone over x's bf16 words and the weight as loaded, each widened in th
 - **Replaces:** the stock call's chain at a prompt span: the table's rebuild (astype, + 0), x's astype to f32 and MLX's fused NAX GEMM: four launches, and x's f32 copy written and read.
 - **Bits:** MLX's: `steel_gemm_fused_nax_nt_float32_float32` at MLX's tile, its gemm_loop's statements but for the tiles' loads (`kernels/router_prompt/loop.metal`): each tile is the f32 kernel's NAXTile<float>, loaded from x's bf16 words and w's own through NAXTile's load (its static_cast: exact), then w's -0.0 stored +0.0 (the table's + 0), so the MMAs see the f32 kernel's operands in its k order (SK 32). Taken only where MLX runs that kernel: NAX, MLX_ENABLE_TF32 on, two rows or more, no split K (`pgemm.mlxRegular`: 1366 rows or more at Ling's shape).
 - **Pinned by:** `src/models/ling/router_prompt_test.zig` "turboexl3 ling router_prompt texts: ..." (CPU: the loop is pg2's copy of MLX's gemm_loop but for the tiles' type and the + 0, `kernels/test/pins/router_prompt.metal`), "turboexl3 gpu ling router_prompt: ..." (GPU: the stock call's words over the f16 view and the f32 table at 1366 to 4097 rows) and "turboexl3 gpu ling router_prompt refusals: ..." (GPU); `src/models/ling/router_prompt.zig` "turboexl3 ling router_prompt: ..." (CPU: MLX's tile, its TF32 gate and its regular-kernel rule).
+## `src/models/ling/anroute.zig`
+
+A MoE layer's post-attention add_norm and the router's launch 1 in one launch: the residual add of the mixer's output,
+its RMSNorm with the post-attention norm (mlx-serve's `add_norm`, its plain arm), and over the normed rows the router's
+logits with the read-ahead predictor's scores (the `turboexl3_ling_router_*` texts). The texts are launch 1's with two
+changes. After the head, each 128-thread threadgroup makes the add_norm's sum of squares of every row it reads (the
+router's threadgroups their row, the predictor's every row; `an_open`): the add_norm runs D / 4 threads a row, 32
+simdgroups at D 4096, and here each of the 4 simdgroups runs 8 of them in turn, lane for lane, so each thread's sum,
+each `simd_sum` and the total over the 32-slot table are the add_norm's words; then `precise::rsqrt` as the add_norm.
+The router's threadgroups of a row store its residual and normed columns, 128 each. And each read of x (the router's
+row, the predictor's one row or 4-vectors) is a reader that makes the normed word where it is read (`an_head`): the add
+rounded to bf16, then `bf16(w · bf16(h · inv))`, the add_norm's statements. The GEMV statements are launch 1's.
+
+### `turboexl3_ling_router_an_logits`
+
+<!-- kernel-facts: turboexl3_ling_router_an_logits -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/ling/anroute.zig:93` (`fn kernelsFor`) |
+| inputs | `H`, `XD`, `NW`, `eps`, `w` |
+| outputs | `logits`, `H_NEW`, `HN` |
+| source | `text_logits` = `ling:router/head_1` ++ `ling:router/an_open` ++ `ling:router/head_2` ++ `ling:router/logits_1a` ++ `ling:router/an_logits_x` ++ `ling:router/logits_1b` ++ `ling:router/logits_w` ++ `ling:router/logits_2` ++ `ling:router/close` (4671 B, `f69cae13df9f`) |
+| header | `an_head` = `ling:router/an_head` (1290 B, `b86f4bbb6501`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** Ling-3.1-flash: `root.ling.addNormLogits` without a predictor over the f32 table: the last MoE layer; the outside plugin's opt-in (turboexl3_ling's `MLX_SERVE_LING_ROUTER_ADDNORM=1`, with `MLX_SERVE_LING_ROUTER_FUSED=1`).
+- **Shapes and dtypes:** H and XD bf16 [R, HK] (the residual and the mixer's output; R 1 to 8, HK a multiple of 1024 up to
+  4096), NW bf16 [HK] (the post-attention norm), eps f32 0-dim, w f32 [512, HK] row-major (the loader's [HK, 512] column-major table, transposed back: a view of its memory). Out: logits f32 [R, 512]; H_NEW and HN bf16
+  [R, HK] (the residual and the normed rows).
+- **Grid and threadgroup:** `(32R · 128, 1, 1)` / `(128, 1, 1)`: `turboexl3_ling_router_logits`'s.
+- **Template args:** R, NE (512), HK.
+- **Replaces:** mlx-serve's add_norm (`msv_add_norm`) and `turboexl3_ling_router_logits`: 2 launches with 1.
+- **Bits:** the residual and the normed rows mlx-serve's add_norm's words (each threadgroup makes the add_norm's sums
+  of squares lane for lane and its `precise::rsqrt`, and each column with its statements); `turboexl3_ling_router_logits`'s words over those
+  normed rows (each read of x makes the normed word where it is read: the same values launch 1 reads from memory).
+- **Pinned by:** `src/models/ling/anroute_test.zig` "turboexl3 gpu ling anroute: addNormLogits gives the served chain's words ..."
+  (GPU, words: the residual, the normed rows, the logits and the scores at rows 1 to 8, over the f32 table and the f16
+  weight, with no predictor and each score); `src/models/ling/anroute.zig` "turboexl3 ling anroute texts: ..." (CPU,
+  the texts).
+
+### `turboexl3_ling_router_an_logits_h`
+
+<!-- kernel-facts: turboexl3_ling_router_an_logits_h -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/ling/anroute.zig:99` (`fn kernelsFor`) |
+| inputs | `H`, `XD`, `NW`, `eps`, `w` |
+| outputs | `logits`, `H_NEW`, `HN` |
+| source | `text_logits_h` = `ling:router/head_1` ++ `ling:router/an_open` ++ `ling:router/head_2` ++ `ling:router/logits_1a` ++ `ling:router/an_logits_x` ++ `ling:router/logits_1b` ++ `ling:router/logits_wh` ++ `ling:router/logits_2` ++ `ling:router/close` (4849 B, `2868bb6b3c7a`) |
+| header | `an_head` = `ling:router/an_head` (1290 B, `b86f4bbb6501`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** Ling-3.1-flash: `turboexl3_ling_router_an_logits`'s call over the loaded f16 weight (E10); the outside plugin's opt-in (turboexl3_ling's `MLX_SERVE_LING_ROUTER_ADDNORM=1`, with `MLX_SERVE_LING_ROUTER_FUSED=1`).
+- **Shapes and dtypes:** H and XD bf16 [R, HK] (the residual and the mixer's output; R 1 to 8, HK a multiple of 1024 up to
+  4096), NW bf16 [HK] (the post-attention norm), eps f32 0-dim, w f16 [512, HK] (the loaded weight, E10's). Out: logits f32 [R, 512]; H_NEW and HN bf16
+  [R, HK] (the residual and the normed rows).
+- **Grid and threadgroup:** `(32R · 128, 1, 1)` / `(128, 1, 1)`: `turboexl3_ling_router_logits_h`'s.
+- **Template args:** R, NE, HK.
+- **Replaces:** mlx-serve's add_norm and `turboexl3_ling_router_logits_h`: 2 launches with 1.
+- **Bits:** the residual and the normed rows mlx-serve's add_norm's words (each threadgroup makes the add_norm's sums
+  of squares lane for lane and its `precise::rsqrt`, and each column with its statements); `turboexl3_ling_router_logits_h`'s words over those
+  normed rows (each read of x makes the normed word where it is read: the same values launch 1 reads from memory).
+- **Pinned by:** `src/models/ling/anroute_test.zig` "turboexl3 gpu ling anroute: addNormLogits gives the served chain's words ..."
+  (GPU, words: the residual, the normed rows, the logits and the scores at rows 1 to 8, over the f32 table and the f16
+  weight, with no predictor and each score); `src/models/ling/anroute.zig` "turboexl3 ling anroute texts: ..." (CPU,
+  the texts).
+
+### `turboexl3_ling_router_an_pred`
+
+<!-- kernel-facts: turboexl3_ling_router_an_pred -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/ling/anroute.zig:95` (`fn kernelsFor`) |
+| inputs | `H`, `XD`, `NW`, `eps`, `w`, `pw`, `pb` |
+| outputs | `logits`, `scores`, `H_NEW`, `HN` |
+| source | `text_pred` = `ling:router/head_1` ++ `ling:router/an_open` ++ `ling:router/head_2` ++ `ling:router/logits_1a` ++ `ling:router/an_logits_x` ++ `ling:router/logits_1b` ++ `ling:router/logits_w` ++ `ling:router/logits_2` ++ `ling:router/pred_open` ++ `ling:router/pred_one_a` ++ `ling:router/an_pred_one_x` ++ `ling:router/pred_one_b` ++ `ling:router/pred_wide_a` ++ `ling:router/an_pred_wide_x` ++ `ling:router/pred_wide_b` ++ `ling:router/close` (8934 B, `1d43bddc7be5`) |
+| header | `header_pred` = `ling:router/score_softplus_sqrt` ++ `ling:router/an_head` (2789 B, `21f37f6d30ad`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** Ling-3.1-flash: `root.ling.addNormLogits` with a `Predictor` at its default score (`.softplus_sqrt`) over the f32 table: every MoE layer but the last; the outside plugin's opt-in (turboexl3_ling's `MLX_SERVE_LING_ROUTER_ADDNORM=1`, with `MLX_SERVE_LING_ROUTER_FUSED=1`).
+- **Shapes and dtypes:** H, XD, NW, eps and w as `turboexl3_ling_router_an_logits`'s; pw bf16 [512, HK] (the next MoE layer's router), pb f32
+  [512] (its expert bias). Out: logits and scores f32 [R, 512]; H_NEW and HN bf16 [R, HK].
+- **Grid and threadgroup:** `((32R + P) · 128, 1, 1)` / `(128, 1, 1)`: `turboexl3_ling_router_pred`'s.
+- **Template args:** R, NE, HK.
+- **Replaces:** mlx-serve's add_norm and `turboexl3_ling_router_pred`: 2 launches with 1.
+- **Bits:** the residual and the normed rows mlx-serve's add_norm's words (each threadgroup makes the add_norm's sums
+  of squares lane for lane and its `precise::rsqrt`, and each column with its statements); `turboexl3_ling_router_pred`'s words over those
+  normed rows (each read of x makes the normed word where it is read: the same values launch 1 reads from memory).
+- **Pinned by:** `src/models/ling/anroute_test.zig` "turboexl3 gpu ling anroute: addNormLogits gives the served chain's words ..."
+  (GPU, words: the residual, the normed rows, the logits and the scores at rows 1 to 8, over the f32 table and the f16
+  weight, with no predictor and each score); `src/models/ling/anroute.zig` "turboexl3 ling anroute texts: ..." (CPU,
+  the texts).
+
+### `turboexl3_ling_router_an_pred_h`
+
+<!-- kernel-facts: turboexl3_ling_router_an_pred_h -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/ling/anroute.zig:101` (`fn kernelsFor`) |
+| inputs | `H`, `XD`, `NW`, `eps`, `w`, `pw`, `pb` |
+| outputs | `logits`, `scores`, `H_NEW`, `HN` |
+| source | `text_pred_h` = `ling:router/head_1` ++ `ling:router/an_open` ++ `ling:router/head_2` ++ `ling:router/logits_1a` ++ `ling:router/an_logits_x` ++ `ling:router/logits_1b` ++ `ling:router/logits_wh` ++ `ling:router/logits_2` ++ `ling:router/pred_open` ++ `ling:router/pred_one_a` ++ `ling:router/an_pred_one_x` ++ `ling:router/pred_one_b` ++ `ling:router/pred_wide_a` ++ `ling:router/an_pred_wide_x` ++ `ling:router/pred_wide_b` ++ `ling:router/close` (9112 B, `3273cd4021c4`) |
+| header | `header_pred` = `ling:router/score_softplus_sqrt` ++ `ling:router/an_head` (2789 B, `21f37f6d30ad`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** Ling-3.1-flash: `turboexl3_ling_router_an_pred`'s call over the loaded f16 weight (E10); the outside plugin's opt-in (turboexl3_ling's `MLX_SERVE_LING_ROUTER_ADDNORM=1`, with `MLX_SERVE_LING_ROUTER_FUSED=1`).
+- **Shapes and dtypes:** H, XD, NW, eps and w as `turboexl3_ling_router_an_logits_h`'s; pw bf16 [512, HK] (the next MoE layer's router), pb f32
+  [512] (its expert bias). Out: logits and scores f32 [R, 512]; H_NEW and HN bf16 [R, HK].
+- **Grid and threadgroup:** `((32R + P) · 128, 1, 1)` / `(128, 1, 1)`: `turboexl3_ling_router_pred_h`'s.
+- **Template args:** R, NE, HK.
+- **Replaces:** mlx-serve's add_norm and `turboexl3_ling_router_pred_h`: 2 launches with 1.
+- **Bits:** the residual and the normed rows mlx-serve's add_norm's words (each threadgroup makes the add_norm's sums
+  of squares lane for lane and its `precise::rsqrt`, and each column with its statements); `turboexl3_ling_router_pred_h`'s words over those
+  normed rows (each read of x makes the normed word where it is read: the same values launch 1 reads from memory).
+- **Pinned by:** `src/models/ling/anroute_test.zig` "turboexl3 gpu ling anroute: addNormLogits gives the served chain's words ..."
+  (GPU, words: the residual, the normed rows, the logits and the scores at rows 1 to 8, over the f32 table and the f16
+  weight, with no predictor and each score); `src/models/ling/anroute.zig` "turboexl3 ling anroute texts: ..." (CPU,
+  the texts).
+
+### `turboexl3_ling_router_an_pred_sig`
+
+<!-- kernel-facts: turboexl3_ling_router_an_pred_sig -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/ling/anroute.zig:97` (`fn kernelsFor`) |
+| inputs | `H`, `XD`, `NW`, `eps`, `w`, `pw`, `pb` |
+| outputs | `logits`, `scores`, `H_NEW`, `HN` |
+| source | `text_pred` = `ling:router/head_1` ++ `ling:router/an_open` ++ `ling:router/head_2` ++ `ling:router/logits_1a` ++ `ling:router/an_logits_x` ++ `ling:router/logits_1b` ++ `ling:router/logits_w` ++ `ling:router/logits_2` ++ `ling:router/pred_open` ++ `ling:router/pred_one_a` ++ `ling:router/an_pred_one_x` ++ `ling:router/pred_one_b` ++ `ling:router/pred_wide_a` ++ `ling:router/an_pred_wide_x` ++ `ling:router/pred_wide_b` ++ `ling:router/close` (8934 B, `1d43bddc7be5`) |
+| header | `header_pred_sig` = `ling:router/score_sigmoid` ++ `ling:router/an_head` (1812 B, `6a8a19de9590`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** Ling-3.1-flash: `root.ling.addNormLogits` with a `Predictor` at `.sigmoid` (Ling's own score, turboexl3_ling's `MLX_SERVE_LING_PREDICTOR=1`) over the f32 table; the outside plugin's opt-in (turboexl3_ling's `MLX_SERVE_LING_ROUTER_ADDNORM=1`, with `MLX_SERVE_LING_ROUTER_FUSED=1`).
+- **Shapes and dtypes:** H, XD, NW, eps and w as `turboexl3_ling_router_an_logits`'s; pw bf16 [512, HK] (the next MoE layer's router), pb f32
+  [512] (its expert bias). Out: logits and scores f32 [R, 512]; H_NEW and HN bf16 [R, HK].
+- **Grid and threadgroup:** `((32R + P) · 128, 1, 1)` / `(128, 1, 1)`: `turboexl3_ling_router_pred_sig`'s.
+- **Template args:** R, NE, HK.
+- **Replaces:** mlx-serve's add_norm and `turboexl3_ling_router_pred_sig`: 2 launches with 1.
+- **Bits:** the residual and the normed rows mlx-serve's add_norm's words (each threadgroup makes the add_norm's sums
+  of squares lane for lane and its `precise::rsqrt`, and each column with its statements); `turboexl3_ling_router_pred_sig`'s words over those
+  normed rows (each read of x makes the normed word where it is read: the same values launch 1 reads from memory).
+- **Pinned by:** `src/models/ling/anroute_test.zig` "turboexl3 gpu ling anroute: addNormLogits gives the served chain's words ..."
+  (GPU, words: the residual, the normed rows, the logits and the scores at rows 1 to 8, over the f32 table and the f16
+  weight, with no predictor and each score); `src/models/ling/anroute.zig` "turboexl3 ling anroute texts: ..." (CPU,
+  the texts).
+
+### `turboexl3_ling_router_an_pred_sig_h`
+
+<!-- kernel-facts: turboexl3_ling_router_an_pred_sig_h -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/ling/anroute.zig:103` (`fn kernelsFor`) |
+| inputs | `H`, `XD`, `NW`, `eps`, `w`, `pw`, `pb` |
+| outputs | `logits`, `scores`, `H_NEW`, `HN` |
+| source | `text_pred_h` = `ling:router/head_1` ++ `ling:router/an_open` ++ `ling:router/head_2` ++ `ling:router/logits_1a` ++ `ling:router/an_logits_x` ++ `ling:router/logits_1b` ++ `ling:router/logits_wh` ++ `ling:router/logits_2` ++ `ling:router/pred_open` ++ `ling:router/pred_one_a` ++ `ling:router/an_pred_one_x` ++ `ling:router/pred_one_b` ++ `ling:router/pred_wide_a` ++ `ling:router/an_pred_wide_x` ++ `ling:router/pred_wide_b` ++ `ling:router/close` (9112 B, `3273cd4021c4`) |
+| header | `header_pred_sig` = `ling:router/score_sigmoid` ++ `ling:router/an_head` (1812 B, `6a8a19de9590`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** Ling-3.1-flash: `turboexl3_ling_router_an_pred_sig`'s call over the loaded f16 weight (E10); the outside plugin's opt-in (turboexl3_ling's `MLX_SERVE_LING_ROUTER_ADDNORM=1`, with `MLX_SERVE_LING_ROUTER_FUSED=1`).
+- **Shapes and dtypes:** H, XD, NW, eps and w as `turboexl3_ling_router_an_logits_h`'s; pw bf16 [512, HK] (the next MoE layer's router), pb f32
+  [512] (its expert bias). Out: logits and scores f32 [R, 512]; H_NEW and HN bf16 [R, HK].
+- **Grid and threadgroup:** `((32R + P) · 128, 1, 1)` / `(128, 1, 1)`: `turboexl3_ling_router_pred_sig_h`'s.
+- **Template args:** R, NE, HK.
+- **Replaces:** mlx-serve's add_norm and `turboexl3_ling_router_pred_sig_h`: 2 launches with 1.
+- **Bits:** the residual and the normed rows mlx-serve's add_norm's words (each threadgroup makes the add_norm's sums
+  of squares lane for lane and its `precise::rsqrt`, and each column with its statements); `turboexl3_ling_router_pred_sig_h`'s words over those
+  normed rows (each read of x makes the normed word where it is read: the same values launch 1 reads from memory).
+- **Pinned by:** `src/models/ling/anroute_test.zig` "turboexl3 gpu ling anroute: addNormLogits gives the served chain's words ..."
+  (GPU, words: the residual, the normed rows, the logits and the scores at rows 1 to 8, over the f32 table and the f16
+  weight, with no predictor and each score); `src/models/ling/anroute.zig` "turboexl3 ling anroute texts: ..." (CPU,
+  the texts).
