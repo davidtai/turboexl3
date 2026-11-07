@@ -1237,6 +1237,23 @@ CHANGED[('pgemm.zig', 'fn warm')] = 'compiles the host\'s table\'s tiles too'
 CHANGED[('config.zig', 'const Config')] += ('; pf_bk128 and pf_half_rows: the routed prefill\'s bk128 and half_rows '
                                             '(prefill.Options, the same bytes) from the configuration')
 CHANGED[('root.zig', 'fn pfOptions')] = 'takes bk128 and half_rows from Config.pf_bk128 and pf_half_rows'
+# the routed prefill's 128-row tile launches in 128-deep K stages (prefill.Options.t128_bk128, Config.pf_t128_bk128: the
+# plugin's TURBOEXL3_GLM53F_PF_OPTS tk and bk128.tk): the same kernels, BKS 128 on those launches (pf_stage_test.zig)
+CHANGED[('config.zig', 'const Config')] += ('; pf_t128_bk128: both routed prefill GEMMs\' 128-row tile launches in '
+                                            '128-deep K stages (prefill.Options.t128_bk128, the same bytes)')
+CHANGED[('prefill.zig', 'const Options')] = ('t128_bk128 (taken beside t128 within 32 KB) and t128Stage, the 128-row tile '
+                                             'launch\'s K stage depth')
+CHANGED[('prefill.zig', 'const Prefill')] += ('; t128Gemm runs the 128-row tile launch at Options.t128Stage of the mixed '
+                                              'launch\'s depth')
+CHANGED[('root.zig', 'fn pfOptions')] += '; t128_bk128 from Config.pf_t128_bk128'
+CHANGED[('root.zig', 'fn prefillFor')] = ('t128_bk128 off where the 128-row tiles do not run or their 128-deep stages '
+                                          'exceed 32 KB; the engage line prints it')
+CHANGED[('fused_test.zig', 'const PfOpts')] = 't128_bk128 beside bk128 and half_rows (default off)'
+CHANGED[('fused_test.zig', 'const pf_opts')] = 'tk and bk128.tk appended (the plugin\'s TURBOEXL3_GLM53F_PF_OPTS values)'
+CHANGED[('fused_test.zig', 'const pf_sets')] = 'tk and bk128.tk appended: the prefill options\' byte and timing tests run them'
+CHANGED[('fused_test.zig', 'fn pfOptsConfigure')] = 'sets Config.pf_t128_bk128 too'
+ADDED_FILES['pf_stage_test.zig'] = ('where the routed prefill takes its 128-row tile launches\' 128-deep stages and the depth '
+                                    'each launch then runs (CPU); their bytes are fused_test.zig\'s prefill options test')
 
 
 def metal_strings(fn, toks, corpus):

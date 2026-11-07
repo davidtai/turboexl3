@@ -423,6 +423,11 @@ pub const Options = struct {
     /// launch of their own beside the mixed launch over the rest (`Prefill.moeT128`, the notes above `t128_cut`): `moe`'s
     /// bytes. Needs bm 64, the mixed table at split 1, froute's route and the strided mid and finish (aux 0)
     t128: bool = false,
+    /// both GEMMs' 128-row tile launches (`t128`) in 128-deep K stages (`bk128`'s two 64-deep sub-stages per buffer between
+    /// barriers, 32 KB double-buffered in fragment order), each mixed launch at its own depth (gate|up 64, down
+    /// `downStage`): half the barriers where the bm-128 body runs, the mixed launch's 4-simdgroup threadgroups left at their
+    /// stage. Every output takes the same 16-deep MMAs in the same order: `moe`'s bytes. Needs `t128`
+    t128_bk128: bool = false,
 
     pub const Small = enum { off, all, mixed };
 
@@ -445,6 +450,8 @@ pub const Options = struct {
         // the bm-128 shared-decode body beside bm 64's
         if (o.t128 and (o.small != .mixed or o.split != 1 or !o.froute or o.aux != 0 or o.bm != 64)) return false;
         if (o.stageBytes(o.downStage()) > 32768) return false;
+        // the 128-row tile launches' 128-deep stages: where those launches run, within 32 KB
+        if (o.t128_bk128 and (!o.t128 or o.stageBytes(128) > 32768)) return false;
         return (o.bm == 64 or o.bm == 128 or o.bm == 256) and (o.sgt == 1 or o.sgt == 2 or o.sgt == 4 or o.sgt == 8);
     }
 
@@ -456,6 +463,11 @@ pub const Options = struct {
     /// the down GEMM's K stage depth (gate|up's is BK)
     pub fn downStage(o: Options) u32 {
         return if (o.bk128) 128 else BK;
+    }
+
+    /// the K stage depth of a GEMM's 128-row tile launch whose mixed launch runs `bks` deep
+    pub fn t128Stage(o: Options, bks: u32) u32 {
+        return if (o.t128_bk128) 128 else bks;
     }
 
     /// threadgroup memory of the shared-decode GEMM's weight stage at K stage depth `bk` (bk / BK sub-stages per buffer),
@@ -976,7 +988,8 @@ pub const Prefill = struct {
     /// A GEMM's outputs ([S, nd] f16 per op, `ZT128`): the mixed launch's over the remainder table, then the bm-128 launch's
     /// over the 128-row tiles (so the register-path tail at the mixed launch's end overlaps the 128-row tiles' start), each
     /// an output of its own launch: no data between the two, so no barrier between them, and MLX orders every reader after
-    /// both. `ins_m` / `ins_t` are the launches' inputs.
+    /// both. `ins_m` / `ins_t` are the launches' inputs. The mixed launch's K stages are `bks` deep, the 128-row tiles'
+    /// `Options.t128Stage(bks)`.
     fn t128Gemm(self: *Prefill, s: mlx.mlx_stream, rt: RouteT128, k_m: mlx.mlx_fast_metal_kernel, k_t: mlx.mlx_fast_metal_kernel, nops: u32, kd: u32, nd: u32, bks: u32, ncb: u32, ins_m: []const mlx.mlx_array, ins_t: []const mlx.mlx_array, S: u32) !ZT128 {
         const shape = [_]c_int{ @intCast(S), @intCast(nd) };
         const shapes = [_][]const c_int{ &shape, &shape };
@@ -991,7 +1004,7 @@ pub const Prefill = struct {
             _ = mlx.mlx_array_free(a);
         };
         var tmpl_t: [23]ks.TemplateArg = undefined;
-        var lt = self.t128Cfg(&tmpl_t, rt.tq, kd, nd, nops, bks, ncb);
+        var lt = self.t128Cfg(&tmpl_t, rt.tq, kd, nd, nops, self.opts.t128Stage(bks), ncb);
         lt.out_shapes = shapes[0..nops];
         lt.out_dtypes = dtypes[0..nops];
         try run(k_t, lt, ins_t, x.t[0..nops], s);
