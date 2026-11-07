@@ -546,6 +546,7 @@ pub const Banked = struct {
         if (set.gu8) {
             // gu8b: prep2bg's arithmetic and gu3bg's GEMV in one launch, then fin7's
             const k8 = try self.gu8Kernel(set.texts == .g4m3);
+            sayGu8(set.texts);
             var o: [4]mlx.mlx_array = undefined; // the split-K gate|up planes, then the blocks' input sums
             try ks.applyConfig(k8, c.gu8, &.{ x, ids, b[0].gate_suh, b[1].gate_suh, b[2].gate_suh, b[0].up_suh, b[1].up_suh, b[2].up_suh, b[0].gate_t, b[1].gate_t, b[2].gate_t, b[0].up_t, b[1].up_t, b[2].up_t }, &o, s);
             defer for (o) |a| {
@@ -648,6 +649,16 @@ fn sayVariant(half: enum { gate_up, down }, variant: u8, texts: Banked.Texts) vo
     std.debug.print("[turboexl3] banked variant engaged: the grouped {s} GEMV on variant {s} ({s} texts)\n", .{ @tagName(half), group_variants[variant].name, @tagName(texts) });
 }
 
+/// Whether a banked call has run gu8b (`Config.banked_gu8`), its engagement line printed once.
+const gu8_said = Global(bool, "deepseek_v41_banked_gu8_said", false);
+
+/// A banked call's engagement line for gu8b, printed at the first gate and up call that runs it, where the call runs it.
+fn sayGu8(texts: Banked.Texts) void {
+    if (gu8_said.get().*) return;
+    gu8_said.get().* = true;
+    std.debug.print("[turboexl3] banked gu8b engaged: the grouped gate_up GEMV with its prepare inside the launch ({s} texts)\n", .{@tagName(texts)});
+}
+
 /// This file's module state (`Global`): what a host that shares its units' state registers.
-pub const shared_state = .{ cache_lock, cache, variant_said };
+pub const shared_state = .{ cache_lock, cache, variant_said, gu8_said };
 
