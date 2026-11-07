@@ -17,8 +17,9 @@
 //! TURBOEXL3_LING_N (rates in halfwords per tile; default 40,32) narrows the routed tests. Lines: TURBOEXL3_LING_BYTES,
 //! TURBOEXL3_LING_PARITY, TURBOEXL3_LING_BANKED, TURBOEXL3_LING_DENSE, TURBOEXL3_LING_ONE_ROW, TURBOEXL3_LING_PAIR.
 //! Timing (TURBOEXL3_LING_TIME=1 with TURBOEXL3_GPU=1; asserts nothing, guidance only): every trunk linear, `moeLing`
-//! and `moeLingBanked` at Ling's shapes and rows, and the decode forward's linears chained over the 72 layers. Lines:
-//! TURBOEXL3_LING_TIME, TURBOEXL3_LING_CHAIN.
+//! and `moeLingBanked` at Ling's shapes and rows, the decode forward's linears chained over the 72 layers, and the dense
+//! decode GEMV's launch shapes swept per trunk shape on that chain at rows 1 to 8 (asserting bytes only). Lines:
+//! TURBOEXL3_LING_TIME, TURBOEXL3_LING_CHAIN, TURBOEXL3_LING_GEMV (_BEST, _TABLE, _DONE).
 const std = @import("std");
 const sdk = @import("sdk");
 const mlx = sdk.mlx;
@@ -1126,4 +1127,229 @@ test "turboexl3 gpu ling timing: the decode forward's linears over 72 layers cha
             std.debug.print("TURBOEXL3_LING_CHAIN arm={s} rows={d} distinct_per_layer={d:.1} token_min_ms={d:.2} token_med_ms={d:.2} per_layer_us={d:.1} graph_build_med_ms={d:.2}{s}\n", .{ @tagName(arm), rows, @as(f64, @floatFromInt(distinct)) / 68.0, total[0] / 1000.0, total[total.len / 2] / 1000.0, total[0] / @as(f64, nl), build[build.len / 2] / 1000.0, if (arm == .layer) " (the head included)" else "" });
         }
     }
+}
+
+// ── TURBOEXL3_LING_TIME: the dense decode GEMV's launch shapes per Ling trunk shape (a sweep; asserts bytes only) ──
+
+/// One launch-shape choice for a trunk shape class at a row count; null fields keep the served value (deepseek_gemv_test's
+/// GemvConf without the grouped arm): tiles per threadgroup, DEC-ONE's prepare inside or in its own launch, DEC-ONE
+/// against the three-launch chain, DEC-ONE's row cap, the lean text.
+const LingGemvConf = struct {
+    bt: u8 = 0,
+    dec_on: ?bool = null,
+    dec_rows: ?u32 = null,
+    prep_in: ?bool = null,
+    lean: ?bool = null,
+
+    fn isDefault(c: LingGemvConf) bool {
+        return c.bt == 0 and c.dec_on == null and c.dec_rows == null and c.prep_in == null and c.lean == null;
+    }
+
+    fn name(c: LingGemvConf, buf: []u8) []const u8 {
+        if (c.isDefault()) return "served";
+        const tri = struct {
+            fn f(v: ?bool) []const u8 {
+                return if (v) |b| (if (b) "1" else "0") else "-";
+            }
+        }.f;
+        return std.fmt.bufPrint(buf, "bt{d}_dec{s}_decrows{d}_prepin{s}_lean{s}", .{ c.bt, tri(c.dec_on), c.dec_rows orelse 0, tri(c.prep_in), tri(c.lean) }) catch "?";
+    }
+};
+
+const LingDenseSaved = struct { bt: u8, dec_on: bool, dec_rows: u32, dec_prep_rows: u32, dec_prep_out: u32, lean: bool };
+
+fn lingApplyDense(d: *dense.Dense, rows: u32, c: LingGemvConf) LingDenseSaved {
+    const sv: LingDenseSaved = .{ .bt = d.bt_set[rows], .dec_on = d.dec_on, .dec_rows = d.dec_rows, .dec_prep_rows = d.dec_prep_rows, .dec_prep_out = d.dec_prep_out, .lean = d.lean };
+    if (c.bt != 0) d.bt_set[rows] = c.bt;
+    if (c.dec_on) |v| d.dec_on = v;
+    if (c.dec_rows) |v| d.dec_rows = v;
+    if (c.lean) |v| d.lean = v;
+    if (c.prep_in) |v| {
+        // inside: every row count and width that fits; outside: none
+        d.dec_prep_rows = if (v) @intCast(decode.Kernels.max_rows) else 0;
+        d.dec_prep_out = if (v) std.math.maxInt(u32) else 0;
+    }
+    d.resetCfgs();
+    return sv;
+}
+
+fn lingRestoreDense(d: *dense.Dense, rows: u32, sv: LingDenseSaved) void {
+    d.bt_set[rows] = sv.bt;
+    d.dec_on = sv.dec_on;
+    d.dec_rows = sv.dec_rows;
+    d.dec_prep_rows = sv.dec_prep_rows;
+    d.dec_prep_out = sv.dec_prep_out;
+    d.lean = sv.lean;
+    d.resetCfgs();
+}
+
+/// The launch-shape choices tried for a class's Dense at `rows` (the served one first): each other tile count whose
+/// accumulators fit 32 floats a lane; where DEC-ONE takes the call, its prepare in the other place (where it fits) and the
+/// three-launch chain; past DEC-ONE's rows, the chain off the lean text and DEC-ONE at up to 8 rows
+fn lingGemvConfs(d: *dense.Dense, rows: u32, buf: []LingGemvConf) ![]const LingGemvConf {
+    var n: usize = 0;
+    buf[n] = .{};
+    n += 1;
+    const dec = d.decTakes(rows);
+    const rb = if (dec) dense.Dense.rbFor(rows) else d.chainRb(rows);
+    const served_bt = if (dec) d.btDec(rows, rb) else d.btAt(rows, rb);
+    for ([_]u8{ 1, 2, 4, 8 }) |bt| {
+        if (bt == served_bt or 2 * @as(u32, bt) * rb > 32) continue;
+        buf[n] = .{ .bt = bt };
+        n += 1;
+    }
+    if (dec) {
+        const inside = try d.decPrepInside(rows);
+        const fits = dense.Dense.decPrepFits(d.shape, d.ks_split, rb, served_bt);
+        if (inside or fits) {
+            buf[n] = .{ .prep_in = !inside };
+            n += 1;
+            // the prepare moved together with each other tile count (T 3a's two-row shape at one row: own launch, BT 2)
+            for ([_]u8{ 1, 2, 4, 8 }) |bt| {
+                if (bt == served_bt or 2 * @as(u32, bt) * rb > 32) continue;
+                if (inside == false and !dense.Dense.decPrepFits(d.shape, d.ks_split, rb, bt)) continue;
+                buf[n] = .{ .bt = bt, .prep_in = !inside };
+                n += 1;
+            }
+        }
+        buf[n] = .{ .dec_on = false };
+        n += 1;
+    } else {
+        if (d.lean) {
+            buf[n] = .{ .lean = false };
+            n += 1;
+        }
+        buf[n] = .{ .dec_rows = 8 };
+        n += 1;
+    }
+    return buf[0..n];
+}
+
+/// The 72-layer chain's trunk (and the head) at `rows`: min ms of 5 evaluations after 2, and the output's bytes (f32) in
+/// `out` when given
+fn lingTrunkMin(g: *G, s: mlx.mlx_stream, layers: []const ChainLayer, head: root.Proj, x: mlx.mlx_array, rows: u32, out: ?[]f32) !f64 {
+    var no_ids: [72]?mlx.mlx_array = @splat(null);
+    var total: [5]f64 = undefined;
+    for (0..total.len + 2) |round| {
+        const fm = g.mark();
+        defer g.resetTo(fm);
+        const t0 = ds_test.nowNs();
+        const y = try chainForward(g, s, layers, no_ids[0..layers.len], .{ .ctx = null }, x, rows, .trunk, head);
+        try g.evalAll(&.{y});
+        const dt = ds_test.nowNs() - t0;
+        if (round >= 2) total[round - 2] = @as(f64, @floatFromInt(dt)) / 1e6;
+        if (round == 0) if (out) |o| {
+            _ = try g.hostF32(try g.astype(y, .float32), o);
+        };
+    }
+    std.mem.sort(f64, &total, {}, std.sort.asc(f64));
+    return total[0];
+}
+
+// TURBOEXL3_LING_TIME=1 with TURBOEXL3_GPU=1 (a diagnostic: guidance, never a verdict; it asserts bytes only): the dense
+// decode GEMV's launch shapes swept per Ling-3.1-flash trunk shape class on the 72-layer chain's trunk arm and the head
+// (`chainForward`, the served kernels around each class), rows 1..8. Per row count: the chain as served, then each
+// launch-shape choice (`lingGemvConfs`) on one class's linears alone, the chain's ms and its delta from the served chain's,
+// and the chain output's bytes against the served chain's (every choice is a launch shape: the bytes must not move). Then
+// the fastest choice per (row count, class) past 0.3% of the served chain, and all of a row count's choices together
+// against the served chain in interleaved rounds. Lines: TURBOEXL3_LING_GEMV, _BEST, _TABLE.
+test "turboexl3 gpu ling timing: the dense decode GEMV's launch shapes per trunk shape on the 72-layer chain, rows 1..8 (TURBOEXL3_LING_TIME=1)" {
+    _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    _ = std.c.getenv("TURBOEXL3_LING_TIME") orelse return error.SkipZigTest;
+    const s = mlx.mlx_default_gpu_stream_new();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    const a = std.heap.page_allocator;
+    var g = try G.init(a, s);
+    defer g.deinit();
+    defer _ = mlx.mlx_clear_cache();
+    var prng = std.Random.DefaultPrng.init(0x11A6C5);
+    const rnd = prng.random();
+    const nl = 72;
+    const HostProj = ds_test.HostProj;
+    var hp = [_]HostProj{
+        try HostProj.draw(a, rnd, null, 4096, 24576, 96), // 0 KDA qkv
+        try HostProj.draw(a, rnd, null, 4096, 8192, 96), // 1 KDA f and g
+        try HostProj.draw(a, rnd, null, 8192, 4096, 96), // 2 KDA o and the MLA output projection
+        try HostProj.draw(a, rnd, null, 4096, 1536, 96), // 3 MLA q_a
+        try HostProj.draw(a, rnd, null, 1536, 12288, 96), // 4 MLA q_b
+        try HostProj.draw(a, rnd, null, 4096, 640, 96), // 5 MLA kv_a
+        try HostProj.draw(a, rnd, null, 4096, 10240, 64), // 6 dense FFN gate and up
+        try HostProj.draw(a, rnd, null, 10240, 4096, 64), // 7 dense FFN down
+        try HostProj.draw(a, rnd, null, 4096, 1280, 96), // 8 shared gate and up
+        try HostProj.draw(a, rnd, null, 1280, 4096, 96), // 9 shared down
+        try HostProj.draw(a, rnd, null, 4096, 157184, 96), // 10 the head
+    };
+    defer for (&hp) |*h| h.deinit(a);
+    var layers: [nl]ChainLayer = undefined;
+    for (&layers, 0..) |*ly, li| {
+        ly.* = .{ .mixer = if (li % 8 == 7)
+            .{ .mla = .{ .q_a = try hp[3].upload(&g), .q_b = try hp[4].upload(&g), .kv_a = try hp[5].upload(&g), .o = try hp[2].upload(&g) } }
+        else
+            .{ .kda = .{ .qkv = try hp[0].upload(&g), .f = try hp[1].upload(&g), .g = try hp[1].upload(&g), .o = try hp[2].upload(&g) } } };
+        if (li < 4) {
+            ly.ffn = .{ try hp[6].upload(&g), try hp[6].upload(&g), try hp[7].upload(&g) };
+        } else {
+            ly.shared = .{ try hp[8].upload(&g), try hp[8].upload(&g), try hp[9].upload(&g) };
+        }
+    }
+    const head = try hp[10].upload(&g);
+    // each class's cached Dense (the object `root.linear` runs the class's linears on), bf16 x
+    var dense_of: [dense_cases.len]*dense.Dense = undefined;
+    for (dense_cases, &dense_of) |c, *d| d.* = try root.denseCached(.{ .in = c.in, .out = c.out, .rate = format.Rate.fromN(c.n).?, .dec = .mul1, .out_dtype = .bfloat16 });
+    var failed: usize = 0;
+    var name_buf: [96]u8 = undefined;
+    for (1..9) |ri| {
+        const rows: u32 = @intCast(ri);
+        const rm = g.mark();
+        defer g.resetTo(rm);
+        const x = try ds_test.randBf16(a, &g, rnd, &.{ ci(rows), 4096 });
+        const n_out = rows * 157184;
+        const want = try a.alloc(f32, n_out);
+        defer a.free(want);
+        const got = try a.alloc(f32, n_out);
+        defer a.free(got);
+        const served0 = try lingTrunkMin(&g, s, &layers, head, x, rows, want);
+        var best: [dense_cases.len]LingGemvConf = @splat(.{});
+        var best_ms: [dense_cases.len]f64 = undefined;
+        for (dense_cases, dense_of, 0..) |c, d, k| {
+            var cbuf: [16]LingGemvConf = undefined;
+            const confs = try lingGemvConfs(d, rows, &cbuf);
+            best_ms[k] = served0;
+            for (confs[1..]) |cf| {
+                const sv = lingApplyDense(d, rows, cf);
+                const ms = try lingTrunkMin(&g, s, &layers, head, x, rows, got);
+                lingRestoreDense(d, rows, sv);
+                const differing = bytesDifferF32(got, want);
+                if (differing != 0) failed += 1;
+                std.debug.print("TURBOEXL3_LING_GEMV rows={d} class={s} conf={s} chain_ms={d:.3} served_ms={d:.3} delta_ms={d:.3} differing={d}/{d} {s}\n", .{ rows, c.name, cf.name(&name_buf), ms, served0, ms - served0, differing, n_out, if (differing == 0) "BYTES_OK" else "BYTES_FAIL" });
+                if (ms < best_ms[k] and ms < served0 * (1.0 - 0.003)) {
+                    best_ms[k] = ms;
+                    best[k] = cf;
+                }
+            }
+            std.debug.print("TURBOEXL3_LING_GEMV_BEST rows={d} class={s} conf={s} chain_ms={d:.3} served_ms={d:.3} delta_ms={d:.3}\n", .{ rows, c.name, best[k].name(&name_buf), best_ms[k], served0, best_ms[k] - served0 });
+        }
+        // the row count's choices together against the served chain, interleaved
+        var sv_all: [dense_cases.len]LingDenseSaved = undefined;
+        var served_min: f64 = std.math.inf(f64);
+        var table_min: f64 = std.math.inf(f64);
+        var differing_all: usize = 0;
+        for (0..3) |_| {
+            served_min = @min(served_min, try lingTrunkMin(&g, s, &layers, head, x, rows, null));
+            for (dense_of, best, &sv_all) |d, cf, *sv| sv.* = lingApplyDense(d, rows, cf);
+            table_min = @min(table_min, try lingTrunkMin(&g, s, &layers, head, x, rows, got));
+            for (dense_of, sv_all) |d, sv| lingRestoreDense(d, rows, sv);
+            differing_all = @max(differing_all, bytesDifferF32(got, want));
+        }
+        if (differing_all != 0) failed += 1;
+        std.debug.print("TURBOEXL3_LING_GEMV_TABLE rows={d} served_ms={d:.3} table_ms={d:.3} delta_ms={d:.3} differing={d}/{d} {s}\n", .{ rows, served_min, table_min, table_min - served_min, differing_all, n_out, if (differing_all == 0) "BYTES_OK" else "BYTES_FAIL" });
+    }
+    std.debug.print("TURBOEXL3_LING_GEMV_DONE bytes_failures={d} {s}\n", .{ failed, if (failed == 0) "BYTES_OK" else "BYTES_FAIL" });
+    try testing.expectEqual(@as(usize, 0), failed);
+}
+
+fn bytesDifferF32(p: []const f32, q: []const f32) usize {
+    var n: usize = 0;
+    for (p, q) |u, w| n += @intFromBool(@as(u32, @bitCast(u)) != @as(u32, @bitCast(w)));
+    return n;
 }
