@@ -12,6 +12,10 @@ its own buffers, with the member chosen after its head and the GEMV's tile addre
   of the pair's prepared rows, and DEC-ONE's two texts (`turboexl3_dense_dec0` over those rows, `turboexl3_dense_dec1`
   with the prepare inside) with the member's prepared rows or suh, its trellis and svh, and Ripple's member tile address
   (`kernels/ricursive/jtile.metal`).
+
+A KDA layer's three projections of one input (`kdaproj.zig`) are dense's `prep_sc` with each member on the grid's z, then
+dense's DEC-ONE text over prepared rows (`turboexl3_dense_dec0`'s, verbatim after its head) under a head that gives each
+threadgroup its member's widths and K split; each member keeps its own buffers.
 How an entry reads: [the core catalog's introduction](../../core/kernels.md#how-an-entry-reads).
 
 ## `src/models/ling/shared.zig`
@@ -204,6 +208,73 @@ A KDA layer's z | a, the shared expert's gate | up and the dense FFN's gate | up
   each member's linear bytes, the prepare inside or in its own launch, at decode rows 1 to 16 (TURBOEXL3_GPU=1)" (GPU,
   words at rows 1 to 6, 8 and 16, bf16 and f32, one row on both launch shapes); `src/models/ling/pair.zig` "turboexl3 ling pair texts: dense's prep_sc and DEC-ONE texts verbatim around the member
   choice, ..." (CPU, the texts).
+
+## `src/models/ling/kdaproj.zig`
+
+A KDA layer's q|k|v, f and g (three projections of one input) in one GEMV launch at decode rows, each member at its own
+K split.
+
+### `turboexl3_ling_kdaproj_dec0`
+
+<!-- kernel-facts: turboexl3_ling_kdaproj_dec0 -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/ling/kdaproj.zig:57` (`fn kernelOf`) |
+| inputs | `jxp`, `jxs`, `w0`, `w1`, `w2`, `svh0`, `svh1`, `svh2`, `jcnt` |
+| outputs | `y0`, `y1`, `y2`, `z0`, `z1`, `z2` |
+| source | `text_kdec0` = `ling:kdaproj/head` ++ `ling:kdaproj/member` ++ `dense/dec_gemv0` ++ `dense/dec_gemv_arrive_1` ++ `dense/dec_tile` ++ `dense/dec_gemv_arrive_2` ++ `dense/dec_xsum0` ++ `dense/dec_finish_v` ++ `dense/dec_finish_store` (7971 B, `a9c43d427f96`) |
+| header | `decode.header5` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` (26594 B, `41efbbbbd943`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** Ling-3.1-flash: `root.ling.kdaProj` at decode rows 1 to 16, after `turboexl3_ling_kdaproj_prep`; and
+  `root.ling.kdaProjPrepared` over a host's own prepare of the same layout (a norm launch that writes its readers'
+  prepared rows).
+- **Shapes and dtypes:** jxp f16 [3 · rows, IN] and jxs f32 [3 · rows, IN/128] (member m's prepared rows, as its own
+  `turboexl3_dense_prep_sc` writes them, and their 128-block sums at rows m · rows..); w0, w1, w2 each member's own
+  trellis U16 or I16 [IN/16, out_m/16, NHW] (one dtype); svh0, svh1, svh2 f16 [out_m]; jcnt u32
+  [max((OUT0 + OUT1 + OUT2)/128 · chunks, 8)] zeroed (`kdaproj.ncntFor`; member m's counters after the members before
+  it). Out: y0, y1, y2 T [rows, out_m] (each member's own); z0, z1, z2 f32 [KS_m · rows, out_m] (scratch, as DEC-ONE's).
+- **Grid and threadgroup:** `((OUT0/128 · KS0 + (OUT1 + OUT2)/128 · KS1) · (8/BT) · 128, chunks, 1)` / `(128, 1, 1)`:
+  member 0's (K slice, block) threadgroups, then member 1's, then member 2's.
+- **Template args:** NHW, CODEBOOK, WBITS (the members' one rate and decode), IN, OUT0, OUT1, OUT2, KS0 (member 0's own
+  `Dense.ksFor(in, out)`), KS1 (members 1 and 2's: they must share it), BT (member 0's `Dense.btDec`), RB
+  (`Dense.rbFor`), ROWS, DEFER (the MUL1 map), OUT_T.
+- **Replaces:** each member's DEC-ONE GEMV (`turboexl3_dense_dec0` or `turboexl3_dense_dec1`, with its own
+  `turboexl3_dense_prep_sc` or `turboexl3_dense_dec_zero`): 6 launches in 2 dependent levels with 2.
+- **Bits:** byte-identical to each member's `linear` at every row count it serves (DEC-ONE's text over prepared rows
+  after its head: the member's own prepared rows, K split, slice order and finish per output block, its own trellis,
+  svh and output; the tiles per threadgroup and where the prepare runs move no byte).
+- **Pinned by:** `src/models/ling/ling_test.zig` "turboexl3 gpu ling kda proj: q|k|v, f and g in one launch give each
+  member's linear bytes, ..." (GPU, words at rows 1 to 8 and 16, bf16 and f32, after its own prepare and over each
+  member's own prep_sc rows joined, at one row on three launch shapes); `src/models/ling/kdaproj.zig` "turboexl3 ling
+  kdaproj texts: ..." (CPU, the texts), "... plan: ..." and "... grid: ..." (CPU, the K splits and the grid).
+
+### `turboexl3_ling_kdaproj_prep`
+
+<!-- kernel-facts: turboexl3_ling_kdaproj_prep -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/ling/kdaproj.zig:56` (`fn kernelOf`) |
+| inputs | `x`, `suh0`, `suh1`, `suh2` |
+| outputs | `jxp`, `jxs`, `cnt` |
+| source | `text_kprep_sc` = `ling:kdaproj/prep` ++ `dense/prep_s` ++ `dense/prep_sc` (2057 B, `74bf60b729c3`) |
+| header | `decode.header` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` (18000 B, `771237d24284`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** `root.ling.kdaProj`, before `turboexl3_ling_kdaproj_dec0`.
+- **Shapes and dtypes:** x T [rows, IN] (bf16, f16 or f32); suh0, suh1, suh2 f16 [IN] (each member's own). Out: jxp f16
+  [3 · rows, IN], jxs f32 [3 · rows, IN/128], cnt u32 [NCNT] zeroed.
+- **Grid and threadgroup:** `(IN/128 · 32, rows, 3)` / `(32, 1, 1)`: dense's `prep_sc` grid, the members on z.
+- **Template args:** DIM (IN), LANE_ORDER 1, NCNT, NTH (IN/128 · 32 · rows, the threads that zero the counters), ROWS.
+- **Replaces:** each member's `turboexl3_dense_prep_sc` (or `turboexl3_dense_dec_zero` where its call takes the prepare
+  inside).
+- **Bits:** each member's prepared rows and block sums are the ones its own `turboexl3_dense_prep_sc` writes (its text
+  after the member's suh and rows are chosen).
+- **Pinned by:** as `turboexl3_ling_kdaproj_dec0`'s.
 
 ## `src/models/ling/combine.zig`
 
