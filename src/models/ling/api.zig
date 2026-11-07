@@ -25,6 +25,13 @@ pub const sigmoidTable = shared.sigmoidTable;
 pub const pair = @import("pair.zig");
 pub const linearPair = pair.linearPair;
 
+/// The residual add and RMSNorm folded into the next linears' prepare at a decode layer's mixer input (`addnorm.zig`):
+/// the residual, the normed rows and each EXL3 member's output from one launch of the add, the norm and the members'
+/// prepares, then each member's GEMV (`addNormLinears`), each the bytes of MLX's add, MLX's rms_norm and its `linear`.
+pub const addnorm = @import("addnorm.zig");
+pub const addNormLinears = addnorm.addNormLinears;
+pub const addNormPrepare = addnorm.addNormPrepare;
+
 /// `root.moe` with Ling-3.1's SwiGLU: `limit` 0 none (`moe`'s bytes), 1..128 the clamp after the SiLU (each row-slot's
 /// gate SiLU clamped from above at `limit` and its up to [-limit, limit], in f32 on the projections' f16-rounded outputs);
 /// else error.InvalidExl3Clamp. Decode rows run form 9's launches (fin7's Ling variant where it clamps), prefill rows the
@@ -83,4 +90,4 @@ fn act(limit: c_int) !ds.BankedAct {
 }
 
 /// This file's module state (`Global`): what a host that shares its units' state registers.
-pub const shared_state = .{ shared.shared_state, pair.shared_state };
+pub const shared_state = .{ shared.shared_state, pair.shared_state, addnorm.shared_state };

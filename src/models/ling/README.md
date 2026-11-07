@@ -14,8 +14,11 @@ The code only Ling-3.1-flash uses, on the core's routed chain, DeepSeek-V4.1's b
 | `combine.zig` | `combineRouted` and `combineParts` (a wide routed call's combine in one launch, over a joined array or the call's unjoined outputs), the texts' CPU test |
 | `combine_test.zig` | both against MLX's composed combine word for word, the refusals (GPU) |
 | `kernels/combine/` | the combine's pieces: the contract pragma, the source choice, the fold's head, each text's row read, the fold and store |
+| `addnorm.zig` | `addNormLinears` (a decode layer's mixer input: the residual add, its RMSNorm and up to three EXL3 members' prepares in one launch, then each member's GEMV over its prepared rows) and `addNormPrepare` (the launch alone), the texts' CPU test |
+| `addnorm_test.zig` | `addNormLinears` against MLX's add, MLX's fast rms_norm and each member's `linear` word for word at decode rows 1 to 8, 12 and 16, in bf16 and f16, each member's own `linear` with its prepare inside or in its own launch; the refusals (GPU) |
+| `kernels/addnorm/` | the launch's pieces: the member's prepare (a function in its header), the add and norm, each member's call and the counters |
 
-Ling's own Metal is the pairs', the shared expert's and the routed combine's pieces (`kernels/pair/`, `kernels/shared/`,
-`kernels/combine/`; `kernels/test/pins/` what the CPU tests pin); the routed experts' clamp pieces are the core's
+Ling's own Metal is the pairs', the shared expert's, the routed combine's and the mixer input's add and norm pieces
+(`kernels/pair/`, `kernels/shared/`, `kernels/combine/`, `kernels/addnorm/`; `kernels/test/pins/` what the CPU tests pin); the routed experts' clamp pieces are the core's
 (`kernels/decode/fin7_swiglu_clamp_out.metal`, `kernels/prefill/mid_swiglu_clamp_out.metal`). docs/models/ling/
 describes the model's needs and its kernels.
