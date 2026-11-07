@@ -106,19 +106,42 @@ pub const dec_head = @embedFile("kernels/dense/dec_head.metal");
 /// arithmetic, lane order, spare rows from the chunk's last row as text_dgemv reads them), one simdgroup per (128-block, row)
 pub const dec_prep1 = @embedFile("kernels/dense/dec_prep1.metal");
 
-/// the GEMV's input loads: prep_sc's rows in device memory (text_dgemv's) ...
-pub const dec_gemv0 = @embedFile("kernels/dense/dec_gemv0.metal");
+/// the GEMV's setup and input loads: prep_sc's rows in device memory (text_dgemv's) ...
+pub const dec_gemv0 = dec_gemv0_head ++ dec_gemv_loop ++ dec_gemv0_x;
 
 /// ... or the slice prepared in threadgroup memory
-pub const dec_gemv1 = @embedFile("kernels/dense/dec_gemv1.metal");
+pub const dec_gemv1 = dec_gemv1_head ++ dec_gemv_loop ++ dec_gemv1_x;
+
+/// dec_gemv0 / dec_gemv1's pieces: the setup (lane plan, accumulators, the slice's first tile, the bases), the input
+/// tile loop's head (shared), and the loads of the tile's inputs (a lane's quad of each row, as floats)
+pub const dec_gemv0_head = @embedFile("kernels/dense/dec_gemv0_head.metal");
+pub const dec_gemv1_head = @embedFile("kernels/dense/dec_gemv1_head.metal");
+pub const dec_gemv_loop = @embedFile("kernels/dense/dec_gemv_loop.metal");
+pub const dec_gemv0_x = @embedFile("kernels/dense/dec_gemv0_x.metal");
+pub const dec_gemv1_x = @embedFile("kernels/dense/dec_gemv1_x.metal");
 
 /// text_dgemv's tile loop, quad fold and simdgroup sum (the z plane values), then the arrival: the loop's head, the
 /// tile's address (`dec_tile`: tile (tk, the block's column t) of the one trellis, which a joined launch reads at its
 /// member's base instead, ricursive.zig), and the rest
 pub const dec_gemv_arrive_1 = @embedFile("kernels/dense/dec_gemv_arrive_1.metal");
 pub const dec_tile = @embedFile("kernels/dense/dec_tile.metal");
-pub const dec_gemv_arrive_2 = @embedFile("kernels/dense/dec_gemv_arrive_2.metal");
+pub const dec_gemv_arrive_2 = dec_gemv_arrive_2a ++ dec_gemv_arrive_2b ++ dec_gemv_arrive_2c;
 pub const dec_gemv_arrive = dec_gemv_arrive_1 ++ dec_tile ++ dec_gemv_arrive_2;
+/// dec_gemv_arrive_2's pieces: the tile's words loaded, then its codewords, decodes and FMAs to the output-tile loop's
+/// end, then the input tile loop's end, the fold, the plane store, the arrival and the finish's head
+pub const dec_gemv_arrive_2a = @embedFile("kernels/dense/dec_gemv_arrive_2a.metal");
+pub const dec_gemv_arrive_2b = @embedFile("kernels/dense/dec_gemv_arrive_2b.metal");
+pub const dec_gemv_arrive_2c = @embedFile("kernels/dense/dec_gemv_arrive_2c.metal");
+
+/// ku's pieces (`dec_variants`): the input tile loop in pairs with both tiles' words of the BT output tiles loaded at the
+/// pair's head (`dec_ku_loop`, which opens the pair loop and the loop over its two tiles and names the tile `tk`), the
+/// output tile's words taken from them (`dec_ku_ww`, in place of dec_tile and dec_gemv_arrive_2a), and the end of the
+/// loop over the pair's tiles (`dec_ku_close`); each tile's FMAs as dec_gemv_arrive_2b runs them, in tile order
+pub const dec_ku_loop = @embedFile("kernels/dense/dec_ku_loop.metal");
+pub const dec_ku_ww = @embedFile("kernels/dense/dec_ku_ww.metal");
+pub const dec_ku_close = @embedFile("kernels/dense/dec_ku_close.metal");
+/// ku's tile loop through the arrival (dec_gemv_arrive's place in the texts)
+const dec_ku_arrive = dec_gemv_arrive_1 ++ dec_ku_ww ++ dec_gemv_arrive_2b ++ dec_ku_close ++ dec_gemv_arrive_2c;
 
 /// the finish's input sums: prep_sc's (text_dfinish's loop) ...
 pub const dec_xsum0 = @embedFile("kernels/dense/dec_xsum0.metal");
@@ -137,6 +160,36 @@ const dec_finish = dec_finish_v ++ dec_finish_store;
 pub const text_dec0: [:0]const u8 = dec_head ++ dec_gemv0 ++ dec_gemv_arrive ++ dec_xsum0 ++ dec_finish;
 /// DEC-ONE with the prepare inside: y, z, and xsx f32 (the published input sums, scratch)
 pub const text_dec1: [:0]const u8 = dec_head ++ dec_prep1 ++ dec_gemv1 ++ dec_gemv_arrive ++ dec_xsum1 ++ dec_finish;
+/// text_dec0 and text_dec1 with ku's tile loop (`dec_variants`)
+pub const text_dec0_ku: [:0]const u8 = dec_head ++ dec_gemv0_head ++ dec_ku_loop ++ dec_gemv0_x ++ dec_ku_arrive ++ dec_xsum0 ++ dec_finish;
+pub const text_dec1_ku: [:0]const u8 = dec_head ++ dec_prep1 ++ dec_gemv1_head ++ dec_ku_loop ++ dec_gemv1_x ++ dec_ku_arrive ++ dec_xsum1 ++ dec_finish;
+
+/// DEC-ONE's GEMV variants (`Config.dense_variant`; 0 today's): other schedules of the same reads, decodes and sums
+/// (the same codewords, the same decoded values, the same FMA sequence into the same f32 accumulators and the same
+/// folds), so the same bytes. `t4`, `t1` and `t0` take the MUL1 helper's other instruction sequences from a codeword to
+/// its byte sum t (`EXL3_T1V`, each the same exact t: the banked decode's t4 / t1 / t0); `ku` loads both tiles' words of
+/// an input tile pair before either decodes; `kut4` both. Each has kernel names of its own (MLX keys a custom kernel's
+/// library by its name); a dense shape's engine reads the variant when it is made.
+pub const DecVariant = struct { name: []const u8, dec0: [:0]const u8, dec1: [:0]const u8, text0: [:0]const u8, text1: [:0]const u8, header: [:0]const u8 };
+const def_t4 = @embedFile("kernels/dense/dec_def_t4.metal");
+const def_t1 = @embedFile("kernels/dense/dec_def_t1.metal");
+const def_t0 = @embedFile("kernels/dense/dec_def_t0.metal");
+pub const dec_variants = [_]DecVariant{
+    .{ .name = "", .dec0 = "turboexl3_dense_dec0", .dec1 = "turboexl3_dense_dec1", .text0 = text_dec0, .text1 = text_dec1, .header = decode.header5 },
+    .{ .name = "t4", .dec0 = "turboexl3_dense_dec0_t4", .dec1 = "turboexl3_dense_dec1_t4", .text0 = text_dec0, .text1 = text_dec1, .header = def_t4 ++ decode.header5 },
+    .{ .name = "t1", .dec0 = "turboexl3_dense_dec0_t1", .dec1 = "turboexl3_dense_dec1_t1", .text0 = text_dec0, .text1 = text_dec1, .header = def_t1 ++ decode.header5 },
+    .{ .name = "t0", .dec0 = "turboexl3_dense_dec0_t0", .dec1 = "turboexl3_dense_dec1_t0", .text0 = text_dec0, .text1 = text_dec1, .header = def_t0 ++ decode.header5 },
+    .{ .name = "ku", .dec0 = "turboexl3_dense_dec0_ku", .dec1 = "turboexl3_dense_dec1_ku", .text0 = text_dec0_ku, .text1 = text_dec1_ku, .header = decode.header5 },
+    .{ .name = "kut4", .dec0 = "turboexl3_dense_dec0_kut4", .dec1 = "turboexl3_dense_dec1_kut4", .text0 = text_dec0_ku, .text1 = text_dec1_ku, .header = def_t4 ++ decode.header5 },
+};
+comptime {
+    if (dec_variants.len != config.dense_variants) @compileError("config.dense_variants is not dec_variants.len");
+}
+/// `dec_variants`' index by name (null: none; "" is today's)
+pub fn decVariantOf(name: []const u8) ?u8 {
+    for (dec_variants, 0..) |v, i| if (std.mem.eql(u8, v.name, name)) return @intCast(i);
+    return null;
+}
 
 /// text_prep_s (lane order) that also zeroes the arrival counters of the DEC-ONE launch after it
 pub const text_prep_sc: [:0]const u8 = text_prep_s ++ @embedFile("kernels/dense/prep_sc.metal");
@@ -376,6 +429,10 @@ pub const Dense = struct {
 
     pub fn init(shape: Shape) !Dense {
         if (shape.in % 128 != 0 or shape.out % 128 != 0 or (shape.in / 16) % 4 != 0 or shape.in == 0 or shape.out == 0) return error.BadExl3Shape;
+        const dv = &dec_variants[config.get().dense_variant];
+        // DEC-ONE's output tiles per threadgroup at decode rows 1 to 4 as configured (0: btFor's)
+        var bt_set: [decode.Kernels.max_rows + 1]u8 = @splat(0);
+        for (config.get().dec_bt, 0..) |b, r| bt_set[r] = b;
         return .{
             .shape = shape,
             .prep = ks.newKernel("turboexl3_dense_prep", &prep_in, &prep_out, text_prep, decode.header, true) orelse return error.KernelCreateFailed,
@@ -399,10 +456,11 @@ pub const Dense = struct {
             .dec_rows = 4,
             .dec_prep_rows = 1,
             .dec_prep_out = 1024,
-            .dec0 = ks.newKernel("turboexl3_dense_dec0", &dec0_in, &dec0_out, text_dec0, decode.header5, true) orelse return error.KernelCreateFailed,
-            .dec1 = ks.newKernel("turboexl3_dense_dec1", &dec1_in, &dec1_out, text_dec1, decode.header5, true) orelse return error.KernelCreateFailed,
+            .dec0 = ks.newKernel(dv.dec0, &dec0_in, &dec0_out, dv.text0, dv.header, true) orelse return error.KernelCreateFailed,
+            .dec1 = ks.newKernel(dv.dec1, &dec1_in, &dec1_out, dv.text1, dv.header, true) orelse return error.KernelCreateFailed,
             .prep_sc = ks.newKernel("turboexl3_dense_prep_sc", &prep_in, &prep_sc_out, text_prep_sc, decode.header, true) orelse return error.KernelCreateFailed,
             .dec_zero = ks.newKernel("turboexl3_dense_dec_zero", &dec_zero_in, &dec_zero_out, text_dec_zero, decode.header, true) orelse return error.KernelCreateFailed,
+            .bt_set = bt_set,
         };
     }
 

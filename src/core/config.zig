@@ -35,6 +35,13 @@ pub const Config = struct {
     nax: bool = true,
     /// Dense decode linears in one launch (DEC-ONE); false the three-launch chain. The same bytes.
     dec_one: bool = true,
+    /// DEC-ONE's GEMV variant (`dense.dec_variants`, `dense_variants` of them; 0 today's): another schedule of the same
+    /// reads, decodes and sums, so the same bytes. A dense shape's engine reads it when it is made.
+    dense_variant: u8 = 0,
+    /// DEC-ONE's output tiles per GEMV threadgroup at each decode row count (index: the call's rows, 1 to 4; 0 the
+    /// default, `dense.Dense.btFor`'s): 1, 2, 4 or 8. Launch shape only (a row's sums do not depend on it), so the same
+    /// bytes. A dense shape's engine reads it when it is made.
+    dec_bt: [5]u8 = @splat(0),
     /// The row chunks of the dense decode GEMV chain: at most 8 rows, a chunk of 6 to 8 rows on the lean GEMV text (its
     /// codeword loop by input element); false keeps chunks of at most 5 rows, all on the plain GEMV text. The same bytes.
     dense_lean: bool = true,
@@ -68,12 +75,21 @@ pub const Config = struct {
             std.mem.indexOfScalar(u32, &spts, c.shared_spt) != null and c.pf_alay <= 2 and
             (c.banked_group == 2 or c.banked_group == 4) and (!c.banked_m3 or c.banked_group == 4) and
             c.banked_variant_gu < banked_variants and c.banked_variant_dn < banked_variants and
-            ((c.banked_variant_gu == 0 and c.banked_variant_dn == 0) or c.banked_group == 4);
+            ((c.banked_variant_gu == 0 and c.banked_variant_dn == 0) or c.banked_group == 4) and
+            c.dense_variant < dense_variants and decBtValid(c.dec_bt);
+    }
+
+    fn decBtValid(bt: [5]u8) bool {
+        if (bt[0] != 0) return false;
+        for (bt[1..]) |b| if (b != 0 and b != 1 and b != 2 and b != 4 and b != 8) return false;
+        return true;
     }
 };
 
 /// The grouped banked GEMVs' variant count (`decode.group_variants.len`, checked there).
 pub const banked_variants: u8 = 12;
+/// DEC-ONE's GEMV variant count (`dense.dec_variants.len`, checked there).
+pub const dense_variants: u8 = 6;
 
 const current = Global(Config, "config_current", .{});
 
@@ -116,6 +132,14 @@ test "turboexl3 config: the defaults are valid and served; an unserved form, sli
     try t.expect(!(Config{ .banked_group = 4, .banked_variant_dn = banked_variants }).valid());
     try t.expect(d.dense_lean);
     try t.expect(d.fused_fin_fold);
+    // DEC-ONE's variants and output tiles: today's by default, every variant and tile count served, others refused
+    try t.expectEqual(@as(u8, 0), d.dense_variant);
+    try t.expectEqualSlices(u8, &.{ 0, 0, 0, 0, 0 }, &d.dec_bt);
+    for (0..dense_variants) |v| try t.expect((Config{ .dense_variant = @intCast(v) }).valid());
+    try t.expect(!(Config{ .dense_variant = dense_variants }).valid());
+    for ([_]u8{ 1, 2, 4, 8 }) |b| try t.expect((Config{ .dec_bt = .{ 0, b, b, b, b } }).valid());
+    for ([_]u8{ 3, 5, 16 }) |b| try t.expect(!(Config{ .dec_bt = .{ 0, 0, 0, b, 0 } }).valid());
+    try t.expect(!(Config{ .dec_bt = .{ 2, 0, 0, 0, 0 } }).valid());
     const saved = current.get().*;
     defer current.get().* = saved;
     try t.expectError(error.InvalidTurboexl3Config, configure(.{ .decode_form = 4 }));
