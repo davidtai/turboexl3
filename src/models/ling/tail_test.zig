@@ -4,8 +4,11 @@
 //! them expanded on the last axis, its sum over the top-k axis), the MoE block's astype of the sum to bf16 and its add
 //! of the shared expert, then mlx-serve's add_norm, whose words are MLX's add and MLX's fast rms_norm (its text mirrors
 //! that kernel; addnorm_test.zig checks the same pair). The operands are built as the plugin builds them: the joined rows
-//! are banked outputs (`moeLingBanked` over a 24-slot bank at n 40, the pack's I16 trellis words, limits 0 and 10),
-//! given as the join gives them ([R, 8, 4096]) and flat ([R * 8, 4096]); the weights are the router's select (bf16,
+//! are banked outputs (`moeLingBankedSel` on hw4b's texts, the control's BANKED_T4 with the configured variant t4, over a
+//! 24-slot bank at n 40, the pack's I16 trellis words, limits 0 and 10; the texts named, as a process's banked state keeps
+//! the group it was made at), given as the join gives them ([R, 8, 4096]) and flat ([R * 8, 4096]), and where the
+//! turboexl3 has it, DEVROUTE's one-call wave's (`moeLingBankedLutSel`, turboexl3_ling's MLX_SERVE_LING_DEVWAVE_LUT=1:
+//! x by token, each pair's id through the layer's LUT); the weights are the router's select (bf16,
 //! normalized and scaled); the shared expert is SHARED_F3's two launches on the MoE input [1, R, 4096] at the rows they
 //! take (1 to 4), and past them random bf16 rows [1, R, 4096] (the served path's stock chain there, any bf16 words to the
 //! tail). Then planted signed zeros: -0.0 in the rows and the shared expert, zeros in the residual. Every case compares
@@ -170,7 +173,7 @@ test "turboexl3 gpu ling tail: moeTail gives the served chain's words (the sourc
         }
         const ids = try g.hostArray(std.mem.sliceAsBytes(ids_h[0..np]), &.{ci(np)}, .uint32);
         const xp = try g.take(try g.reshape(x, &.{ R, 4096 }), try g.hostArray(std.mem.sliceAsBytes(tok_h[0..np]), &.{ci(np)}, .int32), 0);
-        const yr = try g.adopt(try root.moeLingBanked(s, xp, &banks, ids, .mul1, lim));
+        const yr = try g.adopt(try root.moeLingBankedSel(s, xp, &banks, ids, .mul1, lim, .g4m3));
         // the shared expert: SHARED_F3's launches where they take the call (rows 1 to 4), else bf16 rows of their own
         const shx = if (try root.ling.sharedTakes(x, sgp, sup, sdp, .mul1))
             try g.adopt(try root.lingSharedExpert(s, x, sgp, sup, sdp, 0, tab, .mul1))
@@ -183,6 +186,20 @@ test "turboexl3 gpu ling tail: moeTail gives the served chain's words (the sourc
             checks += 1;
             failed += @intFromBool(!ok);
             std.debug.print("TURBOEXL3_LING_TAIL rows={d} limit={d} routed={s} residual_differing={d}/{d} normed_differing={d}/{d} {s}\n", .{ rows, lim, if (joined) "[R,8,D]" else "[R*8,D]", d[0], rows * 4096, d[1], rows * 4096, if (ok) "PASS" else "FAIL" });
+        }
+        // DEVROUTE's device wave in one call (turboexl3_ling's MLX_SERVE_LING_DEVWAVE_LUT=1), where this turboexl3 has it:
+        // x by token, each pair's id the LUT's at its routed expert (the identity into bank 0 here), the rows as the
+        // streamer's join hands them over
+        if (comptime @hasDecl(root, "moeLingBankedLutSel")) {
+            var lut_h: [24]u32 = undefined;
+            for (&lut_h, 0..) |*v, e| v.* = @intCast(e);
+            const lut = try g.hostArray(std.mem.sliceAsBytes(&lut_h), &.{24}, .uint32);
+            const yl = try g.adopt(try root.moeLingBankedLutSel(s, try g.reshape(x, &.{ R, 4096 }), ids, lut, &banks, .mul1, lim, .g4m3));
+            const d = try check(a, &g, s, hres, try g.reshape(yl, &.{ R, 8, 4096 }), wts, shx, wn, eps_a, rows);
+            const ok = d[0] == 0 and d[1] == 0;
+            checks += 1;
+            failed += @intFromBool(!ok);
+            std.debug.print("TURBOEXL3_LING_TAIL rows={d} limit={d} routed=devwave_lut residual_differing={d}/{d} normed_differing={d}/{d} {s}\n", .{ rows, lim, d[0], rows * 4096, d[1], rows * 4096, if (ok) "PASS" else "FAIL" });
         }
     };
     // planted signed zeros: -0.0 in the routed rows and the shared expert, exact zeros in the residual
