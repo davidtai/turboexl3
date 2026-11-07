@@ -9,7 +9,8 @@
 //!   y stored bf16 by the banked down finish. The chain it replaces: `moeClampedBanked` (y f32), then a cast to bf16.
 //! And the plugin's opt-in schedules, each held to the default's bytes:
 //! - the banked decode's schedules (the plugin's TURBOEXL3_GLM53F_BANKED): the grouped texts (`banked_group` 4), hw4b's
-//!   (`banked_m3`) and every grouped GEMV variant on each, selected per call (`moeClampedBankedSelV`: each gate|up
+//!   (`banked_m3`) and every grouped GEMV variant on each but the plugin's refused EXL3_GSH ones (`sh`, `pfsh`: other bytes
+//!   at the K5 rate, g53fz2), selected per call (`moeClampedBankedSelV`: each gate|up
 //!   variant with today's down GEMV, each down variant with today's gate|up GEMV) and configured as the plugin configures
 //!   them (`configure`, a geometry's banked state made after it: y f32, and bf16 from `moeClampedBankedAs`), against the
 //!   served call (`banked_group` 2), over waves of 1 to 64 pairs (a verify's rows drawn routing the same experts);
@@ -309,6 +310,16 @@ fn varName(v: u8) []const u8 {
     return if (v == 0) "0" else root.group_variants[v].name;
 }
 
+/// The grouped GEMV variants the plugin refuses (its `BankedSchedule.refused_variants`): the EXL3_GSH ones give other
+/// bytes than the served banked call at the K5 rate (g53fz2: 4095 of 4096 words at one pair, on either GEMV and either
+/// texts), so this file holds only the others to the served call and times only them
+const refused_variants = [_][]const u8{ "sh", "pfsh" };
+
+fn refusedVariant(v: usize) bool {
+    for (refused_variants) |r| if (std.mem.eql(u8, root.group_variants[v].name, r)) return true;
+    return false;
+}
+
 test "turboexl3 gpu glm53f banked schedules: the grouped texts (g4), hw4b's (g4m3) and every grouped GEMV variant on each, selected per call or configured, give the served banked call's rows byte for byte (the bf16 store its rounding), at GLM-5.3-Flash's routed geometry and every SC rate (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
     const s = mlx.mlx_default_gpu_stream_new();
@@ -375,6 +386,7 @@ test "turboexl3 gpu glm53f banked schedules: the grouped texts (g4), hw4b's (g4m
             const want = try bitsOf(&g, c.want, want_buf[0..w_n]);
             for ([_]root.BankedSel{ .g4, .g4m3 }) |sel| for (0..n_var) |vi| for ([_]bool{ false, true }) |down| {
                 if (down and vi == 0) continue;
+                if (refusedVariant(vi)) continue;
                 const m2 = g.mark();
                 defer g.resetTo(m2);
                 const v: u8 = @intCast(vi);
@@ -713,6 +725,7 @@ test "turboexl3 gpu glm53f schedule timing: the banked decode's schedules at a v
             const served = try timeCall(&g, c, f);
             std.debug.print("TURBOEXL3_GLM_BANKED_SCHED_TIME n={d} pairs={d} texts=served gu=0 dn=0 min_us={d:.1} med_us={d:.1}\n", .{ n, pairs, served[0], served[1] });
             for ([_]root.BankedSel{ .g4, .g4m3 }) |sel| for (0..root.group_variants.len) |vi| {
+                if (refusedVariant(vi)) continue;
                 c.sel = sel;
                 c.v = @intCast(vi);
                 const t = try timeCall(&g, c, f);

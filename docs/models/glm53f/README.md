@@ -46,7 +46,7 @@ The plugin's opt-in schedules (each the default's bytes, `fused_test.zig`):
 
 | part of the model | entry point | what changes | the plugin's switch |
 |---|---|---|---|
-| routed experts over the slot banks at decode rows | `configure` (`banked_group` 4, `banked_m3`, `banked_variant_gu`, `banked_variant_dn`) | the banked decode on the grouped texts (a weight's read and decode shared by up to four row-slots of one expert) and the grouped GEMVs' variants: the same reads, decodes and sums | `TURBOEXL3_GLM53F_BANKED=<texts>[.<gu>[.<dn>]]` |
+| routed experts over the slot banks at decode rows | `configure` (`banked_group` 4, `banked_m3`, `banked_variant_gu`, `banked_variant_dn`) | the banked decode on the grouped texts (a weight's read and decode shared by up to four row-slots of one expert) and the grouped GEMVs' variants but `sh` and `pfsh` (their EXL3_GSH schedule gives other bytes at the K5 rate): the same reads, decodes and sums | `TURBOEXL3_GLM53F_BANKED=<texts>[.<gu>[.<dn>]]` |
 | routed experts in a prompt call over a slot bank | `moeClamped`, `moeClampedRows` | the call's rows at most (2048 to 16384): a row's bytes do not depend on its call | `TURBOEXL3_GLM53F_PF_CALL_ROWS=<n>` |
 
 GLM-5.3-Flash has one kernel of its own, the row-map prepare (a composition of the core prepare's pieces). Its tests
