@@ -21,10 +21,15 @@
 //!   regular matmul, at every EXL3 linear the 2.60 pack serves at prompt rows (`dense_cases` but the head, and the MTP
 //!   layer's eh_proj): the chunk loop's spans of the standard prompt's 18,380 rows, calls over its first 1 to 8,192
 //!   rows and an 8,192-row call's halves; the decode GEMVs (16 rows or fewer), the register-path GEMM (17 to 32) and
-//!   MLX's split-K matmul are reported, not asserted.
+//!   MLX's split-K matmul are reported, not asserted;
+//! - on operands as the plugin serves them (the pack's I16 trellis words; `[1, rows, in]` bf16 activations, whole or a
+//!   row view of a wider array), `root.lingSharedExpert` gives the composed shared expert's words (rows 1 to 4),
+//!   `root.ling.linearPair` each member's `linear` words (rows 1, 2, 4, 6), and the one-row table one row's own words
+//!   (every trunk shape), each also the words of the same call on U16 words and a contiguous `[rows, in]`.
 //! TURBOEXL3_LING_N (rates in halfwords per tile; default 40,32) narrows the routed tests. Lines: TURBOEXL3_LING_BYTES,
 //! TURBOEXL3_LING_PARITY, TURBOEXL3_LING_BANKED, TURBOEXL3_LING_DENSE, TURBOEXL3_LING_ONE_ROW,
-//! TURBOEXL3_LING_ONE_ROW_TABLE, TURBOEXL3_LING_PAIR, TURBOEXL3_LING_KDA_PROJ, TURBOEXL3_LING_ROWINV.
+//! TURBOEXL3_LING_ONE_ROW_TABLE, TURBOEXL3_LING_PAIR, TURBOEXL3_LING_KDA_PROJ, TURBOEXL3_LING_ROWINV,
+//! TURBOEXL3_LING_SERVED.
 //! Timing (TURBOEXL3_LING_TIME=1 with TURBOEXL3_GPU=1; asserts nothing, guidance only): every trunk linear, `moeLing`
 //! and `moeLingBanked` at Ling's shapes and rows, the decode forward's linears chained over the 72 layers, and the dense
 //! decode GEMV's launch shapes swept per trunk shape on that chain at rows 1 to 8 (asserting bytes only). Lines:
@@ -869,6 +874,185 @@ test "turboexl3 gpu ling pair: z | a and the shared and dense gate | up in one l
     }
     std.debug.print("TURBOEXL3_LING_PAIR_DONE checks={d} inside={d} own_launch={d} {s}\n", .{ checks, forms[1], forms[0], if (failed == 0) "PASS" else "FAIL" });
     try testing.expect(forms[0] > 0 and forms[1] > 0);
+    try testing.expectEqual(@as(usize, 0), failed);
+}
+
+/// A projection's trellis as the plugin's loader hands it over: the pack's I16 words (the same bits as `p`'s U16).
+fn packTrellis(g: *G, p: root.Proj) !root.Proj {
+    var v = mlx.mlx_array_new();
+    mlx.check(mlx.mlx_view(&v, p.trellis, .int16, g.s)) catch |e| {
+        _ = mlx.mlx_array_free(v);
+        return e;
+    };
+    return .{ .trellis = try g.adopt(v), .suh = p.suh, .svh = p.svh };
+}
+
+/// Rows 1 to `rows` of `xs` ((rows + 2) x `in` values) in `dt`, as the plugin hands an activation over (`served`:
+/// `[1, rows, in]`, the whole array, or with `view` a slice of a wider array's rows, as a verify's row loop cuts one)
+/// and as the byte tests build it (`flat`: a contiguous `[rows, in]`).
+fn servedAct(g: *G, xs: []const f32, rows: u32, in: u32, dt: mlx.mlx_dtype, view: bool) !struct { served: mlx.mlx_array, flat: mlx.mlx_array } {
+    const n = @as(usize, rows) * in;
+    const flat = try g.astype(try g.hostArray(std.mem.sliceAsBytes(xs[in..][0..n]), &.{ ci(rows), ci(in) }, .float32), dt);
+    const served = if (view) blk: {
+        const wide = try g.astype(try g.hostArray(std.mem.sliceAsBytes(xs[0 .. n + 2 * @as(usize, in)]), &.{ 1, ci(rows + 2), ci(in) }, .float32), dt);
+        break :blk try g.slice(wide, &.{ 0, 1, 0 }, &.{ 1, ci(rows + 1), ci(in) }, &.{ 1, 1, 1 });
+    } else try g.astype(try g.hostArray(std.mem.sliceAsBytes(xs[in..][0..n]), &.{ 1, ci(rows), ci(in) }, .float32), dt);
+    return .{ .served = served, .flat = flat };
+}
+
+fn wordsDiffer(p: []const f32, q: []const f32) usize {
+    var d: usize = 0;
+    for (p, q) |u, w| d += @intFromBool(@as(u32, @bitCast(u)) != @as(u32, @bitCast(w)));
+    return d;
+}
+
+test "turboexl3 gpu ling served operands: the shared expert, the pairs and the one-row table on the pack's I16 trellis words and [1, rows, in] activations (whole or a row view) give their composed chains' words and those of U16 words on [rows, in] rows (TURBOEXL3_GPU=1)" {
+    _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    const s = mlx.mlx_default_gpu_stream_new();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    const a = std.heap.page_allocator;
+    var g = try G.init(a, s);
+    defer g.deinit();
+    var checks: usize = 0;
+    var failed: usize = 0;
+    // the shared expert (SHARED_F3): turboexl3's two launches against the composed chain the block runs (each `linear`,
+    // MLX's sigmoid, multiply and multiply in bf16, the words of the host's table SwiGLU), both on served operands
+    {
+        var prng = std.Random.DefaultPrng.init(0x5E2D_F3);
+        const rnd = prng.random();
+        const mark = g.mark();
+        defer g.resetTo(mark);
+        var gm = try synthProj(a, &g, rnd, 4096, 1280, 96);
+        defer gm.lin.deinit(a);
+        var um = try synthProj(a, &g, rnd, 4096, 1280, 96);
+        defer um.lin.deinit(a);
+        var dm = try synthProj(a, &g, rnd, 1280, 4096, 96);
+        defer dm.lin.deinit(a);
+        const gate = try packTrellis(&g, gm.p);
+        const up = try packTrellis(&g, um.p);
+        const down = try packTrellis(&g, dm.p);
+        const tab = try g.adopt(try root.lingSigmoidTable(s, .bfloat16, false));
+        const xs = try a.alloc(f32, 6 * 4096);
+        defer a.free(xs);
+        for (xs) |*v| v.* = bfExact(rnd.floatNorm(f32));
+        const want = try a.alloc(f32, 4 * 4096);
+        defer a.free(want);
+        const got = try a.alloc(f32, 4 * 4096);
+        defer a.free(got);
+        const flat = try a.alloc(f32, 4 * 4096);
+        defer a.free(flat);
+        for ([_]u32{ 1, 2, 3, 4 }) |rows| for ([_]bool{ false, true }) |view| {
+            const rm = g.mark();
+            defer g.resetTo(rm);
+            const x = try servedAct(&g, xs, rows, 4096, .bfloat16, view);
+            const n = @as(usize, rows) * 4096;
+            if (!(try root.lingSharedTakes(x.served, gate, up, down, .mul1))) {
+                std.debug.print("TURBOEXL3_LING_SERVED shared rows={d} view={} not served FAIL\n", .{ rows, view });
+                failed += 1;
+                continue;
+            }
+            const gv = try g.adopt(try root.linear(s, x.served, gate.trellis, gate.suh, gate.svh, .mul1));
+            const uv = try g.adopt(try root.linear(s, x.served, up.trellis, up.suh, up.svh, .mul1));
+            const h = try g.mul(try g.mul(gv, try g.sigmoid(gv)), uv);
+            _ = try g.hostF32(try g.astype(try g.adopt(try root.linear(s, h, down.trellis, down.suh, down.svh, .mul1)), .float32), want[0..n]);
+            _ = try g.hostF32(try g.astype(try g.adopt(try root.lingSharedExpert(s, x.served, gate, up, down, 0, tab, .mul1)), .float32), got[0..n]);
+            _ = try g.hostF32(try g.astype(try g.adopt(try root.lingSharedExpert(s, x.flat, gm.p, um.p, dm.p, 0, tab, .mul1)), .float32), flat[0..n]);
+            const d_chain = wordsDiffer(got[0..n], want[0..n]);
+            const d_flat = wordsDiffer(got[0..n], flat[0..n]);
+            const ok = d_chain == 0 and d_flat == 0;
+            checks += 1;
+            failed += @intFromBool(!ok);
+            std.debug.print("TURBOEXL3_LING_SERVED shared rows={d} view={} vs_chain={d}/{d} vs_u16_flat={d}/{d} {s}\n", .{ rows, view, d_chain, n, d_flat, n, if (ok) "PASS" else "FAIL" });
+        };
+    }
+    // the pairs (PAIR): each member's columns of the pair against its own `linear`, both on served operands, at the
+    // decode and verify widths
+    for (pair_cases) |c| {
+        var prng = std.Random.DefaultPrng.init(0x5E2D_9A ^ (@as(u64, c.in) << 24) ^ c.out);
+        const rnd = prng.random();
+        const mark = g.mark();
+        defer g.resetTo(mark);
+        var m0 = try synthProj(a, &g, rnd, c.in, c.out, c.n);
+        defer m0.lin.deinit(a);
+        var m1 = try synthProj(a, &g, rnd, c.in, c.out, c.n);
+        defer m1.lin.deinit(a);
+        const p0 = try packTrellis(&g, m0.p);
+        const p1 = try packTrellis(&g, m1.p);
+        const xs = try a.alloc(f32, 8 * c.in);
+        defer a.free(xs);
+        for (xs) |*v| v.* = bfExact(rnd.floatNorm(f32));
+        const want = try a.alloc(f32, 2 * 6 * c.out);
+        defer a.free(want);
+        const got = try a.alloc(f32, 2 * 6 * c.out);
+        defer a.free(got);
+        const flat = try a.alloc(f32, 2 * 6 * c.out);
+        defer a.free(flat);
+        for ([_]u32{ 1, 2, 4, 6 }) |rows| for ([_]bool{ false, true }) |view| {
+            const rm = g.mark();
+            defer g.resetTo(rm);
+            const x = try servedAct(&g, xs, rows, c.in, .bfloat16, view);
+            const n_out = @as(usize, rows) * c.out;
+            for ([_]root.Proj{ p0, p1 }, 0..) |mp, k| {
+                _ = try g.hostF32(try g.astype(try g.adopt(try root.linear(s, x.served, mp.trellis, mp.suh, mp.svh, .mul1)), .float32), want[k * n_out ..][0..n_out]);
+            }
+            _ = try g.hostF32(try g.astype(try g.adopt(try root.ling.linearPair(s, x.served, p0, p1, .mul1)), .float32), got[0 .. 2 * n_out]);
+            _ = try g.hostF32(try g.astype(try g.adopt(try root.ling.linearPair(s, x.flat, m0.p, m1.p, .mul1)), .float32), flat[0 .. 2 * n_out]);
+            var d_chain: usize = 0;
+            for (0..rows) |r| for (0..2) |k| {
+                d_chain += wordsDiffer(got[r * 2 * c.out + k * c.out ..][0..c.out], want[k * n_out + r * c.out ..][0..c.out]);
+            };
+            const d_flat = wordsDiffer(got[0 .. 2 * n_out], flat[0 .. 2 * n_out]);
+            const ok = d_chain == 0 and d_flat == 0;
+            checks += 1;
+            failed += @intFromBool(!ok);
+            std.debug.print("TURBOEXL3_LING_SERVED pair {s} rows={d} view={} vs_linears={d}/{d} vs_u16_flat={d}/{d} {s}\n", .{ c.name, rows, view, d_chain, 2 * n_out, d_flat, 2 * n_out, if (ok) "PASS" else "FAIL" });
+        };
+    }
+    // the one-row table (ONE_ROW_TABLE): a one-row call on its table launch against one row's own, both on served
+    // operands (one row viewed out of three and reshaped to [1, in] as `rowsOf` does), at every trunk shape
+    {
+        const saved = config.get().*;
+        defer config.configure(saved) catch unreachable;
+        var served_cfg = saved;
+        served_cfg.dec_one_row_wide = false;
+        served_cfg.dec_one_row_table = false;
+        var table_cfg = served_cfg;
+        table_cfg.dec_one_row_table = true;
+        for (dense_cases) |c| {
+            var prng = std.Random.DefaultPrng.init(0x5E2D_1E ^ (@as(u64, c.in) << 24) ^ c.out);
+            const rnd = prng.random();
+            const mark = g.mark();
+            defer g.resetTo(mark);
+            var m = try synthProj(a, &g, rnd, c.in, c.out, c.n);
+            defer m.lin.deinit(a);
+            const p = try packTrellis(&g, m.p);
+            const xs = try a.alloc(f32, 3 * c.in);
+            defer a.free(xs);
+            for (xs) |*v| v.* = bfExact(rnd.floatNorm(f32));
+            const got = try a.alloc(f32, 3 * c.out);
+            defer a.free(got);
+            const geo: dense.Shape = .{ .in = c.in, .out = c.out, .rate = format.Rate.fromN(c.n).?, .dec = .mul1, .out_dtype = .bfloat16 };
+            try config.configure(served_cfg);
+            var own = try dense.Dense.init(geo);
+            defer own.deinit();
+            try config.configure(table_cfg);
+            var table = try dense.Dense.init(geo);
+            defer table.deinit();
+            try config.configure(served_cfg);
+            const x = try servedAct(&g, xs, 1, c.in, .bfloat16, true);
+            const x2 = try g.reshape(x.served, &.{ 1, ci(c.in) });
+            _ = try g.hostF32(try g.astype(try g.adopt(try table.linear(s, x2, p.trellis, p.suh, p.svh, 1)), .float32), got[0..c.out]);
+            _ = try g.hostF32(try g.astype(try g.adopt(try own.linear(s, x2, p.trellis, p.suh, p.svh, 1)), .float32), got[c.out..][0..c.out]);
+            _ = try g.hostF32(try g.astype(try g.adopt(try own.linear(s, x.flat, m.p.trellis, m.p.suh, m.p.svh, 1)), .float32), got[2 * c.out ..][0..c.out]);
+            const d_own = wordsDiffer(got[0..c.out], got[c.out..][0..c.out]);
+            const d_flat = wordsDiffer(got[0..c.out], got[2 * c.out ..][0..c.out]);
+            const ok = d_own == 0 and d_flat == 0;
+            checks += 1;
+            failed += @intFromBool(!ok);
+            std.debug.print("TURBOEXL3_LING_SERVED one_row_table {s} in={d} out={d} table_bt={d} vs_own={d}/{d} vs_u16_flat={d}/{d} {s}\n", .{ c.name, c.in, c.out, table.bt_set[1], d_own, c.out, d_flat, c.out, if (ok) "PASS" else "FAIL" });
+        }
+    }
+    std.debug.print("TURBOEXL3_LING_SERVED_DONE checks={d} failed={d} {s}\n", .{ checks, failed, if (failed == 0) "PASS" else "FAIL" });
     try testing.expectEqual(@as(usize, 0), failed);
 }
 
