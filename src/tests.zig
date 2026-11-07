@@ -45,6 +45,8 @@ comptime {
     _ = @import("models/ling/shared_test.zig");
     _ = @import("models/ling/combine.zig");
     _ = @import("models/ling/combine_test.zig");
+    _ = @import("models/ling/addnorm.zig");
+    _ = @import("models/ling/addnorm_test.zig");
 }
 
 

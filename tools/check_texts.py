@@ -1228,6 +1228,13 @@ ADDED_FILES['models/ling/kdaproj.zig'] = ('Ling-3.1\'s KDA decode projections (q
 ADDED_FILES['models/ling/combine.zig'] = ('Ling-3.1\'s wide routed call combine in one launch (combineRouted, combineParts: '
                                           'MLX\'s sum(multiply(astype(routed, f32), expand_dims(weights, -1)), -2) word for '
                                           'word, over a joined array or the call\'s JOINLESS sources) and its texts\' CPU test')
+# Ling-3.1-flash's residual add and RMSNorm folded into the next linears' prepare (turboexl3_ling_addnorm1, 2, 3)
+ADDED_FILES['models/ling/addnorm.zig'] = ('Ling-3.1\'s residual add and RMSNorm at a decode layer\'s mixer input in one launch '
+                                          'with up to three EXL3 members\' DEC-ONE prepares (mlx-serve\'s add_norm statements, '
+                                          'text_prep_s\'s on the row in threadgroup memory, prep_sc\'s counters), then each '
+                                          'member\'s GEMV over its prepared rows (addNormLinears), and its texts\' CPU test')
+ADDED_FILES['models/ling/addnorm_test.zig'] = ('addNormLinears against MLX\'s add, MLX\'s fast rms_norm and each member\'s '
+                                               'linear word for word at decode rows 1 to 8, 12 and 16, the refusals (GPU)')
 ADDED_FILES['models/ling/combine_test.zig'] = ('the combine\'s GPU tests: both entries against MLX\'s composed combine word for '
                                                'word, the refusals')
 
@@ -1474,6 +1481,11 @@ SPLIT_ADDED_KERNELS = {
     'turboexl3_ling_combine': 'Ling-3.1\'s routed combine over a joined array (models/ling/combine.zig): MLX\'s Multiply and '
                               'col_reduce_small sum in one launch, word for word',
     'turboexl3_ling_combine_parts': 'the same over a wide call\'s JOINLESS sources (each pair\'s (source, row))',
+    'turboexl3_ling_addnorm1': ('Ling-3.1\'s residual add and RMSNorm (mlx-serve\'s add_norm statements) with one EXL3 '
+                                'member\'s DEC-ONE prepare (text_prep_s\'s statements on the row in threadgroup memory) and '
+                                'prep_sc\'s counters, one threadgroup a row (an_norm ++ an_m0 ++ an_cnt)'),
+    'turboexl3_ling_addnorm2': 'the same with two members (an_m0 ++ an_m1)',
+    'turboexl3_ling_addnorm3': 'the same with three members (an_m0 ++ an_m1 ++ an_m2)',
 }
 SPLIT_ADDED_KERNELS['turboexl3_gu8bg'] = ('gu8b (Config.banked_gu8): the banked grouped gate|up with its prepare inside '
                                           '(form 8\'s gu8_1 and rk_line, prep2b\'s arithmetic over the span into threadgroup '
