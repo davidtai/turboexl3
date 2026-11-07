@@ -26,10 +26,13 @@ The code only Ling-3.1-flash uses, on the core's routed chain, DeepSeek-V4.1's b
 | `kernels/router/` | the router's pieces: launch 1's head, MLX's gemv statements cut at the table's read (an f32 word, or an f16 word widened then + 0), the predictor's branch (gemv at one row, gemv_wide at 2 to 8), the two scores (headers) and the host's fused router text (`select.metal`) |
 | `mla_latent.zig` | `decodeLatent` (`mlaLatentDecode`): the MLA attention at decode rows in the latent, three launches (the query absorbed into the latent, the attention's partials over the latent cache, the merge and the value half); its texts and plan (CPU tests) |
 | `kernels/mla_latent/` | the three launches' texts and their header; `kernels/test/pins/` what the CPU test pins |
+| `mla_flash.zig` | `mlaFlashPrefill` (`api.zig` exports it): the MLA prompt attention as one causal flash launch, MLX's NAX attention kernel at Ling's head dims (qk 192, v 128) |
+| `kernels/mla_flash/` | the flash kernel's pieces: MLX's attention_nax body less its unused arms, its row ops, the kernel attribute's define and undefine |
 
 Ling's own Metal is the pairs', the shared expert's, the routed combine's, the mixer input's add and norm and the
 router's pieces (`kernels/pair/`, `kernels/shared/`, `kernels/combine/`, `kernels/addnorm/`, `kernels/router/`),
-and the MLA attention in the latent's three launches (`kernels/mla_latent/`;
+the MLA attention in the latent's three launches (`kernels/mla_latent/`) and the MLA prompt attention's flash kernel
+(`kernels/mla_flash/`;
 `kernels/test/pins/` what the CPU tests pin); the routed experts' clamp pieces are the core's
 (`kernels/decode/fin7_swiglu_clamp_out.metal`, `kernels/prefill/mid_swiglu_clamp_out.metal`). docs/models/ling/
 describes the model's needs and its kernels.

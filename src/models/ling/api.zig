@@ -8,13 +8,15 @@
 //! dependent launches of its own (`sharedExpert`, shared.zig), a wide routed call's combine in one launch
 //! (`combineRouted`, `combineParts`, combine.zig), and its MoE router at decode rows with the read-ahead predictor's
 //! scores in two launches (`router.route`, router.zig): each a host's opt-in. Its MLA attention
-//! at decode rows in the latent is `mlaLatentDecode` (`mla_latent.zig`, three launches of its own).
+//! at decode rows in the latent is `mlaLatentDecode` (`mla_latent.zig`, three launches of its own), and its MLA prompt
+//! attention runs as one causal flash launch (`mlaFlashPrefill`, `mla_flash.zig`: MLX's NAX attention at qk 192, v 128).
 const std = @import("std");
 const mlx = @import("sdk").mlx;
 const root = @import("../../root.zig");
 const format = @import("../../core/format.zig");
 const ds = @import("../deepseek_v41/api.zig");
 const combine = @import("combine.zig");
+const mla_flash = @import("mla_flash.zig");
 const Bank = root.Bank;
 const freeArr = root.freeArr;
 /// The shared expert at decode rows in two dependent launches (`shared.zig`)
@@ -153,4 +155,9 @@ pub const tail = @import("tail.zig");
 pub const moeTail = tail.moeTail;
 
 /// This file's module state (`Global`): what a host that shares its units' state registers.
-pub const shared_state = .{ shared.shared_state, pair.shared_state, kdaproj.shared_state, addnorm.shared_state, router.shared_state, tail.shared_state, mla_latent.shared_state };
+pub const shared_state = .{ shared.shared_state, pair.shared_state, kdaproj.shared_state, addnorm.shared_state, router.shared_state, tail.shared_state, mla_latent.shared_state, mla_flash.shared_state };
+
+/// The MLA prompt attention as one causal flash launch (`mla_flash.zig`): o [B, H, qL, v] = softmax(scale q k^T) v, query
+/// row i over keys 0 .. kL - qL + i, at Ling's heads (qk 192, v 128) or any pair `mla_flash.admits` takes; within
+/// tolerance of MLX's composed SDPA (a reordering), refused off the NAX gate (error.Exl3EngineNotImplemented).
+pub const mlaFlashPrefill = mla_flash.mlaFlashPrefill;

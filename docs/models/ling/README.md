@@ -29,6 +29,7 @@ What it runs on turboexl3 (`root.ling`, `src/models/ling/api.zig`):
 | a decode layer's mixer input (rows 1 to 16): the residual add, its RMSNorm and the mixer's EXL3 projections (KDA's qkv, f and g; MLA's q_a and kv_a) | `root.ling.addNormLinears` (a host's opt-in; `addNormPrepare` for a GEMV that reads the prepared rows itself) | `turboexl3_ling_addnorm1`, `2` or `3` (the add, the norm and each member's prepare, one threadgroup a row), then each member's `turboexl3_dense_dec0` (or the chain's GEMV and finish past DEC-ONE's rows) ([kernels](kernels.md)): MLX's add, MLX's rms_norm and each member's `linear`, word for word |
 | a MoE layer's router at decode rows (1 to 8) with the read-ahead predictor's scores (the next MoE layer's router on the call's rows) | `root.ling.router.route` (`routerLogits`, `select`, `tableF32`; a host's opt-in) | `turboexl3_ling_router_pred` (DeepSeek's sqrt(softplus(z)) + bias), `turboexl3_ling_router_pred_sig` (Ling's sigmoid(z) + bias) or, on the last MoE layer, `turboexl3_ling_router_logits`, each over the loader's f32 table (or its `_h` twin over the loaded f16 weight), then `turboexl3_ling_router_select` ([kernels](kernels.md)): the host's logits, scores, ids and bf16 weights word for word |
 | an MLA layer's attention at decode rows (1 to 16) over a latent cache (each token's normed 512-wide latent and 64-wide roped shared key) | `mlaLatentDecode` (`mla_latent.zig`) | three of its own: `turboexl3_ling_mla_qabs`, `turboexl3_ling_mla_attn`, `turboexl3_ling_mla_vabs` ([the Ling catalog](kernels.md)) |
+| an MLA layer's prompt attention over the expanded KV (qk 192, v 128, 64 heads) | `root.ling.mlaFlashPrefill` | `turboexl3_ling_mla_flash` ([kernels.md](kernels.md)): MLX's NAX attention kernel at a tile MLX does not instantiate |
 
 The pairs share each member's K split (z \| a at KS 2, the shared gate \| up at KS 8, the dense gate \| up at KS 1);
 qkv (KS 1) and MLA's q_a (KS 8) \| kv_a (KS 16) cannot join a member of another K split byte for byte.
@@ -45,6 +46,15 @@ a prompt layer's call and a padded one (`TURBOEXL3_LING_ROWS` lines). The kernel
 [the core's catalog](../../core/kernels.md) (`turboexl3_fin7co`, `turboexl3_pf_midco`, `turboexl3_pf_mid_vco`,
 `turboexl3_pf_t128_midco`) and [DeepSeek-V4.1's](../deepseek_v41/kernels.md) (`turboexl3_fin7b`, `turboexl3_fin7cob`,
 `turboexl3_fin7bg`, `turboexl3_fin7cobg`).
+
+**The MLA prompt attention.** MLX 0.32.5 runs attention at a query head dim of 192 on its composed path at prompt
+widths (`ScaledDotProductAttention::use_fallback`): the scores and the probabilities in device memory at the activation
+dtype, about 9 TFLOPS on Ling's 4096-row chunks. `mlaFlashPrefill` is one launch of MLX's own NAX attention kernel
+(`attention_nax`) at bq 64, bk 32, bd 192, bv 128 and 4 simdgroups, causal from the bottom right as MLX aligns it, the
+keys and values read in place from the cache's views. Its numerics are MLX's fused kernel's (f32 scores, running max and
+sum, one output rounding), so it is a reordering against the composed path: held to an f64 reference within tolerance,
+and to MLX's fused kernel word for word at the head dims MLX instantiates it for. The plugin's switch decides whether a
+prompt takes it; the standard test decides that switch.
 
 `TURBOEXL3_LING_TIME=1` (with `TURBOEXL3_GPU=1`) times the Ling kernels at the model's shapes for the serving plan: every
 trunk linear, `moeLing` and `moeLingBanked`, and the decode forward's linears chained over the 72 layers

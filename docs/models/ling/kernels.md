@@ -821,3 +821,42 @@ position only, so a verify call's rows have the bits of one-row calls at their p
   tolerance of the composed path.
 - **Pinned by:** `src/models/ling/mla_latent.zig` "turboexl3 ling mla latent texts: ..." (CPU: the merge's group bound from the
   pin file).
+
+## `src/models/ling/mla_flash.zig`
+
+The MLA prompt attention as one causal flash launch (`root.ling.mlaFlashPrefill`).
+
+### `turboexl3_ling_mla_flash`
+
+<!-- kernel-facts: turboexl3_ling_mla_flash -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/ling/mla_flash.zig:87` (`fn kernelGet`) |
+| inputs | `q`, `k`, `v`, `scale` |
+| outputs | `o` |
+| source | `source` = `ling:mla_flash/body` ++ `ling:mla_flash/close` (10242 B, `f8febea390c3`) |
+| header | `header` = `steel_nax` ++ `ling:mla_flash/head` (31972 B, `30be639a8251`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** Ling-3.1-flash: `root.ling.mlaFlashPrefill`, an MLA layer's prompt attention over the expanded KV (the
+  outside plugin turboexl3_ling's prompt spans, behind its own switch, off by default), where `Config.nax` holds. Any
+  head dims `mla_flash.admits` takes; Ling's are qk 192 (128 nope + 64 rope) and v 128 at 64 heads.
+- **Shapes and dtypes:** q T [B, H, qL, BD]; k T [B, Hk, kL, BD] and v T [B, Hk, kL, BV] at their own strides (a
+  cache's views read in place; each last axis contiguous), H a multiple of Hk, kL >= qL; scale f32 [1]. T bf16 or f16.
+  Out: o T [B, H, qL, BV], contiguous.
+- **Grid and threadgroup:** `(ceil(qL / BQ) · 32, H · WM, B · WN)` / `(32, WM, WN)`: MLX's own launch of
+  `attention_nax` (threadgroups (ceil(qL / BQ), H, B)).
+- **Template args:** T, BQ 64, BK 32, BD (qk), BV (v), WM 4, WN 1 (MLX's tile for head dims up to 128), ALIGN_Q and
+  ALIGN_K (qL and kL whole tiles: attention_nax's align_Q and align_K), CAUSAL 1.
+- **Replaces:** MLX's composed SDPA at qk 192 (`use_fallback` at prompt widths): the scaled query, Q K^T, the causal
+  mask, the softmax and P V as separate launches, the scores and probabilities written to and read from device memory
+  in the activation dtype. One launch, MLX 0.32.5's `attention_nax` (steel/attn/kernels/steel_attention_nax.h) less its
+  mask, sinks, log-sum-exp and window arms, its parameters from the operands.
+- **Bits:** can differ from the composed path (a reordering): the scores, the running row max and sum and the output
+  accumulate in f32, P meets V in the NAX MMA and the output rounds once, where the composed path rounds the scaled
+  query, the scores and the probabilities to the activation dtype. At a head-dim pair MLX instantiates its fused
+  kernel for (qk = v = 128; qk 96, v 64) it is that kernel, word for word.
+- **Pinned by:** `src/models/ling/mla_flash.zig` "turboexl3 ling mla flash plan: MLX's grid and threadgroup, alignment by
+  whole tiles, the admitted head dims" (CPU, the plan).

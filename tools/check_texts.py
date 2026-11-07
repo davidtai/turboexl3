@@ -1329,6 +1329,11 @@ ADDED[('models/ling/api.zig', 'const kdaProjB')] = 'the re-export of kdaproj.zig
 ADDED_FILES['models/ling/bproj_test.zig'] = ('kdaProjB held to the served b_proj (the one-row matmul, the exact verify\'s '
                                              'denseRows) and kdaProj\'s members word for word at rows 1 to 8, and dec0b\'s '
                                              'text (CPU)')
+# Ling-3.1-flash's MLA prompt attention as one causal flash launch (ling-flash)
+ADDED_FILES['models/ling/mla_flash.zig'] = ('Ling-3.1\'s MLA prompt attention in one launch (mlaFlashPrefill): MLX 0.32.5\'s '
+                                            'attention_nax at qk 192, v 128, its parameters from the operands')
+ADDED_KERNELS[('mla_flash.zig', 'turboexl3_ling_mla_flash')] = ('MLX\'s attention_nax less its mask, sinks, log-sum-exp '
+                                                                'and window arms (kernels/mla_flash/body.metal)')
 
 def metal_strings(fn, toks, corpus):
     """(line, kind, value) of every literal in a .zig file that holds Metal"""
@@ -1588,6 +1593,8 @@ SPLIT_ADDED_KERNELS = {
                                 'prep_sc\'s counters, one threadgroup a row (an_norm ++ an_m0 ++ an_cnt)'),
     'turboexl3_ling_addnorm2': 'the same with two members (an_m0 ++ an_m1)',
     'turboexl3_ling_addnorm3': 'the same with three members (an_m0 ++ an_m1 ++ an_m2)',
+    'turboexl3_ling_mla_flash': 'Ling-3.1\'s MLA prompt attention in one launch: MLX 0.32.5\'s attention_nax at qk 192, v 128 '
+                                'less its mask, sinks, log-sum-exp and window arms',
 }
 SPLIT_ADDED_KERNELS['turboexl3_gu8bg'] = ('gu8b (Config.banked_gu8): the banked grouped gate|up with its prepare inside '
                                           '(form 8\'s gu8_1 and rk_line, prep2b\'s arithmetic over the span into threadgroup '
