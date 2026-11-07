@@ -1217,8 +1217,9 @@ ADDED[('root.zig', 'const moeClampedBankedAs')] = 'the re-export of models/deeps
 ADDED[('models/deepseek_v41/api.zig', 'fn moeClampedBankedAs')] = ('moeClampedBanked on the banked Kernels3 of a chosen '
                                                                  'output dtype: dfin3b\'s store the one change')
 ADDED_FILES['fused_test.zig'] = ('GLM-5.3-Flash\'s fused paths held to the chains they replace byte for byte: the row-map '
-                                 'prepare\'s text (CPU), moeClampedRows and moeClampedBankedAs at bf16 (GPU), their timing '
-                                 '(TURBOEXL3_GLM_TIME)')
+                                 'prepare\'s text (CPU), moeClampedRows and moeClampedBankedAs at bf16 (GPU); the plugin\'s '
+                                 'schedules held to the default\'s (the banked texts and GEMV variants, the prompt call '
+                                 'sizes; GPU); their timing (TURBOEXL3_GLM_TIME)')
 for _key in ('const bank_experts', 'fn bfExact', 'fn rootBank', 'fn envList', 'fn drawPairs'):
     CHANGED[('routed_test.zig', _key)] = 'pub: fused_test.zig reuses it'
 

@@ -7,19 +7,31 @@
 //!   call today: `take(x, rows)`, a cast to f32, `moeClamped` at top-1 over [1, S, hidden], a cast of its f32 y to bf16.
 //! - `root.moeClampedBankedAs` at bf16 (the plugin's TURBOEXL3_GLM53F_DEC_BF16): a decode wave over the three slot banks with
 //!   y stored bf16 by the banked down finish. The chain it replaces: `moeClampedBanked` (y f32), then a cast to bf16.
+//! And the plugin's opt-in schedules, each held to the default's bytes:
+//! - the banked decode's schedules (the plugin's TURBOEXL3_GLM53F_BANKED): the grouped texts (`banked_group` 4), hw4b's
+//!   (`banked_m3`) and every grouped GEMV variant on each, selected per call (`moeClampedBankedSelV`: each gate|up
+//!   variant with today's down GEMV, each down variant with today's gate|up GEMV) and configured as the plugin configures
+//!   them (`configure`, a geometry's banked state made after it: y f32, and bf16 from `moeClampedBankedAs`), against the
+//!   served call (`banked_group` 2), over waves of 1 to 64 pairs (a verify's rows drawn routing the same experts);
+//! - a prompt call in calls of 2048, 8192 or 16384 row-slots (the plugin's TURBOEXL3_GLM53F_PF_CALL_ROWS) against its
+//!   4096-row calls, 16384 row-slots in the plugin's slot order, on the default path and on `moeClampedRows`.
 //! - CPU (always): the row-map prepare's text is the prepare's with its one row line swapped for the row map's, and the
 //!   prepare's own text is unchanged by the cut.
 //! - GPU (TURBOEXL3_GPU=1, else skipped): the bytes above, x ~ N(0, 8^2) bf16-exact (about a tenth of the gates and a
 //!   quarter of the ups pass the limit). TURBOEXL3_GLM_ROUTED_N (rates in halfwords a tile, a comma list; default
 //!   32,40,48,56,64,80) narrows both; TURBOEXL3_GLM_ROWS_S (default 17,64,1328,4096) the prompt calls' row-slots,
-//!   TURBOEXL3_GLM_BANKED_ROWS (default 1,2,7,8,16,32,48,64) the decode waves' pairs. Each rate's engines are freed after it.
-//!   Lines: TURBOEXL3_GLM_FUSED_ROWS_BYTES, TURBOEXL3_GLM_FUSED_BANKED_BYTES.
+//!   TURBOEXL3_GLM_BANKED_ROWS (default 1,2,7,8,16,32,48,64; the schedules' 1,2,7,8,16,24,32,48,64) the decode waves'
+//!   pairs. Each rate's engines are freed after it. Lines: TURBOEXL3_GLM_FUSED_ROWS_BYTES, TURBOEXL3_GLM_FUSED_BANKED_BYTES,
+//!   TURBOEXL3_GLM_BANKED_SCHED_BYTES, TURBOEXL3_GLM_PF_CHUNK_BYTES.
 //! - TURBOEXL3_GLM_TIME=1 (with TURBOEXL3_GPU=1, else skipped): each fused path against its chain on the device at the
 //!   served shapes (a 4096-row prompt call over 9 experts of a 100-slot bank; a 4-row verify's 32 pairs), and every
 //!   sc_3.10bpw trunk linear (K6, `root.linear`) at decode rows 1 and 4 and a 16384-row prompt chunk with its count in a
 //!   forward (the trunk's share of a forward: each linear alone, so launch overlap and the forward's other ops are not in
-//!   it); min and median us per call over 8 rounds after 2 warm. It asserts nothing (a microbenchmark steers, the standard
-//!   test decides). Lines: TURBOEXL3_GLM_FUSED_TIME, TURBOEXL3_GLM_TRUNK_TIME, TURBOEXL3_GLM_TRUNK_TOTAL.
+//!   it); min and median us per call over 8 rounds after 2 warm. Also the banked decode's schedules at a verify's 24 and
+//!   32 pairs (the served call, then each texts at each variant for both GEMVs), and a 16384-row prompt bank call (36
+//!   experts' runs of about 455 rows) in calls of 2048 to 16384 rows on each path. It asserts nothing (a microbenchmark
+//!   steers, the standard test decides). Lines: TURBOEXL3_GLM_FUSED_TIME, TURBOEXL3_GLM_TRUNK_TIME,
+//!   TURBOEXL3_GLM_TRUNK_TOTAL, TURBOEXL3_GLM_BANKED_SCHED_TIME, TURBOEXL3_GLM_PF_CHUNK_TIME.
 const std = @import("std");
 const sdk = @import("sdk");
 const mlx = sdk.mlx;
@@ -251,6 +263,271 @@ test "turboexl3 gpu glm53f fused banked: root.moeClampedBankedAs at bf16 is moeC
     try testing.expect(!failed);
 }
 
+/// A decode wave's packed ids (bank << 24 | slot row) over three banks of `routed.bank_experts`: at a multiple of 8 pairs
+/// a verify's rows, 8 distinct experts a row, each pick its previous row's at that position half the time (a verify's
+/// rows route the same experts often: the grouped texts' members), a fresh pick in the base bank 7 times in 10, the ext
+/// 2 and the transient 1; at another count drawn with repeats (`routed.drawPairs`)
+fn drawWave(rnd: std.Random, ids: []u32) void {
+    const n = ids.len;
+    if (n % 8 != 0) {
+        var bank_of: [root.banked_rows_max]u32 = undefined;
+        var slot_of: [root.banked_rows_max]u32 = undefined;
+        routed.drawPairs(rnd, bank_of[0..n], slot_of[0..n]);
+        for (ids, bank_of[0..n], slot_of[0..n]) |*d, b, sl| d.* = (b << 24) | sl;
+        return;
+    }
+    for (0..n / 8) |r| {
+        const row = ids[r * 8 ..][0..8];
+        for (row, 0..) |*d, j| {
+            while (true) {
+                const cand: u32 = if (r > 0 and rnd.boolean()) ids[(r - 1) * 8 + j] else blk: {
+                    const u = rnd.uintLessThan(u32, 10);
+                    const bk: u32 = if (u < 7) 0 else if (u < 9) 1 else 2;
+                    break :blk (bk << 24) | rnd.uintLessThan(u32, routed.bank_experts[bk]);
+                };
+                if (std.mem.indexOfScalar(u32, row[0..j], cand) == null) {
+                    d.* = cand;
+                    break;
+                }
+            }
+        }
+    }
+}
+
+/// The differing words of `got` against `want`, and the non-finite values of `vals` (got's values)
+fn countDiff(got: []const u32, want: []const u32, vals: []const f32) [2]usize {
+    var d: [2]usize = .{ 0, 0 };
+    for (got, want, vals) |u, v, f| {
+        d[0] += @intFromBool(u != v);
+        d[1] += @intFromBool(!std.math.isFinite(f));
+    }
+    return d;
+}
+
+/// A grouped GEMV variant's name for a line (`0` today's)
+fn varName(v: u8) []const u8 {
+    return if (v == 0) "0" else root.group_variants[v].name;
+}
+
+test "turboexl3 gpu glm53f banked schedules: the grouped texts (g4), hw4b's (g4m3) and every grouped GEMV variant on each, selected per call or configured, give the served banked call's rows byte for byte (the bf16 store its rounding), at GLM-5.3-Flash's routed geometry and every SC rate (TURBOEXL3_GPU=1)" {
+    _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    const s = mlx.mlx_default_gpu_stream_new();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    const a = std.heap.page_allocator;
+    var g = try G.init(a, s);
+    defer g.deinit();
+    const saved = root.config.get().*;
+    defer root.configure(saved) catch unreachable;
+    var nbuf: [8]u32 = undefined;
+    const rates = routed.envList("TURBOEXL3_GLM_ROUTED_N", &routed.rates_n, &nbuf);
+    var rbuf: [16]u32 = undefined;
+    const pair_counts = routed.envList("TURBOEXL3_GLM_BANKED_ROWS", &.{ 1, 2, 7, 8, 16, 24, 32, 48, 64 }, &rbuf);
+    const n_var = root.group_variants.len;
+    // the plugin's TURBOEXL3_GLM53F_BANKED as it configures turboexl3: each texts, a variant pair of each GEMV
+    const Configured = struct { m3: bool, gu: []const u8, dn: []const u8 };
+    const configured = [_]Configured{ .{ .m3 = false, .gu = "pf", .dn = "xh" }, .{ .m3 = true, .gu = "xh", .dn = "pf" } };
+    var failed = false;
+    var checked: usize = 0;
+    const max_w = root.banked_rows_max * hidden;
+    const want_buf = try a.alloc(f32, max_w);
+    defer a.free(want_buf);
+    const got_buf = try a.alloc(f32, max_w);
+    defer a.free(got_buf);
+    for (rates) |n| {
+        defer _ = mlx.mlx_clear_cache();
+        defer root.releaseEngines();
+        const rate = format.Rate.fromN(n) orelse return error.Exl3RateUnsupported;
+        const mark = g.mark();
+        defer g.resetTo(mark);
+        var prng = std.Random.DefaultPrng.init(0x61FD3 ^ @as(u64, n));
+        const rnd = prng.random();
+        var hb: [3]ref.Bank = undefined;
+        var made: usize = 0;
+        defer for (hb[0..made]) |*b| b.deinit(a);
+        for (&hb, routed.bank_experts) |*b, e| {
+            b.* = try ref.synthBank(a, rnd, e, hidden, inter, rate);
+            made += 1;
+        }
+        var rb: [3]root.Bank = undefined;
+        for (&hb, &rb) |*b, *r| r.* = try routed.rootBank(&g, b, .int16);
+        // each case's inputs and the served call's rows (the default configuration: banked_group 2), kept to the rate's end
+        const Case = struct { pairs: u32, x: mlx.mlx_array, ids: mlx.mlx_array, want: mlx.mlx_array };
+        var cases: [16]Case = undefined;
+        var nc: usize = 0;
+        for (pair_counts) |pairs| {
+            if (pairs == 0 or pairs > root.banked_rows_max or nc == cases.len) continue;
+            const xh = try a.alloc(f32, pairs * hidden);
+            defer a.free(xh);
+            for (xh) |*v| v.* = routed.bfExact(sigma * rnd.floatNorm(f32));
+            var ids: [root.banked_rows_max]u32 = undefined;
+            drawWave(rnd, ids[0..pairs]);
+            const x = try g.astype(try g.hostArray(std.mem.sliceAsBytes(xh), &.{ ci(pairs), ci(hidden) }, .float32), .bfloat16);
+            const ids_a = try g.hostArray(std.mem.sliceAsBytes(ids[0..pairs]), &.{ci(pairs)}, .uint32);
+            const want = try g.adopt(try root.moeClampedBanked(s, x, &rb, ids_a, .mul1, limit));
+            try g.evalAll(&.{ x, ids_a, want });
+            cases[nc] = .{ .pairs = pairs, .x = x, .ids = ids_a, .want = want };
+            nc += 1;
+        }
+        // selected per call: each texts at each gate|up variant (the down GEMV today's) and each down variant (the gate|up
+        // GEMV today's): any pair of them is a composition of the two
+        for (cases[0..nc]) |c| {
+            const w_n = c.pairs * hidden;
+            const want = try bitsOf(&g, c.want, want_buf[0..w_n]);
+            for ([_]root.BankedSel{ .g4, .g4m3 }) |sel| for (0..n_var) |vi| for ([_]bool{ false, true }) |down| {
+                if (down and vi == 0) continue;
+                const m2 = g.mark();
+                defer g.resetTo(m2);
+                const v: u8 = @intCast(vi);
+                const vgu: u8 = if (down) 0 else v;
+                const vdn: u8 = if (down) v else 0;
+                const y = try g.adopt(try root.moeClampedBankedSelV(s, c.x, &rb, c.ids, .mul1, limit, sel, vgu, vdn));
+                const got = try bitsOf(&g, y, got_buf[0..w_n]);
+                const d = countDiff(got, want, got_buf[0..w_n]);
+                const ok = d[0] == 0 and d[1] == 0;
+                checked += w_n;
+                std.debug.print("TURBOEXL3_GLM_BANKED_SCHED_BYTES n={d} pairs={d} route=selected texts={t} gu={s} dn={s} out=f32 differing={d}/{d} nonfinite={d} {s}\n", .{ n, c.pairs, sel, varName(vgu), varName(vdn), d[0], w_n, d[1], if (ok) "PASS" else "FAIL" });
+                if (!ok) failed = true;
+            };
+        }
+        // configured, as the plugin sets it before its first banked call (a geometry's banked state made after it): the
+        // configured call's y at f32 (moeClampedBanked) and at bf16 (moeClampedBankedAs: the served y rounded once)
+        for (configured) |cf| {
+            root.releaseEngines();
+            var cfg = saved;
+            cfg.banked_group = 4;
+            cfg.banked_m3 = cf.m3;
+            cfg.banked_variant_gu = root.groupVariantOf(cf.gu).?;
+            cfg.banked_variant_dn = root.groupVariantOf(cf.dn).?;
+            try root.configure(cfg);
+            defer {
+                root.configure(saved) catch unreachable;
+                root.releaseEngines();
+            }
+            for (cases[0..nc]) |c| {
+                const w_n = c.pairs * hidden;
+                for ([_]mlx.mlx_dtype{ .float32, .bfloat16 }) |dt| {
+                    const m2 = g.mark();
+                    defer g.resetTo(m2);
+                    const want = try bitsOf(&g, if (dt == .float32) c.want else try g.astype(c.want, .bfloat16), want_buf[0..w_n]);
+                    const y = try g.adopt(if (dt == .float32)
+                        try root.moeClampedBanked(s, c.x, &rb, c.ids, .mul1, limit)
+                    else
+                        try root.moeClampedBankedAs(s, c.x, &rb, c.ids, .mul1, limit, .bfloat16));
+                    try testing.expectEqual(dt, mlx.mlx_array_dtype(y));
+                    const got = try bitsOf(&g, y, got_buf[0..w_n]);
+                    const d = countDiff(got, want, got_buf[0..w_n]);
+                    const ok = d[0] == 0 and d[1] == 0;
+                    checked += w_n;
+                    std.debug.print("TURBOEXL3_GLM_BANKED_SCHED_BYTES n={d} pairs={d} route=configured texts={s} gu={s} dn={s} out={s} differing={d}/{d} nonfinite={d} {s}\n", .{ n, c.pairs, if (cf.m3) "g4m3" else "g4", cf.gu, cf.dn, @tagName(dt), d[0], w_n, d[1], if (ok) "PASS" else "FAIL" });
+                    if (!ok) failed = true;
+                }
+            }
+        }
+    }
+    std.debug.print("TURBOEXL3_GLM_BANKED_SCHED_BYTES total_words={d} {s}\n", .{ checked, if (failed) "FAIL" else "PASS" });
+    try testing.expect(!failed);
+}
+
+/// A prompt call's row-slots as the plugin orders them (a stable counting sort by slot): `rows` and `slots` permuted
+fn sortBySlot(a: std.mem.Allocator, rows: []u32, slots: []u32, n_slots: u32) !void {
+    const n = rows.len;
+    const starts = try a.alloc(u32, n_slots + 1);
+    defer a.free(starts);
+    @memset(starts, 0);
+    for (slots) |sl| starts[sl + 1] += 1;
+    for (1..starts.len) |i| starts[i] += starts[i - 1];
+    const r2 = try a.alloc(u32, n);
+    defer a.free(r2);
+    const s2 = try a.alloc(u32, n);
+    defer a.free(s2);
+    for (rows, slots) |r, sl| {
+        r2[starts[sl]] = r;
+        s2[starts[sl]] = sl;
+        starts[sl] += 1;
+    }
+    @memcpy(rows, r2);
+    @memcpy(slots, s2);
+}
+
+/// One prompt call over the row-slots `rows` and `slots` (host values, each at weight 1: `ones_h` at least as long) on
+/// the plugin's default path (`seamChain`) or on `moeClampedRows`, y bf16
+fn chunkCall(g: *G, s: mlx.mlx_stream, x: mlx.mlx_array, bank: root.Bank, rows: []const u32, slots: []const u32, ones_h: []const f32, on_rows: bool) !mlx.mlx_array {
+    const S = rows.len;
+    const ones = try g.hostArray(std.mem.sliceAsBytes(ones_h[0..S]), &.{ci(S)}, .float32);
+    const rows_a = try g.hostArray(std.mem.sliceAsBytes(rows), &.{ci(S)}, .uint32);
+    const inds = try g.hostArray(std.mem.sliceAsBytes(slots), &.{ci(S)}, .uint32);
+    if (on_rows) return g.adopt(try root.moeClampedRows(s, x, rows_a, bank, inds, ones, .mul1, limit, .bfloat16));
+    return seamChain(g, s, x, rows_a, bank, inds, ones, S, .bfloat16);
+}
+
+test "turboexl3 gpu glm53f chunked prompt calls: a prompt call's row-slots in calls of 2048, 8192 or 16384 are its 4096-row calls' byte for byte, on the plugin's default path and on moeClampedRows, at every SC rate (TURBOEXL3_GPU=1)" {
+    _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    const s = mlx.mlx_default_gpu_stream_new();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    const a = std.heap.page_allocator;
+    var g = try G.init(a, s);
+    defer g.deinit();
+    var nbuf: [8]u32 = undefined;
+    const rates = routed.envList("TURBOEXL3_GLM_ROUTED_N", &routed.rates_n, &nbuf);
+    // a 16K prompt's group of 48 experts routes about 22,000 row-slots a bank call
+    const S: usize = 16384;
+    const base_chunk: usize = 4096;
+    const chunks = [_]usize{ 2048, 8192, 16384 };
+    const want_buf = try a.alloc(f32, S * hidden);
+    defer a.free(want_buf);
+    const got_buf = try a.alloc(f32, S * hidden);
+    defer a.free(got_buf);
+    const ones_h = try a.alloc(f32, S);
+    defer a.free(ones_h);
+    @memset(ones_h, 1.0);
+    var failed = false;
+    for (rates) |n| {
+        defer _ = mlx.mlx_clear_cache();
+        defer root.releaseEngines();
+        const rate = format.Rate.fromN(n) orelse return error.Exl3RateUnsupported;
+        const mark = g.mark();
+        defer g.resetTo(mark);
+        var prng = std.Random.DefaultPrng.init(0x61FC4 ^ @as(u64, n));
+        const rnd = prng.random();
+        var bank = try ref.synthBank(a, rnd, prompt_slots, hidden, inter, rate);
+        defer bank.deinit(a);
+        const rb = try routed.rootBank(&g, &bank, .uint16);
+        const xh = try a.alloc(f32, act_rows * hidden);
+        defer a.free(xh);
+        for (xh) |*v| v.* = routed.bfExact(sigma * rnd.floatNorm(f32));
+        const x = try g.astype(try g.hostArray(std.mem.sliceAsBytes(xh), &.{ ci(act_rows), ci(hidden) }, .float32), .bfloat16);
+        try g.evalAll(&.{x});
+        const rows = try a.alloc(u32, S);
+        defer a.free(rows);
+        const slots = try a.alloc(u32, S);
+        defer a.free(slots);
+        drawCall(rnd, rows, slots, prompt_slots, 0);
+        try sortBySlot(a, rows, slots, prompt_slots);
+        for ([_]bool{ false, true }) |on_rows| {
+            // the 4096-row calls' rows (the plugin's default chunk), then each other chunk size's
+            for ([_]usize{base_chunk} ++ chunks) |chunk| {
+                const buf = if (chunk == base_chunk) want_buf else got_buf;
+                var c0: usize = 0;
+                while (c0 < S) : (c0 += chunk) {
+                    const c1 = @min(c0 + chunk, S);
+                    const m2 = g.mark();
+                    defer g.resetTo(m2);
+                    const y = try chunkCall(&g, s, x, rb, rows[c0..c1], slots[c0..c1], ones_h, on_rows);
+                    _ = try bitsOf(&g, y, buf[c0 * hidden .. c1 * hidden]);
+                }
+                if (chunk == base_chunk) continue;
+                const want: []const u32 = @as([*]const u32, @ptrCast(want_buf.ptr))[0 .. S * hidden];
+                const got: []const u32 = @as([*]const u32, @ptrCast(got_buf.ptr))[0 .. S * hidden];
+                const d = countDiff(got, want, got_buf);
+                const ok = d[0] == 0 and d[1] == 0;
+                std.debug.print("TURBOEXL3_GLM_PF_CHUNK_BYTES n={d} S={d} path={s} chunk={d} against={d} differing={d}/{d} nonfinite={d} {s}\n", .{ n, S, if (on_rows) "rows" else "chain", chunk, base_chunk, d[0], S * hidden, d[1], if (ok) "PASS" else "FAIL" });
+                if (!ok) failed = true;
+            }
+        }
+    }
+    try testing.expect(!failed);
+}
+
 fn nowNs() u64 {
     var ts: std.c.timespec = undefined;
     _ = std.c.clock_gettime(.MONOTONIC, &ts);
@@ -373,6 +650,123 @@ test "turboexl3 gpu glm53f fused timing: each fused path against the chain it re
             }
         }.f);
         std.debug.print("TURBOEXL3_GLM_FUSED_TIME path=banked_bf16 n=48 pairs={d} chain_min_us={d:.1} chain_med_us={d:.1} fused_min_us={d:.1} fused_med_us={d:.1}\n", .{ P, chain[0], chain[1], fused[0], fused[1] });
+    }
+}
+
+/// A banked call for the schedule timing: `sel` null the configured (served) call, else `sel`'s texts at variant `v` for
+/// both GEMVs
+const SchedCtx = struct { s: mlx.mlx_stream, x: mlx.mlx_array, banks: *const [3]root.Bank, ids: mlx.mlx_array, sel: ?root.BankedSel, v: u8 };
+
+/// A prompt bank call's row-slots for the chunk timing, on one path, in calls of `chunk` rows
+const ChunkCtx = struct { s: mlx.mlx_stream, x: mlx.mlx_array, bank: root.Bank, rows: []const u32, slots: []const u32, ones: []const f32, on_rows: bool, chunk: usize };
+
+test "turboexl3 gpu glm53f schedule timing: the banked decode's schedules at a verify's waves, and a prompt bank call in calls of 2048 to 16384 rows (TURBOEXL3_GLM_TIME=1)" {
+    _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    _ = std.c.getenv("TURBOEXL3_GLM_TIME") orelse return error.SkipZigTest;
+    const s = mlx.mlx_default_gpu_stream_new();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    const a = std.heap.page_allocator;
+    var g = try G.init(a, s);
+    defer g.deinit();
+    defer _ = mlx.mlx_clear_cache();
+    defer root.releaseEngines();
+    var prng = std.Random.DefaultPrng.init(0x61F5C7);
+    const rnd = prng.random();
+    // K3, the sc_3.10bpw pack's routed layers
+    const n: u32 = 48;
+    const rate = format.Rate.fromN(n) orelse return error.Exl3RateUnsupported;
+    {
+        const mark = g.mark();
+        defer g.resetTo(mark);
+        var hb: [3]ref.Bank = undefined;
+        var made: usize = 0;
+        defer for (hb[0..made]) |*b| b.deinit(a);
+        for (&hb, routed.bank_experts) |*b, e| {
+            b.* = try ref.synthBank(a, rnd, e, hidden, inter, rate);
+            made += 1;
+        }
+        var rb: [3]root.Bank = undefined;
+        for (&hb, &rb) |*b, *r| r.* = try routed.rootBank(&g, b, .int16);
+        // a depth-2 verify's 3 rows and a 4-row verify's (24 and 32 pairs)
+        for ([_]u32{ 24, 32 }) |pairs| {
+            const m2 = g.mark();
+            defer g.resetTo(m2);
+            const xh = try a.alloc(f32, pairs * hidden);
+            defer a.free(xh);
+            for (xh) |*v| v.* = routed.bfExact(sigma * rnd.floatNorm(f32));
+            var ids: [root.banked_rows_max]u32 = undefined;
+            drawWave(rnd, ids[0..pairs]);
+            var c: SchedCtx = .{
+                .s = s,
+                .x = try g.astype(try g.hostArray(std.mem.sliceAsBytes(xh), &.{ ci(pairs), ci(hidden) }, .float32), .bfloat16),
+                .banks = &rb,
+                .ids = try g.hostArray(std.mem.sliceAsBytes(ids[0..pairs]), &.{ci(pairs)}, .uint32),
+                .sel = null,
+                .v = 0,
+            };
+            try g.evalAll(&.{ c.x, c.ids });
+            const f = struct {
+                fn f(gg: *G, cc: SchedCtx) !mlx.mlx_array {
+                    return gg.adopt(if (cc.sel) |sel| try root.moeClampedBankedSelV(cc.s, cc.x, cc.banks, cc.ids, .mul1, limit, sel, cc.v, cc.v) else try root.moeClampedBanked(cc.s, cc.x, cc.banks, cc.ids, .mul1, limit));
+                }
+            }.f;
+            const served = try timeCall(&g, c, f);
+            std.debug.print("TURBOEXL3_GLM_BANKED_SCHED_TIME n={d} pairs={d} texts=served gu=0 dn=0 min_us={d:.1} med_us={d:.1}\n", .{ n, pairs, served[0], served[1] });
+            for ([_]root.BankedSel{ .g4, .g4m3 }) |sel| for (0..root.group_variants.len) |vi| {
+                c.sel = sel;
+                c.v = @intCast(vi);
+                const t = try timeCall(&g, c, f);
+                std.debug.print("TURBOEXL3_GLM_BANKED_SCHED_TIME n={d} pairs={d} texts={t} gu={s} dn={s} min_us={d:.1} med_us={d:.1}\n", .{ n, pairs, sel, varName(c.v), varName(c.v), t[0], t[1] });
+            };
+        }
+    }
+    {
+        const mark = g.mark();
+        defer g.resetTo(mark);
+        var bank = try ref.synthBank(a, rnd, prompt_slots, hidden, inter, rate);
+        defer bank.deinit(a);
+        const rb = try routed.rootBank(&g, &bank, .uint16);
+        const xh = try a.alloc(f32, act_rows * hidden);
+        defer a.free(xh);
+        for (xh) |*v| v.* = routed.bfExact(sigma * rnd.floatNorm(f32));
+        const x = try g.astype(try g.hostArray(std.mem.sliceAsBytes(xh), &.{ ci(act_rows), ci(hidden) }, .float32), .bfloat16);
+        try g.evalAll(&.{x});
+        // a 16K prompt's bank call: 36 experts' runs of about 455 rows, in slot order (the plugin's)
+        const S: usize = 16384;
+        const rows = try a.alloc(u32, S);
+        defer a.free(rows);
+        const slots = try a.alloc(u32, S);
+        defer a.free(slots);
+        for (rows, slots, 0..) |*r, *sl, i| {
+            r.* = rnd.uintLessThan(u32, act_rows);
+            sl.* = @intCast(@min(i / 455, 35) * 2);
+        }
+        const ones_h = try a.alloc(f32, S);
+        defer a.free(ones_h);
+        @memset(ones_h, 1.0);
+        for ([_]bool{ false, true }) |on_rows| for ([_]usize{ 2048, 4096, 8192, 16384 }) |chunk| {
+            const c: ChunkCtx = .{ .s = s, .x = x, .bank = rb, .rows = rows, .slots = slots, .ones = ones_h, .on_rows = on_rows, .chunk = chunk };
+            var t: [8]f64 = undefined;
+            for (0..t.len + 2) |round| {
+                const m = g.mark();
+                defer g.resetTo(m);
+                var outs: [8]mlx.mlx_array = undefined;
+                var no: usize = 0;
+                const t0 = nowNs();
+                var c0: usize = 0;
+                while (c0 < S) : (c0 += c.chunk) {
+                    const c1 = @min(c0 + c.chunk, S);
+                    outs[no] = try chunkCall(&g, c.s, c.x, c.bank, c.rows[c0..c1], c.slots[c0..c1], c.ones, c.on_rows);
+                    no += 1;
+                }
+                try g.evalAll(outs[0..no]);
+                const dt = nowNs() - t0;
+                if (round >= 2) t[round - 2] = @as(f64, @floatFromInt(dt)) / 1e6;
+            }
+            std.mem.sort(f64, &t, {}, std.sort.asc(f64));
+            const flops = 2.0 * 3.0 * @as(f64, @floatFromInt(S)) * @as(f64, @floatFromInt(hidden)) * @as(f64, @floatFromInt(inter));
+            std.debug.print("TURBOEXL3_GLM_PF_CHUNK_TIME n={d} S={d} experts=36 path={s} chunk={d} calls={d} min_ms={d:.2} med_ms={d:.2} tflops={d:.2}\n", .{ n, S, if (on_rows) "rows" else "chain", chunk, (S + chunk - 1) / chunk, t[0], t[t.len / 2], flops / (t[0] * 1e9) });
+        };
     }
 }
 

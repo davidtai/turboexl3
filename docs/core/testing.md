@@ -15,7 +15,7 @@ The library reads no environment, but the tests do. These variables turn on test
 | `TURBOEXL3_BENCH=1` | `bench.zig` | with `TURBOEXL3_GPU=1`: times the form-3 variants of the decode chain against Sushi's chain |
 | `TURBOEXL3_PF_TIME=1`, `TURBOEXL3_DEC_TIME=1` | `prefill_test.zig` | with `TURBOEXL3_GPU=1`: time the prefill and decode chains against Sushi's |
 | `TURBOEXL3_DS_TIME=1` | `deepseek_test.zig` | with `TURBOEXL3_GPU=1`: times DeepSeek-V4.1's clamped routed MoE (K3, K2; decode rows and a 4096-row chunk), its K6 trunk linears and the grouped `wo_a` |
-| `TURBOEXL3_GLM_TIME=1` | `fused_test.zig` | with `TURBOEXL3_GPU=1`: times GLM-5.3-Flash's fused paths (`moeClampedRows`, `moeClampedBankedAs` at bf16) against the chains they replace, and every sc_3.10bpw trunk linear at decode rows 1 and 4 and a 16384-row prompt chunk with its count in a forward |
+| `TURBOEXL3_GLM_TIME=1` | `fused_test.zig` | with `TURBOEXL3_GPU=1`: times GLM-5.3-Flash's fused paths (`moeClampedRows`, `moeClampedBankedAs` at bf16) against the chains they replace, every sc_3.10bpw trunk linear at decode rows 1 and 4 and a 16384-row prompt chunk with its count in a forward, the banked decode's schedules (grouped texts and GEMV variants) at a verify's 24 and 32 pairs, and a 16384-row prompt bank call in calls of 2048 to 16384 rows |
 | `TURBOEXL3_DENSE_TIME=1` | `gpu_test.zig` | with `TURBOEXL3_GPU=1`: times the dense GEMV against the row-slot GEMV and MLX's 8-bit affine matmul |
 | `TURBOEXL3_REAL_SHARD=<file>` | `gpu_test.zig` | with `TURBOEXL3_GPU=1`: runs `linear` on two real trellises of a trunk shard of the full pack |
 | `TURBOEXL3_PERM_FILE=<file>` | `gpu_test.zig` | a CPU-only tool: the column order of the trunk, the EXL3 pack against the affine pack |
@@ -32,7 +32,7 @@ These variables set or narrow the cases of a test group. The comments of each fi
 | `TURBOEXL3_ATTN_ROWS` | `attn_io_test.zig` | the row counts of the attention tests |
 | `TURBOEXL3_GLM_K` | `glm53f_test.zig` | the K values of GLM-5.3-Flash's dense shapes (a comma list) |
 | `TURBOEXL3_GLM_ROUTED_N`, `_ROUTED_ROWS`, `_BANKED_ROWS` | `routed_test.zig` | the routed rates (halfwords per tile), `moeClamped`'s row counts and the banked call's pair counts at GLM-5.3-Flash's routed geometry |
-| `TURBOEXL3_GLM_ROUTED_N`, `_ROWS_S`, `_BANKED_ROWS` | `fused_test.zig` | the routed rates, the prompt calls' row-slots and the decode waves' pairs of the fused paths' byte tests |
+| `TURBOEXL3_GLM_ROUTED_N`, `_ROWS_S`, `_BANKED_ROWS` | `fused_test.zig` | the routed rates (also of the schedules' byte tests), the prompt calls' row-slots and the decode waves' pairs of the fused paths' and the banked schedules' byte tests |
 | `TURBOEXL3_CLAMP_N`, `_ROWS` | `clamped_test.zig` | the rates (halfwords per tile) and row counts of the clamped SwiGLU's test at DeepSeek-V4.1-Flash's geometry |
 
 `python3 tools/check_texts.py <src before the change>` checks a refactor on the host. It fails on any Zig string that
