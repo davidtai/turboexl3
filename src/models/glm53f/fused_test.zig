@@ -17,7 +17,8 @@
 //! - a prompt call in calls of 2048, 8192 or 16384 row-slots (the plugin's TURBOEXL3_GLM53F_PF_CALL_ROWS) against its
 //!   4096-row calls, 16384 row-slots in the plugin's slot order, on the default path and on `moeClampedRows`;
 //! - the same call (4096-row calls) under the routed prefill's bk128, half_rows and both (`Config.pf_bk128`,
-//!   `pf_half_rows`: the plugin's TURBOEXL3_GLM53F_PF_OPTS) against the served options;
+//!   `pf_half_rows`), and the 128-row tile launches' 128-deep stages alone and with bk128 (`pf_t128_bk128`; all the
+//!   plugin's TURBOEXL3_GLM53F_PF_OPTS) against the served options;
 //! - every pg2 candidate tile (`pgemm.candidates`, as the plugin's TURBOEXL3_GLM53F_PG2 names them by code) at every
 //!   trunk linear of `api.zig` (`root.glm53f.trunk`) against the chain (dequantize, MLX's matmul, the finish), word for
 //!   word, bf16 x and y, at 100, 2048, 4100 and 8200 rows where MLX runs its regular kernel.
@@ -36,12 +37,12 @@
 //!   it); min and median us per call over 8 rounds after 2 warm. Also the banked decode's schedules at a verify's 24 and
 //!   32 pairs (the served call, then each texts at each variant for both GEMVs), and a 16384-row prompt bank call (36
 //!   experts' runs of about 455 rows) in calls of 2048 to 16384 rows on each path; that call (and one over a drawn
-//!   routing) under the served options, bk128, half_rows and both, in calls of 4096 and 16384 rows; each pg2 candidate
-//!   tile against the chain at every trunk linear at 2048, 8192 and 16384 rows, and the code each linear gets by pg2u's
-//!   rule (pgemm.zig: at or below the chain at every row count, the fastest at 16384). It asserts nothing (a
-//!   microbenchmark steers, the standard test decides). Lines: TURBOEXL3_GLM_FUSED_TIME, TURBOEXL3_GLM_TRUNK_TIME,
-//!   TURBOEXL3_GLM_TRUNK_TOTAL, TURBOEXL3_GLM_BANKED_SCHED_TIME, TURBOEXL3_GLM_PF_CHUNK_TIME, TURBOEXL3_GLM_PF_OPTS_TIME,
-//!   TURBOEXL3_GLM_PG2_TIME, TURBOEXL3_GLM_PG2_PICK, TURBOEXL3_GLM_PG2_CODES.
+//!   routing) under the served options and each of the plugin's TURBOEXL3_GLM53F_PF_OPTS values, in calls of 4096 and
+//!   16384 rows; each pg2 candidate tile against the chain at every trunk linear at 2048, 8192 and 16384 rows, and the
+//!   code each linear gets by pg2u's rule (pgemm.zig: at or below the chain at every row count, the fastest at 16384). It
+//!   asserts nothing (a microbenchmark steers, the standard test decides). Lines: TURBOEXL3_GLM_FUSED_TIME,
+//!   TURBOEXL3_GLM_TRUNK_TIME, TURBOEXL3_GLM_TRUNK_TOTAL, TURBOEXL3_GLM_BANKED_SCHED_TIME, TURBOEXL3_GLM_PF_CHUNK_TIME,
+//!   TURBOEXL3_GLM_PF_OPTS_TIME, TURBOEXL3_GLM_PG2_TIME, TURBOEXL3_GLM_PG2_PICK, TURBOEXL3_GLM_PG2_CODES.
 const std = @import("std");
 const sdk = @import("sdk");
 const mlx = sdk.mlx;
@@ -1057,11 +1058,12 @@ test "turboexl3 gpu glm53f pg2 timing: each candidate tile against the chain at 
     std.debug.print("TURBOEXL3_GLM_PG2_CODES codes={s} forward_ms_cut={d:.2} (one code a linear in root.glm53f.trunk's order; each linear alone at 16384 rows times its count in a forward)\n", .{ &codes, saved_ms });
 }
 
-/// The routed prefill's opt-in options (the plugin's TURBOEXL3_GLM53F_PF_OPTS): `bk128`, `half_rows`, both
-const PfOpts = struct { name: []const u8, bk128: bool, half_rows: bool };
-const pf_opts = [_]PfOpts{ .{ .name = "bk128", .bk128 = true, .half_rows = false }, .{ .name = "hr", .bk128 = false, .half_rows = true }, .{ .name = "bk128.hr", .bk128 = true, .half_rows = true } };
+/// The routed prefill's opt-in options (the plugin's TURBOEXL3_GLM53F_PF_OPTS): `bk128`, `half_rows`, both; the 128-row
+/// tile launches' 128-deep stages (`t128_bk128`, `tk`) alone and with `bk128`
+const PfOpts = struct { name: []const u8, bk128: bool, half_rows: bool, t128_bk128: bool = false };
+const pf_opts = [_]PfOpts{ .{ .name = "bk128", .bk128 = true, .half_rows = false }, .{ .name = "hr", .bk128 = false, .half_rows = true }, .{ .name = "bk128.hr", .bk128 = true, .half_rows = true }, .{ .name = "tk", .bk128 = false, .half_rows = false, .t128_bk128 = true }, .{ .name = "bk128.tk", .bk128 = true, .half_rows = false, .t128_bk128 = true } };
 /// The served options (null), then each of `pf_opts`
-const pf_sets = [_]?PfOpts{ null, pf_opts[0], pf_opts[1], pf_opts[2] };
+const pf_sets = [_]?PfOpts{ null, pf_opts[0], pf_opts[1], pf_opts[2], pf_opts[3], pf_opts[4] };
 
 /// `configure` with the routed prefill options `o` (null: the served ones), every engine released first so the next
 /// call's prefill engine is made under them
@@ -1070,6 +1072,7 @@ fn pfOptsConfigure(saved: root.config.Config, o: ?PfOpts) !void {
     var c = saved;
     c.pf_bk128 = if (o) |v| v.bk128 else saved.pf_bk128;
     c.pf_half_rows = if (o) |v| v.half_rows else saved.pf_half_rows;
+    c.pf_t128_bk128 = if (o) |v| v.t128_bk128 else saved.pf_t128_bk128;
     try root.configure(c);
 }
 

@@ -26,6 +26,9 @@ pub const Config = struct {
     /// A routed prefill simdgroup whose rows end within its first 16 multiplies only that fragment row
     /// (`prefill.Options.half_rows`). The same bytes.
     pf_half_rows: bool = false,
+    /// Both routed prefill GEMMs' 128-row tile launches in 128-deep K stages, the mixed launches at their own depth
+    /// (`prefill.Options.t128_bk128`; with `pf_t128`). The same bytes.
+    pf_t128_bk128: bool = false,
     /// Routed prefill rows on the fused GEMM chain; false refuses them (`error.Exl3EngineNotImplemented`).
     prefill: bool = true,
     /// The device passes MLX's NAX gate (an M5-class GPU and macOS 26.2 or later), the consumer's to say. False keeps

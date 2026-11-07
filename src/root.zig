@@ -691,6 +691,7 @@ fn pfOptions() prefill.Options {
     o.t128 = config.get().pf_t128;
     o.bk128 = config.get().pf_bk128;
     o.half_rows = config.get().pf_half_rows;
+    o.t128_bk128 = config.get().pf_t128_bk128;
     return o;
 }
 
@@ -723,10 +724,12 @@ fn prefillFor(geo: prefill.Geometry) !*prefill.Prefill {
     // the 128-row tiles: their remainder tiles ride the mixed launch (froute's route at split 1, the strided mid and finish),
     // the 128-row tiles the bm-128 body beside bm 64's
     if (o.small != .mixed or o.split != 1 or !o.froute or o.aux != 0 or o.bm != 64) o.t128 = false;
+    // the 128-row tile launches' 128-deep stages: where those launches run, within 32 KB
+    if (!o.t128 or o.stageBytes(128) > 32768) o.t128_bk128 = false;
     pf_cache.get().*[i] = try prefill.Prefill.init(geo, o);
     if (!pf_logged.get().*) {
         pf_logged.get().* = true;
-        std.debug.print("[turboexl3] prefill engaged: fused EXL3 GEMM chain (bm={d} dbuf={} unroll={} fragb={} intr={} sintr={} defer={} split={d} small={s} down_bk={d} down_ncb={d} froute={} aux={d} alay={d} t128={})\n", .{ o.bm, o.dbuf, o.unroll, o.fragb, o.intr, o.sintr, o.defer_affine, o.split, @tagName(o.small), o.downStage(), o.ncb, o.froute, o.aux, o.alay, o.t128 });
+        std.debug.print("[turboexl3] prefill engaged: fused EXL3 GEMM chain (bm={d} dbuf={} unroll={} fragb={} intr={} sintr={} defer={} split={d} small={s} down_bk={d} down_ncb={d} froute={} aux={d} alay={d} t128={} t128_bk128={})\n", .{ o.bm, o.dbuf, o.unroll, o.fragb, o.intr, o.sintr, o.defer_affine, o.split, @tagName(o.small), o.downStage(), o.ncb, o.froute, o.aux, o.alay, o.t128, o.t128_bk128 });
     }
     return &pf_cache.get().*[i].?;
 }
