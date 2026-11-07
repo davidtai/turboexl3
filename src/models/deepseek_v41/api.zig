@@ -171,6 +171,24 @@ pub const BankedSel = banked.Banked.BankedSel;
 pub const group_variants = banked.group_variants;
 pub const groupVariantOf = banked.groupVariantOf;
 
+/// `moeClampedBanked` with y in `out_dtype` (bf16, f16 or f32): the same launches on `kernelsFor`'s kernels of that output
+/// dtype, which change dfin3b's store only (OUT_T: the one f32 sum rounded once to `out_dtype`), so y is the f32 call's y
+/// rounded to `out_dtype` as its astype rounds it, bit for bit. A caller that rounds the f32 y (an expert streamer's bf16
+/// joins: GLM-5.3-Flash's turboexl3_glm53f) drops its cast launch. The configured texts and GEMV variants.
+pub fn moeClampedBankedAs(s: mlx.mlx_stream, x: mlx.mlx_array, banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, limit: c_int, out_dtype: mlx.mlx_dtype) !mlx.mlx_array {
+    if (out_dtype != .bfloat16 and out_dtype != .float16 and out_dtype != .float32) return error.BadExl3Dtype;
+    const c = try bankedCall(banks, ids, dec, limit);
+    const xs = mlx.getShape(x);
+    if (xs.len != 2 or xs[0] != @as(c_int, @intCast(c.rows)) or xs[1] != @as(c_int, @intCast(c.geo.hidden))) return error.BadExl3Shape;
+    const xd = mlx.mlx_array_dtype(x);
+    if (xd != .bfloat16 and xd != .float32 and xd != .float16) return error.BadExl3Dtype;
+    const k3 = try kernelsFor(c.geo, out_dtype);
+    const b = try banked.forKernels(k3);
+    const hd = try b.bankedGateUpSelV(k3, s, x, ids, &c.kb, c.rows, .configured, config.get().banked_variant_gu);
+    defer for (hd) |a| freeArr(a);
+    return b.bankedDownSelV(k3, s, hd[0], hd[1], ids, &c.kb, c.rows, .configured, config.get().banked_variant_dn);
+}
+
 /// `moeClampedBanked` on `sel`'s texts at the configured variants (hw4b's check mode's calls, the tests).
 pub fn moeClampedBankedSel(s: mlx.mlx_stream, x: mlx.mlx_array, banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, limit: c_int, sel: BankedSel) !mlx.mlx_array {
     return moeClampedBankedSelV(s, x, banks, ids, dec, limit, sel, config.get().banked_variant_gu, config.get().banked_variant_dn);

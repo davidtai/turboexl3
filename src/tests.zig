@@ -41,6 +41,7 @@ comptime {
     _ = @import("models/ricursive/ricursive_test.zig");
     _ = @import("models/glm53f/glm53f_test.zig");
     _ = @import("models/glm53f/routed_test.zig");
+    _ = @import("models/glm53f/fused_test.zig");
 }
 
 

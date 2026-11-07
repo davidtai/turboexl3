@@ -35,10 +35,18 @@ What it runs on turboexl3:
 | the trunk, the head, the MTP layer's linears, the vision merger | `linear` | the core's dense linear |
 | the vision blocks' biased linears | `linearBias` | the core's dense linear, then the bias |
 
-GLM-5.3-Flash has no kernel of its own. Its tests (`src/models/glm53f/`) hold every shape and rate in the table above:
-`glm53f_test.zig` holds each dense shape at each of its K against `format.project`, and `routed_test.zig` holds the
-routed experts (`moeClamped`, at every routed rate) against the clamped reference and the banked decode against
-`moeClamped`, byte for byte. [Tests](../../core/testing.md) gives their variables.
+The plugin's opt-in fused paths (each off by default, each byte for byte the chain it replaces, `fused_test.zig`):
+
+| part of the model | entry point | what it replaces | the plugin's switch |
+|---|---|---|---|
+| routed experts in a prompt call over a slot bank | `moeClampedRows` | the call's gather (`take`), its cast to f32 and the f32 output's cast to bf16 around `moeClamped` at top-1: the chain's prepare reads each row-slot's x row through a row map (`turboexl3_pf_prep_r`, `prefill.text_prep_rows`) and its finish stores bf16 | `TURBOEXL3_GLM53F_PF_ROWS=1` |
+| routed experts over the slot banks at decode rows | `moeClampedBankedAs` (bf16) | the f32 output's cast to bf16 after `moeClampedBanked`: the banked down finish stores bf16 | `TURBOEXL3_GLM53F_DEC_BF16=1` |
+
+GLM-5.3-Flash has one kernel of its own, the row-map prepare (a composition of the core prepare's pieces). Its tests
+(`src/models/glm53f/`) hold every shape and rate in the tables above: `glm53f_test.zig` holds each dense shape at each of
+its K against `format.project`, `routed_test.zig` holds the routed experts (`moeClamped`, at every routed rate) against
+the clamped reference and the banked decode against `moeClamped`, byte for byte, and `fused_test.zig` holds each fused
+path to the chain it replaces, byte for byte. [Tests](../../core/testing.md) gives their variables.
 
 turboexl3 compiles each geometry's kernels once and keeps them for the process, in fixed caches (`src/root.zig`:
 `dense_cache_slots` 64, `engine_cache_slots` 16 for the decode chains, `prefill_cache_slots` 16). One served pack

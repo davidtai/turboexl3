@@ -1201,6 +1201,26 @@ ADDED_FILES['models/deepseek_v41/api.zig'] = 'DeepSeek-V4.1\'s entry points, out
 ADDED_FILES['chains_test.zig'] = ('byte tests of the core paths no other test pinned: pg2 against dequantize + matmul + '
                                   'finish, the pieces\' finish against the one-call finish, the unfused chain against the '
                                   'reference')
+# GLM-5.3-Flash's fused paths (glm53f-fused): the routed prefill chain over gathered rows (root.moeClampedRows: the prepare
+# with a row map, turboexl3_pf_prep_r) and the banked decode with its y stored in a chosen dtype (moeClampedBankedAs)
+ADDED_KERNELS[('prefill.zig', 'turboexl3_pf_prep_r')] = ('the prepare with its row line swapped for the row map\'s '
+                                                        '(text_prep_rows: prep_1, prep_rmap, prep_2): each slot\'s x row '
+                                                        'read through rmap, an expert streamer\'s prompt rows gathered '
+                                                        'in the prepare')
+ADDED[('prefill.zig', 'const prep_rows_in')] = 'the row-map prepare\'s operand names (the prepare\'s, then rmap)'
+CHANGED[('prefill.zig', 'const Prefill')] += ('; prep_r (made on first use, prepRowsKernel), prepWith / moeWith / moeT128With: '
+                                              'the chain with each slot\'s x row from a row map (prep / moe / moeT128 call '
+                                              'them with none, the same launches)')
+ADDED[('root.zig', 'fn moeClampedRows')] = ('moeClamped\'s prefill chain at top-1 over gathered rows (the row-map prepare), '
+                                          'y in a chosen dtype: GLM-5.3-Flash\'s prompt calls')
+ADDED[('root.zig', 'const moeClampedBankedAs')] = 'the re-export of models/deepseek_v41/api.zig\'s moeClampedBankedAs'
+ADDED[('models/deepseek_v41/api.zig', 'fn moeClampedBankedAs')] = ('moeClampedBanked on the banked Kernels3 of a chosen '
+                                                                 'output dtype: dfin3b\'s store the one change')
+ADDED_FILES['fused_test.zig'] = ('GLM-5.3-Flash\'s fused paths held to the chains they replace byte for byte: the row-map '
+                                 'prepare\'s text (CPU), moeClampedRows and moeClampedBankedAs at bf16 (GPU), their timing '
+                                 '(TURBOEXL3_GLM_TIME)')
+for _key in ('const bank_experts', 'fn bfExact', 'fn rootBank', 'fn envList', 'fn drawPairs'):
+    CHANGED[('routed_test.zig', _key)] = 'pub: fused_test.zig reuses it'
 
 
 def metal_strings(fn, toks, corpus):

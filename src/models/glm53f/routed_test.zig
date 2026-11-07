@@ -40,14 +40,14 @@ const sigma: f32 = 8;
 /// Every routed rate of the four SC packs, in halfwords a 256-weight tile (16 K): K2, K2.5, K3, K3.5, K4, K5.
 pub const rates_n = [_]u32{ 32, 40, 48, 56, 64, 80 };
 /// The banked parity test's slot banks: base, ext, transient.
-const bank_experts = [3]u32{ 20, 12, 8 };
+pub const bank_experts = [3]u32{ 20, 12, 8 };
 
 fn ci(x: anytype) c_int {
     return @intCast(x);
 }
 
 /// `v` rounded to bf16 (as MLX rounds), back in f32: a value both sides read alike.
-fn bfExact(v: f32) f32 {
+pub fn bfExact(v: f32) f32 {
     return @bitCast(@as(u32, support.bf16Bits(v)) << 16);
 }
 
@@ -79,7 +79,7 @@ test "turboexl3 glm53f routed: GLM-5.3-Flash's routed geometry (4096 x 2048, 288
 
 /// The bank as `root` takes it: each projection's arrays from the host bank, its trellis in `td` (U16 for `moeClamped`,
 /// I16 as an expert streamer's code arrays come: the same words).
-fn rootBank(g: *G, b: *const ref.Bank, td: mlx.mlx_dtype) !root.Bank {
+pub fn rootBank(g: *G, b: *const ref.Bank, td: mlx.mlx_dtype) !root.Bank {
     const E = ci(b.experts);
     const ht = ci(b.hidden / 16);
     const it = ci(b.inter / 16);
@@ -121,7 +121,7 @@ fn route(a: std.mem.Allocator, rnd: std.Random, rows: u32, n_experts: u32, topk:
 }
 
 /// A comma list of numbers from the environment (at most buf.len of them), else `default`.
-fn envList(name: [*:0]const u8, default: []const u32, buf: []u32) []const u32 {
+pub fn envList(name: [*:0]const u8, default: []const u32, buf: []u32) []const u32 {
     const v = std.c.getenv(name) orelse return default;
     var n: usize = 0;
     var it = std.mem.splitScalar(u8, std.mem.span(v), ',');
@@ -225,7 +225,7 @@ test "turboexl3 gpu glm53f routed: root.moeClamped at GLM-5.3-Flash's routed geo
 
 /// A call's pairs: row-slot r on bank `bank[r]` at slot row `slot[r]`, drawn over the banks; from 4 rows row-slot 1
 /// repeats row-slot 0's id and row-slot 2 takes row-slot 0's slot row in the next bank.
-fn drawPairs(rnd: std.Random, bank: []u32, slot: []u32) void {
+pub fn drawPairs(rnd: std.Random, bank: []u32, slot: []u32) void {
     for (bank, slot) |*b, *sl| {
         b.* = rnd.uintLessThan(u32, 3);
         sl.* = rnd.uintLessThan(u32, bank_experts[b.*]);

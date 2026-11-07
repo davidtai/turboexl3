@@ -240,13 +240,15 @@ decode among the row-slots of one id (`Config.banked_group`). `Banked` keeps the
 - **Used by:** DeepSeek-V4.1: launch 5, the last, of `root.moeClampedBanked` (DeepSeek-V4.1's streamed routed experts:
   each row-slot one routed pair at top-1 over an expert streamer's three slot banks, base, ext and transient; 1 to
   `banked_rows_max` (64) row-slots), in its down half. Served by default: `Config.banked_group` 2 runs the banked texts.
+  GLM-5.3-Flash: `root.moeClampedBankedAs` at bf16 (turboexl3_glm53f's opt-in `TURBOEXL3_GLM53F_DEC_BF16=1`) runs it on
+  the banked `Kernels3` of out_dtype bf16, its store the one change.
 - **Shapes and dtypes:** zd f32 [KS_dn, rows, hidden] (`turboexl3_down3b`'s planes); slots the ids u32 or i32 [rows],
   each packed (bank << 24 | slot row); scores f32 [64] (`bankedOnes`: every score 1); down_svh0/1/2 f16 [E_b, hidden];
   hsx f32 [rows, inter/128] (`turboexl3_fin7cb`'s hs). Out: y f32 [rows, hidden], each pair's expert output at weight 1
   (the caller weighs and sums them).
 - **Grid and threadgroup:** `((hidden/128)·128, rows, 1)` / `(128, 1, 1)`.
 - **Template args:** HID (hidden), TOPK (1), RKC (rows), KS (KS_dn), OUT_T (f32: `root` builds the banked `Kernels3` at
-  out_dtype f32), DEFER (1 for MUL1), NBI (inter/128). KS_dn is the down's K slices, the largest of 4, 2, 1 with
+  out_dtype f32; `moeClampedBankedAs` at its out dtype, bf16 for GLM-5.3-Flash), DEFER (1 for MUL1), NBI (inter/128). KS_dn is the down's K slices, the largest of 4, 2, 1 with
   (inter/16) % (4·KS) = 0 and at least 2 tiles per part.
 - **Replaces:** `turboexl3_dfin3` (the top-1 down finish: form 9 runs `dfin3` below top-k 4), launched once per bank by
   each bank's own `moeClamped` call: one launch over the three banks.
@@ -261,7 +263,9 @@ decode among the row-slots of one id (`Config.banked_group`). `Banked` keeps the
   `src/models/deepseek_v41/banked_test.zig` "turboexl3 gpu banked decode: every pair of moeClampedBanked over three
   banks is moeClamped's ..." (GPU: every pair byte for byte against `moeClamped` at rows 1, 2, 6, 7, 16, 36 and 48, x
   bf16 and f32, trellis U16 and I16, at DeepSeek-V4.1's routed geometry (hidden 5120, width 2304, limit 10, MUL1) over
-  synthetic banks of 20, 12 and 8 experts, K3 and K2 (n 48, 32); sampled token sums to the reference by 5e-3).
+  synthetic banks of 20, 12 and 8 experts, K3 and K2 (n 48, 32); sampled token sums to the reference by 5e-3);
+  `src/models/glm53f/fused_test.zig` "turboexl3 gpu glm53f fused banked: root.moeClampedBankedAs at bf16 is ..." (GPU,
+  bytes: its bf16 store against the f32 call cast to bf16, GLM-5.3-Flash's geometry, every SC rate, 1 to 64 pairs).
 
 ### `turboexl3_dfin3bg`
 
