@@ -390,7 +390,7 @@ rounded to T again: the MoE block's astype and add.
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/ling/tail.zig:49` (`fn kernelOf`) |
+| made at | `src/models/ling/tail.zig:68` (`fn kernelOf`) |
 | inputs | `H`, `Y`, `WT`, `XS`, `W`, `eps` |
 | outputs | `H_NEW`, `HN` |
 | source | `text` = `ling:tail/tail_1` ++ `ling:tail/tail_delta` ++ `ling:tail/tail_2` (2241 B, `ebc2e07ccb65`) |
@@ -417,6 +417,41 @@ rounded to T again: the MoE block's astype and add.
 - **Pinned by:** `src/models/ling/tail_test.zig` "turboexl3 gpu ling tail: moeTail gives the served chain's words ..."
   (GPU, words: the residual and the normed rows at rows 1 to 8, limits 0 and 10, the joined and flat rows, planted
   signed zeros).
+
+### `turboexl3_ling_moe_tail_parts`
+
+<!-- kernel-facts: turboexl3_ling_moe_tail_parts -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/ling/tail.zig:77` (`fn partsKernelOf`) |
+| inputs | `H`, `s0`, `s1`, `s2`, `s3`, `s4`, `s5`, `s6`, `s7`, `loc`, `WT`, `XS`, `W`, `eps` |
+| outputs | `H_NEW`, `HN` |
+| source | `text_parts` = `ling:tail/tail_1` ++ `ling:tail/tail_delta_parts` ++ `ling:tail/tail_2` (2471 B, `2a1a6a50ab95`) |
+| header | `pick` = `ling:tail/pick` (603 B, `f06a112bd2f9`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** Ling-3.1-flash: `root.ling.moeTailParts`, a MoE layer's end at decode and verify rows (1 to 8) read
+  straight from its routed call's waves; the outside plugin's opt-in on top of the tail (turboexl3_ling's
+  `MLX_SERVE_LING_ROUTED_JOIN=1` with `MLX_SERVE_LING_MOE_TAIL=1`).
+- **Shapes and dtypes:** `turboexl3_ling_moe_tail`'s, with Y replaced by s0..s7 f32 [r_i, D] (1 to 8 sources: the call's
+  device wave and its miss parts in the join's order, each pair's expert output at weight 1; an unused slot aliases s0)
+  and loc int32 [rows, K, 2] (each routed pair's (source, row), its last carrier in the join; every entry names a bound
+  source and one of its rows, which the launch does not check).
+- **Grid and threadgroup:** `turboexl3_ling_moe_tail`'s: `(D / 4 · rows, 1, 1)` / `(D / 4, 1, 1)`.
+- **Template args:** T, D, TN, K, as `turboexl3_ling_moe_tail`'s.
+- **Replaces:** the streamer's join of a decode call (experts.zig `join`: MLX's concatenate, one copy per wave, then its
+  take at each pair's last carrier) and `turboexl3_ling_moe_tail` over it: with no miss part the take and the tail
+  (a concatenate of one array is the array), 2 launches with 1; with m miss parts the concatenate's 1 + m copies, the
+  take and the tail, 3 + m launches with 1.
+- **Bits:** `turboexl3_ling_moe_tail`'s words over the join: `tail_delta_parts` is `tail_delta` with Y's address
+  `(r · K + k) · D + c` replaced by the picked source's `loc row · D + c`. The join only moves f32 words (the
+  concatenate's copies and the take's gather), so each product reads the same value.
+- **Pinned by:** `src/models/ling/tail_test.zig` "turboexl3 gpu ling tail parts: moeTailParts reads each pair's row in
+  place ..." (GPU, words: the residual and the normed rows against the served chain and against `moeTail` over the
+  streamer's join, at rows 1 to 8, limits 0 and 10, one to three sources and all eight, the later miss part's row last
+  where two carry a pair; the refusals).
 
 ## `src/models/ling/addnorm.zig`
 

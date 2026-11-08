@@ -1248,6 +1248,24 @@ ADDED_FILES['models/ling/tail_test.zig'] = ('moeTail against the chain it replac
 ADDED[('models/ling/api.zig', 'const tail')] = 'tail.zig, a MoE layer\'s tail at decode rows in one launch'
 ADDED[('models/ling/api.zig', 'const moeTail')] = 'the re-export of tail.zig\'s moeTail'
 CHANGED[('models/ling/api.zig', 'const shared_state')] = 'registers the module state of the files the change added'
+# E4: the decode join folded into the MoE tail (turboexl3_ling_moe_tail_parts; turboexl3_ling's MLX_SERVE_LING_ROUTED_JOIN)
+ADDED[('models/ling/tail.zig', 'fn moeTailParts')] = ('moeTail over the routed call\'s unjoined outputs: each pair\'s row '
+                                                     'read in place at its (source, row), the streamer\'s join folded in')
+ADDED[('models/ling/tail.zig', 'const tail_delta_parts')] = 'the delta over the unjoined outputs (kernels/tail/tail_delta_parts)'
+ADDED[('models/ling/tail.zig', 'const pick')] = 'the parts launch\'s header: the source choice (kernels/tail/pick)'
+ADDED[('models/ling/tail.zig', 'const text_parts')] = 'tail_1 ++ tail_delta_parts ++ tail_2'
+ADDED[('models/ling/tail.zig', 'const max_sources')] = 'the sources a parts launch binds (8)'
+ADDED[('models/ling/tail.zig', 'const parts_in_names')] = 'the parts launch\'s operand names'
+ADDED[('models/ling/tail.zig', 'comptime #0')] = 'parts_in_names names max_sources sources'
+ADDED[('models/ling/tail.zig', 'const parts_kernel')] = 'the parts launch\'s kernel, made at its first call'
+ADDED[('models/ling/tail.zig', 'fn partsKernelOf')] = 'makes turboexl3_ling_moe_tail_parts'
+ADDED[('models/ling/tail.zig', 'const Call')] = 'a tail call\'s checked shape, both entries\''
+ADDED[('models/ling/tail.zig', 'fn callOf')] = 'both entries\' first checks (moeTail\'s, moved)'
+ADDED[('models/ling/tail.zig', 'fn checkRest')] = 'both entries\' last checks (moeTail\'s, moved)'
+ADDED[('models/ling/tail.zig', 'fn launch')] = 'the add_norm config and the launch (moeTail\'s, moved)'
+CHANGED[('models/ling/tail.zig', 'fn moeTail')] = 'its checks and launch moved to callOf, checkRest and launch, the same order and config'
+CHANGED[('models/ling/tail.zig', 'const shared_state')] = 'adds parts_kernel'
+ADDED[('models/ling/api.zig', 'const moeTailParts')] = 'the re-export of tail.zig\'s moeTailParts'
 # Ling-3.1-flash's MoE router at decode rows with the read-ahead predictor's scores (turboexl3_ling_router_*)
 ADDED_FILES['models/ling/router.zig'] = ('Ling-3.1\'s MoE router at decode rows 1 to 8 in two launches (routerLogits: MLX\'s '
                                          'one-row gemv_t for the logits beside its gemv / gemv_wide for the read-ahead '
@@ -1609,6 +1627,10 @@ SPLIT_ADDED_KERNELS['turboexl3_ling_moe_tail'] = ('Ling-3.1\'s MoE tail at decod
                                                   'add_norm (the plain arm) with its delta the routed sum over the call\'s '
                                                   'joined rows in the combine\'s statements, rounded to T, plus the shared '
                                                   'expert (tail_1 ++ tail_delta ++ tail_2); ling.moeTail')
+SPLIT_ADDED_KERNELS['turboexl3_ling_moe_tail_parts'] = ('the MoE tail over the routed call\'s unjoined outputs '
+                                                        '(models/ling/tail.zig): tail_1 ++ tail_delta_parts ++ tail_2, '
+                                                        'each pair\'s row read in place at its (source, row), header '
+                                                        'pick; ling.moeTailParts')
 SPLIT_ADDED_KERNELS['turboexl3_ling_router_logits'] = ('Ling-3.1\'s router logits at decode rows (models/ling/router.zig): '
                                                        'MLX\'s one-row gemv over the loader\'s column-major table a row '
                                                        '(router/head ++ logits_1 ++ logits_w ++ logits_2 ++ close)')

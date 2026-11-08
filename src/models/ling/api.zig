@@ -153,6 +153,9 @@ fn act(limit: c_int) !ds.BankedAct {
 /// of the served chain (the source's sum, the block's astype and add, mlx-serve's add_norm).
 pub const tail = @import("tail.zig");
 pub const moeTail = tail.moeTail;
+/// `moeTail` over the routed call's unjoined outputs (`tail.zig`): each pair's row read in place at its (source, row),
+/// the decode join folded in; the words of `moeTail` over the join.
+pub const moeTailParts = tail.moeTailParts;
 
 /// This file's module state (`Global`): what a host that shares its units' state registers.
 pub const shared_state = .{ shared.shared_state, pair.shared_state, kdaproj.shared_state, addnorm.shared_state, router.shared_state, tail.shared_state, mla_latent.shared_state, mla_flash.shared_state };
