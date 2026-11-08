@@ -168,6 +168,10 @@ const down3g_3 = @embedFile("kernels/banked/down3g_3.metal");
 const gu3g_3m3 = @embedFile("kernels/banked/gu3g_3m3.metal");
 const down3g_3m3 = @embedFile("kernels/banked/down3g_3m3.metal");
 
+/// wave3 (`Config.banked_wave3`): the whole grouped call in three launches, each finish run by its unit's last arriving
+/// GEMV threadgroup (`Banked.wave3`, `bankedMoeSelV`)
+const banked_wave3 = @import("banked_wave3.zig");
+
 /// The most row-slots a banked call takes (an expert streamer's route: 8 verify rows of top-6 = 48 pairs)
 pub const banked_rows_max: usize = 64;
 /// The banked texts' kernels (`text_prep2b` .. `text_dfin3b`)
@@ -202,6 +206,10 @@ pub const Banked = struct {
     banked_m3: bool = false,
     banked_gm3: ?BankedKernels = null,
     cfgbgm3: [banked_rows_max + 1]?Cfg = @splat(null),
+    /// wave3 (`Config.banked_wave3`, read at the geometry's first whole call; banked_wave3.zig): the whole call
+    /// (`bankedMoeSelV`) on the grouped texts as three launches, its kernels and configs made on first use. The same hd,
+    /// hs and y.
+    wave3: banked_wave3.Wave3 = .{},
     /// hw2: each grouped GEMV variant's gate|up and down kernels on today's grouped texts (`banked_gv`) and on hw4b's
     /// (`banked_gvm3`) (`group_variants`; `bankedGateUpSelV`, `bankedDownSelV`), made on first use (variant 0's are
     /// `banked_g`'s and `banked_gm3`'s). The configs are their texts' (`cfgbg`, `cfgbgm3`).
@@ -220,6 +228,7 @@ pub const Banked = struct {
     }
 
     pub fn deinit(self: *Banked) void {
+        self.wave3.deinit();
         for ([_]*[banked_rows_max + 1]?Cfg{ &self.cfgb, &self.cfgbg, &self.cfgbgm3 }) |tbl| for (tbl) |*c| if (c.*) |cc| {
             inline for (.{ cc.prep_h, cc.gu, cc.fin, cc.down, cc.dfin, cc.fin7, cc.dfin7, cc.gu8 }) |k| _ = mlx.mlx_fast_metal_kernel_config_free(k);
             c.* = null;
@@ -493,6 +502,34 @@ pub const Banked = struct {
         const zd = try one(k.down, c.down, &.{ hd, ids, b[0].down_t, b[1].down_t, b[2].down_t }, s);
         defer _ = mlx.mlx_array_free(zd);
         return one(k.dfin, c.dfin, &.{ zd, ids, ones, b[0].down_svh, b[1].down_svh, b[2].down_svh, hs }, s);
+    }
+
+    /// The whole banked call on `sel`'s texts with the grouped GEMVs of `vgu` (gate|up) and `vdn` (down): hd, hs and y,
+    /// as the five launches (`bankedGateUpSelV`, then `bankedDownSelV`) or, `wave3`, as banked_wave3.zig's three on the
+    /// same grouped texts and variants (`wave3Texts`): the same words either way. The caller frees all three.
+    pub fn bankedMoeSelV(self: *Banked, k3: *Kernels3, s: mlx.mlx_stream, x: mlx.mlx_array, ids: mlx.mlx_array, banks: *const [3]Kernels.Bank, rows: usize, sel: BankedSel, vgu: u8, vdn: u8, wave3: bool) ![3]mlx.mlx_array {
+        if (wave3) return self.wave3.moe(k3, s, x, ids, banks, rows, try self.wave3Texts(sel), vgu, vdn, try self.bankedOnes());
+        const h = try self.bankedGateUpSelV(k3, s, x, ids, banks, rows, sel, vgu);
+        errdefer for (h) |a| {
+            _ = mlx.mlx_array_free(a);
+        };
+        const y = try self.bankedDownSelV(k3, s, h[0], h[1], ids, banks, rows, sel, vdn);
+        return .{ h[0], h[1], y };
+    }
+
+    /// Whether the whole call runs wave3 here: `Config.banked_wave3` as configured at this geometry's first whole call
+    pub fn wave3On(self: *Banked) bool {
+        return self.wave3.configured();
+    }
+
+    /// The grouped texts wave3 runs for `sel`: today's (g4) or hw4b's (g4m3), `configured` the ones `banked_group` 4
+    /// runs (hw4b's with `banked_m3`); the banked texts (`banked_group` 2) and any other selection
+    /// error.Exl3EngineNotImplemented, before a launch.
+    fn wave3Texts(self: *const Banked, sel: BankedSel) !banked_wave3.Texts {
+        if (sel == .g4) return .g4;
+        if (sel == .g4m3) return .g4m3;
+        if (sel == .configured and self.banked_group == 4) return if (self.banked_m3) .g4m3 else .g4;
+        return error.Exl3EngineNotImplemented;
     }
 };
 

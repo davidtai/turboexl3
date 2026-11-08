@@ -80,6 +80,11 @@ pub const Config = struct {
     /// A diagnostic: each routed decode call's routing read back (a sync per call), its expert multiplicities printed
     /// every 480 calls.
     slot_stats: bool = false,
+    /// wave3: the whole banked call (`moeClampedBanked`, `moeClampedBankedAs`) on the grouped texts in three launches
+    /// where five run (models/deepseek_v41/banked_wave3.zig): prep2bg zeroing the arrival counters, then each GEMV with
+    /// its finish run by the last threadgroup to arrive at each finish unit (fin7's after the gate|up, dfin3's after the
+    /// down). The same words. Needs `banked_group` 4; a geometry's banked state reads it at its first whole call.
+    banked_wave3: bool = false,
     /// A diagnostic: the first 512 routed prefill calls' routing written under this directory (a sync per call).
     pf_capture_dir: ?[]const u8 = null,
 
@@ -93,7 +98,14 @@ pub const Config = struct {
             (!c.banked_ptg or c.banked_group == 4) and
             c.banked_variant_gu < banked_variants and c.banked_variant_dn < banked_variants and
             ((c.banked_variant_gu == 0 and c.banked_variant_dn == 0) or c.banked_group == 4) and
-            c.dense_variant < dense_variants and decBtValid(c.dec_bt);
+            c.dense_variant < dense_variants and decBtValid(c.dec_bt) and
+            (!c.banked_wave3 or (c.banked_group == 4 and !ptgSet(c)));
+    }
+
+    /// Whether `c` also names the persistent grouped GEMVs (`banked_ptg`, where this build has that field; false where
+    /// it has none): wave3 runs GEMV grids of its own, so a configuration naming both is refused
+    fn ptgSet(c: Config) bool {
+        return if (@hasField(Config, "banked_ptg")) c.banked_ptg else false;
     }
 
     fn decBtValid(bt: [5]u8) bool {

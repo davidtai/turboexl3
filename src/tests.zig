@@ -32,6 +32,7 @@ comptime {
     _ = @import("models/deepseek_v41/banked_test.zig");
     _ = @import("models/deepseek_v41/banked_grp_test.zig");
     _ = @import("models/deepseek_v41/banked_ilp_test.zig");
+    _ = @import("models/deepseek_v41/banked_wave3.zig");
     _ = @import("models/deepseek_v41/deepseek_test.zig");
     _ = @import("models/deepseek_v41/deepseek_gemv_test.zig");
     _ = @import("core/topk_test.zig");
@@ -43,6 +44,7 @@ comptime {
     _ = @import("models/glm53f/glm53f_test.zig");
     _ = @import("models/glm53f/routed_test.zig");
     _ = @import("models/glm53f/fused_test.zig");
+    _ = @import("models/glm53f/wave3_test.zig");
     _ = @import("models/glm53f/dense_dec_test.zig");
     _ = @import("models/glm53f/pf_stage_test.zig");
     _ = @import("models/glm53f/zfit_test.zig");

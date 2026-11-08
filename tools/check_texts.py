@@ -1353,6 +1353,38 @@ ADDED_FILES['dense_dec_test.zig'] = ('DEC-ONE\'s schedules at sc_3.10\'s 20 dens
 EDITED_TESTS[('config.zig', 'turboexl3 config: the defaults are valid and served; an unserved form, slice count or layout is '
               'refused')] = 'DEC-ONE\'s dense_variant and dec_bt: the defaults, every variant and tile count served, others refused'
 
+# wave3 (Config.banked_wave3, banked_wave3.zig; the plugin's TURBOEXL3_GLM53F_BANKED_WAVE3): the whole grouped banked call in
+# three launches where five run: prep2bg zeroing the arrival counters (w3_zero before its skip line), then each grouped GEMV
+# with its finish run by the last threadgroup to arrive at each finish unit (fin7cbg's statements after the gate|up GEMV,
+# dfin3bg's after the down), their grid lines (decode.fin7_1b, dfin3_1b, cut out of fin7_1 and dfin3_1: the same bytes)
+# swapped for the unit's. Every other kernel and text is unchanged.
+ADDED_FILES['banked_wave3.zig'] = ('wave3\'s texts (turboexl3_prep2bgw3, turboexl3_gu3bgw3 and turboexl3_gu3bgm3w3, '
+                                   'turboexl3_down3bgw3 and turboexl3_down3bgm3w3, each grouped GEMV variant\'s too: the '
+                                   'grouped GEMVs\' and finishes\' own pieces with the w3_* pieces around them), its launch '
+                                   'shape, kernels and configs (Wave3), and the texts\' CPU test')
+ADDED_FILES['wave3_test.zig'] = ('wave3\'s option and its exact arrival counts (CPU), and its call against the five launches, '
+                                 'word for word, at every SC rate, 1 to 4 rows of top-8 and other waves with skipped '
+                                 'row-slots, selected and configured, y f32 and bf16 (GPU)')
+for _k, _why in (('fin7_1a', 'fin7_1 to its grid lines: its constants'),
+                 ('fin7_1b', 'fin7_1\'s grid lines and lane (banked_wave3.zig\'s gate|up launch takes its unit\'s there)'),
+                 ('dfin3_1a', 'dfin3_1 to its grid lines: its constants'),
+                 ('dfin3_1b', 'dfin3_1\'s grid lines, lane, thread and exchange (banked_wave3.zig\'s down launch takes its '
+                              'unit\'s there, the exchange at kernel scope)'),
+                 ('dfin3_1c', 'dfin3_1 past its exchange: the output, the MUL1 constants and the slot loop\'s head')):
+    ADDED[('decode.zig', f'const {_k}')] = _why
+ADDED[('banked.zig', 'const banked_wave3')] = 'banked_wave3.zig, the whole grouped call in three launches (Banked.wave3)'
+CHANGED[('banked.zig', 'const Banked')] = (CHANGED.get(('banked.zig', 'const Banked'), 'Banked') +
+                                           '; wave3 (its kernels and configs, freed first in deinit) and bankedMoeSelV, the '
+                                           'whole call as the five launches or wave3\'s three (wave3On, wave3Texts)')
+CHANGED[('config.zig', 'const Config')] += ('; banked_wave3: the whole grouped banked call in three launches (needs '
+                                            'banked_group 4; the same words)')
+ADDED[('models/deepseek_v41/api.zig', 'const BankedOuts')] = 'the whole banked call\'s hd, hs and y (moeClampedBankedWave)'
+ADDED[('models/deepseek_v41/api.zig', 'fn moeClampedBankedWave')] = ('the whole banked call on a selection and variants as '
+                                                                    'five launches or wave3\'s three, or as configured')
+ADDED[('models/deepseek_v41/api.zig', 'fn bankedY')] = 'moeClampedBankedWave\'s y as configured (hd and hs freed)'
+for _k in ('fn moeClampedBankedAs', 'fn moeClampedBankedSelV'):
+    CHANGED[('models/deepseek_v41/api.zig', _k)] = 'the whole call through bankedY: wave3 as configured (Config.banked_wave3)'
+
 # GLM-5.3-Flash's shared expert gate | up in one DEC-ONE launch (glm53f/shared_gu.zig, the plugin's
 # TURBOEXL3_GLM53F_SHARED_GU): dense's text_dec1 with the member chosen over two trellises after its head (jsel_pair) and
 # ricursive's tile address in the member's trellis (jtile), each member at its own K split, suh and svh

@@ -175,19 +175,10 @@ pub const groupVariantOf = banked.groupVariantOf;
 /// `moeClampedBanked` with y in `out_dtype` (bf16, f16 or f32): the same launches on `kernelsFor`'s kernels of that output
 /// dtype, which change dfin3b's store only (OUT_T: the one f32 sum rounded once to `out_dtype`), so y is the f32 call's y
 /// rounded to `out_dtype` as its astype rounds it, bit for bit. A caller that rounds the f32 y (an expert streamer's bf16
-/// joins: GLM-5.3-Flash's turboexl3_glm53f) drops its cast launch. The configured texts and GEMV variants.
+/// joins: GLM-5.3-Flash's turboexl3_glm53f) drops its cast launch. The configured texts, GEMV variants and wave3
+/// (`Config.banked_wave3`: the call in three launches, the same y).
 pub fn moeClampedBankedAs(s: mlx.mlx_stream, x: mlx.mlx_array, banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, limit: c_int, out_dtype: mlx.mlx_dtype) !mlx.mlx_array {
-    if (out_dtype != .bfloat16 and out_dtype != .float16 and out_dtype != .float32) return error.BadExl3Dtype;
-    const c = try bankedCall(banks, ids, dec, limit);
-    const xs = mlx.getShape(x);
-    if (xs.len != 2 or xs[0] != @as(c_int, @intCast(c.rows)) or xs[1] != @as(c_int, @intCast(c.geo.hidden))) return error.BadExl3Shape;
-    const xd = mlx.mlx_array_dtype(x);
-    if (xd != .bfloat16 and xd != .float32 and xd != .float16) return error.BadExl3Dtype;
-    const k3 = try kernelsFor(c.geo, out_dtype);
-    const b = try banked.forKernels(k3);
-    const hd = try b.bankedGateUpSelV(k3, s, x, ids, &c.kb, c.rows, .configured, config.get().banked_variant_gu);
-    defer for (hd) |a| freeArr(a);
-    return b.bankedDownSelV(k3, s, hd[0], hd[1], ids, &c.kb, c.rows, .configured, config.get().banked_variant_dn);
+    return bankedY(s, x, banks, ids, dec, limit, .configured, config.get().banked_variant_gu, config.get().banked_variant_dn, out_dtype);
 }
 
 /// `moeClampedBanked` on `sel`'s texts at the configured variants (hw4b's check mode's calls, the tests).
@@ -203,12 +194,39 @@ pub fn moeClampedBankedV(s: mlx.mlx_stream, x: mlx.mlx_array, banks: *const [3]B
 }
 
 /// `moeClampedBanked` on `sel`'s texts with the grouped GEMVs of variants `vgu` (gate|up) and `vdn` (down) on them: the
-/// same bytes for every selection and variant.
+/// same bytes for every selection and variant, fused as configured (`Config.banked_wave3`) or not.
 pub fn moeClampedBankedSelV(s: mlx.mlx_stream, x: mlx.mlx_array, banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, limit: c_int, sel: BankedSel, vgu: u8, vdn: u8) !mlx.mlx_array {
-    const h = try moeClampedBankedGateUpSelV(s, x, banks, ids, dec, limit, sel, vgu);
-    defer freeArr(h.hd);
-    defer freeArr(h.hs);
-    return moeClampedBankedDownSelV(s, h, banks, ids, dec, limit, sel, vdn);
+    return bankedY(s, x, banks, ids, dec, limit, sel, vgu, vdn, .float32);
+}
+
+/// wave3: the whole banked call's outputs (`moeClampedBankedWave`): hd f16 [rows, inter] and hs f32 [rows, inter / 128]
+/// (the down's prepared input and its 128-block sums; a skipped row-slot's rows are left unwritten) and y [rows, hidden]
+/// in the call's output dtype. The caller frees all three.
+pub const BankedOuts = struct { hd: mlx.mlx_array, hs: mlx.mlx_array, y: mlx.mlx_array };
+
+/// The whole banked call (`moeClampedBankedAs`) on `sel`'s texts with the grouped GEMVs of `vgu` (gate|up) and `vdn`
+/// (down), y in `out_dtype`, as five launches (`wave3` false), as wave3's three (true: `Config.banked_wave3`'s launches,
+/// models/deepseek_v41/banked_wave3.zig; grouped texts only, else error.Exl3EngineNotImplemented before a launch), or
+/// as the geometry's banked state was configured (null): the same hd, hs and y every way (glm53f/wave3_test.zig's calls).
+pub fn moeClampedBankedWave(s: mlx.mlx_stream, x: mlx.mlx_array, banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, limit: c_int, sel: BankedSel, vgu: u8, vdn: u8, out_dtype: mlx.mlx_dtype, wave3: ?bool) !BankedOuts {
+    if (out_dtype != .bfloat16 and out_dtype != .float16 and out_dtype != .float32) return error.BadExl3Dtype;
+    const c = try bankedCall(banks, ids, dec, limit);
+    const xs = mlx.getShape(x);
+    if (xs.len != 2 or xs[0] != @as(c_int, @intCast(c.rows)) or xs[1] != @as(c_int, @intCast(c.geo.hidden))) return error.BadExl3Shape;
+    const xd = mlx.mlx_array_dtype(x);
+    if (xd != .bfloat16 and xd != .float32 and xd != .float16) return error.BadExl3Dtype;
+    const k3 = try kernelsFor(c.geo, out_dtype);
+    const b = try banked.forKernels(k3);
+    const o = try b.bankedMoeSelV(k3, s, x, ids, &c.kb, c.rows, sel, vgu, vdn, wave3 orelse b.wave3On());
+    return .{ .hd = o[0], .hs = o[1], .y = o[2] };
+}
+
+/// `moeClampedBankedWave`'s y as configured (hd and hs freed)
+fn bankedY(s: mlx.mlx_stream, x: mlx.mlx_array, banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, limit: c_int, sel: BankedSel, vgu: u8, vdn: u8, out_dtype: mlx.mlx_dtype) !mlx.mlx_array {
+    const o = try moeClampedBankedWave(s, x, banks, ids, dec, limit, sel, vgu, vdn, out_dtype, null);
+    freeArr(o.hd);
+    freeArr(o.hs);
+    return o.y;
 }
 
 /// `moeClampedBanked`'s gate|up: prep2b, gu3b and fin7cb (`decode.Kernels3.bankedGateUp`). It reads every bank's gate and
