@@ -1622,10 +1622,6 @@ SPLIT_ADDED_KERNELS = {
     'turboexl3_ling_mla_flash': 'Ling-3.1\'s MLA prompt attention in one launch: MLX 0.32.5\'s attention_nax at qk 192, v 128 '
                                 'less its mask, sinks, log-sum-exp and window arms',
 }
-SPLIT_ADDED_KERNELS['turboexl3_gu8bg'] = ('gu8b (Config.banked_gu8): the banked grouped gate|up with its prepare inside '
-                                          '(form 8\'s gu8_1 and rk_line, prep2b\'s arithmetic over the span into threadgroup '
-                                          'memory, gu3bg\'s GEMV there, its planes)')
-SPLIT_ADDED_KERNELS['turboexl3_gu8bgm3'] = 'the same with hw4b\'s M = 3 member path (gu8bg_3m3)'
 SPLIT_ADDED_KERNELS['turboexl3_ling_moe_tail'] = ('Ling-3.1\'s MoE tail at decode rows (models/ling/tail.zig): mlx-serve\'s '
                                                   'add_norm (the plain arm) with its delta the routed sum over the call\'s '
                                                   'joined rows in the combine\'s statements, rounded to T, plus the shared '
@@ -1772,6 +1768,10 @@ SPLIT_REMOVED_TESTS[("turboexl3 gpu ling addnorm: the add, its RMSNorm and up to
                      "to 8, 12 and 16, each linear's prepare inside or in its own launch (TURBOEXL3_GPU=1)")] = _R2
 SPLIT_REMOVED_TESTS[('turboexl3 gpu ling addnorm: refusals come before any launch: a width other than '
                      '4096, mixed dtypes, a non-f32 or non-scalar eps, a suh of another width (TURBOEXL3_GPU=1)')] = _R2
+_GU8 = ('BANKED_GU8 (B8, superseded by BANKED_T4, S14): gu8b, the banked grouped gate|up with its prepare inside '
+        'its launch (Config.banked_gu8, BankedSel.g4gu8 and g4m3gu8)')
+SPLIT_REMOVED_KERNELS['turboexl3_gu8bg'] = _GU8
+SPLIT_REMOVED_KERNELS['turboexl3_gu8bgm3'] = _GU8
 # the Ling banked test selects each arm's texts (moeLingBankedSel): Config.banked_group set in the process selected nothing
 RENAMED_TESTS[('ling_test.zig', "turboexl3 gpu ling banked: every pair of moeLingBanked over three banks is moeLing's on "
                                 "its bank at top-1 with score 1, byte for byte, at limits 0 and 10 and banked groups 2 and "

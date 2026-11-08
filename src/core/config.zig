@@ -51,10 +51,6 @@ pub const Config = struct {
     /// hw4b: the grouped texts with an M = 3 member path (`decode.text_gu3bgm3`, `text_down3bgm3`) for a lead with three
     /// members (today's run the M = 4 path, a fourth member's FMAs padding). The same bytes. Needs `banked_group` 4.
     banked_m3: bool = false,
-    /// gu8b: the banked decode's prepare inside its grouped gate|up launch (form 8's idiom: each lead threadgroup prepares
-    /// its members' K span in threadgroup memory; `banked.text_gu8bg`, hw4b's `text_gu8bgm3` with `banked_m3`) where a
-    /// call's span and members fit, one dependent launch fewer. The same bytes. Needs `banked_group` 4.
-    banked_gu8: bool = false,
     /// hw2: the grouped banked gate|up and down GEMVs' variants (`decode.group_variants`, `banked_variants` of them; 0
     /// today's): other schedules of the same reads, decodes and sums, so the same bytes, on the grouped texts the call
     /// runs (today's, or hw4b's with `banked_m3`). Any but 0 needs `banked_group` 4.
@@ -73,7 +69,6 @@ pub const Config = struct {
         return std.mem.indexOfScalar(u8, &forms, c.decode_form) != null and
             std.mem.indexOfScalar(u32, &spts, c.shared_spt) != null and c.pf_alay <= 2 and
             (c.banked_group == 2 or c.banked_group == 4) and (!c.banked_m3 or c.banked_group == 4) and
-            (!c.banked_gu8 or c.banked_group == 4) and
             c.banked_variant_gu < banked_variants and c.banked_variant_dn < banked_variants and
             ((c.banked_variant_gu == 0 and c.banked_variant_dn == 0) or c.banked_group == 4);
     }
@@ -111,10 +106,6 @@ test "turboexl3 config: the defaults are valid and served; an unserved form, sli
     try t.expect(!d.banked_m3);
     try t.expect((Config{ .banked_group = 4, .banked_m3 = true }).valid());
     try t.expect(!(Config{ .banked_group = 2, .banked_m3 = true }).valid());
-    try t.expect(!d.banked_gu8);
-    try t.expect((Config{ .banked_group = 4, .banked_gu8 = true }).valid());
-    try t.expect((Config{ .banked_group = 4, .banked_m3 = true, .banked_gu8 = true }).valid());
-    try t.expect(!(Config{ .banked_group = 2, .banked_gu8 = true }).valid());
     try t.expect(d.banked_variant_gu == 0 and d.banked_variant_dn == 0);
     for (1..banked_variants) |v| {
         try t.expect((Config{ .banked_group = 4, .banked_variant_gu = @intCast(v) }).valid());

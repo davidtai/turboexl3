@@ -120,7 +120,6 @@ test "turboexl3 gpu ling tail: moeTail gives the served chain's words (the sourc
     var cfg = saved;
     cfg.banked_group = 4;
     cfg.banked_m3 = true;
-    cfg.banked_gu8 = false;
     cfg.banked_variant_gu = banked.groupVariantOf("t4") orelse return error.NoT4Variant;
     cfg.banked_variant_dn = cfg.banked_variant_gu;
     try config.configure(cfg);
@@ -291,7 +290,6 @@ test "turboexl3 gpu ling tail parts: moeTailParts reads each pair's row in place
     var cfg = saved;
     cfg.banked_group = 4;
     cfg.banked_m3 = true;
-    cfg.banked_gu8 = false;
     cfg.banked_variant_gu = banked.groupVariantOf("t4") orelse return error.NoT4Variant;
     cfg.banked_variant_dn = cfg.banked_variant_gu;
     try config.configure(cfg);
