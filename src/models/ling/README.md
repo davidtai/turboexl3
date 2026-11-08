@@ -18,9 +18,6 @@ The code only Ling-3.1-flash uses, on the core's routed chain, DeepSeek-V4.1's b
 | `combine.zig` | `combineRouted` and `combineParts` (a wide routed call's combine in one launch, over a joined array or the call's unjoined outputs), the texts' CPU test |
 | `combine_test.zig` | both against MLX's composed combine word for word, the refusals (GPU) |
 | `kernels/combine/` | the combine's pieces: the contract pragma, the source choice, the fold's head, each text's row read, the fold and store |
-| `addnorm.zig` | `addNormLinears` (a decode layer's mixer input: the residual add, its RMSNorm and up to three EXL3 members' prepares in one launch, then each member's GEMV over its prepared rows) and `addNormPrepare` (the launch alone), the texts' CPU test |
-| `addnorm_test.zig` | `addNormLinears` against MLX's add, MLX's fast rms_norm and each member's `linear` word for word at decode rows 1 to 8, 12 and 16, in bf16 and f16, each member's own `linear` with its prepare inside or in its own launch; the refusals (GPU) |
-| `kernels/addnorm/` | the launch's pieces: the member's prepare (a function in its header), the add and norm, each member's call and the counters |
 | `router.zig` | `route`, `routerLogits`, `select` and `tableF32` (a MoE layer's router at decode rows 1 to 8 in two launches: MLX's one-row gemv over the host loader's column-major table for the logits, or over the loaded f16 weight widened then + 0, beside its gemv / gemv_wide for the read-ahead predictor's scores, then the host's fused router text over the logits with its weights in bf16; the loader's f32 table rebuilt from the f16 weight), the texts' and the plan's CPU tests |
 | `router_test.zig` | the logits, both predictor scores, the ids and the weights against the host's served path word for word at rows 1 to 8 (every operand built as the host builds it: the loaded f16 weight, the loader's column-major table, the MoE input, denseRows), a weight holding every finite f16 word, the rebuilt table at the stock widths, with `TURBOEXL3_LING_PACK=<pack dir>` every router weight of the pack as stored (the MoE layers' and the NextN layer's), the refusals (GPU) |
 | `bproj_test.zig` | `kdaProjB`'s b_proj member against the served b_proj (the one-row matmul, the exact verify's denseRows) and its three members against `kdaProj`'s word for word at rows 1 to 8, operands as the loader keeps them; the refusals (GPU); the member's text and gemv statements (CPU) |
@@ -34,8 +31,8 @@ The code only Ling-3.1-flash uses, on the core's routed chain, DeepSeek-V4.1's b
 | `mla_flash_test.zig` | the flash kernel's text (CPU) and its standalone translation units (TURBOEXL3_METAL_DUMP=1); against MLX's fused SDPA word for word where MLX instantiates one, and within tolerance of an f64 reference at Ling's heads (GPU) |
 | `kernels/mla_flash/` | the flash kernel's pieces: MLX's attention_nax body less its unused arms, its row ops, the kernel attribute's define and undefine; `kernels/test/` its pin file and dump data |
 
-Ling's own Metal is the pairs', the shared expert's, the routed combine's, the mixer input's add and norm and the
-router's pieces (`kernels/pair/`, `kernels/shared/`, `kernels/combine/`, `kernels/addnorm/`, `kernels/router/`),
+Ling's own Metal is the pairs', the shared expert's, the routed combine's and the router's pieces (`kernels/pair/`,
+`kernels/shared/`, `kernels/combine/`, `kernels/router/`),
 the MLA attention in the latent's three launches (`kernels/mla_latent/`) and the MLA prompt attention's flash kernel
 (`kernels/mla_flash/`;
 `kernels/test/pins/` what the CPU tests pin); the routed experts' clamp pieces are the core's

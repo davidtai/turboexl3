@@ -1229,13 +1229,6 @@ ADDED_FILES['models/ling/kdaproj.zig'] = ('Ling-3.1\'s KDA decode projections (q
 ADDED_FILES['models/ling/combine.zig'] = ('Ling-3.1\'s wide routed call combine in one launch (combineRouted, combineParts: '
                                           'MLX\'s sum(multiply(astype(routed, f32), expand_dims(weights, -1)), -2) word for '
                                           'word, over a joined array or the call\'s JOINLESS sources) and its texts\' CPU test')
-# Ling-3.1-flash's residual add and RMSNorm folded into the next linears' prepare (turboexl3_ling_addnorm1, 2, 3)
-ADDED_FILES['models/ling/addnorm.zig'] = ('Ling-3.1\'s residual add and RMSNorm at a decode layer\'s mixer input in one launch '
-                                          'with up to three EXL3 members\' DEC-ONE prepares (mlx-serve\'s add_norm statements, '
-                                          'text_prep_s\'s on the row in threadgroup memory, prep_sc\'s counters), then each '
-                                          'member\'s GEMV over its prepared rows (addNormLinears), and its texts\' CPU test')
-ADDED_FILES['models/ling/addnorm_test.zig'] = ('addNormLinears against MLX\'s add, MLX\'s fast rms_norm and each member\'s '
-                                               'linear word for word at decode rows 1 to 8, 12 and 16, the refusals (GPU)')
 ADDED_FILES['models/ling/combine_test.zig'] = ('the combine\'s GPU tests: both entries against MLX\'s composed combine word for '
                                                'word, the refusals')
 # Ling-3.1-flash's MoE tail at decode rows in one launch (turboexl3_ling_moe_tail): the routed sum, its astype, the shared
@@ -1626,11 +1619,6 @@ SPLIT_ADDED_KERNELS = {
     'turboexl3_pf_prep_r': ('the prepare with its row line swapped for the row map\'s (text_prep_rows: prep_1, prep_rmap, '
                             'prep_2): each slot\'s x row read through rmap, an expert streamer\'s prompt rows gathered in '
                             'the prepare (root.moeSwigluRows, ling.moeLingRows; glm53f-fused b0f22c9\'s port)'),
-    'turboexl3_ling_addnorm1': ('Ling-3.1\'s residual add and RMSNorm (mlx-serve\'s add_norm statements) with one EXL3 '
-                                'member\'s DEC-ONE prepare (text_prep_s\'s statements on the row in threadgroup memory) and '
-                                'prep_sc\'s counters, one threadgroup a row (an_norm ++ an_m0 ++ an_cnt)'),
-    'turboexl3_ling_addnorm2': 'the same with two members (an_m0 ++ an_m1)',
-    'turboexl3_ling_addnorm3': 'the same with three members (an_m0 ++ an_m1 ++ an_m2)',
     'turboexl3_ling_mla_flash': 'Ling-3.1\'s MLA prompt attention in one launch: MLX 0.32.5\'s attention_nax at qk 192, v 128 '
                                 'less its mask, sinks, log-sum-exp and window arms',
 }
@@ -1767,6 +1755,23 @@ SPLIT_REMOVED_TESTS[("turboexl3 gpu ling devlut: moeLingBankedLut is DEVROUTE's 
                      "taken at the routed experts, x's rows taken per pair, moeLingBanked) byte for byte, tokens "
                      "1 to 6 and 8 at top-8, limits 0 and 10, x bf16 and f32, on the streamer's banks "
                      '(TURBOEXL3_GPU=1)')] = _R6
+_R2 = ("R2 NORM_FUSED (E3, rejected): the mixer input's residual add, RMSNorm and EXL3 prepares in one launch "
+       '(models/ling/addnorm.zig, ling.addNormLinears, addNormPrepare)')
+SPLIT_REMOVED_KERNELS['turboexl3_ling_addnorm1'] = _R2
+SPLIT_REMOVED_KERNELS['turboexl3_ling_addnorm2'] = _R2
+SPLIT_REMOVED_KERNELS['turboexl3_ling_addnorm3'] = _R2
+SPLIT_REMOVED_FILES['models/ling/addnorm.zig'] = _R2
+SPLIT_REMOVED_FILES['models/ling/addnorm_test.zig'] = _R2
+SPLIT_REMOVED_TESTS[("turboexl3 ling addnorm texts: the launches are the norm, the members' prepares in "
+                     "member order and the counters; the prepare is text_prep_s's statements on the row in "
+                     "threadgroup memory, the counters prep_sc's loop, the norm mlx-serve's add_norm statements")] = _R2
+SPLIT_REMOVED_TESTS[('turboexl3 ling addnorm plan: no member, more than three, rows outside 1 to 16 and '
+                     'float32 rows are refused before any Dense is made')] = _R2
+SPLIT_REMOVED_TESTS[("turboexl3 gpu ling addnorm: the add, its RMSNorm and up to three linears' prepares "
+                     "in one launch give MLX's add, MLX's fast rms_norm and each linear's bytes at decode rows 1 "
+                     "to 8, 12 and 16, each linear's prepare inside or in its own launch (TURBOEXL3_GPU=1)")] = _R2
+SPLIT_REMOVED_TESTS[('turboexl3 gpu ling addnorm: refusals come before any launch: a width other than '
+                     '4096, mixed dtypes, a non-f32 or non-scalar eps, a suh of another width (TURBOEXL3_GPU=1)')] = _R2
 # the Ling banked test selects each arm's texts (moeLingBankedSel): Config.banked_group set in the process selected nothing
 RENAMED_TESTS[('ling_test.zig', "turboexl3 gpu ling banked: every pair of moeLingBanked over three banks is moeLing's on "
                                 "its bank at top-1 with score 1, byte for byte, at limits 0 and 10 and banked groups 2 and "

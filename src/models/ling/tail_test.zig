@@ -3,7 +3,7 @@
 //! source's routed sum over the call's joined rows (MLX's astype of the weights to f32, its multiply of the rows by
 //! them expanded on the last axis, its sum over the top-k axis), the MoE block's astype of the sum to bf16 and its add
 //! of the shared expert, then mlx-serve's add_norm, whose words are MLX's add and MLX's fast rms_norm (its text mirrors
-//! that kernel; addnorm_test.zig checks the same pair). The operands are built as the plugin builds them: the joined rows
+//! that kernel). The operands are built as the plugin builds them: the joined rows
 //! are banked outputs (`moeLingBankedSel` on hw4b's texts, the control's BANKED_T4 with the configured variant t4, over a
 //! 24-slot bank at n 40, the pack's I16 trellis words, limits 0 and 10; the texts named, as a process's banked state keeps
 //! the group it was made at), given as the join gives them ([R, 8, 4096]) and flat ([R * 8, 4096]); the weights are the

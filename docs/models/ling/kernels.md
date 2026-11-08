@@ -18,10 +18,6 @@ A KDA layer's three projections of one input (`kdaproj.zig`) are dense's `prep_s
 dense's DEC-ONE text over prepared rows (`turboexl3_dense_dec0`'s, verbatim after its head) under a head that gives each
 threadgroup its member's widths and K split; each member keeps its own buffers.
 
-A decode layer's mixer input (`addnorm.zig`) is mlx-serve's add_norm (the residual add and MLX's rms_norm order) with
-each EXL3 member's DEC-ONE prepare of the normed row (`text_prep_s`'s statements on the row in threadgroup memory) into
-the members' joined prepared rows, before each member's `turboexl3_dense_dec0` or the KDA layer's one GEMV launch
-(`kdaProjPrepared`).
 How an entry reads: [the core catalog's introduction](../../core/kernels.md#how-an-entry-reads).
 
 ## `src/models/ling/shared.zig`
@@ -482,102 +478,6 @@ rounded to T again: the MoE block's astype and add.
   place ..." (GPU, words: the residual and the normed rows against the served chain and against `moeTail` over the
   streamer's join, at rows 1 to 8, limits 0 and 10, one to three sources and all eight, the later miss part's row last
   where two carry a pair; the refusals).
-
-## `src/models/ling/addnorm.zig`
-
-A decode layer's mixer input in one launch: the residual add `h + delta`, its RMSNorm with the next layer's input norm,
-and each EXL3 projection's DEC-ONE prepare of the normed row (KDA's qkv, f and g; MLA's q_a and kv_a), then each
-projection's `turboexl3_dense_dec0` over its prepared rows. One threadgroup of 1024 threads per row: the add and norm
-are mlx-serve's `add_norm` statements (four consecutive elements a thread, the simdgroups' sums folded through a 32-slot
-table, `precise::rsqrt`, `w * T(x * inv)`: MLX's single-row `rms_norm`), the normed row stays in threadgroup memory,
-and simdgroup b prepares 128-block b for each member with `text_prep_s`'s statements (f16 round, the member's suh, H128,
-lane order, the block's sum) into member m's rows of the joined prepared rows (`pair.zig`'s layout). The residual and
-the normed rows are written too (the normed rows for the readers that are not EXL3: KDA's b_proj, MLA's gate).
-
-### `turboexl3_ling_addnorm1`
-
-<!-- kernel-facts: turboexl3_ling_addnorm1 -->
-
-| fact | from the code |
-|---|---|
-| made at | `src/models/ling/addnorm.zig:60` (`fn kernelOf`) |
-| inputs | `H`, `X`, `W`, `eps`, `suh0` |
-| outputs | `H_NEW`, `HN`, `jxp`, `jxs`, `cnt` |
-| source | `text_an1` = `ling:addnorm/an_norm` ++ `ling:addnorm/an_m0` ++ `ling:addnorm/an_cnt` (2325 B, `25002243a1a8`) |
-| header | `header` = `ling:addnorm/an_prep` (1623 B, `ad5fbeeff379`) |
-
-<!-- /kernel-facts -->
-
-- **Used by:** Ling-3.1-flash: `root.ling.addNormLinears` and `addNormPrepare` with one member.
-- **Shapes and dtypes:** H, X T [rows, 4096] (bf16 or f16), W T [4096], eps f32 (0-dim), suh0 f16 [4096]. Out: H_NEW,
-  HN T [rows, 4096] (the residual, the normed rows), jxp f16 [n · rows, 4096] (member m's prepared rows at m · rows,
-  lane order), jxs f32 [n · rows, 32] (their 128-block sums), cnt u32 [NCNT] (the members' DEC-ONE counters, zeroed).
-- **Grid and threadgroup:** `(1024 · rows, 1, 1)` / `(1024, 1, 1)`: one threadgroup a row, one simdgroup a 128-block.
-- **Template args:** T, D (4096), TN (1024), ROWS, NCNT (every member's counters, back to back, at least 8), NTH
-  (1024 · rows).
-- **Replaces:** the add and norm launch and each member's prepare (`turboexl3_dense_prep_sc`, or the prepare inside
-  `turboexl3_dense_dec1` with its counter zeroing `turboexl3_dense_dec_zero`): at one row 1 + 2 n launches become 1 + n.
-- **Bits:** byte-identical: the residual is the add's, the normed rows MLX's fast rms_norm's, and each member's prepared
-  rows and sums `turboexl3_dense_prep_sc`'s of the normed rows, so each member's `turboexl3_dense_dec0` gives its
-  `linear` bytes.
-- **Pinned by:** `src/models/ling/addnorm_test.zig` "turboexl3 gpu ling addnorm: the add, its RMSNorm and up to three
-  linears' prepares in one launch give MLX's add, MLX's fast rms_norm and each linear's bytes at decode rows 1 to 8,
-  12 and 16, ..." (GPU, words, bf16 and f16, each member's own `linear` with its prepare inside or in its own launch);
-  `src/models/ling/addnorm.zig` "turboexl3 ling addnorm texts: ..." (CPU, the texts and their pins).
-
-### `turboexl3_ling_addnorm2`
-
-<!-- kernel-facts: turboexl3_ling_addnorm2 -->
-
-| fact | from the code |
-|---|---|
-| made at | `src/models/ling/addnorm.zig:61` (`fn kernelOf`) |
-| inputs | `H`, `X`, `W`, `eps`, `suh0`, `suh1` |
-| outputs | `H_NEW`, `HN`, `jxp`, `jxs`, `cnt` |
-| source | `text_an2` = `ling:addnorm/an_norm` ++ `ling:addnorm/an_m0` ++ `ling:addnorm/an_m1` ++ `ling:addnorm/an_cnt` (2479 B, `3ba27565d274`) |
-| header | `header` = `ling:addnorm/an_prep` (1623 B, `ad5fbeeff379`) |
-
-<!-- /kernel-facts -->
-
-- **Used by:** Ling-3.1-flash: `root.ling.addNormLinears` and `addNormPrepare` with 2 members (MLA's q_a and kv_a).
-- **Shapes and dtypes:** H, X T [rows, 4096] (bf16 or f16), W T [4096], eps f32 (0-dim), suh0, suh1 f16 [4096] (each member's own). Out: H_NEW, HN T
-  [rows, 4096], jxp f16 [2 · rows, 4096] (member m's prepared rows at m · rows, lane order), jxs f32 [2 · rows, 32],
-  cnt u32 [NCNT] (every member's DEC-ONE counters, zeroed).
-- **Grid and threadgroup:** `(1024 · rows, 1, 1)` / `(1024, 1, 1)`: one threadgroup a row, one simdgroup a 128-block.
-- **Template args:** T, D (4096), TN (1024), ROWS, NCNT (the members' counters back to back, at least 8), NTH (1024 · rows).
-- **Replaces:** the add and norm launch and the members' prepares (`turboexl3_dense_prep_sc`, or the prepare inside
-  `turboexl3_dense_dec1` with `turboexl3_dense_dec_zero`): at one row 1 + 4 launches become 1 + 2.
-- **Bits:** byte-identical: `turboexl3_ling_addnorm1`'s text with each further member's call (its suh, its rows), so each
-  member's prepared rows and sums are `turboexl3_dense_prep_sc`'s of the normed rows.
-- **Pinned by:** `src/models/ling/addnorm_test.zig` "turboexl3 gpu ling addnorm: ..." (GPU, words: MLA's q_a and kv_a,
-  bf16 and f16, rows 1 to 8, 12 and 16); `src/models/ling/addnorm.zig` "turboexl3 ling addnorm texts: ..." (CPU).
-
-### `turboexl3_ling_addnorm3`
-
-<!-- kernel-facts: turboexl3_ling_addnorm3 -->
-
-| fact | from the code |
-|---|---|
-| made at | `src/models/ling/addnorm.zig:62` (`fn kernelOf`) |
-| inputs | `H`, `X`, `W`, `eps`, `suh0`, `suh1`, `suh2` |
-| outputs | `H_NEW`, `HN`, `jxp`, `jxs`, `cnt` |
-| source | `text_an3` = `ling:addnorm/an_norm` ++ `ling:addnorm/an_m0` ++ `ling:addnorm/an_m1` ++ `ling:addnorm/an_m2` ++ `ling:addnorm/an_cnt` (2633 B, `91a80b89c014`) |
-| header | `header` = `ling:addnorm/an_prep` (1623 B, `ad5fbeeff379`) |
-
-<!-- /kernel-facts -->
-
-- **Used by:** Ling-3.1-flash: `root.ling.addNormLinears` and `addNormPrepare` with 3 members (KDA's qkv, f and g).
-- **Shapes and dtypes:** H, X T [rows, 4096] (bf16 or f16), W T [4096], eps f32 (0-dim), suh0, suh1, suh2 f16 [4096] (each member's own). Out: H_NEW, HN T
-  [rows, 4096], jxp f16 [3 · rows, 4096] (member m's prepared rows at m · rows, lane order), jxs f32 [3 · rows, 32],
-  cnt u32 [NCNT] (every member's DEC-ONE counters, zeroed).
-- **Grid and threadgroup:** `(1024 · rows, 1, 1)` / `(1024, 1, 1)`: one threadgroup a row, one simdgroup a 128-block.
-- **Template args:** T, D (4096), TN (1024), ROWS, NCNT (the members' counters back to back, at least 8), NTH (1024 · rows).
-- **Replaces:** the add and norm launch and the members' prepares (`turboexl3_dense_prep_sc`, or the prepare inside
-  `turboexl3_dense_dec1` with `turboexl3_dense_dec_zero`): at one row 1 + 6 launches become 1 + 3.
-- **Bits:** byte-identical: `turboexl3_ling_addnorm1`'s text with each further member's call (its suh, its rows), so each
-  member's prepared rows and sums are `turboexl3_dense_prep_sc`'s of the normed rows.
-- **Pinned by:** `src/models/ling/addnorm_test.zig` "turboexl3 gpu ling addnorm: ..." (GPU, words: KDA's qkv, f and g,
-  bf16 and f16, rows 1 to 8, 12 and 16); `src/models/ling/addnorm.zig` "turboexl3 ling addnorm texts: ..." (CPU).
 
 ## `src/models/ling/router.zig`
 
