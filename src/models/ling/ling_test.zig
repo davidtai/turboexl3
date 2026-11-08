@@ -5,6 +5,9 @@
 //! 128-blocks, 512 experts, top-8, MUL1 at n 40 = K 2.5 and n 32 = K 2, the 2.60 and 2.10 packs' routed rates):
 //! - `root.moeLing` at a limit no value reaches gives `root.moe`'s bytes (decode and prefill rows), and at limits 0 and 10
 //!   equals `ref.moeRowClampedAt` (`silu_out`) on sampled rows of decode rows 1, 4, 16 and prefill rows 32, 1328;
+//! - `root.moeLing` at top-4 on the operands the plugin's MTP head hands it (x f32, the slots u32, the weights f32
+//!   rounded through bf16, limit 0) equals `ref.moeRowClampedAt` on sampled rows of decode rows 1, 4 and prefill rows
+//!   17, 1328, 4096, at n 40;
 //! - every pair of `root.moeLingBanked` over three banks is `moeLing`'s on its bank at top-1 with score 1, byte for byte,
 //!   at limits 0 and 10, rows 1, 2, 8, 16, 48, on the configured texts (banked group 2), the grouped texts (g4), the
 //!   M = 3 member path (g4m3) and each grouped set with gu8b (the prepare inside the gate|up launch, `Config.banked_gu8`;
@@ -27,7 +30,7 @@
 //!   `root.ling.linearPair` each member's `linear` words (rows 1, 2, 4, 6), and the one-row table one row's own words
 //!   (every trunk shape), each also the words of the same call on U16 words and a contiguous `[rows, in]`.
 //! TURBOEXL3_LING_N (rates in halfwords per tile; default 40,32) narrows the routed tests. Lines: TURBOEXL3_LING_BYTES,
-//! TURBOEXL3_LING_PARITY, TURBOEXL3_LING_BANKED, TURBOEXL3_LING_DENSE, TURBOEXL3_LING_ONE_ROW,
+//! TURBOEXL3_LING_PARITY, TURBOEXL3_LING_TOP4, TURBOEXL3_LING_BANKED, TURBOEXL3_LING_DENSE, TURBOEXL3_LING_ONE_ROW,
 //! TURBOEXL3_LING_ONE_ROW_TABLE, TURBOEXL3_LING_PAIR, TURBOEXL3_LING_KDA_PROJ, TURBOEXL3_LING_ROWINV,
 //! TURBOEXL3_LING_SERVED.
 //! Timing (TURBOEXL3_LING_TIME=1 with TURBOEXL3_GPU=1; asserts nothing, guidance only): every trunk linear, `moeLing`
@@ -164,7 +167,7 @@ test "turboexl3 ling: every Ling-3.1-flash trunk shape is a width the dense kern
     }
     for ([_]u32{ 40, 32 }) |n| {
         const rate = format.Rate.fromN(n).?;
-        for ([_]u32{ 1, top_k }) |k| {
+        for ([_]u32{ 1, 4, top_k }) |k| {
             try testing.expect((decode.Geometry{ .hidden = hidden, .inter = inter, .topk = k, .rate = rate, .dec = .mul1 }).admitted());
             try testing.expect((prefill.Geometry{ .hidden = hidden, .inter = inter, .topk = k, .experts = experts, .rate = rate, .dec = .mul1 }).admitted());
         }
@@ -354,6 +357,69 @@ test "turboexl3 gpu ling: root.moeLing at Ling-3.1-flash's routed geometry (4096
                 }
             }
         }
+    }
+    try testing.expect(!failed);
+}
+
+// The plugin's MTP head at top-4 (turboexl3_ling's ling_mtp.zig under MLX_SERVE_LING_MTP_HEAD_TOP4=1) calls moeLing on its
+// resident bank: the 512 experts' I16 trellis words stacked on axis 0 and viewed as u16, suh and svh f16 (rootBank at
+// .uint16), with x f32 [1, rows, hidden], the slots u32 and the weights f32 [1, rows, 4]. The weights are rounded through
+// bf16 (the block's cast to the activation dtype, then the head's to f32), and the limit is 0. Decode rows 1 and 4, then
+// prefill rows 17, 1328 and 4096 (the head's history pass). x ~ N(0, 8^2), with the f32 output held to ref.moeRowClampedAt
+// on sampled rows at the top-8 test's bar.
+test "turboexl3 gpu ling top4: root.moeLing at top-4 on the MTP head's operands (x f32, u32 slots, bf16-rounded f32 weights, limit 0) equals the reference at Ling-3.1-flash's routed geometry, decode rows 1 and 4 and prefill rows 17, 1328 and 4096 (TURBOEXL3_GPU=1)" {
+    _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    const s = mlx.mlx_default_gpu_stream_new();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    const a = std.heap.page_allocator;
+    var g = try G.init(a, s);
+    defer g.deinit();
+    defer _ = mlx.mlx_clear_cache();
+    const k: u32 = 4;
+    const n: u32 = 40;
+    const rate = format.Rate.fromN(n) orelse return error.Exl3RateUnsupported;
+    var prng = std.Random.DefaultPrng.init(0x70B4 ^ @as(u64, n));
+    const rnd = prng.random();
+    var bank = try ref.synthBank(a, rnd, experts, hidden, inter, rate);
+    defer bank.deinit(a);
+    const rb = try rootBank(&g, &bank, .uint16);
+    var failed = false;
+    for ([_]u32{ 1, 4, 17, 1328, 4096 }) |rows| {
+        const m2 = g.mark();
+        defer g.resetTo(m2);
+        const x = try a.alloc(f32, rows * hidden);
+        defer a.free(x);
+        for (x) |*v| v.* = bfExact(sigma * rnd.floatNorm(f32));
+        const slots = try a.alloc(u32, rows * k);
+        defer a.free(slots);
+        const scores = try a.alloc(f32, rows * k);
+        defer a.free(scores);
+        try route(a, rnd, rows, experts, k, 1.5, slots, scores);
+        // the head's weights sum to routed_scaling_factor 2.5, then land in bf16
+        for (scores) |*w| w.* = bfExact(2.5 * w.*);
+        const x3 = try g.hostArray(std.mem.sliceAsBytes(x), &.{ 1, ci(rows), ci(hidden) }, .float32);
+        const inds3 = try g.hostArray(std.mem.sliceAsBytes(slots), &.{ 1, ci(rows), ci(k) }, .uint32);
+        const sc3 = try g.astype(try g.astype(try g.hostArray(std.mem.sliceAsBytes(scores), &.{ 1, ci(rows), ci(k) }, .float32), .bfloat16), .float32);
+        var sbuf: [3]u32 = undefined;
+        const sample = sampleRows(rows, &sbuf);
+        const want = try a.alloc(f32, sample.len * hidden);
+        defer a.free(want);
+        for (sample, 0..) |r, i| _ = try ref.moeRowClampedAt(a, &bank, .mul1, 0, .silu_out, x[r * hidden ..][0..hidden], slots[r * k ..][0..k], scores[r * k ..][0..k], want[i * hidden ..][0..hidden]);
+        const y = try g.adopt(try root.moeLing(s, x3, rb, inds3, sc3, .mul1, 0));
+        try testing.expectEqualSlices(c_int, &.{ 1, ci(rows), ci(hidden) }, mlx.getShape(y));
+        try testing.expectEqual(mlx.mlx_dtype.float32, mlx.mlx_array_dtype(y));
+        const got = try a.alloc(f32, rows * hidden);
+        defer a.free(got);
+        _ = try g.hostF32(try g.astype(y, .float32), got);
+        var bad: usize = 0;
+        for (got) |v| bad += @intFromBool(!std.math.isFinite(v));
+        var worst: f64 = 0;
+        for (sample, 0..) |r, i| worst = @max(worst, ref.compare(got[r * hidden ..][0..hidden], want[i * hidden ..][0..hidden]).max_ratio);
+        const bar: f64 = 5e-3;
+        const ok = bad == 0 and worst <= bar;
+        const path: []const u8 = if (rows <= root.kernels.DECODE_ROWS_MAX) "decode" else "prefill";
+        std.debug.print("TURBOEXL3_LING_TOP4 n={d} rows={d} k={d} path={s} x=float32 worst_vs_ref={e:.3} bar={e:.1} nonfinite={d} {s}\n", .{ n, rows, k, path, worst, bar, bad, if (ok) "PASS" else "FAIL" });
+        if (!ok) failed = true;
     }
     try testing.expect(!failed);
 }
