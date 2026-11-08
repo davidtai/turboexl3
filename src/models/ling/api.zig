@@ -67,10 +67,6 @@ pub const router = @import("router.zig");
 pub const mla_latent = @import("mla_latent.zig");
 pub const mlaLatentDecode = mla_latent.decodeLatent;
 pub const mlaLatentTakes = mla_latent.takes;
-/// The MoE router at prompt widths in one launch (`router_prompt.zig`): MLX's fused NAX GEMM over x's bf16 rows and the
-/// router weight as loaded, each widened in the tiles, at the tile MLX picks (`router_prompt.logits`; `takes`), the host's
-/// stock logits word for word.
-pub const router_prompt = @import("router_prompt.zig");
 
 /// `root.moe` with Ling-3.1's SwiGLU: `limit` 0 none (`moe`'s bytes), 1..128 the clamp after the SiLU (each row-slot's
 /// gate SiLU clamped from above at `limit` and its up to [-limit, limit], in f32 on the projections' f16-rounded outputs);
@@ -172,7 +168,7 @@ pub const moeTail = tail.moeTail;
 pub const moeTailParts = tail.moeTailParts;
 
 /// This file's module state (`Global`): what a host that shares its units' state registers.
-pub const shared_state = .{ shared.shared_state, pair.shared_state, kdaproj.shared_state, addnorm.shared_state, router.shared_state, router_prompt.shared_state, tail.shared_state, mla_latent.shared_state, mla_flash.shared_state, kdaproj_pf.shared_state, swiglu.shared_state };
+pub const shared_state = .{ shared.shared_state, pair.shared_state, kdaproj.shared_state, addnorm.shared_state, router.shared_state, tail.shared_state, mla_latent.shared_state, mla_flash.shared_state, kdaproj_pf.shared_state, swiglu.shared_state };
 
 /// The MLA prompt attention as one causal flash launch (`mla_flash.zig`): o [B, H, qL, v] = softmax(scale q k^T) v, query
 /// row i over keys 0 .. kL - qL + i, at Ling's heads (qk 192, v 128) or any pair `mla_flash.admits` takes; within

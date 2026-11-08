@@ -1401,17 +1401,6 @@ ADDED_FILES['models/ling/swiglu_test.zig'] = ('upSwiglu held to the composed cha
                                               'MLX\'s ops) word for word at the shared expert\'s and the dense layers\' shapes, '
                                               'rows 17 to 16384, limits 0 and 10, its declines and refusals (GPU), the texts\' '
                                               'composition (CPU), and its timing (TURBOEXL3_LING_TIME)')
-# Ling-3.1-flash's MoE router at prompt widths in one launch (turboexl3_ling_router_prompt): MLX's fused NAX GEMM over x's
-# bf16 rows and the weight as loaded, each widened in the tiles (turboexl3_ling's MLX_SERVE_LING_ROUTER_PROMPT)
-ADDED_FILES['models/ling/router_prompt.zig'] = ('Ling-3.1\'s MoE router at prompt widths in one launch (logits: MLX\'s fused '
-                                                'NAX kernel at nt with its gemm_loop\'s f32 tiles loaded from x\'s bf16 words '
-                                                'and the weight\'s own, w\'s -0.0 stored +0.0, at the tile MLX picks: mlxTile, '
-                                                'takes) and its CPU test of the tiles and the gates')
-ADDED_FILES['models/ling/router_prompt_test.zig'] = ('logits held to the host\'s stock call (tableF32, then MLX\'s matmul) word '
-                                                     'for word over the f16 weight\'s view and the f32 table at the spans MLX '
-                                                     'runs its regular kernel at (GPU), the refusals (GPU), the loop\'s '
-                                                     'statements against pg2\'s copy of MLX\'s (CPU), and a TIME arm')
-ADDED[('models/ling/api.zig', 'const router_prompt')] = 'router_prompt.zig, the MoE router at prompt widths in one launch'
 
 def metal_strings(fn, toks, corpus):
     """(line, kind, value) of every literal in a .zig file that holds Metal"""
@@ -1733,10 +1722,6 @@ SPLIT_ADDED_KERNELS['turboexl3_ling_finish_sgu'] = ('Ling-3.1\'s prefill SwiGLU 
                                                   'SwiGLU of the gate\'s value and its own; ling.upSwiglu')
 SPLIT_ADDED_KERNELS['turboexl3_ling_finish_sguco'] = ('turboexl3_ling_finish_sgu with the clamp after the SiLU '
                                                     '(shared/sgu_swiglu_clamp_out)')
-SPLIT_ADDED_KERNELS['turboexl3_ling_router_prompt'] = ('Ling-3.1\'s router at prompt widths (models/ling/router_prompt.zig): '
-                                                       'MLX\'s fused NAX GEMM at nt (steel_gemm_fused_nax.h gemm) with its '
-                                                       'gemm_loop\'s f32 tiles loaded from x bf16 and w f16 or f32, w\'s '
-                                                       '-0.0 stored +0.0 (router_prompt/loop, router_prompt/gemm)')
 SPLIT_CHANGED_CONSTS = {
     'head': 'models/ling/router.zig: launch 1\'s router threadgroups at 512 / 16 a row (MLX\'s gemv tiles)',
     'pred_open': 'models/ling/router.zig: the predictor\'s threadgroups after 512 / 16 a row of the router\'s',
@@ -1789,6 +1774,24 @@ SPLIT_REMOVED_TESTS[("turboexl3 gpu ling mlaproj: mlaProjG's q_a and kv_a are ea
                      'at rows 1 to 8, operands as the loader keeps them (TURBOEXL3_GPU=1)')] = _R9
 SPLIT_REMOVED_TESTS[("turboexl3 gpu ling mlaproj timing: ten MLA layers' q_a, kv_a and gate, the served "
                      "launches against mlaProjG's two, at rows 1 to 4, and their bytes (TURBOEXL3_LING_TIME=1)")] = _R9
+_R11 = ('R11 ROUTER_PROMPT (PR, rejected): the MoE router at prompt widths in one launch '
+        '(models/ling/router_prompt.zig, ling.router_prompt.logits), with its audit case d48ac6a (PR-1)')
+SPLIT_REMOVED_KERNELS['turboexl3_ling_router_prompt'] = _R11
+SPLIT_REMOVED_FILES['models/ling/router_prompt.zig'] = _R11
+SPLIT_REMOVED_FILES['models/ling/router_prompt_test.zig'] = _R11
+SPLIT_REMOVED_TESTS[("turboexl3 ling router_prompt: MLX's tile per architecture class, MLX's TF32 gate, "
+                     'and the regular kernel only where MLX runs it')] = _R11
+SPLIT_REMOVED_TESTS[("turboexl3 ling router_prompt texts: the loop is MLX's gemm_loop (pg2's verbatim "
+                     "copy) but for its f32 tiles loaded from each operand's own type and B's -0.0 stored +0.0; "
+                     "the kernel attribute's macro closes the header and the body undefines it")] = _R11
+SPLIT_REMOVED_TESTS[("turboexl3 gpu ling router_prompt: logits over the loaded f16 weight's view and "
+                     "over the loader's f32 table gives the stock call's words (tableF32, then MLX's matmul) at "
+                     'every span width MLX runs its regular kernel at (TURBOEXL3_GPU=1)')] = _R11
+SPLIT_REMOVED_TESTS[('turboexl3 gpu ling router_prompt refusals: one row and every span MLX runs on its '
+                     'NAX split K (1365 rows and fewer), x not bf16, a row-major or bf16 weight '
+                     '(TURBOEXL3_GPU=1)')] = _R11
+SPLIT_REMOVED_TESTS[("turboexl3 gpu ling timing: router_prompt's logits in one launch against the "
+                     "router's stock call at prompt widths (tableF32, then MLX's matmul) (TURBOEXL3_LING_TIME=1)")] = _R11
 # the Ling banked test selects each arm's texts (moeLingBankedSel): Config.banked_group set in the process selected nothing
 RENAMED_TESTS[('ling_test.zig', "turboexl3 gpu ling banked: every pair of moeLingBanked over three banks is moeLing's on "
                                 "its bank at top-1 with score 1, byte for byte, at limits 0 and 10 and banked groups 2 and "
