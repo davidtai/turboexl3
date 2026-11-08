@@ -1127,4 +1127,5 @@ pub const shared_state = .{
     qwen38.shared_state,
     deepseek_v41.shared_state,
     glm53f.shared_gu.shared_state,
+    glm53f.pair_ks.shared_state,
 };

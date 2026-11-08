@@ -15,11 +15,3 @@
             const uint q = (r & 7u) >> 1u;
             const uint m = (r & 1u) | ((r >> 3u) << 1u);
             const half hv = half(v[j] * HAD_SCALE);
-            xt[rr * SPAN + ((i & ~15u) + 4u * q + m) - ksl * SPAN] = hv;
-            sum += float(hv);
-        }
-        sum = simd_sum(sum);
-        // the deferred map's input sums: the block's first column group publishes them (it arrives like every other)
-        if (DEFER != 0 && (blk % GC) == 0u && L == 0u && r0 + rr < ROWSC) xsc[((ob * NCHC + chunk) * RBC + rr) * NB + b] = sum;
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);

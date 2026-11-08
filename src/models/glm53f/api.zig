@@ -6,6 +6,9 @@ const std = @import("std");
 const pgemm = @import("../../core/pgemm.zig");
 /// The shared expert's gate | up in one DEC-ONE launch (the plugin's TURBOEXL3_GLM53F_SHARED_GU)
 pub const shared_gu = @import("shared_gu.zig");
+/// Two linears of one input in one DEC-ONE launch, each at its own K split (a DSA layer's q_a and kv_a: the plugin's
+/// TURBOEXL3_GLM53F_SMALLOP_FUSE)
+pub const pair_ks = @import("pair_ks.zig");
 
 /// One trunk linear at prefill rows: its name, in (K) and out (N)
 pub const Linear = struct { name: []const u8, k: u32, n: u32 };
