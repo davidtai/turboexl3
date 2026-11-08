@@ -48,6 +48,8 @@ comptime {
     _ = @import("models/glm53f/zfit_test.zig");
     _ = @import("models/glm53f/shared_gu.zig");
     _ = @import("models/glm53f/shared_gu_test.zig");
+    _ = @import("models/glm53f/pair_ks.zig");
+    _ = @import("models/glm53f/pair_ks_test.zig");
 }
 
 

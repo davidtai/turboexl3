@@ -1,0 +1,11 @@
+- ksl * SPAN] = hv;
+- ksl * MSPAN] = hv;
+const uint KSC = second ? KS1C : KS0C;
+const uint PER = second ? PER1 : PER0;
+const uint SPB = MSPAN / 128u;
+const uint ARR = GC * KSC;
+constexpr uint SPAN = 64u * ((PER0 > PER1) ? PER0 : PER1);
+const uint ksl = fm / ngm;
+const uint blk = (second ? NG0 : 0u) + (fm - ksl * ngm);
+constexpr uint KSC = uint(KS);
+const uint ksl = threadgroup_position_in_grid.z;

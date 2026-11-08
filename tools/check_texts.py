@@ -1369,6 +1369,25 @@ CHANGED[('ricursive.zig', 'const jtile')] = 'pub: glm53f/shared_gu.zig\'s text r
 ADDED[('models/glm53f/api.zig', 'const shared_gu')] = 'shared_gu.zig, the shared expert\'s gate | up launch (root\'s glm53f.shared_gu)'
 CHANGED[('root.zig', 'const shared_state')] = 'registers glm53f.shared_gu.shared_state'
 
+# Two linears of one input at their own K splits in one DEC-ONE launch (glm53f/pair_ks.zig, a DSA layer's q_a and kv_a: the
+# plugin's TURBOEXL3_GLM53F_SMALLOP_FUSE): shared_gu's text with its head laying the members out flat at their own K
+# splits (ks_head) and dense's prepare's store at the member's slice (ks_prep1_2, dec_prep1 cut at its store)
+ADDED_FILES['pair_ks.zig'] = ('two linears of one input at their own K splits in one DEC-ONE launch (turboexl3_glm53f_pair_ks: '
+                              'shared_gu\'s pieces with ks_head and dense\'s prepare with ks_prep1_2 for its store), its plan '
+                              'and its CPU tests')
+ADDED_FILES['pair_ks_test.zig'] = ('pair_ks.linear2 against root.linear of each member, word for word, a DSA layer\'s q_a and '
+                                   'kv_a at K6 and K4, decode rows 1 to 8 and 16, bf16 and f32 (GPU)')
+ADDED_KERNELS[('pair_ks.zig', 'turboexl3_glm53f_pair_ks')] = ('shared_gu\'s text with the head laying the members out flat '
+                                                              'along x at their own K splits (ks_head) and the prepare\'s store '
+                                                              'at the member\'s slice (ks_prep1_2)')
+CHANGED[('dense.zig', 'const dec_prep1')] = ('cut into dec_prep1_1, dec_prep1_2 (the store of a prepared input at its offset in '
+                                            'the slice) and dec_prep1_3: the same bytes')
+ADDED[('dense.zig', 'const dec_prep1_1')] = 'dec_prep1 to its store'
+ADDED[('dense.zig', 'const dec_prep1_2')] = 'dec_prep1\'s store (glm53f/pair_ks.zig stores at its member\'s slice instead)'
+ADDED[('dense.zig', 'const dec_prep1_3')] = 'dec_prep1 after its store'
+ADDED[('models/glm53f/api.zig', 'const pair_ks')] = 'pair_ks.zig, two linears at their own K splits in one launch (root\'s glm53f.pair_ks)'
+CHANGED[('root.zig', 'const shared_state')] = 'registers glm53f.shared_gu.shared_state and glm53f.pair_ks.shared_state'
+
 
 def metal_strings(fn, toks, corpus):
     """(line, kind, value) of every literal in a .zig file that holds Metal"""

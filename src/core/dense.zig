@@ -104,7 +104,13 @@ pub const dec_head = @embedFile("kernels/dense/dec_head.metal");
 
 /// DEC-ONE with the prepare inside: the threadgroup's K slice of its row chunk into threadgroup memory (text_prep_s's
 /// arithmetic, lane order, spare rows from the chunk's last row as text_dgemv reads them), one simdgroup per (128-block, row)
-pub const dec_prep1 = @embedFile("kernels/dense/dec_prep1.metal");
+pub const dec_prep1 = dec_prep1_1 ++ dec_prep1_2 ++ dec_prep1_3;
+/// dec_prep1's pieces: the prepare to its store, the store of a prepared value at its offset in the slice (the slice's
+/// span from its first input; a joined launch whose members take their own K splits stores at its member's span,
+/// glm53f/pair_ks.zig), and the rest
+pub const dec_prep1_1 = @embedFile("kernels/dense/dec_prep1_1.metal");
+pub const dec_prep1_2 = @embedFile("kernels/dense/dec_prep1_2.metal");
+pub const dec_prep1_3 = @embedFile("kernels/dense/dec_prep1_3.metal");
 
 /// the GEMV's setup and input loads: prep_sc's rows in device memory (text_dgemv's) ...
 pub const dec_gemv0 = dec_gemv0_head ++ dec_gemv_loop ++ dec_gemv0_x;
