@@ -8,7 +8,8 @@
 //! - the served logits: the host's stock call, `router.tableF32` over the view (stockTable: the astype, then + 0) and
 //!   Linear's matmul(x, table) (MLX casts x to f32 and runs its fused NAX GEMM over the column-major table), at the
 //!   span widths where MLX runs its regular kernel: 4096 (a prompt chunk), 1366 (the fewest; 1365 and fewer take MLX's
-//!   NAX split K), the tails of 1996 and 2253, 3063, and 4095 and 4097 (a row off the tile).
+//!   NAX split K), the standard request's 1965-row span, the tails of 1996 and 2253, 3063, and 4095 and 4097 (a row
+//!   off the tile).
 //! GPU tests (TURBOEXL3_GPU=1, else skipped): those words over the f16 weight and over the f32 table, and the refusals.
 //! Timing (TURBOEXL3_LING_TIME=1 with TURBOEXL3_GPU=1; asserts nothing, guidance only): the stock call against `logits`
 //! at 4096 and 2253 rows, min and median us over 8 rounds after 2 warm. Lines: TURBOEXL3_LING_ROUTER_PROMPT,
@@ -138,7 +139,7 @@ test "turboexl3 gpu ling router_prompt: logits over the loaded f16 weight's view
     fillAllWords(rnd, words);
     const op = try operands(&g, s, words);
     try testing.expect(columnMajor(op.view) and columnMajor(op.table) and columnMajor(op.rebuilt));
-    const widths = [_]usize{ 4096, 1366, 1996, 2253, 3063, 4095, 4097 };
+    const widths = [_]usize{ 4096, 1366, 1965, 1996, 2253, 3063, 4095, 4097 };
     const max_rows: usize = 4097;
     const xbits = try a.alloc(u16, max_rows * hidden);
     defer a.free(xbits);
