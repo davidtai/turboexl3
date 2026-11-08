@@ -8,7 +8,12 @@
 //! - no worse than the served path against the same f64 reference: the expanded cache (kv_b over every cached latent
 //!   in bf16, the shared rope key broadcast, MLX's one-row SDPA for each row over the keys up to it, as the exact
 //!   verify's rows run), bf16, rows 1 to 4 at decode and verify widths, keys to the served prompt's 18,480.
-//! Lines: TURBOEXL3_LING_MLA_LATENT, TURBOEXL3_LING_MLA_LATENT_ROWS, TURBOEXL3_LING_MLA_LATENT_SERVED.
+//! - the outside plugin turboexl3_ling's served operand: kv_b as its loader holds it (the f16 checkpoint's [in, out]
+//!   view cast to bf16) transposed back to its stored rows, row-contiguous over the loaded buffer and taken by the
+//!   plan; `decodeLatent` over a wider cache buffer's first rows within 2 % of the plugin's expanded attention, which
+//!   reads that view through a plain matmul, at the standard prompt's 18,380 keys.
+//! Lines: TURBOEXL3_LING_MLA_LATENT, TURBOEXL3_LING_MLA_LATENT_ROWS, TURBOEXL3_LING_MLA_LATENT_SERVED,
+//! TURBOEXL3_LING_MLA_LATENT_LOADER_KVB, TURBOEXL3_LING_MLA_LATENT_LOADER.
 const std = @import("std");
 const sdk = @import("sdk");
 const mlx = sdk.mlx;
@@ -383,6 +388,169 @@ test "turboexl3 gpu ling mla latent: no worse than the served expanded attention
             std.debug.print("TURBOEXL3_LING_MLA_LATENT_SERVED keys={d} rows={d} scale={d:.4} fused_rms={e:.3} served_rms={e:.3} fused_max={e:.3} served_max={e:.3} {s}\n", .{ t, rows, scale, rf, rs, ef.max_ratio, es.max_ratio, if (ok) "PASS" else "FAIL" });
             failed += @intFromBool(!ok);
         }
+    }
+    try testing.expectEqual(@as(usize, 0), failed);
+}
+
+// ── the plugin's served operand ──
+
+/// kv_b as the outside plugin turboexl3_ling hands it to `decodeLatent`. The checkpoint stores kv_b f16
+/// [H (DN + DV), DL]. The plugin's loader (its copied trunk.zig `proj`) holds a dense projection as the [DL, H (DN + DV)]
+/// view a plain matmul reads (`transposed`), then casts a plain f16 weight to bf16 and evaluates it (`lin`). `held` is
+/// that array. The plugin's `kvRows` (src/ling_mla_latent.zig) transposes it back to the stored rows: `rows`, what its
+/// `latentAttn` passes here. `ckpt_bf16` is the checkpoint cast to bf16, the words `rows` must hold.
+const LoaderKvB = struct { held: mlx.mlx_array, rows: mlx.mlx_array, ckpt_bf16: mlx.mlx_array };
+
+fn loaderKvB(g: *G, a: std.mem.Allocator, rnd: std.Random, h: usize) !LoaderKvB {
+    const host = try a.alloc(f32, h * (DN + DV) * DL);
+    defer a.free(host);
+    const ws: f32 = 1.0 / @sqrt(@as(f32, @floatFromInt(DL)));
+    for (host) |*v| v.* = rnd.floatNorm(f32) * ws;
+    const ckpt = try g.astype(try g.hostArray(std.mem.sliceAsBytes(host), &.{ ci(h * (DN + DV)), ci(DL) }, .float32), .float16);
+    try mlx.check(mlx.mlx_array_eval(ckpt));
+    const held = try g.astype(try g.transposeAxes(ckpt, &.{ 1, 0 }), .bfloat16);
+    try mlx.check(mlx.mlx_array_eval(held));
+    const rows = try g.transposeAxes(held, &.{ 1, 0 });
+    try mlx.check(mlx.mlx_array_eval(rows));
+    const ckpt_bf16 = try g.astype(ckpt, .bfloat16);
+    try mlx.check(mlx.mlx_array_eval(ckpt_bf16));
+    return .{ .held = held, .rows = rows, .ckpt_bf16 = ckpt_bf16 };
+}
+
+/// normal(0, 1) on the host, as a device array [shape] in `dt`, evaluated
+fn devRandn(g: *G, a: std.mem.Allocator, rnd: std.Random, shape: []const c_int, dt: mlx.mlx_dtype) !mlx.mlx_array {
+    var n: usize = 1;
+    for (shape) |d| n *= @as(usize, @intCast(d));
+    const host = try a.alloc(f32, n);
+    defer a.free(host);
+    for (host) |*v| v.* = rnd.floatNorm(f32);
+    const x = try g.astype(try g.hostArray(std.mem.sliceAsBytes(host), shape, .float32), dt);
+    try mlx.check(mlx.mlx_array_eval(x));
+    return x;
+}
+
+/// The plugin's expanded-cache attention of the call's rows, the head's path without its latent switch: the latent rows
+/// through the loader's `held` view (`self.mm(&fa.kv_b, latent)`, a plain `x @ held`), the heads' keys and values cut
+/// from it, the shared rope key broadcast, then each row alone over the keys up to its position through MLX's one-row
+/// SDPA. out [H, S, DV] f32.
+fn servedLoader(g: *G, s: mlx.mlx_stream, a: std.mem.Allocator, qn: mlx.mlx_array, qr: mlx.mlx_array, lat: mlx.mlx_array, rot: mlx.mlx_array, held: mlx.mlx_array, h: usize, rows: usize, t: usize, scale: f64, out: []f32) !void {
+    const hc = ci(h);
+    const tc = ci(t);
+    const kv = try g.matmul(try g.reshape(lat, &.{ tc, ci(DL) }), held);
+    const kvh = try g.transposeAxes(try g.reshape(kv, &.{ 1, tc, hc, ci(DN + DV) }), &.{ 0, 2, 1, 3 });
+    const kn = try g.slice(kvh, &.{ 0, 0, 0, 0 }, &.{ 1, hc, tc, ci(DN) }, &.{ 1, 1, 1, 1 });
+    const vt = try g.slice(kvh, &.{ 0, 0, 0, ci(DN) }, &.{ 1, hc, tc, ci(DN + DV) }, &.{ 1, 1, 1, 1 });
+    var vc = mlx.mlx_array_new();
+    try mlx.check(mlx.mlx_contiguous(&vc, vt, false, s));
+    const v = try g.adopt(vc);
+    var rb = mlx.mlx_array_new();
+    try mlx.check(broadcastTo(&rb, rot, &[_]c_int{ 1, hc, tc, ci(DR) }, 4, s));
+    const keys = try g.concat(&.{ kn, try g.adopt(rb) }, 3);
+    const q = try g.concat(&.{ qn, qr }, 3);
+    const none = mlx.mlx_array_new();
+    defer _ = mlx.mlx_array_free(none);
+    const one = try a.alloc(f32, h * DV);
+    defer a.free(one);
+    for (0..rows) |r| {
+        const pos = t - rows + r;
+        const q1 = try g.slice(q, &.{ 0, 0, ci(r), 0 }, &.{ 1, hc, ci(r + 1), ci(DN + DR) }, &.{ 1, 1, 1, 1 });
+        const k1 = try g.slice(keys, &.{ 0, 0, 0, 0 }, &.{ 1, hc, ci(pos + 1), ci(DN + DR) }, &.{ 1, 1, 1, 1 });
+        const v1 = try g.slice(v, &.{ 0, 0, 0, 0 }, &.{ 1, hc, ci(pos + 1), ci(DV) }, &.{ 1, 1, 1, 1 });
+        var y = mlx.mlx_array_new();
+        try mlx.check(sdpa(&y, q1, k1, v1, @floatCast(scale), "", none, .{ .ctx = null }, false, s));
+        _ = try g.hostF32(try g.astype(try g.adopt(y), .float32), one);
+        for (0..h) |hh| @memcpy(out[(hh * rows + r) * DV ..][0..DV], one[hh * DV ..][0..DV]);
+    }
+}
+
+fn yes(b: bool) []const u8 {
+    return if (b) "true" else "false";
+}
+
+/// ||got - want|| / ||want|| and max |got - want| / max |want|
+fn relErr(got: []const f32, want: []const f32) [2]f64 {
+    var num: f64 = 0;
+    var den: f64 = 0;
+    var max_d: f64 = 0;
+    var max_w: f64 = 0;
+    for (got, want) |u, w| {
+        const d = @as(f64, u) - w;
+        num += d * d;
+        den += @as(f64, w) * w;
+        max_d = @max(max_d, @abs(d));
+        max_w = @max(max_w, @abs(@as(f64, w)));
+    }
+    return .{ @sqrt(num / den), max_d / max_w };
+}
+
+test "turboexl3 gpu ling mla latent: the outside plugin's served operand, kv_b as its loader holds it (the f16 checkpoint's [in, out] view cast to bf16) transposed back to its stored rows, row-contiguous over the loaded buffer, taken by the plan, and decodeLatent over a wider buffer's first rows within 2 % of the plugin's expanded attention: 18,380 keys at 1 row, 18,383 at 4, an 18,381 rollback at 2 (TURBOEXL3_GPU=1)" {
+    _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    const s = mlx.mlx_default_gpu_stream_new();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    const a = std.heap.page_allocator;
+    var g = try G.init(a, s);
+    defer g.deinit();
+    const h: usize = 64;
+    var prng = std.Random.DefaultPrng.init(0x10AD_E4B0);
+    const kvb = try loaderKvB(&g, a, prng.random(), h);
+    var failed: usize = 0;
+    {
+        const hs = mlx.getShape(kvb.held);
+        const rs = mlx.getShape(kvb.rows);
+        const hst = mlx.mlx_array_strides(kvb.held);
+        const rst = mlx.mlx_array_strides(kvb.rows);
+        const ph = mlx.mlx_array_data_uint8(kvb.held) orelse return error.NoData;
+        const pr = mlx.mlx_array_data_uint8(kvb.rows) orelse return error.NoData;
+        const pc = mlx.mlx_array_data_uint8(kvb.ckpt_bf16) orelse return error.NoData;
+        const nw = mlx.mlx_array_size(kvb.rows);
+        // `rows` is row-contiguous, so its buffer in order is its words; `ckpt_bf16` is a fresh row-major array
+        var differ: usize = 0;
+        for (0..nw) |i| differ += @intFromBool(!std.mem.eql(u8, pr[i * 2 ..][0..2], pc[i * 2 ..][0..2]));
+        const same_buffer = @intFromPtr(ph) == @intFromPtr(pr);
+        const ok = hs[0] == ci(DL) and hs[1] == ci(h * (DN + DV)) and hst[0] == 1 and hst[1] == DL and
+            rs[0] == ci(h * (DN + DV)) and rs[1] == ci(DL) and rst[0] == DL and rst[1] == 1 and same_buffer and differ == 0;
+        std.debug.print("TURBOEXL3_LING_MLA_LATENT_LOADER_KVB held [{d}, {d}] strides [{d}, {d}]; rows [{d}, {d}] strides [{d}, {d}], the held buffer: {s}; words differing from the checkpoint in bf16: {d}/{d} {s}\n", .{ hs[0], hs[1], hst[0], hst[1], rs[0], rs[1], rst[0], rst[1], yes(same_buffer), differ, nw, if (ok) "PASS" else "FAIL" });
+        failed += @intFromBool(!ok);
+    }
+    // the misread the plugin's latent decode made before kvRows: the loader's view read row-major as rows
+    const misread = try g.reshape(kvb.held, &.{ ci(h * (DN + DV)), ci(DL) });
+    const scale: f64 = 1.0 / @sqrt(192.0);
+    const cases = [_][3]usize{ .{ 18380, 1, 18432 }, .{ 18383, 4, 18432 }, .{ 18381, 2, 18432 } };
+    for (cases) |c| {
+        const t = c[0];
+        const rows = c[1];
+        const cap = c[2];
+        const mark = g.mark();
+        defer g.resetTo(mark);
+        const lat_buf = try devRandn(&g, a, prng.random(), &.{ 1, 1, ci(cap), ci(DL) }, .bfloat16);
+        const rot_buf = try devRandn(&g, a, prng.random(), &.{ 1, 1, ci(cap), ci(DR) }, .bfloat16);
+        const lat = try g.slice(lat_buf, &.{ 0, 0, 0, 0 }, &.{ 1, 1, ci(t), ci(DL) }, &.{ 1, 1, 1, 1 });
+        const rot = try g.slice(rot_buf, &.{ 0, 0, 0, 0 }, &.{ 1, 1, ci(t), ci(DR) }, &.{ 1, 1, 1, 1 });
+        // the plugin's mlaAttn cut: the query heads [1, S, H, DN + DR] transposed to [1, H, S, DN + DR], each half a view
+        const qt = try g.transposeAxes(try devRandn(&g, a, prng.random(), &.{ 1, ci(rows), ci(h), ci(DN + DR) }, .bfloat16), &.{ 0, 2, 1, 3 });
+        const qn = try g.slice(qt, &.{ 0, 0, 0, 0 }, &.{ 1, ci(h), ci(rows), ci(DN) }, &.{ 1, 1, 1, 1 });
+        const qr = try g.slice(qt, &.{ 0, 0, 0, ci(DN) }, &.{ 1, ci(h), ci(rows), ci(DN + DR) }, &.{ 1, 1, 1, 1 });
+        const takes_rows = ml.takes(qn, qr, lat, rot, kvb.rows);
+        const takes_held = ml.takes(qn, qr, lat, rot, kvb.held);
+        const n = h * rows * DV;
+        const want = try a.alloc(f32, n);
+        defer a.free(want);
+        try servedLoader(&g, s, a, qn, qr, lat, rot, kvb.held, h, rows, t, scale, want);
+        const got = try a.alloc(f32, n);
+        defer a.free(got);
+        const ctl = try a.alloc(f32, n);
+        defer a.free(ctl);
+        var e: [2]f64 = .{ std.math.inf(f64), std.math.inf(f64) };
+        var ec: [2]f64 = .{ std.math.inf(f64), std.math.inf(f64) };
+        if (takes_rows) {
+            try run(&g, s, .{ .qn = qn, .qr = qr, .lat = lat, .rot = rot, .w = kvb.rows }, scale, got);
+            e = relErr(got, want);
+            try run(&g, s, .{ .qn = qn, .qr = qr, .lat = lat, .rot = rot, .w = misread }, scale, ctl);
+            ec = relErr(ctl, want);
+        }
+        const ok = takes_rows and !takes_held and e[0] <= 0.02 and ec[0] > 0.5;
+        std.debug.print("TURBOEXL3_LING_MLA_LATENT_LOADER keys={d} of a {d}-row buffer rows={d}: takes(rows)={s} takes(held)={s}; decodeLatent against the plugin's expanded attention rel_l2={d:.5} rel_max={d:.5} (tolerance 0.02); control (the loader's view read as rows) rel_l2={d:.3} {s}\n", .{ t, cap, rows, yes(takes_rows), yes(takes_held), e[0], e[1], ec[0], if (ok) "PASS" else "FAIL" });
+        failed += @intFromBool(!ok);
     }
     try testing.expectEqual(@as(usize, 0), failed);
 }
