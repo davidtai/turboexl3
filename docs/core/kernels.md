@@ -1214,7 +1214,7 @@ streamer's slot banks and its grouped variants DeepSeek-V4.1's ([its catalog](..
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/dense.zig:1418` (`fn unrotKernels`) |
+| made at | `src/core/dense.zig:1435` (`fn unrotKernels`) |
 | inputs | `w` |
 | outputs | `r` |
 | source | `text_unrot_cols` = `dense/unrot_cols` (731 B, `1e71a2b282ba`) |
@@ -1252,7 +1252,7 @@ streamer's slot banks and its grouped variants DeepSeek-V4.1's ([its catalog](..
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/dense.zig:1420` (`fn unrotKernels`) |
+| made at | `src/core/dense.zig:1437` (`fn unrotKernels`) |
 | inputs | `r`, `suh`, `svh` |
 | outputs | `W` |
 | source | `text_unrot_rows` = `dense/unrot_rows` (1431 B, `aeb52f782bb2`) |
@@ -1297,10 +1297,10 @@ pg2: a dense linear's prefill matmul and finish as one launch.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/pgemm.zig:135` (`fn kernelGet`) |
+| made at | `src/core/pgemm.zig:144` (`fn kernelGet`) |
 | inputs | `x`, `w`, `svh` |
 | outputs | `y` |
-| source | `body` = `pg2/gemm_fused` ++ text '\n#undef kernel\n' (4974 B, `5d135c7c939d`) |
+| source | `body` = `pg2/gemm_fused_1` ++ `pg2/gemm_fused_2` ++ `pg2/gemm_fused_3` ++ `pg2/gemm_fused_4` ++ `pg2/gemm_fused_5` ++ `pg2/gemm_fused_6` ++ text '\n#undef kernel\n' (4974 B, `5d135c7c939d`) |
 | header | `header` = `steel_nax` ++ text 'using namespace mlx::steel;\n' ++ `pg2/gemm_loop` ++ text (72 B) (34287 B, `0ab3ef8c4fca`) |
 
 <!-- /kernel-facts -->

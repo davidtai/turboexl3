@@ -1357,6 +1357,29 @@ ADDED_FILES['mla_flash_test.zig'] = ('the flash kernel\'s text, refusals and dum
                                      'word at 128 / 128 and 96 / 64, and an f64 reference at Ling\'s heads (GPU)')
 ADDED_KERNELS[('mla_flash.zig', 'turboexl3_ling_mla_flash')] = ('MLX\'s attention_nax less its mask, sinks, log-sum-exp '
                                                                 'and window arms (kernels/mla_flash/body.metal)')
+# P4: a KDA layer's q|k|v, f and g at prompt rows in one launch past their prepares and W_hats (turboexl3_ling's
+# MLX_SERVE_LING_KDA_PROJ_PROMPT): pg2's fused NAX GEMM and dense finish over the three members
+ADDED_KERNELS[('models/ling/kdaproj_pf.zig', 'turboexl3_ling_kdaproj_pf')] = ('pg2\'s body with the member choice: '
+                                                                           'kdaproj/pf_1 (the members\' shapes and N tiles), '
+                                                                           'pg2\'s fused_2, kdaproj/pf_3 (the tile\'s member, '
+                                                                           'its operands and output), pg2\'s fused_4, '
+                                                                           'kdaproj/pf_5 (the column in the member), pg2\'s '
+                                                                           'fused_6, the macro\'s end; pg2\'s header')
+ADDED_FILES['models/ling/kdaproj_pf.zig'] = ('Ling-3.1\'s KDA projections at prompt rows (q|k|v, f and g of one input): each '
+                                             'member\'s prepare and W_hat by its linear\'s launches, then the three products '
+                                             'and finishes in one launch (kdaProjPrompt, turboexl3_ling_kdaproj_pf), and its '
+                                             'texts\' CPU tests')
+ADDED_FILES['models/ling/kdaproj_pf_test.zig'] = ('kdaProjPrompt held to each member\'s linear word for word at prompt rows 33 to '
+                                                  '16384, the refusal at 32 rows (GPU); its timing against the three linear '
+                                                  'calls over a short tile sweep (TURBOEXL3_LING_TIME)')
+ADDED[('models/ling/api.zig', 'const kdaproj_pf')] = 'kdaproj_pf.zig, the KDA projections at prompt rows in one launch'
+ADDED[('models/ling/api.zig', 'const kdaProjPrompt')] = 'the re-export of kdaproj_pf.zig\'s kdaProjPrompt'
+ADDED[('core/dense.zig', 'fn prefillOperands')] = ('linearOn\'s prefill operands (its prepare and W_hat, the same launches) for a '
+                                                   'caller that runs the product itself')
+for _i in range(1, 7):
+    ADDED[('core/pgemm.zig', 'const fused_%d' % _i)] = 'a piece of pg2\'s fused body, cut where a grouped launch puts its own statements'
+CHANGED[('core/pgemm.zig', 'const text_fused')] = 'its six pieces concatenated (fused_1 to fused_6): the same text'
+CHANGED[('core/pgemm.zig', 'const header')] = 'pub: models/ling/kdaproj_pf.zig\'s grouped launch reads it'
 
 def metal_strings(fn, toks, corpus):
     """(line, kind, value) of every literal in a .zig file that holds Metal"""
@@ -1666,6 +1689,12 @@ SPLIT_ADDED_KERNELS['turboexl3_ling_mla_attn'] = ('the same: the attention\'s pa
                                                   '0, an online softmax a row')
 SPLIT_ADDED_KERNELS['turboexl3_ling_mla_vabs'] = ('the same: a row\'s group partials merged in group order, then kv_b\'s '
                                                   'value half')
+SPLIT_ADDED_KERNELS['turboexl3_ling_kdaproj_pf'] = ('P4: a KDA layer\'s q|k|v, f and g at prompt rows in one launch '
+                                                    '(models/ling/kdaproj_pf.zig text_pf: kdaproj/pf_1, pg2\'s fused_2, '
+                                                    'kdaproj/pf_3, pg2\'s fused_4, kdaproj/pf_5, pg2\'s fused_6, the '
+                                                    'macro\'s end): pg2\'s fused NAX GEMM and dense finish with the N '
+                                                    'tiles running each member\'s in turn, each member\'s linear bytes; '
+                                                    'ling.kdaProjPrompt')
 SPLIT_CHANGED_CONSTS = {
     'head': 'models/ling/router.zig: launch 1\'s router threadgroups at 512 / 16 a row (MLX\'s gemv tiles)',
     'pred_open': 'models/ling/router.zig: the predictor\'s threadgroups after 512 / 16 a row of the router\'s',

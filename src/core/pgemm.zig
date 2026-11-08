@@ -1,7 +1,7 @@
 //! pg2: a dense linear's prefill matmul and finish as one launch, at the shapes this machine runs faster that way.
 //! `linearOn`'s matmul path at prefill rows is three launches past the prepare: the W_hat decode, MLX's f16 matmul (z half
 //! [M, N] written, MLX's fused NAX kernel) and the finish (z read, y written: f16(H128(f16(z)) * svh) per 128-column
-//! block, kernels/dense/finish.metal). pg2 runs the matmul and the finish as one kernel (kernels/pg2/gemm_fused.metal):
+//! block, kernels/dense/finish.metal). pg2 runs the matmul and the finish as one kernel (kernels/pg2/gemm_fused_*.metal):
 //! MLX's fused NAX GEMM body (steel/gemm/kernels/steel_gemm_fused_nax.h `gemm`, MLX 0.32.3; its gemm_loop verbatim,
 //! kernels/pg2/gemm_loop.metal: SK 32, the 16 x 32 x 16 multiply-accumulate on the f16 operands, f32 accumulation, k in
 //! MLX's order) at a tile of this machine's choosing, then the finish as its epilogue: the accumulators rounded to half as
@@ -27,7 +27,16 @@ const steel_nax = @import("steel.zig").nax;
 const A = mlx.mlx_array;
 
 pub const text_loop = @embedFile("kernels/pg2/gemm_loop.metal");
-pub const text_fused = @embedFile("kernels/pg2/gemm_fused.metal");
+/// The fused body in pieces, cut where a grouped launch (Ling's KDA prompt projections, models/ling/kdaproj_pf.zig)
+/// puts its own statements: the shapes, the block and its bounds, the operands, the block's row, its column, then the
+/// GEMM and the finish
+pub const fused_1 = @embedFile("kernels/pg2/gemm_fused_1.metal");
+pub const fused_2 = @embedFile("kernels/pg2/gemm_fused_2.metal");
+pub const fused_3 = @embedFile("kernels/pg2/gemm_fused_3.metal");
+pub const fused_4 = @embedFile("kernels/pg2/gemm_fused_4.metal");
+pub const fused_5 = @embedFile("kernels/pg2/gemm_fused_5.metal");
+pub const fused_6 = @embedFile("kernels/pg2/gemm_fused_6.metal");
+pub const text_fused = fused_1 ++ fused_2 ++ fused_3 ++ fused_4 ++ fused_5 ++ fused_6;
 
 fn sentinel(comptime s: []const u8) [:0]const u8 {
     comptime {
@@ -41,7 +50,7 @@ fn sentinel(comptime s: []const u8) [:0]const u8 {
 /// MLX's kernel attribute on the generated definition: `[[kernel]]` becomes `[[kernel, max_total_threads_per_threadgroup(WM
 /// * WN * 32)]]` (WM and WN the definition's template parameters, MLX's own expression); the body's last line undefines
 /// the macro, so the explicit instantiation MLX appends keeps its plain `[[kernel]]`.
-const header: [:0]const u8 = sentinel(steel_nax ++ "using namespace mlx::steel;\n" ++ text_loop ++ "\n#define kernel kernel, max_total_threads_per_threadgroup(WM * WN * 32)\n");
+pub const header: [:0]const u8 = sentinel(steel_nax ++ "using namespace mlx::steel;\n" ++ text_loop ++ "\n#define kernel kernel, max_total_threads_per_threadgroup(WM * WN * 32)\n");
 const body: [:0]const u8 = sentinel(text_fused ++ "\n#undef kernel\n");
 
 const fused_in = [_][*:0]const u8{ "x", "w", "svh" };

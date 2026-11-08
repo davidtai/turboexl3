@@ -1097,6 +1097,23 @@ pub const Dense = struct {
         pgemm.check(rs, xp, W, svh, self.shape.out_dtype, y);
         return y;
     }
+
+    /// The operands `linearOn` hands its matmul at `rows` prefill rows: xp half [rows, in] (its prepare, natural order)
+    /// and W half [in, out] (`dequantize`), by the same launches and configs. Null where `linearOn` takes another arm at
+    /// `rows`: the GEMV or register path, the fused GEMM, or an un-rotated resident. The caller frees both.
+    pub fn prefillOperands(self: *Dense, s: mlx.mlx_stream, x: mlx.mlx_array, trellis: mlx.mlx_array, suh: mlx.mlx_array, rows: usize) !?[2]mlx.mlx_array {
+        if (rows <= decode.Kernels.max_rows or rows <= self.small_rows or self.fused_prefill) return null;
+        if (rows > unrot_min_rows) if (stdTake(trellis, true)) |w| {
+            _ = mlx.mlx_array_free(w);
+            return null;
+        };
+        const c = try self.buildCfg(rows, false);
+        defer _ = mlx.mlx_fast_metal_kernel_config_free(c.prep);
+        defer _ = mlx.mlx_fast_metal_kernel_config_free(c.finish);
+        const xp = try one(self.prep, c.prep, &.{ x, suh }, s);
+        errdefer _ = mlx.mlx_array_free(xp);
+        return .{ xp, try self.dequantize(s, trellis) };
+    }
 };
 
 // ---- The resident trunk (memory for compute; a host's opt-in): W_hat kept ----

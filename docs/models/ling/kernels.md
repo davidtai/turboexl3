@@ -304,6 +304,36 @@ K split.
 - **Bits:** the members' are dec0's. b's are MLX's gemv's (gemv.h `GEMVKernel::run` at BM 1, BN 8, SM 1, SN 32, TM 4, TN 4, MLX 0.32): each K slice's products in its order, the simdgroup's shuffle-down sum, then the eight slices' sums added in simdgroup order, one simdgroup running the eight slices in turn; stored in bf16. It needs IN % 1024 == 0, OUTB % 4 == 0, OUTB < 4096 and IN >= 16 OUTB (`kdaproj.bTakes`), where MLX picks that kernel.
 - **Pinned by:** `src/models/ling/bproj_test.zig` "turboexl3 ling bproj texts: ..." (CPU: the composition and the gemv statements, `kernels/test/pins/bproj_texts.metal`) and "turboexl3 gpu ling bproj: ..." (GPU: b's output against the served one-row matmul and denseRows, the members against kdaProj's, word for word at rows 1 to 8).
 
+## `src/models/ling/kdaproj_pf.zig`
+
+A KDA layer's q|k|v (4096 -> 24576), f and g (4096 -> 8192 each) at prompt rows (`kdaProjPrompt`, the outside plugin
+turboexl3_ling's MLX_SERVE_LING_KDA_PROJ_PROMPT). `linear` at these rows runs, per member, its prepare, its W_hat
+decode, MLX's f16 matmul (z half written) and the finish (z read back). Here each member's prepare and W_hat come from
+its own `linear`'s launches (`Dense.prefillOperands`), and one launch runs the three products and finishes: pg2's
+kernel (`turboexl3_pgemm_fused`) with its N tiles running member 0's, then 1's, then 2's.
+
+### `turboexl3_ling_kdaproj_pf`
+
+<!-- kernel-facts: turboexl3_ling_kdaproj_pf -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/ling/kdaproj_pf.zig:49` (`fn kernelGet`) |
+| inputs | `x0`, `x1`, `x2`, `w0`, `w1`, `w2`, `svh0`, `svh1`, `svh2` |
+| outputs | `y0`, `y1`, `y2` |
+| source | `text_pf` = `ling:kdaproj/pf_1` ++ `pg2/gemm_fused_2` ++ `ling:kdaproj/pf_3` ++ `pg2/gemm_fused_4` ++ `ling:kdaproj/pf_5` ++ `pg2/gemm_fused_6` ++ `ling:kdaproj/pf_undef` (5529 B, `7454701fcb9a`) |
+| header | `pgemm.header` = `steel_nax` ++ text 'using namespace mlx::steel;\n' ++ `pg2/gemm_loop` ++ text (72 B) (34287 B, `0ab3ef8c4fca`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** `kdaProjPrompt` (`ling.kdaProjPrompt`), the outside plugin turboexl3_ling's MLX_SERVE_LING_KDA_PROJ_PROMPT: a KDA layer's three EXL3 projections of its normed input at prompt rows (past `linear`'s register path, 32 rows on NAX).
+- **Shapes and dtypes:** x0, x1, x2 half [M, K] (each member's prepared rows, natural order), w0, w1, w2 half [K, N_m] (each member's W_hat), svh0, svh1, svh2 half [N_m]. Out: y0, y1, y2 OUT_T [M, N_m] (x's dtype).
+- **Grid and threadgroup:** pg2's: `((N0 + N1 + N2) / BN · 2^SWZ · 32, ceil(ceil(M / BM) / 2^SWZ) · WN, WM)` / `(32, WN, WM)`; a threadgroup's N tile lies in one member (each N_m a multiple of BN).
+- **Template args:** pg2's: T (half), BM, BN, BK, WM, WN, SWZ, AM, AK (M and K aligned to the tile), AN (1) and OUT_T; the tile `kdaproj_pf.tileFor` (K 4096: `ling_tile`).
+- **Replaces:** per member, MLX's matmul and the finish: six launches, and z's write and read, for one.
+- **Bits:** each member's are its `linear` chain's: pg2's statements (MLX's NAX gemm_loop verbatim, each column's k in MLX's order whatever the tile; the accumulators rounded to half as MLX's store rounds them; the finish's statements per 128-column block), on that member's operands. A call is taken only where `linear` runs that chain at these rows and MLX runs its regular kernel (`pgemm.mlxRegular`: no split K) on the NAX path.
+- **Pinned by:** `src/models/ling/kdaproj_pf.zig` "turboexl3 ling kdaproj prompt texts: ..." (CPU: the composition of pg2's pieces) and `src/models/ling/kdaproj_pf_test.zig` "turboexl3 gpu ling kdaproj prompt: ..." (GPU: each member against `root.linear` word for word at rows 33 to 16384, the refusal at 32).
+
 ## `src/models/ling/combine.zig`
 
 A wide routed call's combine: the call's routed rows (each pair's expert output at weight 1, f32) times their routing
