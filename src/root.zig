@@ -136,10 +136,12 @@ pub fn validateCall(x: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array, scores: m
     return bankGeometry(bank, sh[2]);
 }
 
-/// The compiled kernels of every geometry this process has served (a handful per model).
+/// The compiled kernels of every geometry this process has served, kept for its life (a handful per model). 32 holds a
+/// test binary's tests too, which all run in one process: the Ling GPU tests make 17 routed geometries (ling_test.zig's
+/// kernel cache test).
 /// a spinlock: the cache fills once per geometry and is read thereafter
 const cache_lock = Global(std.atomic.Value(u32), "root_cache_lock", std.atomic.Value(u32).init(0));
-const cache = Global([16]?decode.Kernels3, "root_cache", @splat(null));
+const cache = Global([32]?decode.Kernels3, "root_cache", @splat(null));
 
 pub fn kernelsFor(geo: decode.Geometry, out_dtype: mlx.mlx_dtype) !*decode.Kernels3 {
     while (cache_lock.get().*.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
