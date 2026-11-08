@@ -359,12 +359,13 @@ test "turboexl3 gpu ling: root.moeLing at Ling-3.1-flash's routed geometry (4096
     try testing.expect(!failed);
 }
 
-// The plugin's MTP head at top-4 (turboexl3_ling's ling_mtp.zig under MLX_SERVE_LING_MTP_HEAD_TOP4=1) calls moeLing on its
-// resident bank: the 512 experts' I16 trellis words stacked on axis 0 and viewed as u16, suh and svh f16 (rootBank at
-// .uint16), with x f32 [1, rows, hidden], the slots u32 and the weights f32 [1, rows, 4]. The weights are rounded through
-// bf16 (the block's cast to the activation dtype, then the head's to f32), and the limit is 0. Decode rows 1 and 4, then
-// prefill rows 17, 1328 and 4096 (the head's history pass). x ~ N(0, 8^2), with the f32 output held to ref.moeRowClampedAt
-// on sampled rows at the top-8 test's bar.
+// The plugin's MTP head at top-4 (turboexl3_ling's MLX_SERVE_LING_MTP_HEAD_TOP4, rejected as R7 and removed from the
+// plugin; this case stays as moeLing's top-4 coverage) called moeLing on its resident bank: the 512 experts' I16
+// trellis words stacked on axis 0 and viewed as u16, suh and svh f16 (rootBank at .uint16), with x f32 [1, rows,
+// hidden], the slots u32 and the weights f32 [1, rows, 4]. The weights are rounded through bf16 (the block's cast to
+// the activation dtype, then the head's to f32), and the limit is 0. Decode rows 1 and 4, then prefill rows 17, 1328
+// and 4096 (the head's history pass). x ~ N(0, 8^2), with the f32 output held to ref.moeRowClampedAt on sampled rows at
+// the top-8 test's bar.
 test "turboexl3 gpu ling top4: root.moeLing at top-4 on the MTP head's operands (x f32, u32 slots, bf16-rounded f32 weights, limit 0) equals the reference at Ling-3.1-flash's routed geometry, decode rows 1 and 4 and prefill rows 17, 1328 and 4096 (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
     const s = mlx.mlx_default_gpu_stream_new();
