@@ -155,18 +155,6 @@ const group_down_m3_names: [group_variants.len][:0]const u8 = blk: {
 /// Every grouped GEMV kernel name a variant or a text set uses, for the tests: distinct names, distinct libraries.
 pub const group_kernel_names = group_gu_names ++ group_down_names ++ group_gu_m3_names ++ group_down_m3_names;
 pub const text_prep2bg = prep2_1 ++ skip_rk ++ prep2b_expert ++ prep2_row ++ prep2_body;
-/// DEVROUTE's device wave in the gate|up's prepare (`Banked.bankedGateUpLutSelV`): prep2bg with each row-slot's packed id
-/// read through the layer's resident LUT at its routed expert (`lut[idx[rk]]`, `prep2bl_slot`, which also writes it to
-/// `slots` for the call's other launches) and its x row at its token (prep2_row at the call's top-k), in place of the
-/// caller's two takes. Every statement after the id is prep2bg's, on the same values: the same bytes.
-pub const text_prep2bgl = prep2_1 ++ prep2bl_slot ++ skip_sid ++ prep2bl_expert ++ prep2_row ++ prep2_body;
-const prep2bl_slot = @embedFile("kernels/banked/prep2bl_slot.metal");
-const skip_sid = @embedFile("kernels/banked/skip_sid.metal");
-const prep2bl_expert = @embedFile("kernels/banked/prep2bl_expert.metal");
-/// prep2bgl's inputs: x by token, the routed experts and the layer's LUT in place of the ids, then prep2b's banked arrays
-pub const prep2bl_inputs = [_][*:0]const u8{ "x", "idx", "lut", "gate_suh0", "gate_suh1", "gate_suh2", "up_suh0", "up_suh1", "up_suh2" };
-/// prep2bgl's outputs: prep2's, then the row-slots' packed ids
-pub const prep2bl_outputs = [_][*:0]const u8{ "xg", "xu", "sg", "su", "slots" };
 pub const text_gu3bg = gu3_1 ++ rk_line ++ gu3g_2 ++ gu3b_w ++ gu3g_3;
 pub const text_fin7cbg = fin7_1 ++ skip_rk ++ fin7b_expert ++ fin7_2 ++ fin7_planes ++ fin7_3 ++ fin7_sums ++ fin7_4 ++ fin7_swiglu_clamp ++ fin7_5;
 /// fin7cbg's Ling-3.1 forms, as `text_fin7b` and `text_fin7cob` are fin7cb's.
@@ -249,11 +237,6 @@ pub const Banked = struct {
     /// `banked_g`'s and `banked_gm3`'s). The configs are their texts' (`cfgbg`, `cfgbgm3`).
     banked_gv: [group_variants.len]?GroupGemvs = @splat(null),
     banked_gvm3: [group_variants.len]?GroupGemvs = @splat(null),
-    /// DEVROUTE's LUT-routed prepare (`text_prep2bgl`), made on first use, and its configs, one per row-slot count at the
-    /// top-k it was made for (`cfgsLut`).
-    banked_l: ?mlx.mlx_fast_metal_kernel = null,
-    cfgl: [banked_rows_max + 1]?LutCfg = @splat(null),
-    const LutCfg = struct { topk: u32, prep: mlx.mlx_fast_metal_kernel_config };
 
     /// The banked state for the process's `Kernels3` of a geometry (`forKernels`): `Config.banked_group` and
     /// `banked_m3` as configured when it is made
@@ -280,10 +263,7 @@ pub const Banked = struct {
             g.* = null;
         };
         if (self.banked_ones) |o| _ = mlx.mlx_array_free(o);
-        for ([_]?mlx.mlx_fast_metal_kernel{ self.banked_g8, self.banked_g8m3, self.banked_l }) |k| if (k) |kk| freeKernel(kk);
-        for (self.cfgl) |c| if (c) |cc| {
-            _ = mlx.mlx_fast_metal_kernel_config_free(cc.prep);
-        };
+        for ([_]?mlx.mlx_fast_metal_kernel{ self.banked_g8, self.banked_g8m3 }) |k| if (k) |kk| freeKernel(kk);
         self.* = undefined;
     }
 
@@ -590,62 +570,6 @@ pub const Banked = struct {
         var hd: [2]mlx.mlx_array = undefined;
         try ks.applyConfig(k.fin, c.fin7, &.{ z[0], z[1], ids, b[0].gate_svh, b[1].gate_svh, b[2].gate_svh, b[0].up_svh, b[1].up_svh, b[2].up_svh, b[0].down_suh, b[1].down_suh, b[2].down_suh, xp[2], xp[3] }, &hd, s);
         return hd;
-    }
-
-    /// DEVROUTE's prepare (`text_prep2bgl`), made on first use.
-    fn lutKernel(self: *Banked) !mlx.mlx_fast_metal_kernel {
-        if (self.banked_l) |k| return k;
-        const k = ks.newKernel("turboexl3_prep2bgl", &prep2bl_inputs, &prep2bl_outputs, text_prep2bgl, header, true) orelse return error.KernelCreateFailed;
-        self.banked_l = k;
-        return k;
-    }
-
-    /// prep2bgl's config at `rows` row-slots, `topk` a token: prep2bg's grid, threadgroup and outputs (`prep_h`) with
-    /// TOPK the call's top-k, then the ids' output. One a row-slot count, rebuilt when the top-k changes.
-    fn cfgsLut(self: *Banked, k3: *Kernels3, rows: usize, topk: u32) !mlx.mlx_fast_metal_kernel_config {
-        if (rows == 0 or rows > banked_rows_max or topk == 0 or rows % topk != 0) return error.BadExl3Shape;
-        if (self.cfgl[rows]) |c| {
-            if (c.topk == topk) return c.prep;
-            _ = mlx.mlx_fast_metal_kernel_config_free(c.prep);
-            self.cfgl[rows] = null;
-        }
-        const g = k3.geo;
-        const rkc: c_int = @intCast(rows);
-        const H: c_int = @intCast(g.hidden);
-        const nb: c_int = @intCast(g.hidden / 128);
-        const c = try ks.buildConfig(.{ .grid = .{ (g.hidden / 128) * 32, @intCast(rows), 1 }, .threadgroup = .{ 32, 1, 1 }, .out_shapes = &.{ &[_]c_int{ rkc, H }, &[_]c_int{ rkc, H }, &[_]c_int{ rkc, nb }, &[_]c_int{ rkc, nb }, &[_]c_int{rkc} }, .out_dtypes = &.{ .float16, .float16, .float32, .float32, .uint32 }, .template = &.{ .{ .name = "DIM", .value = .{ .int = H } }, .{ .name = "TOPK", .value = .{ .int = @intCast(topk) } } } });
-        self.cfgl[rows] = .{ .topk = topk, .prep = c };
-        return c;
-    }
-
-    /// `bankedGateUpSelV` with DEVROUTE's two takes in its prepare (prep2bgl): x [tokens, hidden] by token, `idx` [rows]
-    /// the routed experts (i32 or u32, `topk` a token, every one below `lut`'s length) and `lut` u32 the layer's packed
-    /// ids by expert, in place of x's rows taken per pair and the LUT taken at the experts -> hd, hs (as
-    /// `bankedGateUpSelV`'s) and the row-slots' packed ids `slots` u32 [rows], the down's `ids`. The grouped texts only
-    /// (today's or hw4b's, any variant), without gu8b; error.Exl3EngineNotImplemented for the others. The caller frees
-    /// all three.
-    pub fn bankedGateUpLutSelV(self: *Banked, k3: *Kernels3, s: mlx.mlx_stream, x: mlx.mlx_array, idx: mlx.mlx_array, lut: mlx.mlx_array, topk: u32, banks: *const [3]Kernels.Bank, rows: usize, sel: BankedSel, variant: u8) ![3]mlx.mlx_array {
-        const set = try self.bankedSetSelV(k3, rows, sel, variant);
-        if (set.texts == .banked or set.gu8) return error.Exl3EngineNotImplemented;
-        const k = &set.k;
-        const c = set.c;
-        const b = banks;
-        var xp: [5]mlx.mlx_array = undefined; // xg, xu, their per-block input sums, the row-slots' ids
-        try ks.applyConfig(try self.lutKernel(), try self.cfgsLut(k3, rows, topk), &.{ x, idx, lut, b[0].gate_suh, b[1].gate_suh, b[2].gate_suh, b[0].up_suh, b[1].up_suh, b[2].up_suh }, &xp, s);
-        defer for (xp[0..4]) |a| {
-            _ = mlx.mlx_array_free(a);
-        };
-        errdefer _ = mlx.mlx_array_free(xp[4]);
-        const ids = xp[4];
-        var z: [2]mlx.mlx_array = undefined; // the split-K gate|up planes
-        if (variant != 0) sayVariant(.gate_up, variant, set.texts);
-        try ks.applyConfig(k.gu, c.gu, &.{ xp[0], xp[1], ids, b[0].gate_t, b[1].gate_t, b[2].gate_t, b[0].up_t, b[1].up_t, b[2].up_t }, &z, s);
-        defer for (z) |a| {
-            _ = mlx.mlx_array_free(a);
-        };
-        var hd: [2]mlx.mlx_array = undefined;
-        try ks.applyConfig(k.fin, c.fin7, &.{ z[0], z[1], ids, b[0].gate_svh, b[1].gate_svh, b[2].gate_svh, b[0].up_svh, b[1].up_svh, b[2].up_svh, b[0].down_suh, b[1].down_suh, b[2].down_suh, xp[2], xp[3] }, &hd, s);
-        return .{ hd[0], hd[1], ids };
     }
 
     /// The banked decode's down (down3b, then dfin3b at top-1 with unit scores): `hd`, `hs` (`bankedGateUp`'s), the same

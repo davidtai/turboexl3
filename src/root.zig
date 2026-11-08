@@ -983,8 +983,6 @@ pub const moeLingBanked = ling.moeLingBanked;
 pub const moeLingBankedSel = ling.moeLingBankedSel;
 pub const moeLingBankedGateUp = ling.moeLingBankedGateUp;
 pub const moeLingBankedDown = ling.moeLingBankedDown;
-pub const moeLingBankedLut = ling.moeLingBankedLut;
-pub const moeLingBankedLutSel = ling.moeLingBankedLutSel;
 /// Ling-3.1-flash's shared expert at decode rows: the gate and the up in one launch with the host's SwiGLU and the down's
 /// prepare in its pairs' second finishes, then the down's GEMV (models/ling/shared.zig)
 pub const lingSharedExpert = ling.sharedExpert;

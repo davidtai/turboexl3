@@ -1302,35 +1302,6 @@ ADDED_KERNELS[('models/ling/mla_latent.zig', 'turboexl3_ling_mla_vabs')] = ('a r
 ADDED_FILES['models/ling/mla_latent_test.zig'] = ('decodeLatent against an f64 reference within tolerance, its rows '
                                                   'against one-row calls and strided views against contiguous ones byte for '
                                                   'byte, and no worse than the served expanded attention (GPU)')
-# DEVROUTE's device wave in one call (turboexl3_ling's MLX_SERVE_LING_DEVWAVE_LUT): the banked prepare reading x's rows by
-# token and each row-slot's id through the layer's LUT (turboexl3_prep2bgl), ds.bankedGateUpLutAct and ling.moeLingBankedLut
-ADDED_KERNELS[('models/deepseek_v41/banked.zig', 'turboexl3_prep2bgl')] = ('prep2bg with its skip and expert lines reading '
-                                                                          'the row-slot\'s id through the layer\'s LUT at '
-                                                                          'its routed expert, the id line before them '
-                                                                          'writing it for the call\'s other launches '
-                                                                          '(text_prep2bgl: prep2_1, prep2bl_slot, skip_sid, '
-                                                                          'prep2bl_expert, prep2_row, prep2_2)')
-ADDED[('models/deepseek_v41/banked.zig', 'const prep2bl_inputs')] = ('the LUT prepare\'s operand names (x, the routed ids, '
-                                                                    'the LUT, then prep2bg\'s scales)')
-ADDED[('models/deepseek_v41/banked.zig', 'const prep2bl_outputs')] = 'the LUT prepare\'s outputs (prep2bg\'s, then the ids)'
-CHANGED[('models/deepseek_v41/banked.zig', 'const Banked')] = ('holds the LUT prepare (made on first use) and its configs, '
-                                                              'one per row-slot count, freed in deinit; '
-                                                              'bankedGateUpLutSelV runs it before the gate|up\'s GEMV '
-                                                              'and finish')
-ADDED[('models/deepseek_v41/api.zig', 'const BankedLutHalf')] = ('the LUT-routed gate|up\'s result: the half and the '
-                                                                'row-slots\' ids the down reads')
-ADDED[('models/deepseek_v41/api.zig', 'fn bankedGateUpLutAct')] = ('bankedGateUpAct with the routed ids read through the '
-                                                                  'layer\'s LUT and x\'s rows read by token in the prepare')
-ADDED[('models/deepseek_v41/api.zig', 'fn bankedCallRows')] = 'bankedCall\'s body at a row-slot count the caller checked'
-CHANGED[('models/deepseek_v41/api.zig', 'fn bankedCall')] = 'its body moved to bankedCallRows, at its ids\' count'
-ADDED[('models/ling/api.zig', 'fn moeLingBankedLut')] = ('moeLingBanked over the routed ids and the layer\'s LUT (DEVROUTE\'s '
-                                                        'device wave in one call), on the configured texts')
-ADDED[('models/ling/api.zig', 'fn moeLingBankedLutSel')] = 'moeLingBankedLut on the chosen texts (the byte test\'s arms)'
-ADDED[('root.zig', 'const moeLingBankedLut')] = 'the re-export of models/ling/api.zig\'s moeLingBankedLut'
-ADDED[('root.zig', 'const moeLingBankedLutSel')] = 'the re-export of models/ling/api.zig\'s moeLingBankedLutSel'
-ADDED_FILES['models/ling/devlut_test.zig'] = ('moeLingBankedLut held to DEVROUTE\'s device wave (the LUT\'s take, the rows\' '
-                                              'take, moeLingBanked) byte for byte at Ling\'s shapes on the streamer\'s banks, '
-                                              'y and the ids, and prep2bgl\'s text (CPU)')
 # a KDA layer's b_proj (bf16) as a fourth member of kdaProj's GEMV launch (turboexl3_ling's MLX_SERVE_LING_KDA_BPROJ):
 # turboexl3_ling_kdaproj_dec0b, MLX's gemv over b's weight on the grid's threadgroups past the three members'
 ADDED_KERNELS[('models/ling/kdaproj.zig', 'turboexl3_ling_kdaproj_dec0b')] = ('dec0\'s text with b_proj\'s threadgroups before its head '
@@ -1697,12 +1668,6 @@ SPLIT_ADDED_KERNELS['turboexl3_ling_router_logits_h'] = ('Ling-3.1\'s router log
 SPLIT_ADDED_KERNELS['turboexl3_ling_router_pred_h'] = 'turboexl3_ling_router_pred over the loaded f16 weight (router/logits_wh)'
 SPLIT_ADDED_KERNELS['turboexl3_ling_router_pred_sig_h'] = ('turboexl3_ling_router_pred_sig over the loaded f16 weight '
                                                            '(router/logits_wh)')
-SPLIT_ADDED_KERNELS['turboexl3_prep2bgl'] = ('DEVROUTE\'s device wave in the gate|up\'s prepare (models/deepseek_v41/'
-                                             'banked.zig text_prep2bgl: prep2_1, prep2bl_slot, skip_sid, prep2bl_expert, '
-                                             'prep2_row, prep2_2): prep2bg with each row-slot\'s id read through the '
-                                             'layer\'s LUT at its routed expert and written for the call\'s other launches, '
-                                             'its x row at its token (TOPK the call\'s top-k); ds.bankedGateUpLutAct, '
-                                             'ling.moeLingBankedLut')
 SPLIT_ADDED_KERNELS['turboexl3_ling_mla_qabs'] = ('Ling-3.1\'s MLA attention at decode rows in the latent '
                                                   '(models/ling/mla_latent.zig): q_nope through kv_b\'s key half, f32')
 SPLIT_ADDED_KERNELS['turboexl3_ling_mla_attn'] = ('the same: the attention\'s partials over the latent cache (latents and '
@@ -1792,6 +1757,16 @@ SPLIT_REMOVED_TESTS[('turboexl3 gpu ling router_prompt refusals: one row and eve
                      '(TURBOEXL3_GPU=1)')] = _R11
 SPLIT_REMOVED_TESTS[("turboexl3 gpu ling timing: router_prompt's logits in one launch against the "
                      "router's stock call at prompt widths (tableF32, then MLX's matmul) (TURBOEXL3_LING_TIME=1)")] = _R11
+_R6 = ("R6 DEVWAVE_LUT (M3, rejected): DEVROUTE's device wave in one call (ling.moeLingBankedLut, "
+       'ds.bankedGateUpLutAct, the LUT prepare turboexl3_prep2bgl)')
+SPLIT_REMOVED_KERNELS['turboexl3_prep2bgl'] = _R6
+SPLIT_REMOVED_FILES['models/ling/devlut_test.zig'] = _R6
+SPLIT_REMOVED_TESTS[('turboexl3 ling devlut texts: prep2bgl is prep2bg with its skip and expert lines '
+                     "swapped for the LUT's and the id line before them, nothing else")] = _R6
+SPLIT_REMOVED_TESTS[("turboexl3 gpu ling devlut: moeLingBankedLut is DEVROUTE's device wave (the LUT "
+                     "taken at the routed experts, x's rows taken per pair, moeLingBanked) byte for byte, tokens "
+                     "1 to 6 and 8 at top-8, limits 0 and 10, x bf16 and f32, on the streamer's banks "
+                     '(TURBOEXL3_GPU=1)')] = _R6
 # the Ling banked test selects each arm's texts (moeLingBankedSel): Config.banked_group set in the process selected nothing
 RENAMED_TESTS[('ling_test.zig', "turboexl3 gpu ling banked: every pair of moeLingBanked over three banks is moeLing's on "
                                 "its bank at top-1 with score 1, byte for byte, at limits 0 and 10 and banked groups 2 and "

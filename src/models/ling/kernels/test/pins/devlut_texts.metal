@@ -1,2 +1,0 @@
-uint(slots[rk])
-sid

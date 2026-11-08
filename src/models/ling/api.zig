@@ -99,27 +99,6 @@ pub fn moeLingBanked(s: mlx.mlx_stream, x: mlx.mlx_array, banks: *const [3]Bank,
     return moeLingBankedDown(s, h, banks, ids, dec, limit);
 }
 
-/// DEVROUTE's device wave in one call: `moeLingBanked` with x's rows read by token and each pair's packed id read through
-/// the layer's LUT at its routed expert, both in the gate|up's prepare (`ds.bankedGateUpLutAct`) in place of the caller's
-/// two takes. x [tokens, hidden] (bf16, f16 or f32), `idx` [tokens, topk] or [tokens · topk] (i32 or u32) the routed
-/// experts, every one below `lut`'s length, `lut` u32 [experts] the layer's packed ids (bank << 24 | slot row) by expert
-/// -> y f32 [tokens · topk, hidden]: row r is token r / topk's pair r % topk at weight 1, its bytes `moeLingBanked`'s over
-/// x's rows taken per pair and the LUT taken at `idx`. The grouped texts without gu8b (`Config.banked_group` 4,
-/// `banked_gu8` off), else error.Exl3EngineNotImplemented; `limit` as `moeLingBanked`'s.
-pub fn moeLingBankedLut(s: mlx.mlx_stream, x: mlx.mlx_array, idx: mlx.mlx_array, lut: mlx.mlx_array, banks: *const [3]Bank, dec: format.Decode, limit: c_int) !mlx.mlx_array {
-    return moeLingBankedLutSel(s, x, idx, lut, banks, dec, limit, .configured);
-}
-
-/// `moeLingBankedLut` on `sel`'s texts at the configured variants (the tests).
-pub fn moeLingBankedLutSel(s: mlx.mlx_stream, x: mlx.mlx_array, idx: mlx.mlx_array, lut: mlx.mlx_array, banks: *const [3]Bank, dec: format.Decode, limit: c_int, sel: BankedSel) !mlx.mlx_array {
-    const a = try act(limit);
-    const h = try ds.bankedGateUpLutAct(s, x, idx, lut, banks, dec, a, sel, root.config.get().banked_variant_gu);
-    defer freeArr(h.slots);
-    defer freeArr(h.hd);
-    defer freeArr(h.hs);
-    return ds.bankedDownAct(s, .{ .hd = h.hd, .hs = h.hs }, banks, h.slots, dec, a, sel, root.config.get().banked_variant_dn);
-}
-
 /// hw4b's selection of the banked texts a call runs (DeepSeek-V4.1's `BankedSel`): the configured ones (a geometry's
 /// `Config.banked_group` and `banked_m3` as they were at its first banked call), the grouped texts (g4) or the grouped
 /// texts with the M = 3 member path (g4m3). Every selection gives a pair the same bytes.
