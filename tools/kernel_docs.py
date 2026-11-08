@@ -192,6 +192,12 @@ def _group_family(prog, unit, prefix):
     return out
 
 
+def _ptg_family(prog, unit, prefix):
+    """banked_ptg.zig's persistent grouped GEMVs: banked.zig's grouped-GEMV variants (its `group_variants`, each on its
+    defines ++ `header_group`) under the persistent prefix"""
+    return _group_family(prog, prog.unit_of(unit, unit.imports['banked']), prefix)
+
+
 def _probe_family(prog, unit):
     """banked_ilp_test.zig's t-route probes: turboexl3_t1v_probe_<route>_<dtype>, each on `#define EXL3_T1V <route>`
     ++ decode.header"""
@@ -217,6 +223,11 @@ FAMILIES = {
     ('decode.zig', 'group_down_m3_names[v].ptr'): ('turboexl3_down3bgm3_<variant>', lambda p, u: _group_family(p, u, 'turboexl3_down3bgm3')),
     ('decode.zig', 'group_down_names[v].ptr'): ('turboexl3_down3bg_<variant>', lambda p, u: _group_family(p, u, 'turboexl3_down3bg')),
     ('banked_ilp_test.zig', 't_probe_names[ri][j].ptr'): ('turboexl3_t1v_probe_<route>_<dtype>', lambda p, u: _probe_family(p, u)),
+    # the persistent grouped GEMVs' variants (`Config.banked_ptg`), on today's grouped texts and on hw4b's
+    ('banked_ptg.zig', 'gu_names[v].ptr'): ('turboexl3_gu3bgp_<variant>', lambda p, u: _ptg_family(p, u, 'turboexl3_gu3bgp')),
+    ('banked_ptg.zig', 'down_names[v].ptr'): ('turboexl3_down3bgp_<variant>', lambda p, u: _ptg_family(p, u, 'turboexl3_down3bgp')),
+    ('banked_ptg.zig', 'gu_m3_names[v].ptr'): ('turboexl3_gu3bgm3p_<variant>', lambda p, u: _ptg_family(p, u, 'turboexl3_gu3bgm3p')),
+    ('banked_ptg.zig', 'down_m3_names[v].ptr'): ('turboexl3_down3bgm3p_<variant>', lambda p, u: _ptg_family(p, u, 'turboexl3_down3bgm3p')),
 }
 # the grouped-GEMV variants live in deepseek_v41/banked.zig since the split (decode.zig before it)
 for (_f, _e), _v in list(FAMILIES.items()):

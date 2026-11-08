@@ -278,7 +278,7 @@ test "turboexl3 gpu glm53f fused banked: root.moeClampedBankedAs at bf16 is moeC
 /// a verify's rows, 8 distinct experts a row, each pick its previous row's at that position half the time (a verify's
 /// rows route the same experts often: the grouped texts' members), a fresh pick in the base bank 7 times in 10, the ext
 /// 2 and the transient 1; at another count drawn with repeats (`routed.drawPairs`)
-fn drawWave(rnd: std.Random, ids: []u32) void {
+pub fn drawWave(rnd: std.Random, ids: []u32) void {
     const n = ids.len;
     if (n % 8 != 0) {
         var bank_of: [root.banked_rows_max]u32 = undefined;
@@ -316,7 +316,7 @@ pub fn countDiff(got: []const u32, want: []const u32, vals: []const f32) [2]usiz
 }
 
 /// A grouped GEMV variant's name for a line (`0` today's)
-fn varName(v: u8) []const u8 {
+pub fn varName(v: u8) []const u8 {
     return if (v == 0) "0" else root.group_variants[v].name;
 }
 
@@ -325,7 +325,7 @@ fn varName(v: u8) []const u8 {
 /// texts), so this file holds only the others to the served call and times only them
 const refused_variants = [_][]const u8{ "sh", "pfsh" };
 
-fn refusedVariant(v: usize) bool {
+pub fn refusedVariant(v: usize) bool {
     for (refused_variants) |r| if (std.mem.eql(u8, root.group_variants[v].name, r)) return true;
     return false;
 }
@@ -736,7 +736,7 @@ test "turboexl3 gpu glm53f schedule timing: the banked decode's schedules at a v
             }.f;
             const served = try timeCall(&g, c, f);
             std.debug.print("TURBOEXL3_GLM_BANKED_SCHED_TIME n={d} pairs={d} texts=served gu=0 dn=0 min_us={d:.1} med_us={d:.1}\n", .{ n, pairs, served[0], served[1] });
-            for ([_]root.BankedSel{ .g4, .g4m3 }) |sel| for (0..root.group_variants.len) |vi| {
+            for ([_]root.BankedSel{ .g4, .g4m3, .g4p, .g4m3p }) |sel| for (0..root.group_variants.len) |vi| {
                 if (refusedVariant(vi)) continue;
                 c.sel = sel;
                 c.v = @intCast(vi);

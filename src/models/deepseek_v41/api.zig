@@ -162,8 +162,9 @@ pub fn moeClampedBanked(s: mlx.mlx_stream, x: mlx.mlx_array, banks: *const [3]Ba
     return moeClampedBankedSelV(s, x, banks, ids, dec, limit, .configured, config.get().banked_variant_gu, config.get().banked_variant_dn);
 }
 
-/// hw4b: which banked texts a call runs (`decode.Kernels3.BankedSel`): the configured ones, today's grouped texts (g4) or
-/// the grouped texts with the M = 3 member path (g4m3). Every selection gives a row-slot the same bytes.
+/// hw4b: which banked texts a call runs (`decode.Kernels3.BankedSel`): the configured ones, today's grouped texts (g4),
+/// the grouped texts with the M = 3 member path (g4m3), or either with the persistent grouped GEMVs (g4p, g4m3p:
+/// `Config.banked_ptg`). Every selection gives a row-slot the same bytes.
 pub const BankedSel = banked.Banked.BankedSel;
 
 /// hw2: the grouped banked GEMVs' variants (`Config.banked_variant_gu`, `banked_variant_dn`; `decode.group_variants`),
