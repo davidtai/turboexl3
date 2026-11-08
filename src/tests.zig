@@ -22,6 +22,7 @@ comptime {
     _ = @import("models/ricursive/ricursive.zig");
     _ = @import("models/ling/pair.zig");
     _ = @import("models/ling/kdaproj.zig");
+    _ = @import("models/ling/mlaproj.zig");
     _ = @import("models/deepseek_v41/grouped.zig");
     _ = @import("root.zig");
     _ = @import("core/test_support.zig");
@@ -62,6 +63,7 @@ comptime {
     _ = @import("models/ling/swiglu_test.zig");
     _ = @import("models/ling/router_prompt.zig");
     _ = @import("models/ling/router_prompt_test.zig");
+    _ = @import("models/ling/mlaproj_test.zig");
 }
 
 

@@ -1411,6 +1411,19 @@ ADDED_FILES['models/ling/router_prompt_test.zig'] = ('logits held to the host\'s
                                                      'runs its regular kernel at (GPU), the refusals (GPU), the loop\'s '
                                                      'statements against pg2\'s copy of MLX\'s (CPU), and a TIME arm')
 ADDED[('models/ling/api.zig', 'const router_prompt')] = 'router_prompt.zig, the MoE router at prompt widths in one launch'
+# an MLA layer's q_a, kv_a and head gate in one GEMV launch (turboexl3_ling's MLX_SERVE_LING_MLA_PROJ_FUSED):
+# turboexl3_ling_mlaproj_prep, _mlaproj_dec0g (models/ling/mlaproj.zig)
+ADDED_FILES['models/ling/mlaproj.zig'] = ('Ling-3.1\'s MLA decode projections of the layer\'s input (q_a and kv_a, two EXL3 '
+                                          'members each at its own K split, and the bf16 head gate) in one DEC-ONE GEMV '
+                                          'launch after one prepare launch (turboexl3_ling_mlaproj_prep: dense\'s prep_sc '
+                                          'with the member chosen first; _mlaproj_dec0g: kdaproj/bmember, then dense\'s '
+                                          'text_dec0 under a two-member head), and its CPU tests')
+ADDED_FILES['models/ling/mlaproj_test.zig'] = ('mlaProjG held to q_a\'s and kv_a\'s own linear and the served g_proj (the '
+                                               'one-row matmul, the exact verify\'s denseRows) word for word at rows 1 to '
+                                               '8, the refusals (GPU); ten layers\' served launches against mlaProjG '
+                                               '(TURBOEXL3_LING_TIME)')
+ADDED[('models/ling/api.zig', 'const mlaproj')] = 'mlaproj.zig, an MLA layer\'s q_a, kv_a and head gate in one GEMV launch'
+ADDED[('models/ling/api.zig', 'const mlaProjG')] = 'the re-export of mlaproj.zig\'s mlaProjG'
 
 def metal_strings(fn, toks, corpus):
     """(line, kind, value) of every literal in a .zig file that holds Metal"""
@@ -1736,6 +1749,14 @@ SPLIT_ADDED_KERNELS['turboexl3_ling_router_prompt'] = ('Ling-3.1\'s router at pr
                                                        'MLX\'s fused NAX GEMM at nt (steel_gemm_fused_nax.h gemm) with its '
                                                        'gemm_loop\'s f32 tiles loaded from x bf16 and w f16 or f32, w\'s '
                                                        '-0.0 stored +0.0 (router_prompt/loop, router_prompt/gemm)')
+SPLIT_ADDED_KERNELS['turboexl3_ling_mlaproj_prep'] = ('Ling-3.1\'s MLA projections of the layer\'s input: dense\'s '
+                                                     'prep_sc for q_a and kv_a on the grid\'s z (mlaproj/prep ++ '
+                                                     'text_prep_sc)')
+SPLIT_ADDED_KERNELS['turboexl3_ling_mlaproj_dec0g'] = ('Ling-3.1\'s MLA projections: the head gate\'s threadgroups '
+                                                      '(kdaproj/bmember: MLX\'s gemv at BM 1, BN 8 over each row), then '
+                                                      'text_dec0 after its head under the two-member head and the member '
+                                                      'choice (mlaproj/head, mlaproj/member), q_a and kv_a each at its own '
+                                                      'K split; ling.mlaProjG')
 SPLIT_CHANGED_CONSTS = {
     'head': 'models/ling/router.zig: launch 1\'s router threadgroups at 512 / 16 a row (MLX\'s gemv tiles)',
     'pred_open': 'models/ling/router.zig: the predictor\'s threadgroups after 512 / 16 a row of the router\'s',

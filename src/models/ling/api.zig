@@ -50,6 +50,12 @@ pub const kdaProjB = kdaproj.kdaProjB;
 pub const kdaproj_pf = @import("kdaproj_pf.zig");
 pub const kdaProjPrompt = kdaproj_pf.kdaProjPrompt;
 
+/// An MLA layer's q_a and kv_a and its head gate g_proj (bf16) of the layer's input in one GEMV launch after one prepare
+/// launch (`mlaproj.zig`): q_a and kv_a each at its own K split, each its `linear` bytes, and the gate the served one-row
+/// matmul's bytes at every row (`mlaproj.gTakes` says where it takes the gate's weight)
+pub const mlaproj = @import("mlaproj.zig");
+pub const mlaProjG = mlaproj.mlaProjG;
+
 /// The residual add and RMSNorm folded into the next linears' prepare at a decode layer's mixer input (`addnorm.zig`):
 /// the residual, the normed rows and each EXL3 member's output from one launch of the add, the norm and the members'
 /// prepares, then each member's GEMV (`addNormLinears`), each the bytes of MLX's add, MLX's rms_norm and its `linear`.
@@ -172,7 +178,7 @@ pub const moeTail = tail.moeTail;
 pub const moeTailParts = tail.moeTailParts;
 
 /// This file's module state (`Global`): what a host that shares its units' state registers.
-pub const shared_state = .{ shared.shared_state, pair.shared_state, kdaproj.shared_state, addnorm.shared_state, router.shared_state, router_prompt.shared_state, tail.shared_state, mla_latent.shared_state, mla_flash.shared_state, kdaproj_pf.shared_state, swiglu.shared_state };
+pub const shared_state = .{ shared.shared_state, pair.shared_state, kdaproj.shared_state, mlaproj.shared_state, addnorm.shared_state, router.shared_state, router_prompt.shared_state, tail.shared_state, mla_latent.shared_state, mla_flash.shared_state, kdaproj_pf.shared_state, swiglu.shared_state };
 
 /// The MLA prompt attention as one causal flash launch (`mla_flash.zig`): o [B, H, qL, v] = softmax(scale q k^T) v, query
 /// row i over keys 0 .. kL - qL + i, at Ling's heads (qk 192, v 128) or any pair `mla_flash.admits` takes; within
