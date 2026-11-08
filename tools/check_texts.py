@@ -1274,18 +1274,6 @@ ADDED_FILES['models/ling/router.zig'] = ('Ling-3.1\'s MoE router at decode rows 
                                          'stored in bf16; route: both) and its texts\' CPU tests')
 ADDED_FILES['models/ling/router_test.zig'] = ('the router\'s GPU tests: the logits, both predictor scores, the ids and the '
                                               'weights against the host\'s launches word for word at rows 1 to 8, the refusals')
-# Ling-3.1-flash's post-attention add_norm folded into the router's launch 1 (turboexl3_ling_router_an_*;
-# turboexl3_ling's MLX_SERVE_LING_ROUTER_ADDNORM): launch 1's texts cut at the reads of x (each text keeps its value)
-ADDED_FILES['models/ling/anroute.zig'] = ('Ling-3.1\'s post-attention add_norm and the router\'s launch 1 in one launch '
-                                         '(addNormLogits: launch 1\'s texts with the add_norm\'s sums of squares after '
-                                         'the head, an_open, and the reads of x swapped for readers of the normed rows, '
-                                         'an_head) and its texts\' CPU test')
-ADDED_FILES['models/ling/anroute_test.zig'] = ('addNormLogits against the add_norm\'s words (MLX\'s add and fast rms_norm) '
-                                              'and routerLogits over its normed rows, word for word at rows 1 to 8, both '
-                                              'weights, every predictor (GPU)')
-ADDED[('models/ling/api.zig', 'const anroute')] = 'anroute.zig, the post-attention add_norm folded into the router\'s launch 1'
-ADDED[('models/ling/api.zig', 'const addNormLogits')] = 'the re-export of anroute.zig\'s addNormLogits'
-CHANGED[('models/ling/api.zig', 'const shared_state')] = 'registers the module state of the files the change added'
 # Ling-3.1-flash's prompt call over gathered rows (glm53f-fused b0f22c9's library part, ported): the prepare with a row map
 # (turboexl3_pf_prep_r), root.moeSwigluRows and ling.moeLingRows
 ADDED_KERNELS[('prefill.zig', 'turboexl3_pf_prep_r')] = ('the prepare with its row line swapped for the row map\'s '
@@ -1727,16 +1715,6 @@ SPLIT_ADDED_KERNELS['turboexl3_ling_kdaproj_dec0b'] = ('kdaProj\'s GEMV launch w
                                                        'text_kdec0): MLX\'s gemv at BM 1, BN 8 over b\'s weight on the '
                                                        'threadgroups past the members\', each row the served one-row '
                                                        'matmul\'s; ling.kdaProjB')
-SPLIT_ADDED_KERNELS['turboexl3_ling_router_an_logits'] = ('turboexl3_ling_router_logits with mlx-serve\'s add_norm folded in '
-                                                          '(models/ling/anroute.zig: head_1 ++ an_open ++ head_2, x\'s row '
-                                                          'read through an_head\'s normed-row reader, an_logits_x); '
-                                                          'ling.addNormLogits')
-SPLIT_ADDED_KERNELS['turboexl3_ling_router_an_pred'] = ('turboexl3_ling_router_pred with the add_norm folded in (and the '
-                                                        'predictor\'s reads of x, an_pred_one_x, an_pred_wide_x)')
-SPLIT_ADDED_KERNELS['turboexl3_ling_router_an_pred_sig'] = 'turboexl3_ling_router_pred_sig with the add_norm folded in'
-SPLIT_ADDED_KERNELS['turboexl3_ling_router_an_logits_h'] = 'turboexl3_ling_router_logits_h with the add_norm folded in'
-SPLIT_ADDED_KERNELS['turboexl3_ling_router_an_pred_h'] = 'turboexl3_ling_router_pred_h with the add_norm folded in'
-SPLIT_ADDED_KERNELS['turboexl3_ling_router_an_pred_sig_h'] = 'turboexl3_ling_router_pred_sig_h with the add_norm folded in'
 SPLIT_ADDED_KERNELS['turboexl3_ling_router_logits_h'] = ('Ling-3.1\'s router logits over the loaded f16 weight (E10): '
                                                          'turboexl3_ling_router_logits with the table\'s read swapped for the '
                                                          'f16 word widened, then + 0 (router/logits_wh)')
@@ -1794,6 +1772,24 @@ SPLIT_REMOVED_KERNELS = {}
 SPLIT_REMOVED_FILES = {}
 SPLIT_REMOVED_TESTS = {}
 
+_R10 = ("R10 ROUTER_ADDNORM (M6, rejected): the post-attention add_norm folded into the router's launch 1 "
+        '(models/ling/anroute.zig, ling.addNormLogits)')
+SPLIT_REMOVED_KERNELS['turboexl3_ling_router_an_logits'] = _R10
+SPLIT_REMOVED_KERNELS['turboexl3_ling_router_an_logits_h'] = _R10
+SPLIT_REMOVED_KERNELS['turboexl3_ling_router_an_pred'] = _R10
+SPLIT_REMOVED_KERNELS['turboexl3_ling_router_an_pred_h'] = _R10
+SPLIT_REMOVED_KERNELS['turboexl3_ling_router_an_pred_sig'] = _R10
+SPLIT_REMOVED_KERNELS['turboexl3_ling_router_an_pred_sig_h'] = _R10
+SPLIT_REMOVED_FILES['models/ling/anroute.zig'] = _R10
+SPLIT_REMOVED_FILES['models/ling/anroute_test.zig'] = _R10
+SPLIT_REMOVED_TESTS[("turboexl3 ling anroute texts: each text is launch 1's composition with the "
+                     "add_norm's sums after the head, x's reads swapped for the normed rows' readers and nothing "
+                     "else; launch 1's texts are their pieces' compositions")] = _R10
+SPLIT_REMOVED_TESTS[("turboexl3 gpu ling anroute: addNormLogits gives the served chain's words (the "
+                     "add_norm's: MLX's add and fast rms_norm; then routerLogits over its normed rows): the "
+                     "residual, the normed rows, the logits and the predictor's scores at rows 1 to 8, over the "
+                     "loader's f32 table and the loaded f16 weight, with no predictor and each score, on rows of "
+                     'every scale, a row of signed zeros and cancelling columns (TURBOEXL3_GPU=1)')] = _R10
 # the Ling banked test selects each arm's texts (moeLingBankedSel): Config.banked_group set in the process selected nothing
 RENAMED_TESTS[('ling_test.zig', "turboexl3 gpu ling banked: every pair of moeLingBanked over three banks is moeLing's on "
                                 "its bank at top-1 with score 1, byte for byte, at limits 0 and 10 and banked groups 2 and "

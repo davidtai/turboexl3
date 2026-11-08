@@ -29,18 +29,10 @@ const ks = @import("sdk").kernel_launch;
 const Global = @import("../../core/global.zig").Global;
 const decode = @import("../../core/decode.zig");
 
-/// The launch's threadgroups (the router's, then the predictor's) ...
-pub const head_1 = @embedFile("kernels/router/head_1.metal");
-/// ... and the router branch's row and tile
-pub const head_2 = @embedFile("kernels/router/head_2.metal");
-pub const head: [:0]const u8 = head_1 ++ head_2;
-/// MLX's gemv statements for 16 logits of one row up to the table's read (x widened in registers): up to x's row ...
-pub const logits_1a = @embedFile("kernels/router/logits_1a.metal");
-/// ... x's row (the reads of x go through `in_vec`) ...
-pub const logits_x = @embedFile("kernels/router/logits_x.metal");
-/// ... then the K loop up to the table's read
-pub const logits_1b = @embedFile("kernels/router/logits_1b.metal");
-pub const logits_1: [:0]const u8 = logits_1a ++ logits_x ++ logits_1b;
+/// The launch's threadgroups (the router's, then the predictor's) and the router branch's row and tile
+pub const head = @embedFile("kernels/router/head.metal");
+/// MLX's gemv statements for 16 logits of one row up to the table's read (x widened in registers) ...
+pub const logits_1 = @embedFile("kernels/router/logits_1.metal");
 /// ... the read of an f32 table word (MLX's load) ...
 pub const logits_w = @embedFile("kernels/router/logits_w.metal");
 /// ... or of an f16 weight word, widened, then + 0 (the loader's table word) ...
@@ -53,21 +45,10 @@ pub const logits_gemv: [:0]const u8 = logits_1 ++ logits_w ++ logits_2;
 pub const logits_gemv_h: [:0]const u8 = logits_1 ++ logits_wh ++ logits_2;
 /// The predictor branch's opening: the threadgroup's index among the predictor's
 pub const pred_open = @embedFile("kernels/router/pred_open.metal");
-/// One row: MLX's gemv statements for 16 rows of the next router, each word rounded to bf16 and scored: up to x ...
-pub const pred_one_a = @embedFile("kernels/router/pred_one_a.metal");
-/// ... x (its reads go through `in_vec`) ...
-pub const pred_one_x = @embedFile("kernels/router/pred_one_x.metal");
-/// ... the rest
-pub const pred_one_b = @embedFile("kernels/router/pred_one_b.metal");
-pub const pred_one: [:0]const u8 = pred_one_a ++ pred_one_x ++ pred_one_b;
-/// 2 to 8 rows: MLX's gemv_wide statements (k_lanes 32 to 5 rows, 16 past), each word rounded to bf16 and scored: up
-/// to x ...
-pub const pred_wide_a = @embedFile("kernels/router/pred_wide_a.metal");
-/// ... x as rows of 4-vectors (its reads go through `x4`) ...
-pub const pred_wide_x = @embedFile("kernels/router/pred_wide_x.metal");
-/// ... the rest
-pub const pred_wide_b = @embedFile("kernels/router/pred_wide_b.metal");
-pub const pred_wide: [:0]const u8 = pred_wide_a ++ pred_wide_x ++ pred_wide_b;
+/// One row: MLX's gemv statements for 16 rows of the next router, each word rounded to bf16 and scored
+pub const pred_one = @embedFile("kernels/router/pred_one.metal");
+/// 2 to 8 rows: MLX's gemv_wide statements (k_lanes 32 to 5 rows, 16 past), each word rounded to bf16 and scored
+pub const pred_wide = @embedFile("kernels/router/pred_wide.metal");
 /// The branch's close
 pub const close = @embedFile("kernels/router/close.metal");
 /// The predictor's score of each word, a header each: DeepSeek's sqrt(softplus(z)) + bias (the host's today) ...

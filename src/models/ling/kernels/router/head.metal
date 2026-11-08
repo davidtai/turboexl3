@@ -3,3 +3,6 @@
 const uint tg = threadgroup_position_in_grid.x;
 const uint simd_gid = simdgroup_index_in_threadgroup;
 const uint simd_lid = thread_index_in_simdgroup;
+if (tg < uint(R * (NE / 16))) {
+  const uint row = tg / uint(NE / 16);
+  const uint blk = tg % uint(NE / 16);
