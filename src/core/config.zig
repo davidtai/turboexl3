@@ -68,6 +68,10 @@ pub const Config = struct {
     /// runs (today's, or hw4b's with `banked_m3`). Any but 0 needs `banked_group` 4.
     banked_variant_gu: u8 = 0,
     banked_variant_dn: u8 = 0,
+    /// The grouped banked GEMVs as persistent threadgroups (`banked_ptg.text_gu3bgp`, `text_down3bgp`, or hw4b's with
+    /// `banked_m3`): each runs the call's work items in turn from one lead list, so no threadgroup runs for a row-slot that
+    /// leads nothing and no work item scans its members. The same work items, so the same bytes. Needs `banked_group` 4.
+    banked_ptg: bool = false,
     /// A diagnostic: each routed decode call's routing read back (a sync per call), its expert multiplicities printed
     /// every 480 calls.
     slot_stats: bool = false,
@@ -81,6 +85,7 @@ pub const Config = struct {
         return std.mem.indexOfScalar(u8, &forms, c.decode_form) != null and
             std.mem.indexOfScalar(u32, &spts, c.shared_spt) != null and c.pf_alay <= 2 and
             (c.banked_group == 2 or c.banked_group == 4) and (!c.banked_m3 or c.banked_group == 4) and
+            (!c.banked_ptg or c.banked_group == 4) and
             c.banked_variant_gu < banked_variants and c.banked_variant_dn < banked_variants and
             ((c.banked_variant_gu == 0 and c.banked_variant_dn == 0) or c.banked_group == 4) and
             c.dense_variant < dense_variants and decBtValid(c.dec_bt);

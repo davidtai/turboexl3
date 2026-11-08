@@ -1369,6 +1369,28 @@ CHANGED[('ricursive.zig', 'const jtile')] = 'pub: glm53f/shared_gu.zig\'s text r
 ADDED[('models/glm53f/api.zig', 'const shared_gu')] = 'shared_gu.zig, the shared expert\'s gate | up launch (root\'s glm53f.shared_gu)'
 CHANGED[('root.zig', 'const shared_state')] = 'registers glm53f.shared_gu.shared_state'
 
+# the persistent grouped banked GEMVs (Config.banked_ptg, banked_ptg.zig; the plugin's TURBOEXL3_GLM53F_BANKED g4p and
+# g4m3p): a threadgroup builds the call's lead list once (each row-slot's turboexl3_members_g), then runs the grouped
+# GEMV's work items at its index, its index + NPT, ... on the grouped texts' own bodies (gu3g_3, down3g_3, hw4b's m3 ones)
+ADDED_FILES['banked_ptg.zig'] = ('the persistent grouped GEMVs (turboexl3_gu3bgp, turboexl3_down3bgp, hw4b\'s '
+                                 'turboexl3_gu3bgm3p and turboexl3_down3bgm3p, each grouped GEMV variant\'s too: gu3_1 and '
+                                 'down3_1, the lead list and work item loop (ptg_1 .. ptg_3) around the grouped bodies), '
+                                 'their configs at NPT threadgroups and the texts\' CPU test')
+ADDED_FILES['ptg_test.zig'] = ('the persistent grouped GEMVs\' option and names (CPU), and each persistent text set at every '
+                               'grouped GEMV variant the plugin takes, selected and configured (g4m3p and g4p at t4.t4), '
+                               'against the served banked call\'s rows, byte for byte, at every SC rate (GPU)')
+ADDED[('banked.zig', 'const banked_ptg')] = 'banked_ptg.zig, the persistent grouped GEMVs (Banked.ptg)'
+CHANGED[('banked.zig', 'const Banked')] = ('banked_ptg and ptg: at banked_group 4 the grouped GEMVs as persistent '
+                                           'threadgroups (gpSet; the BankedSel and set texts g4p and g4m3p, bankedSetSelV '
+                                           'takes their variants from ptg); a set\'s kernels held by value')
+CHANGED[('config.zig', 'const Config')] += ('; banked_ptg: at banked_group 4, the grouped banked GEMVs as persistent '
+                                            'threadgroups over the call\'s lead list (the same work items, so the same bytes)')
+for _key in ('fn drawWave', 'fn varName', 'fn refusedVariant'):
+    CHANGED[('fused_test.zig', _key)] = 'pub: ptg_test.zig draws its waves, names its variants and skips the refused ones with them'
+EDITED_TESTS[('fused_test.zig', 'turboexl3 gpu glm53f schedule timing: the banked decode\'s schedules at a verify\'s waves, '
+              'and a prompt bank call in calls of 2048 to 16384 rows (TURBOEXL3_GLM_TIME=1)')] += (
+    '; the persistent texts\' selections (g4p, g4m3p) timed beside g4 and g4m3')
+
 
 def metal_strings(fn, toks, corpus):
     """(line, kind, value) of every literal in a .zig file that holds Metal"""

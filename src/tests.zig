@@ -48,6 +48,8 @@ comptime {
     _ = @import("models/glm53f/zfit_test.zig");
     _ = @import("models/glm53f/shared_gu.zig");
     _ = @import("models/glm53f/shared_gu_test.zig");
+    _ = @import("models/glm53f/ptg_test.zig");
+    _ = @import("models/deepseek_v41/banked_ptg.zig");
 }
 
 
