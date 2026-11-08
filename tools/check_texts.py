@@ -1400,6 +1400,17 @@ ADDED_FILES['models/ling/swiglu_test.zig'] = ('upSwiglu held to the composed cha
                                               'MLX\'s ops) word for word at the shared expert\'s and the dense layers\' shapes, '
                                               'rows 17 to 16384, limits 0 and 10, its declines and refusals (GPU), the texts\' '
                                               'composition (CPU), and its timing (TURBOEXL3_LING_TIME)')
+# Ling-3.1-flash's MoE router at prompt widths in one launch (turboexl3_ling_router_prompt): MLX's fused NAX GEMM over x's
+# bf16 rows and the weight as loaded, each widened in the tiles (turboexl3_ling's MLX_SERVE_LING_ROUTER_PROMPT)
+ADDED_FILES['models/ling/router_prompt.zig'] = ('Ling-3.1\'s MoE router at prompt widths in one launch (logits: MLX\'s fused '
+                                                'NAX kernel at nt with its gemm_loop\'s f32 tiles loaded from x\'s bf16 words '
+                                                'and the weight\'s own, w\'s -0.0 stored +0.0, at the tile MLX picks: mlxTile, '
+                                                'takes) and its CPU test of the tiles and the gates')
+ADDED_FILES['models/ling/router_prompt_test.zig'] = ('logits held to the host\'s stock call (tableF32, then MLX\'s matmul) word '
+                                                     'for word over the f16 weight\'s view and the f32 table at the spans MLX '
+                                                     'runs its regular kernel at (GPU), the refusals (GPU), the loop\'s '
+                                                     'statements against pg2\'s copy of MLX\'s (CPU), and a TIME arm')
+ADDED[('models/ling/api.zig', 'const router_prompt')] = 'router_prompt.zig, the MoE router at prompt widths in one launch'
 
 def metal_strings(fn, toks, corpus):
     """(line, kind, value) of every literal in a .zig file that holds Metal"""
@@ -1721,6 +1732,10 @@ SPLIT_ADDED_KERNELS['turboexl3_ling_finish_sgu'] = ('Ling-3.1\'s prefill SwiGLU 
                                                   'SwiGLU of the gate\'s value and its own; ling.upSwiglu')
 SPLIT_ADDED_KERNELS['turboexl3_ling_finish_sguco'] = ('turboexl3_ling_finish_sgu with the clamp after the SiLU '
                                                     '(shared/sgu_swiglu_clamp_out)')
+SPLIT_ADDED_KERNELS['turboexl3_ling_router_prompt'] = ('Ling-3.1\'s router at prompt widths (models/ling/router_prompt.zig): '
+                                                       'MLX\'s fused NAX GEMM at nt (steel_gemm_fused_nax.h gemm) with its '
+                                                       'gemm_loop\'s f32 tiles loaded from x bf16 and w f16 or f32, w\'s '
+                                                       '-0.0 stored +0.0 (router_prompt/loop, router_prompt/gemm)')
 SPLIT_CHANGED_CONSTS = {
     'head': 'models/ling/router.zig: launch 1\'s router threadgroups at 512 / 16 a row (MLX\'s gemv tiles)',
     'pred_open': 'models/ling/router.zig: the predictor\'s threadgroups after 512 / 16 a row of the router\'s',

@@ -60,6 +60,8 @@ comptime {
     _ = @import("models/ling/kdaproj_pf.zig");
     _ = @import("models/ling/kdaproj_pf_test.zig");
     _ = @import("models/ling/swiglu_test.zig");
+    _ = @import("models/ling/router_prompt.zig");
+    _ = @import("models/ling/router_prompt_test.zig");
 }
 
 
