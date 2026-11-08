@@ -29,10 +29,6 @@ pub const Config = struct {
     nax: bool = true,
     /// Dense decode linears in one launch (DEC-ONE); false the three-launch chain. The same bytes.
     dec_one: bool = true,
-    /// A one-row dense decode call on two rows' launch shape (`dense.Dense.init`): DEC-ONE's prepare in its own launch
-    /// (prep_sc) above `dense.Dense.dec_prep_out` outputs, and 2 output tiles per GEMV threadgroup (BT 2); false keeps
-    /// one row's own (the prepare inside the launch at any width, BT 4). Launch shape only: the same bytes.
-    dec_one_row_wide: bool = false,
     /// A one-row dense decode call on its trunk shape's entry of `dense.one_row_table` (Ling-3.1-flash's shapes on the M5
     /// Max: output tiles per GEMV threadgroup, and DEC-ONE's prepare inside the launch or in its own); a shape the table
     /// does not name keeps the rest of this configuration's. Launch shape only: the same bytes.
@@ -118,11 +114,8 @@ test "turboexl3 config: the defaults are valid and served; an unserved form, sli
     try t.expect(!(Config{ .banked_group = 4, .banked_variant_dn = banked_variants }).valid());
     try t.expect(d.dense_lean);
     try t.expect(d.fused_fin_fold);
-    try t.expect(!d.dec_one_row_wide);
-    try t.expect((Config{ .dec_one_row_wide = true }).valid());
     try t.expect(!d.dec_one_row_table);
     try t.expect((Config{ .dec_one_row_table = true }).valid());
-    try t.expect((Config{ .dec_one_row_table = true, .dec_one_row_wide = true }).valid());
     const saved = current.get().*;
     defer current.get().* = saved;
     try t.expectError(error.InvalidTurboexl3Config, configure(.{ .decode_form = 4 }));

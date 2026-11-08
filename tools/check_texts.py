@@ -1772,6 +1772,11 @@ _GU8 = ('BANKED_GU8 (B8, superseded by BANKED_T4, S14): gu8b, the banked grouped
         'its launch (Config.banked_gu8, BankedSel.g4gu8 and g4m3gu8)')
 SPLIT_REMOVED_KERNELS['turboexl3_gu8bg'] = _GU8
 SPLIT_REMOVED_KERNELS['turboexl3_gu8bgm3'] = _GU8
+_WIDE = ('DEC_ONE_ROW_WIDE (superseded by ONE_ROW_TABLE, S10): Config.dec_one_row_wide, a one-row dense decode '
+         "call on two rows' launch shape")
+SPLIT_REMOVED_TESTS[("turboexl3 gpu ling dense: a one-row call on two rows' launch shape "
+                     "(Config.dec_one_row_wide) gives one row's own bytes and the three-launch chain's at every "
+                     'Ling-3.1-flash trunk shape (TURBOEXL3_GPU=1)')] = _WIDE
 # the Ling banked test selects each arm's texts (moeLingBankedSel): Config.banked_group set in the process selected nothing
 RENAMED_TESTS[('ling_test.zig', "turboexl3 gpu ling banked: every pair of moeLingBanked over three banks is moeLing's on "
                                 "its bank at top-1 with score 1, byte for byte, at limits 0 and 10 and banked groups 2 and "

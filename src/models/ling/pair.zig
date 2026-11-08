@@ -3,7 +3,7 @@
 //! (4096 -> 10240). Each member stays in its own buffers (no joined copy, nothing done at load): the launch binds both
 //! members' trellises and svh and chooses a threadgroup's member by its output block. A call runs both members in the
 //! DEC-ONE form each member's own `linear` takes at that row count (the member's cached `dense.Dense`: its prepare inside
-//! the launch or in a launch of its own, its output tiles per threadgroup; `Config.dec_one_row_wide` included):
+//! the launch or in a launch of its own, its output tiles per threadgroup):
 //! - the prepare inside: dense's counter zeroing (`turboexl3_dense_dec_zero`), then `turboexl3_ling_pair_dec1` (dense's
 //!   DEC-ONE text with the prepare inside, the member chosen after its head: its suh, its trellis, its svh);
 //! - the prepare in its own launch: one prepare launch for both members (`turboexl3_ling_pair_prep`: dense's `prep_sc`

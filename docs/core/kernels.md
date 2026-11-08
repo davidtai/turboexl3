@@ -669,7 +669,7 @@ streamer's slot banks and its grouped variants DeepSeek-V4.1's ([its catalog](..
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/dense.zig:451` (`const Dense`) |
+| made at | `src/core/dense.zig:449` (`const Dense`) |
 | inputs | `xp`, `xs`, `w`, `svh`, `cnt` |
 | outputs | `y`, `z` |
 | source | `text_dec0` = `dense/dec_head` ++ `dense/dec_gemv0` ++ `dense/dec_gemv_arrive_1` ++ `dense/dec_tile` ++ `dense/dec_gemv_arrive_2` ++ `dense/dec_xsum0` ++ `dense/dec_finish_v` ++ `dense/dec_finish_store` (6206 B, `1f49ed16dcfc`) |
@@ -714,7 +714,7 @@ streamer's slot banks and its grouped variants DeepSeek-V4.1's ([its catalog](..
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/dense.zig:452` (`const Dense`) |
+| made at | `src/core/dense.zig:450` (`const Dense`) |
 | inputs | `x`, `suh`, `w`, `svh`, `cnt` |
 | outputs | `y`, `z`, `xsx` |
 | source | `text_dec1` = `dense/dec_head` ++ `dense/dec_prep1` ++ `dense/dec_gemv1` ++ `dense/dec_gemv_arrive_1` ++ `dense/dec_tile` ++ `dense/dec_gemv_arrive_2` ++ `dense/dec_xsum1` ++ `dense/dec_finish_v` ++ `dense/dec_finish_store` (7726 B, `d4555320479f`) |
@@ -746,7 +746,7 @@ streamer's slot banks and its grouped variants DeepSeek-V4.1's ([its catalog](..
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/dense.zig:454` (`const Dense`) |
+| made at | `src/core/dense.zig:452` (`const Dense`) |
 | inputs | `svh` |
 | outputs | `cnt` |
 | source | `text_dec_zero` = `dense/dec_zero` (83 B, `c4a6f024bb78`) |
@@ -973,7 +973,7 @@ streamer's slot banks and its grouped variants DeepSeek-V4.1's ([its catalog](..
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/dense.zig:979` (`const Dense`) |
+| made at | `src/core/dense.zig:976` (`const Dense`) |
 | inputs | `zp0`, `zp1`, `zp2`, `zp3`, `svh`, `R1`, `R2`, `R3` |
 | outputs | `y` |
 | source | `text_finish_pieces` = `dense/finish_pieces` (1102 B, `577ca60ab2f0`) |
@@ -1141,7 +1141,7 @@ streamer's slot banks and its grouped variants DeepSeek-V4.1's ([its catalog](..
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/dense.zig:453` (`const Dense`) |
+| made at | `src/core/dense.zig:451` (`const Dense`) |
 | inputs | `x`, `suh` |
 | outputs | `xp`, `xs`, `cnt` |
 | source | `text_prep_sc` = `dense/prep_s` ++ `dense/prep_sc` (1429 B, `6e36fd607e96`) |
@@ -1214,7 +1214,7 @@ streamer's slot banks and its grouped variants DeepSeek-V4.1's ([its catalog](..
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/dense.zig:1439` (`fn unrotKernels`) |
+| made at | `src/core/dense.zig:1436` (`fn unrotKernels`) |
 | inputs | `w` |
 | outputs | `r` |
 | source | `text_unrot_cols` = `dense/unrot_cols` (731 B, `1e71a2b282ba`) |
@@ -1252,7 +1252,7 @@ streamer's slot banks and its grouped variants DeepSeek-V4.1's ([its catalog](..
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/dense.zig:1441` (`fn unrotKernels`) |
+| made at | `src/core/dense.zig:1438` (`fn unrotKernels`) |
 | inputs | `r`, `suh`, `svh` |
 | outputs | `W` |
 | source | `text_unrot_rows` = `dense/unrot_rows` (1431 B, `aeb52f782bb2`) |

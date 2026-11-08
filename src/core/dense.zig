@@ -243,7 +243,7 @@ pub const Dense = struct {
     /// DEC-ONE (`Config.dec_one`): decode calls of up to `dec_rows` rows (4) run the GEMV with the finish in each output
     /// block's last-arriving threadgroup.
     /// The prepare runs inside that launch too (one GEMV launch, beside a counter-zeroing launch that waits on nothing) for
-    /// calls of up to `dec_prep_rows` rows (1; 0 under `Config.dec_one_row_wide`, which also sets `bt_set[1]` to 2) or of up to `dec_prep_out` outputs at any
+    /// calls of up to `dec_prep_rows` rows (1) or of up to `dec_prep_out` outputs at any
     /// decode width (1024: the small, latency-bound linears), where its threadgroup
     /// buffer fits; otherwise in prep_sc's launch (two launches). The defaults because every column group of a call redoes
     /// the rotation of its K slice (RB / (8 BT) rotations per tile decode, on an ALU-bound GEMV) and the slice's rows take
@@ -441,9 +441,7 @@ pub const Dense = struct {
             .gemm_rs = ks.newKernel("turboexl3_dense_rs_gemm", &prefill.gemm1_in, &prefill.gemm1_out, prefill.gemm1s_text, prefill.header_nax_small, true) orelse return error.KernelCreateFailed,
             .dec_on = config.get().dec_one,
             .dec_rows = 4,
-            // `Config.dec_one_row_wide`: a one-row call on two rows' launch shape (the prepare in prep_sc's launch above
-            // dec_prep_out outputs, BT 2), launch shape only
-            .dec_prep_rows = if (config.get().dec_one_row_wide) 0 else 1,
+            .dec_prep_rows = 1,
             .bt_set = btSetFor(config.get().*, shape),
             .one_prep_in = onePrepFor(config.get().*, shape),
             .one_row = if (config.get().dec_one_row_table) oneRowIndex(shape) else null,
@@ -455,11 +453,10 @@ pub const Dense = struct {
         };
     }
 
-    /// `bt_set` as a Dense of `shape` starts under `cfg`: none set, but a one-row call's 2 under `Config.dec_one_row_wide`
-    /// (two rows' BT) and its `one_row_table` entry's under `Config.dec_one_row_table`
+    /// `bt_set` as a Dense of `shape` starts under `cfg`: none set, but a one-row call's `one_row_table` entry's under
+    /// `Config.dec_one_row_table`
     pub fn btSetFor(cfg: config.Config, shape: Shape) [decode.Kernels.max_rows + 1]u8 {
         var b: [decode.Kernels.max_rows + 1]u8 = @splat(0);
-        if (cfg.dec_one_row_wide) b[1] = @intCast(btFor(2));
         if (cfg.dec_one_row_table) if (oneRowFor(shape)) |e| {
             b[1] = e.bt;
         };
