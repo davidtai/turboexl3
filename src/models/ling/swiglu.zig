@@ -139,3 +139,59 @@ pub fn upSwiglu(s: mlx.mlx_stream, x: mlx.mlx_array, up: Proj, gate: mlx.mlx_arr
     try mlx.check(mlx.mlx_reshape(&y, o[0], osh[0..xsh.len].ptr, @intCast(xsh.len), s));
     return y;
 }
+
+/// `upSwiglu` over a W_hat the caller decoded: `w_hat` half [in, out], what `Dense.dequantize` makes of up's trellis, so
+/// a caller that decodes it once can run several calls over it (the outside plugin's MLX_SERVE_LING_SHARED_LAYER_WHAT:
+/// a layer's spans over its first span's W_hat). Up's inner product is `linear`'s prepare at these rows and MLX's
+/// matmul against `w_hat` (`Dense.pieceInner`: the matmul path's launches less the decode), then `upSwiglu`'s finish
+/// launch, so with the trellis's own W_hat h is `upSwiglu`'s word for word. The matmul path only: null (no launch) for
+/// an x other than bf16 or f16, at rows `linear` serves another way (the decode GEMVs, the register path's 17 to 32
+/// rows) and where `takes` does not hold; error.InvalidExl3Clamp above 128, error.BadExl3Shape for a `w_hat` that is
+/// not half [in, out] or a gate of the wrong size, error.BadExl3Dtype for the wrong table, before any launch.
+pub fn upSwigluW(s: mlx.mlx_stream, x: mlx.mlx_array, up: Proj, w_hat: mlx.mlx_array, gate: mlx.mlx_array, limit: u32, tab: mlx.mlx_array, dec: format.Decode) !?mlx.mlx_array {
+    if (limit > 128) return error.InvalidExl3Clamp;
+    const xsh = mlx.getShape(x);
+    if (xsh.len < 1) return error.BadExl3Shape;
+    const in_dim: u32 = @intCast(xsh[xsh.len - 1]);
+    const xd = mlx.mlx_array_dtype(x);
+    if (xd != .bfloat16 and xd != .float16) return null;
+    const d = try root.denseOf(up, in_dim, xd, dec);
+    const out_dim = d.shape.out;
+    const v = try root.rowsOf(x, in_dim, s);
+    defer freeArr(v.x2);
+    if (d.pathFor(v.rows) != .matmul or !takes(d, v.rows, xd, up.trellis)) return null;
+    if (!std.mem.eql(c_int, mlx.getShape(w_hat), &[_]c_int{ @intCast(in_dim), @intCast(out_dim) }) or mlx.mlx_array_dtype(w_hat) != .float16) return error.BadExl3Shape;
+    if (mlx.mlx_array_dtype(gate) != xd or mlx.mlx_array_size(gate) != v.rows * out_dim) return error.BadExl3Shape;
+    const want_tab: mlx.mlx_dtype = if (limit == 0) xd else .float32;
+    if (mlx.mlx_array_dtype(tab) != want_tab or mlx.mlx_array_size(tab) != 1 << 16) return error.BadExl3Dtype;
+    const variant: Variant = if (limit == 0) .plain else .clamp_out;
+    const k = try kernelOf(variant);
+    const r: c_int = @intCast(v.rows);
+    const OUT: c_int = @intCast(out_dim);
+    var g2 = mlx.mlx_array_new();
+    defer freeArr(g2);
+    try mlx.check(mlx.mlx_reshape(&g2, gate, &[_]c_int{ r, OUT }, 2, s));
+    // up's inner product: `linear`'s prepare at these rows and the matmul against the given W_hat; then `upSwiglu`'s
+    // finish launch, its config and operands
+    const z = try d.pieceInner(s, v.x2, w_hat, up.suh, v.rows);
+    defer freeArr(z);
+    const cfg = try ks.buildConfig(.{ .grid = .{ (out_dim / 128) * 32, @intCast(v.rows), 1 }, .threadgroup = .{ 32, 1, 1 }, .out_shapes = &.{&[_]c_int{ r, OUT }}, .out_dtypes = &.{xd}, .template = &.{ .{ .name = "DIM", .value = .{ .int = OUT } }, .{ .name = "OUT_T", .value = .{ .dtype = xd } } } });
+    defer _ = mlx.mlx_fast_metal_kernel_config_free(cfg);
+    var o: [1]mlx.mlx_array = undefined;
+    if (variant == .plain) {
+        try ks.applyConfig(k, cfg, &.{ z, up.svh, g2, tab }, &o, s);
+    } else {
+        const lim = try lim1(limit);
+        defer freeArr(lim);
+        try ks.applyConfig(k, cfg, &.{ z, up.svh, g2, tab, lim }, &o, s);
+    }
+    defer freeArr(o[0]);
+    var osh: [8]c_int = undefined;
+    if (xsh.len > osh.len) return error.BadExl3Shape;
+    @memcpy(osh[0..xsh.len], xsh);
+    osh[xsh.len - 1] = OUT;
+    var y = mlx.mlx_array_new();
+    errdefer freeArr(y);
+    try mlx.check(mlx.mlx_reshape(&y, o[0], osh[0..xsh.len].ptr, @intCast(xsh.len), s));
+    return y;
+}

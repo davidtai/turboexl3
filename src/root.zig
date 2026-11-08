@@ -993,6 +993,8 @@ pub const lingSigmoidTable = ling.sigmoidTable;
 /// Ling-3.1-flash's prefill SwiGLU epilogue: up's finish at prompt rows running the host's SwiGLU of the gate's value
 /// and its own (models/ling/swiglu.zig)
 pub const lingUpSwiglu = ling.upSwiglu;
+/// The same over a W_hat the caller decoded once (models/ling/swiglu.zig `upSwigluW`)
+pub const lingUpSwigluW = ling.upSwigluW;
 /// Ling-3.1-flash's routed combine at prompt rows, joined and JOINLESS (models/ling/combine.zig)
 pub const ling_combine = @import("models/ling/combine.zig");
 /// Ling-3.1-flash's MLA attention at decode rows in the latent (models/ling/mla_latent.zig)

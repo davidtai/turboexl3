@@ -15,6 +15,9 @@
 //!   fusedSwiGLU; at 10 the plugin's swigluClampOut, MLX's ops in f32), word for word; the declines (rows 1 to 16, an f32
 //!   x) and the refusals (a clamp above 128, the wrong table, a gate of the wrong size). Lines: TURBOEXL3_LING_SWIGLU_EPI
 //!   (then TURBOEXL3_LING_SWIGLU_EPI_DONE).
+//! - GPU, over a given W_hat (`upSwigluW`): up's W_hat decoded once by `Dense.dequantize` and read by every call, at the
+//!   matmul path's rows (33, 1965, 4096), h against `upSwiglu`'s word for word; null at rows 16, 17, 31 and 32; its
+//!   refusals. Lines: TURBOEXL3_LING_SWIGLU_EPI_W (then TURBOEXL3_LING_SWIGLU_EPI_W_DONE).
 //! - Timing (TURBOEXL3_LING_TIME=1 with TURBOEXL3_GPU=1; asserts nothing, guidance only): at rows 4096 and 16384, up's
 //!   `linear` alone, then with one elementwise launch over the gate and up (fusedSwiGLU's launch and traffic), with
 //!   swigluClampOut's ops (limit 10), and `upSwiglu`. Lines: TURBOEXL3_LING_TIME swiglu_epi.
@@ -227,6 +230,64 @@ test "turboexl3 gpu ling swiglu epi: up's finish running the host's SwiGLU gives
     }
     std.debug.print("TURBOEXL3_LING_SWIGLU_EPI_DONE lines={d} differing_lines={d} clamp_reached={} {s}\n", .{ lines, bad, clamped_seen, if (bad == 0 and clamped_seen) "BYTES_OK" else "BYTES_DIFFER" });
     try testing.expect(clamped_seen);
+    try testing.expectEqual(@as(usize, 0), bad);
+}
+
+test "turboexl3 gpu ling swiglu epi over a given W_hat: upSwigluW over the trellis's W_hat, decoded once and read by every call, gives upSwiglu's words at the matmul path's rows (33, 1965, 4096), the shared expert's shape at limits 0 and 10 and the dense layers' at 0; null at the GEMV's and the register path's rows; its refusals (TURBOEXL3_GPU=1)" {
+    _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    const s = mlx.mlx_default_gpu_stream_new();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    const a = std.heap.page_allocator;
+    var g = try G.init(a, s);
+    defer g.deinit();
+    var prng = std.Random.DefaultPrng.init(0x11A6E8);
+    const rnd = prng.random();
+    var lines: usize = 0;
+    var bad: usize = 0;
+    for (cases) |c| {
+        const cm = g.mark();
+        defer g.resetTo(cm);
+        defer _ = mlx.mlx_clear_cache();
+        const gate = try randProj(a, &g, s, rnd, hidden, c.out, c.n, 8);
+        const up = try randProj(a, &g, s, rnd, hidden, c.out, c.n, 8);
+        const dn = try root.denseCached(.{ .in = hidden, .out = c.out, .rate = format.Rate.fromN(c.n).?, .dec = .mul1, .out_dtype = .bfloat16 });
+        // up's W_hat, decoded once by the per-call launch and evaluated: every call below reads it
+        const w_hat = try g.adopt(try dn.dequantize(s, up.trellis));
+        try g.evalAll(&.{w_hat});
+        const tabs = [2]A{ try g.adopt(try shared.sigmoidTable(s, .bfloat16, false)), try g.adopt(try shared.sigmoidTable(s, .bfloat16, true)) };
+        for (c.lims) |lim| for ([_]u32{ 33, 1965, 4096 }) |rows| {
+            const rm = g.mark();
+            defer g.resetTo(rm);
+            const x = try randX(a, &g, rnd, rows, .bfloat16);
+            const tab = tabs[@intFromBool(lim != 0)];
+            const gv = try g.adopt(try root.linear(s, x, gate.trellis, gate.suh, gate.svh, .mul1));
+            const want = try g.adopt((try swiglu.upSwiglu(s, x, up, gv, lim, tab, .mul1)) orelse return error.TestUnexpectedResult);
+            const got = try g.adopt((try swiglu.upSwigluW(s, x, up, w_hat, gv, lim, tab, .mul1)) orelse return error.TestUnexpectedResult);
+            try testing.expectEqualSlices(c_int, &.{ 1, ci(rows), ci(c.out) }, mlx.getShape(got));
+            const nel: usize = @as(usize, rows) * c.out;
+            const d = try wordsDiffer(a, &g, got, want, nel);
+            lines += 1;
+            bad += @intFromBool(d != 0);
+            std.debug.print("TURBOEXL3_LING_SWIGLU_EPI_W {s} {d}x{d} n={d} rows={d} limit={d} path={s} differing={d}/{d} {s}\n", .{ c.name, hidden, c.out, c.n, rows, lim, @tagName(dn.pathFor(rows)), d, nel, if (d == 0) "PASS" else "FAIL" });
+        };
+        const tab0 = tabs[0];
+        // the declines (null, no launch): the decode GEMVs' rows and the register path's
+        for ([_]u32{ 16, 17, 31, 32 }) |rows| {
+            const x = try randX(a, &g, rnd, rows, .bfloat16);
+            const gv = try g.adopt(try root.linear(s, x, gate.trellis, gate.suh, gate.svh, .mul1));
+            try testing.expect((try swiglu.upSwigluW(s, x, up, w_hat, gv, 0, tab0, .mul1)) == null);
+        }
+        // the refusals, before any launch: a clamp above 128, a W_hat of another shape, a gate of the wrong size
+        const x33 = try randX(a, &g, rnd, 33, .bfloat16);
+        const g33 = try g.adopt(try root.linear(s, x33, gate.trellis, gate.suh, gate.svh, .mul1));
+        try testing.expectError(error.InvalidExl3Clamp, swiglu.upSwigluW(s, x33, up, w_hat, g33, 129, tab0, .mul1));
+        const narrow = try g.slice(w_hat, &.{ 0, 0 }, &.{ ci(hidden), ci(c.out - 128) }, &.{ 1, 1 });
+        try testing.expectError(error.BadExl3Shape, swiglu.upSwigluW(s, x33, up, narrow, g33, 0, tab0, .mul1));
+        const short = try g.slice(g33, &.{ 0, 0, 0 }, &.{ 1, 32, ci(c.out) }, &.{ 1, 1, 1 });
+        try testing.expectError(error.BadExl3Shape, swiglu.upSwigluW(s, x33, up, w_hat, short, 0, tab0, .mul1));
+    }
+    std.debug.print("TURBOEXL3_LING_SWIGLU_EPI_W_DONE lines={d} differing_lines={d} {s}\n", .{ lines, bad, if (bad == 0) "BYTES_OK" else "BYTES_DIFFER" });
+    try testing.expectEqual(@as(usize, 9), lines);
     try testing.expectEqual(@as(usize, 0), bad);
 }
 

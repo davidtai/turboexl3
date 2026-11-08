@@ -29,6 +29,8 @@ pub const sigmoidTable = shared.sigmoidTable;
 /// and its own (`upSwiglu`; `swiglu.takes` says where), the composed chain's words.
 pub const swiglu = @import("swiglu.zig");
 pub const upSwiglu = swiglu.upSwiglu;
+/// `upSwiglu` over a W_hat the caller decoded once (`swiglu.upSwigluW`: the matmul path's rows).
+pub const upSwigluW = swiglu.upSwigluW;
 
 /// Same-input linear pairs in one DEC-ONE launch (`pair.zig`): z | a, the shared expert's and the dense FFN's
 /// gate | up, each member in its own buffers, each member's `linear` bytes (`linearPair`).
