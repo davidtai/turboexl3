@@ -59,6 +59,7 @@ comptime {
     _ = @import("models/ling/mla_flash_test.zig");
     _ = @import("models/ling/kdaproj_pf.zig");
     _ = @import("models/ling/kdaproj_pf_test.zig");
+    _ = @import("models/ling/swiglu_test.zig");
 }
 
 

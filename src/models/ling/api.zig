@@ -25,6 +25,11 @@ pub const sharedExpert = shared.sharedExpert;
 pub const sharedTakes = shared.sharedTakes;
 pub const sigmoidTable = shared.sigmoidTable;
 
+/// The prefill SwiGLU epilogue (`swiglu.zig`): at prompt rows, up's finish running the host's SwiGLU of the gate's value
+/// and its own (`upSwiglu`; `swiglu.takes` says where), the composed chain's words.
+pub const swiglu = @import("swiglu.zig");
+pub const upSwiglu = swiglu.upSwiglu;
+
 /// Same-input linear pairs in one DEC-ONE launch (`pair.zig`): z | a, the shared expert's and the dense FFN's
 /// gate | up, each member in its own buffers, each member's `linear` bytes (`linearPair`).
 pub const pair = @import("pair.zig");
@@ -163,7 +168,7 @@ pub const moeTail = tail.moeTail;
 pub const moeTailParts = tail.moeTailParts;
 
 /// This file's module state (`Global`): what a host that shares its units' state registers.
-pub const shared_state = .{ shared.shared_state, pair.shared_state, kdaproj.shared_state, addnorm.shared_state, router.shared_state, tail.shared_state, mla_latent.shared_state, mla_flash.shared_state, kdaproj_pf.shared_state };
+pub const shared_state = .{ shared.shared_state, pair.shared_state, kdaproj.shared_state, addnorm.shared_state, router.shared_state, tail.shared_state, mla_latent.shared_state, mla_flash.shared_state, kdaproj_pf.shared_state, swiglu.shared_state };
 
 /// The MLA prompt attention as one causal flash launch (`mla_flash.zig`): o [B, H, qL, v] = softmax(scale q k^T) v, query
 /// row i over keys 0 .. kL - qL + i, at Ling's heads (qk 192, v 128) or any pair `mla_flash.admits` takes; within

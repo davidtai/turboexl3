@@ -939,3 +939,67 @@ The MLA prompt attention as one causal flash launch (`root.ling.mlaFlashPrefill`
   attention_nax statements ..." (CPU, the texts; its pin file); "... metal source: the kernel as standalone translation
   units (TURBOEXL3_METAL_DUMP=1)" (the offline compile); `src/models/ling/mla_flash.zig` "turboexl3 ling mla flash plan:
   ..." (CPU, the plan).
+## `src/models/ling/swiglu.zig`
+
+The prefill SwiGLU epilogue: at a prompt's rows the up projection's finish runs the host's SwiGLU of the gate's
+finished value and its own, and stores the activation where the composed chain stores up. Rows 1 to 16 (the decode
+GEMVs), the fused-GEMM option, pg2 and an un-rotated resident trellis keep the chain (`swiglu.takes`).
+
+### `turboexl3_ling_finish_sgu`
+
+<!-- kernel-facts: turboexl3_ling_finish_sgu -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/ling/swiglu.zig:61` (`fn kernelOf`) |
+| inputs | `z`, `svh`, `gate`, `sigtab` |
+| outputs | `y` |
+| source | `text_finish_sgu` = `dense/finish_v` ++ `ling:swiglu/epi_open` ++ `ling:shared/sgu_swiglu` ++ `ling:swiglu/epi_close` (1515 B, `79dc32c6f4d5`) |
+| header | `decode.header` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` (18000 B, `771237d24284`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** `upSwiglu` (`root.lingUpSwiglu`) at limit 0, the outside plugin turboexl3_ling's MLX_SERVE_LING_SWIGLU_EPI:
+  the up projection of the shared expert (its unclamped layers) and of the dense layers' MLP at prompt rows (17 and up).
+- **Shapes and dtypes:** z f16 [ROWS, DIM] (up's inner product by `linear`'s own launches at these rows), svh f16 [DIM],
+  gate T [ROWS, DIM] (the gate's `linear`), sigtab T [65536] (the host's table: MLX's sigmoid of every 16-bit pattern of
+  T, in T). Out: y T [ROWS, DIM], the activation h. T bf16 or f16.
+- **Grid and threadgroup:** `((DIM / 128) · 32, ROWS, 1)` / `(32, 1, 1)`: `turboexl3_dense_finish`'s, one simdgroup per
+  (128-column block, row).
+- **Template args:** DIM, OUT_T, as `turboexl3_dense_finish`'s.
+- **Replaces:** up's `turboexl3_dense_finish` and the host's SwiGLU launch (mlx-serve's fusedSwiGLU): up's store, and the
+  SwiGLU's reads of the gate and up and its store.
+- **Bits:** up's value is text_finish's (`dense/finish_v`, then its store expression, kept in a register); h is
+  fusedSwiGLU's statements (`ling:shared/sgu_swiglu`: the sigmoid read from the host's table by the gate's pattern, then
+  MLX's Multiply twice in T), so the composed chain's words.
+- **Pinned by:** `src/models/ling/swiglu_test.zig` "turboexl3 ling swiglu texts: ..." (CPU: the composition, the kept
+  store expression and index, the gate's read and h's store, `kernels/test/pins/swiglu_texts.metal`) and "turboexl3 gpu
+  ling swiglu epi: ..." (GPU: h against the composed chain word for word at the shared expert's and the dense layers'
+  shapes, rows 17 to 16384).
+
+### `turboexl3_ling_finish_sguco`
+
+<!-- kernel-facts: turboexl3_ling_finish_sguco -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/ling/swiglu.zig:62` (`fn kernelOf`) |
+| inputs | `z`, `svh`, `gate`, `sig32`, `lim` |
+| outputs | `y` |
+| source | `text_finish_sguco` = `dense/finish_v` ++ `ling:swiglu/epi_open` ++ `ling:shared/sgu_swiglu_clamp_out` ++ `ling:swiglu/epi_close` (2061 B, `56844ead9ac6`) |
+| header | `decode.header` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` (18000 B, `771237d24284`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** `upSwiglu` at a limit L > 0: the shared expert's up projection on the clamped layers (Ling-3.1's
+  `share_expert_swiglu_limit_list`: layers 64 to 71 at L 10).
+- **Shapes and dtypes:** `turboexl3_ling_finish_sgu`'s, with sig32 f32 [65536] (MLX's f32 sigmoid of every 16-bit pattern
+  of T taken to f32) in place of sigtab, and lim f32 [1] (L).
+- **Grid and threadgroup:** `turboexl3_ling_finish_sgu`'s.
+- **Template args:** DIM, OUT_T.
+- **Replaces:** up's `turboexl3_dense_finish` and the plugin's swigluClampOut, MLX's ops in f32 (astype twice, sigmoid,
+  multiply, minimum, clip, multiply, astype).
+- **Bits:** up's value as `turboexl3_ling_finish_sgu`'s; h is swigluClampOut's statements in f32
+  (`ling:shared/sgu_swiglu_clamp_out`: MLX's sigmoid read from the table by the gate's pattern, Multiply, Minimum with L,
+  clip to [-L, L], Multiply, back in T).
+- **Pinned by:** as `turboexl3_ling_finish_sgu`'s, at limit 10 (the shared expert's shape).

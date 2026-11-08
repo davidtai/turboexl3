@@ -1380,6 +1380,26 @@ for _i in range(1, 7):
     ADDED[('core/pgemm.zig', 'const fused_%d' % _i)] = 'a piece of pg2\'s fused body, cut where a grouped launch puts its own statements'
 CHANGED[('core/pgemm.zig', 'const text_fused')] = 'its six pieces concatenated (fused_1 to fused_6): the same text'
 CHANGED[('core/pgemm.zig', 'const header')] = 'pub: models/ling/kdaproj_pf.zig\'s grouped launch reads it'
+# Ling-3.1-flash's prefill SwiGLU epilogue (turboexl3_ling's MLX_SERVE_LING_SWIGLU_EPI): up's finish at prompt rows running
+# the host's SwiGLU of the gate's value and its own (turboexl3_ling_finish_sgu / _sguco); dense's finish cut at its store
+ADDED_KERNELS[('models/ling/swiglu.zig', 'turboexl3_ling_finish_sgu')] = ('dense\'s finish_v, its store loop with up\'s value kept and '
+                                                                         'the gate\'s read, the shared expert\'s unclamped SwiGLU '
+                                                                         '(sgu_swiglu), h stored')
+ADDED_KERNELS[('models/ling/swiglu.zig', 'turboexl3_ling_finish_sguco')] = ('turboexl3_ling_finish_sgu with the SwiGLU clamped '
+                                                                           'after the SiLU (sgu_swiglu_clamp_out)')
+CHANGED[('dense.zig', 'const text_finish')] = 'finish_v ++ finish_store (the same text, cut at its store loop)'
+ADDED[('dense.zig', 'const finish_v')] = 'text_finish\'s loads and butterfly, before its store loop'
+ADDED[('dense.zig', 'const finish_store')] = 'text_finish\'s store loop'
+ADDED_FILES['models/ling/swiglu.zig'] = ('Ling-3.1\'s prefill SwiGLU epilogue: upSwiglu (up\'s inner product by linear\'s '
+                                         'own launches, then its finish running the host\'s SwiGLU of the gate\'s value and '
+                                         'its own: the composed chain\'s words), takes, the two texts')
+ADDED[('models/ling/api.zig', 'const swiglu')] = 'swiglu.zig, the prefill SwiGLU epilogue'
+ADDED[('models/ling/api.zig', 'const upSwiglu')] = 'the re-export of swiglu.zig\'s upSwiglu'
+ADDED[('root.zig', 'const lingUpSwiglu')] = 'the re-export of models/ling/api.zig\'s upSwiglu'
+ADDED_FILES['models/ling/swiglu_test.zig'] = ('upSwiglu held to the composed chain (linear\'s gate and up, the host\'s SwiGLU as '
+                                              'MLX\'s ops) word for word at the shared expert\'s and the dense layers\' shapes, '
+                                              'rows 17 to 16384, limits 0 and 10, its declines and refusals (GPU), the texts\' '
+                                              'composition (CPU), and its timing (TURBOEXL3_LING_TIME)')
 
 def metal_strings(fn, toks, corpus):
     """(line, kind, value) of every literal in a .zig file that holds Metal"""
@@ -1695,6 +1715,12 @@ SPLIT_ADDED_KERNELS['turboexl3_ling_kdaproj_pf'] = ('P4: a KDA layer\'s q|k|v, f
                                                     'macro\'s end): pg2\'s fused NAX GEMM and dense finish with the N '
                                                     'tiles running each member\'s in turn, each member\'s linear bytes; '
                                                     'ling.kdaProjPrompt')
+SPLIT_ADDED_KERNELS['turboexl3_ling_finish_sgu'] = ('Ling-3.1\'s prefill SwiGLU epilogue (models/ling/swiglu.zig '
+                                                  'text_finish_sgu: dense/finish_v, swiglu/epi_open, shared/sgu_swiglu, '
+                                                  'swiglu/epi_close): up\'s finish with its value kept, then the host\'s '
+                                                  'SwiGLU of the gate\'s value and its own; ling.upSwiglu')
+SPLIT_ADDED_KERNELS['turboexl3_ling_finish_sguco'] = ('turboexl3_ling_finish_sgu with the clamp after the SiLU '
+                                                    '(shared/sgu_swiglu_clamp_out)')
 SPLIT_CHANGED_CONSTS = {
     'head': 'models/ling/router.zig: launch 1\'s router threadgroups at 512 / 16 a row (MLX\'s gemv tiles)',
     'pred_open': 'models/ling/router.zig: the predictor\'s threadgroups after 512 / 16 a row of the router\'s',

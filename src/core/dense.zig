@@ -40,7 +40,11 @@ pub const text_prep = @embedFile("kernels/dense/prep.metal");
 pub const text_prep_s = @embedFile("kernels/dense/prep_s.metal");
 
 /// finish for a dense linear: y OUT_T [rows, OUT] = f16(H128(f16(z)) * svh) per 128-block; z f32 (decode) or f16 (prefill)
-pub const text_finish = @embedFile("kernels/dense/finish.metal");
+pub const text_finish = finish_v ++ finish_store;
+/// text_finish's two pieces: its loads and butterfly (each lane's four values, v), then the store loop (svh, the f16
+/// round, OUT_T); Ling's prefill SwiGLU epilogue (models/ling/swiglu.zig) runs finish_v, then its own store
+pub const finish_v = @embedFile("kernels/dense/finish_v.metal");
+pub const finish_store = @embedFile("kernels/dense/finish_store.metal");
 
 /// text_finish over a call whose inner product arrives as up to four row pieces zp0..zp3 (`Dense.finishPieces`; f16
 /// [rows_p, DIM]; piece p holds the call's rows [R_p, R_{p+1}), R_0 = 0, R1..R3 0-dim ints, an unused piece's bound at the

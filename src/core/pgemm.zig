@@ -1,7 +1,7 @@
 //! pg2: a dense linear's prefill matmul and finish as one launch, at the shapes this machine runs faster that way.
 //! `linearOn`'s matmul path at prefill rows is three launches past the prepare: the W_hat decode, MLX's f16 matmul (z half
 //! [M, N] written, MLX's fused NAX kernel) and the finish (z read, y written: f16(H128(f16(z)) * svh) per 128-column
-//! block, kernels/dense/finish.metal). pg2 runs the matmul and the finish as one kernel (kernels/pg2/gemm_fused_*.metal):
+//! block, dense.text_finish). pg2 runs the matmul and the finish as one kernel (kernels/pg2/gemm_fused_*.metal):
 //! MLX's fused NAX GEMM body (steel/gemm/kernels/steel_gemm_fused_nax.h `gemm`, MLX 0.32.3; its gemm_loop verbatim,
 //! kernels/pg2/gemm_loop.metal: SK 32, the 16 x 32 x 16 multiply-accumulate on the f16 operands, f32 accumulation, k in
 //! MLX's order) at a tile of this machine's choosing, then the finish as its epilogue: the accumulators rounded to half as
@@ -231,7 +231,7 @@ pub fn warm(s: mlx.mlx_stream, out_dtype: mlx.mlx_dtype, only: ?[2]u32) !void {
 const testing = std.testing;
 
 test "pgemm: the epilogue runs the finish's statements, the loop is MLX's gemm_loop by its statements, the table's tiles exact by construction" {
-    const finish = @embedFile("kernels/dense/finish.metal");
+    const finish = @embedFile("kernels/dense/finish_v.metal") ++ @embedFile("kernels/dense/finish_store.metal");
     var it = std.mem.splitScalar(u8, finish, '\n');
     var lines: usize = 0;
     while (it.next()) |line| {
