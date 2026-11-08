@@ -8,8 +8,9 @@
 //! - GPU (TURBOEXL3_GPU=1, else skipped), at Ling-3.1-flash's shapes with the loader's I16 trellis words: the shared
 //!   expert's gate and up (4096 -> 1280 at K 6) at limits 0 and 10 (`share_expert_swiglu_limit_list`), the dense layers'
 //!   (4096 -> 10240 at K 4) at limit 0; x the MLP's input [1, S, 4096] in bf16 (f16 at two row counts), the gate's and the
-//!   up's outputs reaching past the limit. At rows 17 and 32 (the register path) and 33, 100, 1966, 4096 and 16384 (the
-//!   matmul path: a span's tail, a chunk, a layer-major call), h against the composed chain (the gate and the up by
+//!   up's outputs reaching past the limit. At rows 17, 31 and 32 (the register path) and 33, 100, 1965, 4096 and 16384
+//!   (the matmul path; the standard request's spans are 4096, 1965 and 31 rows, a prompt without spans runs layer-major
+//!   calls of 16384), h against the composed chain (the gate and the up by
 //!   `linear`; at limit 0 the host's SwiGLU as MLX's sigmoid, multiply and multiply in x's dtype, the words of mlx-serve's
 //!   fusedSwiGLU; at 10 the plugin's swigluClampOut, MLX's ops in f32), word for word; the declines (rows 1 to 16, an f32
 //!   x) and the refusals (a clamp above 128, the wrong table, a gate of the wrong size). Lines: TURBOEXL3_LING_SWIGLU_EPI
@@ -158,7 +159,7 @@ const cases = [_]Case{
     .{ .name = "shared", .out = 1280, .n = 96, .lims = &.{ 0, 10 } },
     .{ .name = "dense", .out = 10240, .n = 64, .lims = &.{0} },
 };
-const test_rows = [_]u32{ 17, 32, 33, 100, 1966, 4096, 16384 };
+const test_rows = [_]u32{ 17, 31, 32, 33, 100, 1965, 4096, 16384 };
 
 test "turboexl3 gpu ling swiglu epi: up's finish running the host's SwiGLU gives the composed chain's words at the shared expert's and the dense layers' shapes, rows 17 to 16384, limits 0 and 10 (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
