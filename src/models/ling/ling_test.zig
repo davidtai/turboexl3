@@ -11,6 +11,7 @@
 //! - every pair of `root.moeLingBanked` over three banks is `moeLing`'s on its bank at top-1 with score 1, byte for byte,
 //!   at limits 0 and 10, rows 1, 2, 8, 16, 48, on the configured texts (banked group 2), the grouped texts (g4) and the
 //!   M = 3 member path (g4m3), each selected (`moeLingBankedSel`) and checked to have run;
+//! - the 17 routed geometries those three tests make in one process have their kernels in root's cache at once;
 //! - `root.linear` at every Ling trunk shape (K6; the dense FFN K4) equals the host reference;
 //! - a one-row call on its shape's `dense.one_row_table` launch (`Config.dec_one_row_table`) gives one row's own bytes and
 //!   the three-launch chain's at every trunk shape, on that launch;
@@ -28,7 +29,7 @@
 //!   `root.ling.linearPair` each member's `linear` words (rows 1, 2, 4, 6), and the one-row table one row's own words
 //!   (every trunk shape), each also the words of the same call on U16 words and a contiguous `[rows, in]`.
 //! TURBOEXL3_LING_N (rates in halfwords per tile; default 40,32) narrows the routed tests. Lines: TURBOEXL3_LING_BYTES,
-//! TURBOEXL3_LING_PARITY, TURBOEXL3_LING_TOP4, TURBOEXL3_LING_BANKED, TURBOEXL3_LING_DENSE, TURBOEXL3_LING_ONE_ROW,
+//! TURBOEXL3_LING_PARITY, TURBOEXL3_LING_TOP4, TURBOEXL3_LING_BANKED, TURBOEXL3_LING_CACHE, TURBOEXL3_LING_DENSE,
 //! TURBOEXL3_LING_ONE_ROW_TABLE, TURBOEXL3_LING_PAIR, TURBOEXL3_LING_KDA_PROJ, TURBOEXL3_LING_ROWINV,
 //! TURBOEXL3_LING_SERVED.
 //! Timing (TURBOEXL3_LING_TIME=1 with TURBOEXL3_GPU=1; asserts nothing, guidance only): every trunk linear, `moeLing`
@@ -562,6 +563,44 @@ test "turboexl3 gpu ling banked: every pair of moeLingBanked over three banks is
         }
     }
     try testing.expect(!failed);
+}
+
+// The routed geometries this file's GPU tests make, each one's kernels in root's cache at once (`root.kernelsFor`): the
+// cache keeps a geometry's kernels for the process's life and evicts none, and a test binary runs every test in one
+// process. The moeLing test makes 12 (top-8 at n 40 and 32, limits 0, 10 and 128, out bf16 and f32; root.moe at limit 0
+// shares moeLing's), the top-4 test 1 (n 40, limit 0, f32) and the banked test 4 (top-1 at n 40 and 32, limits 0 and
+// 10, f32): 17 in all. A cache of 16 failed the banked test's last geometry with Exl3EngineCacheFull after its byte
+// lines. Kernel objects only: nothing launches.
+test "turboexl3 gpu ling kernel cache: the 17 routed geometries the Ling GPU tests make (top-8, top-4 and top-1, n 40 and 32, limits 0, 10 and 128, out bf16 and f32) have their kernels in root's cache at once (TURBOEXL3_GPU=1)" {
+    _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    const s = mlx.mlx_default_gpu_stream_new();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    const Key = struct { topk: u32, n: u32, lim: u32, out: mlx.mlx_dtype };
+    var keys: [17]Key = undefined;
+    var nk: usize = 0;
+    for ([_]u32{ 40, 32 }) |n| for ([_]u32{ 0, @intCast(limit), 128 }) |lim| for ([_]mlx.mlx_dtype{ .bfloat16, .float32 }) |dt| {
+        keys[nk] = .{ .topk = top_k, .n = n, .lim = lim, .out = dt };
+        nk += 1;
+    };
+    keys[nk] = .{ .topk = 4, .n = 40, .lim = 0, .out = .float32 };
+    nk += 1;
+    for ([_]u32{ 40, 32 }) |n| for ([_]u32{ 0, @intCast(limit) }) |lim| {
+        keys[nk] = .{ .topk = 1, .n = n, .lim = lim, .out = .float32 };
+        nk += 1;
+    };
+    try testing.expectEqual(keys.len, nk);
+    var got: [keys.len]*decode.Kernels3 = undefined;
+    for (keys, &got, 0..) |k, *p, i| {
+        const rate = format.Rate.fromN(k.n) orelse return error.Exl3RateUnsupported;
+        p.* = try root.kernelsFor(.{ .hidden = hidden, .inter = inter, .topk = k.topk, .rate = rate, .dec = .mul1, .limit = k.lim, .clamp = .silu_out }, k.out);
+        std.debug.print("TURBOEXL3_LING_CACHE geometry={d}/{d} topk={d} n={d} limit={d} out={s} cached\n", .{ i + 1, keys.len, k.topk, k.n, k.lim, @tagName(k.out) });
+    }
+    // each geometry its own kernels, every one still held after the last was made
+    for (keys, got, 0..) |k, p, i| {
+        try testing.expect(p.geo.topk == k.topk and p.geo.rate.n == k.n and p.geo.limit == k.lim and p.out_dtype == k.out);
+        for (got[0..i]) |q| try testing.expect(p != q);
+    }
+    std.debug.print("TURBOEXL3_LING_CACHE {d} geometries held at once PASS\n", .{keys.len});
 }
 
 /// DEC-ONE (1, 4), the GEMV chain's two chunks (16), the register path (32), dequantize + matmul (512)
