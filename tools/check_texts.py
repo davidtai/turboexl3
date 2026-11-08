@@ -7,7 +7,8 @@ usage: python3 tools/check_texts.py ORIG_SRC [NEW_SRC] [-v] [--split]
             inside it, e.g. afb52be: `git worktree add /tmp/t3-orig afb52be`, then /tmp/t3-orig/src)
   NEW_SRC   the sources after it (default: this repository's src/)
   -v        every kernel and text const, one line each
-  --split   a change that moves declarations between files: checks 1 to 4 over the whole tree (`split_report`)
+  --split   a change that moves declarations between files: checks 1 to 4 over the whole tree (`split_report`); a
+            kernel, Zig file or test it removes on purpose is listed in SPLIT_REMOVED_KERNELS, _FILES or _TESTS
 
 All on the host, no Zig needed. Both trees are tokenized and their texts evaluated: string literals, `@embedFile`, `++`,
 consts, `module.const`, `if` (a comptime condition: only the taken branch, as Zig analyzes it), `&.{ ... }`, labeled blocks
@@ -1786,6 +1787,13 @@ SPLIT_CHANGED_CONSTS = {
     'text_logits': 'models/ling/router.zig: the router half as MLX\'s gemv over the loader\'s table',
     'text_pred': 'models/ling/router.zig: the router half as MLX\'s gemv over the loader\'s table',
 }
+# --split against a base: what a strip removes on purpose (the Ling final strip: each rejected candidate's code, one
+# commit each), by name with the candidate it belonged to. A kernel, a Zig file or a test missing from NEW fails unless it
+# is listed here; each listed one is printed as removed (intended). Emptied after the strip lands, as the tables above.
+SPLIT_REMOVED_KERNELS = {}
+SPLIT_REMOVED_FILES = {}
+SPLIT_REMOVED_TESTS = {}
+
 # the Ling banked test selects each arm's texts (moeLingBankedSel): Config.banked_group set in the process selected nothing
 RENAMED_TESTS[('ling_test.zig', "turboexl3 gpu ling banked: every pair of moeLingBanked over three banks is moeLing's on "
                                 "its bank at top-1 with score 1, byte for byte, at limits 0 and 10 and banked groups 2 and "
@@ -1833,7 +1841,10 @@ def split_report(oprog, nprog, ounits, nunits, orig_dir, new_dir, problems, verb
     same = 0
     for name in sorted(set(ok_) | set(nk)):
         if name not in nk:
-            problems.append(f'kernel {name}: removed')
+            if name in SPLIT_REMOVED_KERNELS:
+                print(f'   removed (intended) {name}: {SPLIT_REMOVED_KERNELS[name]}')
+            else:
+                problems.append(f'kernel {name}: removed')
             continue
         if name not in ok_:
             if name in SPLIT_ADDED_KERNELS:
@@ -1901,6 +1912,9 @@ def split_report(oprog, nprog, ounits, nunits, orig_dir, new_dir, problems, verb
         if t in renamed and renamed[t] in nt:
             print(f'   renamed (RENAMED_TESTS) "{t[:60]}" -> "{renamed[t][:60]}"')
             continue
+        if t in SPLIT_REMOVED_TESTS:
+            print(f'   removed (intended) "{t[:60]}": {SPLIT_REMOVED_TESTS[t]}')
+            continue
         problems.append(f'test "{t[:70]}" missing')
     print(f'   {len(ot)} tests before, {len(nt)} after, {len(nt - ot)} added\n')
 
@@ -1934,12 +1948,19 @@ def main():
     ounits, nunits = load(orig_dir, omap), load(new_dir, lambda rel: rel)
     oprog, nprog = Program(orig_dir, ounits, omap), Program(new_dir, nunits)
     rekey_tables(nunits)
-    added_files = []
+    added_files, removed_files = [], []
     for f in sorted(set(ounits) ^ set(nunits)):
         if f in nunits and f in ADDED_FILES:
             added_files.append(f)
+        elif split and f in ounits and f in SPLIT_REMOVED_FILES:
+            removed_files.append(f)
         else:
             problems.append(f'{f}: only in {"ORIG" if f in ounits else "NEW"}')
+    if removed_files:
+        print('0. files (split): the Zig files the change removed on purpose (SPLIT_REMOVED_FILES)')
+        for f in removed_files:
+            print(f'   removed (intended) {f}: {SPLIT_REMOVED_FILES[f]}')
+        print()
 
     if split:
         split_report(oprog, nprog, ounits, nunits, orig_dir, new_dir, problems, verbose)
