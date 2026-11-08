@@ -17,8 +17,6 @@ its own buffers, with the member chosen after its head and the GEMV's tile addre
 A KDA layer's three projections of one input (`kdaproj.zig`) are dense's `prep_sc` with each member on the grid's z, then
 dense's DEC-ONE text over prepared rows (`turboexl3_dense_dec0`'s, verbatim after its head) under a head that gives each
 threadgroup its member's widths and K split; each member keeps its own buffers.
-An MLA layer's q_a, kv_a and head gate (`mlaproj.zig`) take the same form over two EXL3 members, with the gate's
-threadgroups (`kdaproj/bmember`, MLX's gemv over each row) after theirs.
 
 A decode layer's mixer input (`addnorm.zig`) is mlx-serve's add_norm (the residual add and MLX's rms_norm order) with
 each EXL3 member's DEC-ONE prepare of the normed row (`text_prep_s`'s statements on the row in threadgroup memory) into
@@ -335,76 +333,6 @@ kernel (`turboexl3_pgemm_fused`) with its N tiles running member 0's, then 1's, 
 - **Replaces:** per member, MLX's matmul and the finish: six launches, and z's write and read, for one.
 - **Bits:** each member's are its `linear` chain's: pg2's statements (MLX's NAX gemm_loop verbatim, each column's k in MLX's order whatever the tile; the accumulators rounded to half as MLX's store rounds them; the finish's statements per 128-column block), on that member's operands. A call is taken only where `linear` runs that chain at these rows and MLX runs its regular kernel (`pgemm.mlxRegular`: no split K) on the NAX path.
 - **Pinned by:** `src/models/ling/kdaproj_pf.zig` "turboexl3 ling kdaproj prompt texts: ..." (CPU: the composition of pg2's pieces) and `src/models/ling/kdaproj_pf_test.zig` "turboexl3 gpu ling kdaproj prompt: ..." (GPU: each member against `root.linear` word for word at rows 33 to 16384, the refusal at 32).
-## `src/models/ling/mlaproj.zig`
-
-An MLA layer's q_a and kv_a (two EXL3 projections of the layer's input) and its head gate g_proj (bf16) in one GEMV launch
-at decode rows, q_a and kv_a each at its own K split.
-
-### `turboexl3_ling_mlaproj_dec0g`
-
-<!-- kernel-facts: turboexl3_ling_mlaproj_dec0g -->
-
-| fact | from the code |
-|---|---|
-| made at | `src/models/ling/mlaproj.zig:59` (`fn kernelOf`) |
-| inputs | `jxp`, `jxs`, `w0`, `w1`, `svh0`, `svh1`, `jcnt`, `xb`, `wb` |
-| outputs | `y0`, `y1`, `z0`, `z1`, `yb` |
-| source | `text_mdec0g` = `ling:kdaproj/bmember` ++ `ling:mlaproj/head` ++ `ling:mlaproj/member` ++ `dense/dec_gemv0` ++ `dense/dec_gemv_arrive_1` ++ `dense/dec_tile` ++ `dense/dec_gemv_arrive_2` ++ `dense/dec_xsum0` ++ `dense/dec_finish_v` ++ `dense/dec_finish_store` (10429 B, `7212fd5c8ae3`) |
-| header | `decode.header5` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` (26594 B, `41efbbbbd943`) |
-
-<!-- /kernel-facts -->
-
-- **Used by:** Ling-3.1-flash: `root.ling.mlaProjG` at decode rows 1 to 16, after `turboexl3_ling_mlaproj_prep` (the
-  outside plugin turboexl3_ling's MLX_SERVE_LING_MLA_PROJ_FUSED).
-- **Shapes and dtypes:** jxp f16 [2 · rows, IN] and jxs f32 [2 · rows, IN/128] (member m's prepared rows, as its own
-  `turboexl3_dense_prep_sc` writes them, and their 128-block sums at rows m · rows..); w0, w1 each member's own trellis
-  U16 or I16 [IN/16, out_m/16, NHW] (one dtype); svh0, svh1 f16 [out_m]; jcnt u32 [max((OUT0 + OUT1)/128 · chunks, 8)]
-  zeroed (`mlaproj.ncntFor`; member 1's counters after member 0's); xb bf16 [ROWS, IN] (x's rows); wb bf16 [OUTB, IN]
-  row-major (the loader's [IN, OUTB] column-major view transposed back). Out: y0, y1 T [rows, out_m] (each member's
-  own); z0, z1 f32 [KS_m · rows, out_m] (scratch, as DEC-ONE's); yb bf16 [ROWS, OUTB].
-- **Grid and threadgroup:** `(((OUT0/128 · KS0 + OUT1/128 · KS1) · (8/BT) + OUTB/4) · 128, chunks, 1)` /
-  `(128, 1, 1)`: member 0's (K slice, block) threadgroups, then member 1's, then the gate's (four outputs each).
-- **Template args:** NHW, CODEBOOK, WBITS (the members' one rate and decode), IN, OUT0, OUT1, KS0 and KS1 (each member's
-  own `Dense.ksFor(in, out)`), BT (member 0's `Dense.btDec`), RB (`Dense.rbFor`), ROWS, DEFER (the MUL1 map), OUT_T, FB
-  (the members' threadgroups: the gate's first), OUTB (the gate's width).
-- **Replaces:** q_a's and kv_a's DEC-ONE GEMVs (`turboexl3_dense_dec0` or `turboexl3_dense_dec1`, each with its own
-  `turboexl3_dense_prep_sc` or `turboexl3_dense_dec_zero`; at 5 to 8 rows the three-launch chain) and the gate's
-  matmul (one row) or the exact verify's denseRows (a concatenate and a batched matmul): 5 launches at one row, 6 at 2
-  to 4 rows and 8 at 5 to 8, in 2 dependent levels, with 2.
-- **Bits:** q_a's and kv_a's outputs are each member's `linear` bytes at every row count it serves (DEC-ONE's text over
-  prepared rows after its head: the member's own prepared rows, K split, slice order and finish per output block, its
-  own trellis, svh and output; the tiles per threadgroup and where the prepare runs move no byte); the gate's rows are
-  MLX's gemv's (`gemv.h` `GEMVKernel::run` at BM 1, BN 8, SM 1, SN 32, TM 4, TN 4, statement for statement), the served
-  one-row matmul's and so each row of the exact verify's denseRows.
-- **Pinned by:** `src/models/ling/mlaproj_test.zig` "turboexl3 gpu ling mlaproj: mlaProjG's q_a and kv_a are each one's
-  own linear and its gate the served g_proj ..." (GPU, words at rows 1 to 8, operands as the loader keeps them);
-  `src/models/ling/mlaproj.zig` "turboexl3 ling mlaproj texts: ..." (CPU, the texts), "... plan: ..." and "... grid:
-  ..." (CPU, the K splits and the grid).
-
-### `turboexl3_ling_mlaproj_prep`
-
-<!-- kernel-facts: turboexl3_ling_mlaproj_prep -->
-
-| fact | from the code |
-|---|---|
-| made at | `src/models/ling/mlaproj.zig:58` (`fn kernelOf`) |
-| inputs | `x`, `suh0`, `suh1` |
-| outputs | `jxp`, `jxs`, `cnt` |
-| source | `text_mprep_sc` = `ling:mlaproj/prep` ++ `dense/prep_s` ++ `dense/prep_sc` (2037 B, `36e2753443a6`) |
-| header | `decode.header` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` (18000 B, `771237d24284`) |
-
-<!-- /kernel-facts -->
-
-- **Used by:** `root.ling.mlaProjG`, before `turboexl3_ling_mlaproj_dec0g`.
-- **Shapes and dtypes:** x T [rows, IN] (bf16 where `mlaProjG` calls it); suh0, suh1 f16 [IN] (each member's own). Out:
-  jxp f16 [2 · rows, IN], jxs f32 [2 · rows, IN/128], cnt u32 [NCNT] zeroed.
-- **Grid and threadgroup:** `(IN/128 · 32, rows, 2)` / `(32, 1, 1)`: dense's `prep_sc` grid, the members on z.
-- **Template args:** DIM (IN), LANE_ORDER 1, NCNT, NTH (IN/128 · 32 · rows, the threads that zero the counters), ROWS.
-- **Replaces:** each member's `turboexl3_dense_prep_sc` (or `turboexl3_dense_dec_zero` where its call takes the prepare
-  inside).
-- **Bits:** each member's prepared rows and block sums are the ones its own `turboexl3_dense_prep_sc` writes (its text
-  after the member's suh and rows are chosen).
-- **Pinned by:** as `turboexl3_ling_mlaproj_dec0g`'s.
 
 ## `src/models/ling/combine.zig`
 
