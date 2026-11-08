@@ -1007,7 +1007,9 @@ The MLA prompt attention as one causal flash launch (`root.ling.mlaFlashPrefill`
   `force_fused` SDPA, GQA and views of a wider cache included) and "... at Ling's heads (qk 192, v 128) the causal prompt
   attention is within tolerance of an f64 host reference and no worse than MLX's composed path against it
   (TURBOEXL3_GPU=1)" (GPU, 2.5e-2 beyond the output's rounding over the reference RMS, and an RMS and worst-element
-  error no worse than the composed path's against the same reference, bf16 and f16); "turboexl3 ling mla flash texts: the body is MLX's
+  error no worse than the composed path's against the same reference, bf16 and f16; and at the served sizes, FL-1:
+  Ling's 64 heads in bf16 over views of a 32,768-row cache, 4,096 query rows over 12,288 and 16,384 keys, 1,965 over
+  18,349, 31 and 17 over 18,380, the reference on heads 0, 21, 42 and 63); "turboexl3 ling mla flash texts: the body is MLX's
   attention_nax statements ..." (CPU, the texts; its pin file); "... metal source: the kernel as standalone translation
   units (TURBOEXL3_METAL_DUMP=1)" (the offline compile); `src/models/ling/mla_flash.zig` "turboexl3 ling mla flash plan:
   ..." (CPU, the plan).

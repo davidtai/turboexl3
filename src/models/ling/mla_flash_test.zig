@@ -5,10 +5,15 @@
 //! - at the head dims MLX instantiates its fused NAX kernel for (qk = v = 128; qk 96, v 64) the kernel gives MLX's
 //!   fused causal SDPA's words (`force_fused`), the keys and values read in place from views of a wider cache, GQA too;
 //! - at Ling's heads (qk 192, v 128) it is within tolerance of an f64 host reference on sampled query rows of every
-//!   head (bf16 and f16; prompt chunks from 64 to 4096 rows over up to 8192 keys, and Ling's 64 heads), beside MLX's
-//!   composed path's error on the same rows (reported, not asserted).
+//!   head (bf16 and f16; prompt chunks from 64 to 4096 rows over up to 8192 keys, and Ling's 64 heads), and no worse
+//!   than MLX's composed path against the same reference;
+//! - at the served sizes (FL-1, main's operand audit): Ling's 64 heads in bf16 over views of the cache's
+//!   [1, 64, 32768, *] buffers (--ctx-size 32768) at layer-major's calls of the standard request (4096 query rows over
+//!   12,288 and 16,384 keys, 1965 over 18,349, 31 over 18,380) and the narrowest call the plugin hands it (17 over
+//!   18,380), the reference on sampled rows of heads 0, 21, 42 and 63, MLX's composed path one head at a time.
 //! TURBOEXL3_METAL_DUMP=1: the kernel as standalone translation units (Ling's bf16 heads aligned and not, f16 at 128)
-//! for an offline `xcrun metal` compile. Lines: TURBOEXL3_LING_FLASH_WORDS, TURBOEXL3_LING_FLASH.
+//! for an offline `xcrun metal` compile. Lines: TURBOEXL3_LING_FLASH_WORDS, TURBOEXL3_LING_FLASH,
+//! TURBOEXL3_LING_FLASH_SERVED.
 const std = @import("std");
 const sdk = @import("sdk");
 const mlx = sdk.mlx;
@@ -318,6 +323,91 @@ test "turboexl3 gpu ling mla flash: at Ling's heads (qk 192, v 128) the causal p
             const ok = std.math.isFinite(e.max_abs) and std.math.isFinite(rk) and e.max_ratio <= bar and no_worse;
             std.debug.print("TURBOEXL3_LING_FLASH b={d} h={d} ql={d} kl={d} qk={d} v={d} x={s} rows={d} max_abs={e:.3} ratio={e:.3} composed_max_abs={e:.3} composed_ratio={e:.3} rms={e:.3} composed_rms={e:.3} bar={e:.1} no_worse={} {s}\n", .{ c.b, c.h, c.ql, c.kl, c.qk, c.v, @tagName(dt), rows.len, e.max_abs, e.max_ratio, ec.max_abs, ec.max_ratio, rk, rc, bar, no_worse, if (ok) "PASS" else "FAIL" });
             failed += @intFromBool(!ok);
+        }
+    }
+    // FL-1 (main's operand audit, 2026-11-08): the served sizes. Ling's 64 heads in bf16, k and v views of the first kL
+    // rows of the cache's [1, 64, 32768, 192 | 128] buffers (--ctx-size 32768: the request's reservation), at
+    // layer-major's (query rows, key rows) of the standard request and the narrowest call the plugin hands the kernel
+    // (17 rows). The f64 reference on the sampled rows of heads 0, 21, 42 and 63 (the host's time); MLX's composed path
+    // for those heads one at a time, each its own call (one head's scores, not 64 heads'), the same bars.
+    {
+        const served_calls = [_][2]u32{ .{ 4096, 12288 }, .{ 4096, 16384 }, .{ 1965, 18349 }, .{ 31, 18380 }, .{ 17, 18380 } };
+        const ref_heads = [_]u32{ 0, 21, 42, 63 };
+        const nh: u32 = 64;
+        const cap_rows: u32 = 32768;
+        const xdt: mlx.mlx_dtype = .bfloat16;
+        const fl_scale: f32 = 1.0 / @sqrt(192.0);
+        var fl_prng = std.Random.DefaultPrng.init(0xF11);
+        const fl_rnd = fl_prng.random();
+        const mark0 = g.mark();
+        defer g.resetTo(mark0);
+        // The cache's buffers, once for every call: host copies (f32, each value exact in bf16) and the device's bf16.
+        const hk_all = try a.alloc(f32, nh * cap_rows * 192);
+        defer a.free(hk_all);
+        const hv_all = try a.alloc(f32, nh * cap_rows * 128);
+        defer a.free(hv_all);
+        for (hk_all) |*x| x.* = bfExact(fl_rnd.floatNorm(f32));
+        for (hv_all) |*x| x.* = bfExact(fl_rnd.floatNorm(f32));
+        const kbuf = try g.astype(try g.hostArray(std.mem.sliceAsBytes(hk_all), &.{ 1, ci(nh), ci(cap_rows), 192 }, .float32), xdt);
+        const vbuf = try g.astype(try g.hostArray(std.mem.sliceAsBytes(hv_all), &.{ 1, ci(nh), ci(cap_rows), 128 }, .float32), xdt);
+        try g.evalAll(&.{ kbuf, vbuf });
+        for (served_calls) |qk_rows| {
+            const fc: Case = .{ .h = nh, .hk = nh, .ql = qk_rows[0], .kl = qk_rows[1], .qk = 192, .v = 128, .cap = cap_rows };
+            const mark = g.mark();
+            defer g.resetTo(mark);
+            const hq_all = try a.alloc(f32, nh * fc.ql * 192);
+            defer a.free(hq_all);
+            for (hq_all) |*x| x.* = bfExact(2 * fl_rnd.floatNorm(f32));
+            const fq = try g.astype(try g.hostArray(std.mem.sliceAsBytes(hq_all), &.{ 1, ci(nh), ci(fc.ql), 192 }, .float32), xdt);
+            const fk = try g.slice(kbuf, &.{ 0, 0, 0, 0 }, &.{ 1, ci(nh), ci(fc.kl), 192 }, &.{ 1, 1, 1, 1 });
+            const fv = try g.slice(vbuf, &.{ 0, 0, 0, 0 }, &.{ 1, ci(nh), ci(fc.kl), 128 }, &.{ 1, 1, 1, 1 });
+            const fo: Operands = .{ .q = fq, .k = fk, .v = fv, .hq = hq_all, .hk = hk_all, .hv = hv_all };
+            const fgot = try g.adopt(try root.ling.mlaFlashPrefill(s, fq, fk, fv, fl_scale));
+            const fgf = try a.alloc(f32, nh * fc.ql * 128);
+            defer a.free(fgf);
+            _ = try g.hostF32(try g.astype(fgot, .float32), fgf);
+            var frows_buf: [12]u32 = undefined;
+            const frows = sampleRows(fc.ql, &frows_buf);
+            const fm = ref_heads.len * frows.len * 128;
+            const fwant = try a.alloc(f32, fm);
+            defer a.free(fwant);
+            const fsel = try a.alloc(f32, fm);
+            defer a.free(fsel);
+            const fselc = try a.alloc(f32, fm);
+            defer a.free(fselc);
+            const fcf = try a.alloc(f32, fc.ql * 128);
+            defer a.free(fcf);
+            const frow = try a.alloc(f64, 128);
+            defer a.free(frow);
+            const fw = try a.alloc(f64, fc.kl);
+            defer a.free(fw);
+            var fat: usize = 0;
+            for (ref_heads) |h| {
+                const hi = ci(h);
+                const qh = try g.slice(fq, &.{ 0, hi, 0, 0 }, &.{ 1, hi + 1, ci(fc.ql), 192 }, &.{ 1, 1, 1, 1 });
+                const kh = try g.slice(fk, &.{ 0, hi, 0, 0 }, &.{ 1, hi + 1, ci(fc.kl), 192 }, &.{ 1, 1, 1, 1 });
+                const vh = try g.slice(fv, &.{ 0, hi, 0, 0 }, &.{ 1, hi + 1, ci(fc.kl), 128 }, &.{ 1, 1, 1, 1 });
+                const composed_h = try mlxCausal(&g, qh, kh, vh, fl_scale, false);
+                _ = try g.hostF32(try g.astype(composed_h, .float32), fcf);
+                for (frows) |r| {
+                    hostRow(fc, fo, fl_scale, 0, h, r, frow, fw);
+                    const off = (h * fc.ql + r) * 128;
+                    for (0..128) |j| {
+                        fwant[fat + j] = @floatCast(frow[j]);
+                        fsel[fat + j] = fgf[off + j];
+                        fselc[fat + j] = fcf[r * 128 + j];
+                    }
+                    fat += 128;
+                }
+            }
+            const fe = @import("../../core/ref.zig").compareRounded(fsel, fwant, 1.0 / 256.0);
+            const fec = @import("../../core/ref.zig").compareRounded(fselc, fwant, 1.0 / 256.0);
+            const frk = rmsRatio(fsel, fwant, fe.rms_ref);
+            const frc = rmsRatio(fselc, fwant, fec.rms_ref);
+            const fno_worse = frk <= @max(1.10 * frc, frc + 1e-4) and fe.max_ratio <= @max(1.25 * fec.max_ratio, fec.max_ratio + 1.0 / 512.0);
+            const fok = std.math.isFinite(fe.max_abs) and std.math.isFinite(frk) and fe.max_ratio <= bar and fno_worse;
+            std.debug.print("TURBOEXL3_LING_FLASH_SERVED b=1 h={d} heads=0,21,42,63 ql={d} kl={d} cap={d} qk=192 v=128 x=bfloat16 rows={d} max_abs={e:.3} ratio={e:.3} composed_max_abs={e:.3} composed_ratio={e:.3} rms={e:.3} composed_rms={e:.3} bar={e:.1} no_worse={} {s}\n", .{ nh, fc.ql, fc.kl, cap_rows, frows.len, fe.max_abs, fe.max_ratio, fec.max_abs, fec.max_ratio, frk, frc, bar, fno_worse, if (fok) "PASS" else "FAIL" });
+            failed += @intFromBool(!fok);
         }
     }
     try testing.expectEqual(@as(usize, 0), failed);
