@@ -3,10 +3,10 @@
 //! path at prompt widths (`ScaledDotProductAttention::use_fallback` for a head dim of 192): the scores and the
 //! probabilities written to and read from device memory at the activation dtype, about 9 TFLOPS on Ling's prompt chunks.
 //! The kernel is MLX's own NAX attention (steel/attn/kernels/steel_attention_nax.h `attention_nax`, MLX 0.32.5;
-//! kernels/mla_flash/body.metal its statements less the mask, sinks, log-sum-exp and window arms) at a tile MLX does not
-//! instantiate: bq 64, bk 32, bd 192, bv 128 and 4 simdgroups along the queries, MLX's own tile for head dims up to 128.
-//! The template takes any `admits` pair, so at a pair MLX instantiates (qk = v = 128; qk 96, v 64) it is MLX's fused
-//! kernel itself.
+//! kernels/mla_flash/body_*.metal its statements less the mask, sinks, log-sum-exp and window arms) at a tile MLX does
+//! not instantiate: bq 64, bk 32, bd 192, bv 128 and 4 simdgroups along the queries, MLX's own tile for head dims up
+//! to 128. The template takes any `admits` pair, so at a pair MLX instantiates (qk = v = 128; qk 96, v 64) it is
+//! MLX's fused kernel itself.
 //! Numerics: MLX's fused kernel's, not the composed path's. The scores, the running row max and sum and the output
 //! accumulate in f32 (exp2 of the log2(e)-scaled scores), P meets V in the NAX MMA, and the output rounds once to the
 //! activation dtype; the composed path rounds the scaled query, the scores and the probabilities to the activation dtype
@@ -14,6 +14,9 @@
 //! the composed path's bytes.
 //! The launch is MLX's: threadgroups (ceil(qL / BQ), H, B) of (32, WM, WN) threads, the operands at their own strides (a
 //! cache's views read in place, no copy), the output contiguous.
+//! The rope-once cache (`mlaFlashPrefillRope1`, `Config.mla_rope_once`, off by default): the keys are each head's nope
+//! keys and the token's one roped key, shared by every head, each read in place; the same launch with the key tile's
+//! 16-wide slices read from one or the other (`text_body_r1`), the expanded key's words, so the same output words.
 const std = @import("std");
 const mlx = @import("sdk").mlx;
 const ks = @import("sdk").kernel_launch;
@@ -25,10 +28,31 @@ const steel_nax = @import("../../core/steel.zig").nax;
 /// After MLX steel's NAX tiles: attention_nax's row ops and finite minimum, the kernel attribute (MLX's threads per
 /// threadgroup) on the generated definition
 pub const text_head = @embedFile("kernels/mla_flash/head.metal");
-/// attention_nax's statements for causal prompt attention, its parameters from the operands
-pub const text_body = @embedFile("kernels/mla_flash/body.metal");
+/// attention_nax's statements for causal prompt attention, its parameters from the operands, cut where the rope-once
+/// variant reads its keys (`text_body_r1`): up to the keys' head offset, up to the key tile's offset, the offset, up to
+/// the key tile's load, the load, up to the keys' step, the step, the rest
+pub const body_1 = @embedFile("kernels/mla_flash/body_1.metal");
+pub const body_2 = @embedFile("kernels/mla_flash/body_2.metal");
+pub const body_kofs = @embedFile("kernels/mla_flash/body_kofs.metal");
+pub const body_3 = @embedFile("kernels/mla_flash/body_3.metal");
+pub const body_kload = @embedFile("kernels/mla_flash/body_kload.metal");
+pub const body_4 = @embedFile("kernels/mla_flash/body_4.metal");
+pub const body_kstep = @embedFile("kernels/mla_flash/body_kstep.metal");
+pub const body_5 = @embedFile("kernels/mla_flash/body_5.metal");
+pub const text_body = body_1 ++ body_2 ++ body_kofs ++ body_3 ++ body_kload ++ body_4 ++ body_kstep ++ body_5;
 /// the attribute undefined after the definition, so MLX's explicit instantiation keeps a plain [[kernel]]
 pub const text_close = @embedFile("kernels/mla_flash/close.metal");
+
+/// The rope-once variant's pieces (`mlaFlashPrefillRope1`): the roped keys' pointer (kr: one roped key a token, no head
+/// offset), the key tile's source, row stride and offset (each 16-wide slice of a key's dims in k's nope keys or in
+/// kr), its load from there, and the roped keys' step
+pub const r1_setup = @embedFile("kernels/mla_flash/r1_setup.metal");
+pub const r1_kofs = @embedFile("kernels/mla_flash/r1_kofs.metal");
+pub const r1_kload = @embedFile("kernels/mla_flash/r1_kload.metal");
+pub const r1_kstep = @embedFile("kernels/mla_flash/r1_kstep.metal");
+/// attention_nax's statements over the rope-once cache: `text_body` with the key tile read from k (a key's first KN
+/// dims) or kr (the rest), the same words into the same tiles, so every other statement is `text_body`'s
+pub const text_body_r1 = body_1 ++ r1_setup ++ body_2 ++ r1_kofs ++ body_3 ++ r1_kload ++ body_4 ++ body_kstep ++ r1_kstep ++ body_5;
 
 fn sentinel(comptime s: []const u8) [:0]const u8 {
     comptime {
@@ -41,9 +65,13 @@ fn sentinel(comptime s: []const u8) [:0]const u8 {
 
 pub const header: [:0]const u8 = sentinel(steel_nax ++ text_head);
 pub const source: [:0]const u8 = sentinel(text_body ++ text_close);
+/// `turboexl3_ling_mla_flash_r1`'s source (its header is `header`)
+pub const source_r1: [:0]const u8 = sentinel(text_body_r1 ++ text_close);
 
 pub const flash_in = [_][*:0]const u8{ "q", "k", "v", "scale" };
 pub const flash_out = [_][*:0]const u8{"o"};
+/// The rope-once launch's operands: `flash_in`'s, k the nope keys, and kr the roped keys
+pub const flash_r1_in = [_][*:0]const u8{ "q", "k", "v", "kr", "scale" };
 
 /// The launch tile: query rows a threadgroup (bq), key rows a step (bk), simdgroups along the queries (wm) and the head
 /// dim (wn; MLX's split-D kernel only, so 1 here); bq = 16 wm wn, one 16-row fragment a simdgroup (attention_nax's TQ 1)
@@ -75,9 +103,11 @@ pub fn planFor(b: u32, h: u32, ql: u32, kl: u32, t: Tile) Plan {
 const kernel_cache = Global(?mlx.mlx_fast_metal_kernel, "ling_mla_flash_kernel", null);
 const kernel_lock = Global(std.atomic.Value(u32), "ling_mla_flash_lock", std.atomic.Value(u32).init(0));
 const said = Global(bool, "ling_mla_flash_said", false);
+const kernel_r1_cache = Global(?mlx.mlx_fast_metal_kernel, "ling_mla_flash_r1_kernel", null);
+const said_r1 = Global(bool, "ling_mla_flash_r1_said", false);
 
 /// This file's module state (`Global`): what a host that shares its units' state registers.
-pub const shared_state = .{ kernel_cache, kernel_lock, said };
+pub const shared_state = .{ kernel_cache, kernel_lock, said, kernel_r1_cache, said_r1 };
 
 fn kernelGet() !mlx.mlx_fast_metal_kernel {
     while (kernel_lock.get().*.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
@@ -89,12 +119,24 @@ fn kernelGet() !mlx.mlx_fast_metal_kernel {
     return k;
 }
 
-/// Drops the kernel (`decode.freeKernel`, the consumer's drop); the next call makes it again
+fn kernelGetR1() !mlx.mlx_fast_metal_kernel {
+    while (kernel_lock.get().*.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
+    defer kernel_lock.get().*.store(0, .release);
+    if (kernel_r1_cache.get().*) |k| return k;
+    // the nope keys, the values and the roped keys read in place at their own strides (k_strides, v_strides, kr_strides)
+    const k = ks.newKernel("turboexl3_ling_mla_flash_r1", &flash_r1_in, &flash_out, source_r1, header, false) orelse return error.KernelCreateFailed;
+    kernel_r1_cache.get().* = k;
+    return k;
+}
+
+/// Drops the kernels (`decode.freeKernel`, the consumer's drop); the next call makes them again
 pub fn release() void {
     while (kernel_lock.get().*.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
     defer kernel_lock.get().*.store(0, .release);
     if (kernel_cache.get().*) |k| decode.freeKernel(k);
     kernel_cache.get().* = null;
+    if (kernel_r1_cache.get().*) |k| decode.freeKernel(k);
+    kernel_r1_cache.get().* = null;
 }
 
 /// The operands `mlaFlashPrefill` takes, checked before any launch: (B, H, Hk, qL, kL, qk, v)
@@ -159,6 +201,83 @@ pub fn mlaFlashPrefill(s: mlx.mlx_stream, q: mlx.mlx_array, k: mlx.mlx_array, v:
     defer _ = mlx.mlx_array_free(sc);
     var o: [1]mlx.mlx_array = undefined;
     try ks.applyConfig(kern, cfg, &.{ q, k, v, sc }, &o, s);
+    return o[0];
+}
+
+/// The operands `mlaFlashPrefillRope1` takes: `dimsOf`'s at the whole key (qk = KN + the roped key's dims) and KN, the
+/// nope dims a key reads from k
+pub const Rope1Dims = struct { d: Dims, kn: u32 };
+
+/// q [B, H, qL, qk]; k [B, Hk, kL, KN] (each head's nope keys), kr [B, 1, kL, qk - KN] (the token's roped key, shared by
+/// every head) and v [B, Hk, kL, v]: 4-d, the same B, kr one head of k's rows, KN and qk - KN multiples of 16 (each
+/// 16-wide slice of a key's dims lies whole in k or in kr), `dimsOf`'s other bounds; bf16 or f16, all four the same.
+/// Else error.BadExl3Shape / error.BadExl3Dtype. Each last axis contiguous, as `dimsOf`.
+pub fn dimsOfRope1(q: mlx.mlx_array, k: mlx.mlx_array, kr: mlx.mlx_array, v: mlx.mlx_array) !Rope1Dims {
+    const qs = mlx.getShape(q);
+    const kss = mlx.getShape(k);
+    const rs = mlx.getShape(kr);
+    const vs = mlx.getShape(v);
+    if (qs.len != 4 or kss.len != 4 or rs.len != 4 or vs.len != 4) return error.BadExl3Shape;
+    for ([_][]const c_int{ qs, kss, rs, vs }) |sh| for (sh) |x| if (x < 1) return error.BadExl3Shape;
+    if (kss[0] != qs[0] or rs[0] != qs[0] or vs[0] != qs[0] or rs[1] != 1 or rs[2] != kss[2] or vs[1] != kss[1] or vs[2] != kss[2]) return error.BadExl3Shape;
+    if (kss[3] + rs[3] != qs[3] or @mod(kss[3], 16) != 0 or @mod(rs[3], 16) != 0) return error.BadExl3Shape;
+    if (@mod(qs[1], kss[1]) != 0 or kss[2] < qs[2]) return error.BadExl3Shape;
+    const d: Dims = .{ .b = @intCast(qs[0]), .h = @intCast(qs[1]), .hk = @intCast(kss[1]), .ql = @intCast(qs[2]), .kl = @intCast(kss[2]), .qk = @intCast(qs[3]), .v = @intCast(vs[3]) };
+    if (!admits(d.qk, d.v)) return error.BadExl3Shape;
+    const dt = mlx.mlx_array_dtype(q);
+    if ((dt != .bfloat16 and dt != .float16) or mlx.mlx_array_dtype(k) != dt or mlx.mlx_array_dtype(kr) != dt or mlx.mlx_array_dtype(v) != dt) return error.BadExl3Dtype;
+    return .{ .d = d, .kn = @intCast(kss[3]) };
+}
+
+/// `mlaFlashPrefill` over the rope-once cache: the keys each head's nope keys k [B, Hk, kL, KN] and the token's one roped
+/// key kr [B, 1, kL, qk - KN] (`dimsOfRope1`), each read in place at its own strides. The launch, the tile and every
+/// statement but the key tile's source are `mlaFlashPrefill`'s (`text_body_r1`): a key tile's 16-wide slice comes from
+/// k or from kr, the same words the expanded key [B, Hk, kL, qk] = k ++ kr (kr for every head) holds there, into the
+/// same tile, so o is `mlaFlashPrefill`'s over that expanded key, word for word. Refused with
+/// error.Exl3EngineNotImplemented unless `Config.mla_rope_once` (off by default) and `Config.nax` hold. The caller owns o.
+pub fn mlaFlashPrefillRope1(s: mlx.mlx_stream, q: mlx.mlx_array, k: mlx.mlx_array, kr: mlx.mlx_array, v: mlx.mlx_array, scale: f32) !mlx.mlx_array {
+    const c = config.get();
+    if (!c.mla_rope_once or !c.nax) return error.Exl3EngineNotImplemented;
+    const rd = try dimsOfRope1(q, k, kr, v);
+    const kern = try kernelGetR1();
+    if (!said_r1.get().*) {
+        said_r1.get().* = true;
+        std.debug.print("[turboexl3] Ling MLA prompt attention over the rope-once cache engaged: one causal flash launch reading each head's nope keys and the token's one roped key (qk {d} = {d} + {d}, v {d}; bq {d}, bk {d}) (Config.mla_rope_once)\n", .{ rd.d.qk, rd.kn, rd.d.qk - rd.kn, rd.d.v, tile.bq, tile.bk });
+    }
+    return rope1On(s, kern, rd, q, k, kr, v, scale);
+}
+
+/// The rope-once launch on `kern` (`turboexl3_ling_mla_flash_r1`, or a test's fault text of it) over `dimsOfRope1`'s
+/// operands; no gate (`mlaFlashPrefillRope1` holds them). The caller owns o.
+pub fn rope1On(s: mlx.mlx_stream, kern: mlx.mlx_fast_metal_kernel, rd: Rope1Dims, q: mlx.mlx_array, k: mlx.mlx_array, kr: mlx.mlx_array, v: mlx.mlx_array, scale: f32) !mlx.mlx_array {
+    const d = rd.d;
+    const p = planFor(d.b, d.h, d.ql, d.kl, tile);
+    const dt = mlx.mlx_array_dtype(q);
+    const cfg = try ks.buildConfig(.{
+        .grid = p.grid,
+        .threadgroup = p.threadgroup,
+        .out_shapes = &.{&[_]c_int{ @intCast(d.b), @intCast(d.h), @intCast(d.ql), @intCast(d.v) }},
+        .out_dtypes = &.{dt},
+        .template = &.{
+            .{ .name = "T", .value = .{ .dtype = dt } },
+            .{ .name = "BQ", .value = .{ .int = @intCast(tile.bq) } },
+            .{ .name = "BK", .value = .{ .int = @intCast(tile.bk) } },
+            .{ .name = "BD", .value = .{ .int = @intCast(d.qk) } },
+            .{ .name = "BV", .value = .{ .int = @intCast(d.v) } },
+            .{ .name = "WM", .value = .{ .int = @intCast(tile.wm) } },
+            .{ .name = "WN", .value = .{ .int = @intCast(tile.wn) } },
+            .{ .name = "ALIGN_Q", .value = .{ .int = @intFromBool(p.align_q) } },
+            .{ .name = "ALIGN_K", .value = .{ .int = @intFromBool(p.align_k) } },
+            .{ .name = "CAUSAL", .value = .{ .int = 1 } },
+            .{ .name = "KN", .value = .{ .int = @intCast(rd.kn) } },
+        },
+    });
+    defer _ = mlx.mlx_fast_metal_kernel_config_free(cfg);
+    const sv = [_]f32{scale};
+    const sc = mlx.mlx_array_new_data(&sv, &[_]c_int{1}, 1, .float32);
+    defer _ = mlx.mlx_array_free(sc);
+    var o: [1]mlx.mlx_array = undefined;
+    try ks.applyConfig(kern, cfg, &.{ q, k, v, kr, sc }, &o, s);
     return o[0];
 }
 

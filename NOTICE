@@ -31,9 +31,10 @@ MLX 0.32.3) under another name, and src/core/kernels/pg2/gemm_fused.metal follow
 `gemm` kernel of `steel/gemm/kernels/steel_gemm_fused_nax.h` (MLX 0.32.3), with
 turboexl3's dense finish as its epilogue. The clamped SwiGLU in
 src/core/kernels/dense/swiglu_prep.metal reproduces MLX's Minimum, Maximum, Sigmoid
-and Multiply functors. src/models/ling/kernels/mla_flash/body.metal is the
-`attention_nax` kernel of `steel/attn/kernels/steel_attention_nax.h` (MLX 0.32.5)
-less its mask, sinks, log-sum-exp and window arms, and
+and Multiply functors. src/models/ling/kernels/mla_flash/body_*.metal (cut at its key
+reads) are the `attention_nax` kernel of `steel/attn/kernels/steel_attention_nax.h`
+(MLX 0.32.5) less its mask, sinks, log-sum-exp and window arms (r1_*.metal read its
+keys from the rope-once cache), and
 src/models/ling/kernels/mla_flash/head.metal holds that file's row ops.
 
 --------------------------------------------------------------------------------

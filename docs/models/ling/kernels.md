@@ -897,7 +897,8 @@ words staged in threadgroup memory, more tiles a simdgroup.
 
 ## `src/models/ling/mla_flash.zig`
 
-The MLA prompt attention as one causal flash launch (`root.ling.mlaFlashPrefill`).
+The MLA prompt attention as one causal flash launch (`root.ling.mlaFlashPrefill`; over the rope-once cache,
+`root.ling.mlaFlashPrefillRope1`).
 
 ### `turboexl3_ling_mla_flash`
 
@@ -905,10 +906,10 @@ The MLA prompt attention as one causal flash launch (`root.ling.mlaFlashPrefill`
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/ling/mla_flash.zig:87` (`fn kernelGet`) |
+| made at | `src/models/ling/mla_flash.zig:117` (`fn kernelGet`) |
 | inputs | `q`, `k`, `v`, `scale` |
 | outputs | `o` |
-| source | `source` = `ling:mla_flash/body` ++ `ling:mla_flash/close` (10242 B, `f8febea390c3`) |
+| source | `source` = `ling:mla_flash/body_1` ++ `ling:mla_flash/body_2` ++ `ling:mla_flash/body_kofs` ++ `ling:mla_flash/body_3` ++ `ling:mla_flash/body_kload` ++ `ling:mla_flash/body_4` ++ `ling:mla_flash/body_kstep` ++ `ling:mla_flash/body_5` ++ `ling:mla_flash/close` (10242 B, `f8febea390c3`) |
 | header | `header` = `steel_nax` ++ `ling:mla_flash/head` (31972 B, `30be639a8251`) |
 
 <!-- /kernel-facts -->
@@ -941,7 +942,78 @@ The MLA prompt attention as one causal flash launch (`root.ling.mlaFlashPrefill`
   18,349, 31 and 17 over 18,380, the reference on heads 0, 21, 42 and 63); "turboexl3 ling mla flash texts: the body is MLX's
   attention_nax statements ..." (CPU, the texts; its pin file); "... metal source: the kernel as standalone translation
   units (TURBOEXL3_METAL_DUMP=1)" (the offline compile); `src/models/ling/mla_flash.zig` "turboexl3 ling mla flash plan:
-  ..." (CPU, the plan).
+  ..." (CPU, the plan); "turboexl3 gpu ling mla flash rope once: ..." (GPU: the
+  reference of `turboexl3_ling_mla_flash_r1`, every word).
+
+### `turboexl3_ling_mla_flash_r1`
+
+<!-- kernel-facts: turboexl3_ling_mla_flash_r1 -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/ling/mla_flash.zig:127` (`fn kernelGetR1`) |
+| inputs | `q`, `k`, `v`, `kr`, `scale` |
+| outputs | `o` |
+| source | `source_r1` = `ling:mla_flash/body_1` ++ `ling:mla_flash/r1_setup` ++ `ling:mla_flash/body_2` ++ `ling:mla_flash/r1_kofs` ++ `ling:mla_flash/body_3` ++ `ling:mla_flash/r1_kload` ++ `ling:mla_flash/body_4` ++ `ling:mla_flash/body_kstep` ++ `ling:mla_flash/r1_kstep` ++ `ling:mla_flash/body_5` ++ `ling:mla_flash/close` (11012 B, `1478b201f6da`) |
+| header | `header` = `steel_nax` ++ `ling:mla_flash/head` (31972 B, `30be639a8251`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** Ling-3.1-flash: `root.ling.mlaFlashPrefillRope1`, an MLA layer's prompt attention over the rope-once
+  cache (the outside plugin turboexl3_ling's MLA_ROPE_ONCE candidate, off by default: kv_b's rows kept as they come, each
+  head's nope keys then its values, and the roped key once a token, never expanded to every head), where
+  `Config.mla_rope_once` and `Config.nax` hold.
+- **Shapes and dtypes:** q T [B, H, qL, BD]; k T [B, Hk, kL, KN] (each head's nope keys), kr T [B, 1, kL, BD - KN] (the
+  token's roped key, one for every head) and v T [B, Hk, kL, BV], each at its own strides (views of the cache read in
+  place; each last axis contiguous), KN and BD - KN multiples of 16, H a multiple of Hk, kL >= qL; scale f32 [1]. T bf16
+  or f16. Out: o T [B, H, qL, BV], contiguous.
+- **Grid and threadgroup:** `turboexl3_ling_mla_flash`'s.
+- **Template args:** `turboexl3_ling_mla_flash`'s, and KN (the nope dims a key reads from k; Ling's 128).
+- **Replaces:** `turboexl3_ling_mla_flash` over the expanded key (each head's nope keys ++ the token's roped key, built
+  and cached for every head): `text_body` with kr's batch offset and step added and the key tile's offset and load
+  swapped (`ling:mla_flash/r1_setup`, `r1_kofs`, `r1_kload`, `r1_kstep`): each 16-wide slice of a key's dims is read
+  from k (below KN) or kr (from KN), at that operand's row stride.
+- **Bits:** the same as `turboexl3_ling_mla_flash` over the expanded key, word for word: the key tile holds the same
+  words (the expanded key's slice is k's or kr's words), and every other statement is the base's in the base's order,
+  so no score, sum or output changes order.
+- **Pinned by:** `src/models/ling/mla_flash_test.zig` "turboexl3 gpu ling mla flash rope once: over the rope-once cache
+  ... (TURBOEXL3_GPU=1)" (GPU, every word against `turboexl3_ling_mla_flash` over the expanded key and the values built
+  from the same words, bf16 and f16, GQA and two batches, Ling's 64 heads and FL-1's served calls; red checks: the
+  planted fault `turboexl3_test_ling_mla_flash_r1_nope_fault` and token 0's roped key negated must differ); "turboexl3
+  ling mla flash rope once texts: ..." (CPU, the composition; pins/mla_flash_r1.metal); "turboexl3 ling mla flash rope
+  once refusals: ..." (CPU, the shapes, dtypes and gates).
+
+## `src/models/ling/mla_flash_test.zig`
+
+The rope-once launch's red check: a kernel made only by its GPU byte test, `turboexl3_ling_mla_flash_r1` with the key
+tile's source pinned to the nope keys (`kernels/test/fault/`), so the test shows its word comparison catches a key slice
+read from the wrong operand.
+
+### `turboexl3_test_ling_mla_flash_r1_nope_fault`
+
+<!-- kernel-facts: turboexl3_test_ling_mla_flash_r1_nope_fault -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/ling/mla_flash_test.zig:596` (`test turboexl3 gpu ling mla flash rope once: over the rope-once cache (each head's nope keys and values one row a token, the roped key once a token, read in place) the launch gives mlaFlashPrefill's words over the expanded key; a planted fault and a changed roped key differ (TURBOEXL3_GPU=1)`) |
+| inputs | `q`, `k`, `v`, `kr`, `scale` |
+| outputs | `o` |
+| source | `text_r1_nope` = `ling:mla_flash/body_1` ++ `ling:mla_flash/r1_setup` ++ `ling:mla_flash/body_2` ++ `ling:test/fault/mla_flash_r1_kofs_nope` ++ `ling:mla_flash/body_3` ++ `ling:mla_flash/r1_kload` ++ `ling:mla_flash/body_4` ++ `ling:mla_flash/body_kstep` ++ `ling:mla_flash/r1_kstep` ++ `ling:mla_flash/body_5` ++ `ling:mla_flash/close` (11099 B, `3d0116dbe206`) |
+| header | `flash.header` = `steel_nax` ++ `ling:mla_flash/head` (31972 B, `30be639a8251`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** test only: the red check in `src/models/ling/mla_flash_test.zig` "turboexl3 gpu ling mla flash rope
+  once: ...", launched through `mla_flash.rope1On` at 100 query rows over 100 keys, bf16.
+- **Shapes and dtypes:** `turboexl3_ling_mla_flash_r1`'s.
+- **Grid and threadgroup:** `turboexl3_ling_mla_flash_r1`'s.
+- **Template args:** `turboexl3_ling_mla_flash_r1`'s.
+- **Replaces:** nothing: a planted fault, `turboexl3_ling_mla_flash_r1` with every 16-wide slice of a key's dims read
+  from k's row at k's stride (`ling:test/fault/mla_flash_r1_kofs_nope` in `r1_kofs`'s place): in the test's rope-once
+  cache, the rope dims read the head's values that follow its nope keys.
+- **Bits:** wrong on purpose: the keys' rope dims are another operand's words.
+- **Pinned by:** `src/models/ling/mla_flash_test.zig` "turboexl3 gpu ling mla flash rope once: ..." (GPU:
+  `TURBOEXL3_LING_FLASH_ROPE1_RED` check=nope_fault, which must differ from the served words).
 
 ## `src/models/ling/mla_rows.zig`
 

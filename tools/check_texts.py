@@ -1321,7 +1321,7 @@ ADDED_FILES['models/ling/mla_flash.zig'] = ('Ling-3.1\'s MLA prompt attention in
 ADDED_FILES['mla_flash_test.zig'] = ('the flash kernel\'s text, refusals and dump units (CPU); MLX\'s fused SDPA word for '
                                      'word at 128 / 128 and 96 / 64, and an f64 reference at Ling\'s heads (GPU)')
 ADDED_KERNELS[('mla_flash.zig', 'turboexl3_ling_mla_flash')] = ('MLX\'s attention_nax less its mask, sinks, log-sum-exp '
-                                                                'and window arms (kernels/mla_flash/body.metal)')
+                                                                'and window arms (kernels/mla_flash/body_*.metal)')
 # P4: a KDA layer's q|k|v, f and g at prompt rows in one launch past their prepares and W_hats (turboexl3_ling's
 # MLX_SERVE_LING_KDA_PROJ_PROMPT): pg2's fused NAX GEMM and dense finish over the three members
 ADDED_KERNELS[('models/ling/kdaproj_pf.zig', 'turboexl3_ling_kdaproj_pf')] = ('pg2\'s body with the member choice: '
@@ -1863,6 +1863,17 @@ SPLIT_ADDED_KERNELS['turboexl3_test_ling_mla_rows_krev_fault'] = ('test only: tu
 SPLIT_ADDED_KERNELS['turboexl3_test_ling_mla_rows_sgrev_fault'] = ('test only: turboexl3_ling_mla_rows with the simdgroups\' '
                                                                    'sums added in reverse simdgroup order '
                                                                    '(fault/mla_rows_tgsum_rev in tgsum\'s place), a red check')
+SPLIT_ADDED_KERNELS['turboexl3_ling_mla_flash_r1'] = ('rope-once: the MLA prompt attention over the rope-once cache '
+                                                      '(models/ling/mla_flash.zig text_body_r1: the base body\'s pieces '
+                                                      'with r1_setup and r1_kstep added, body_kofs and body_kload swapped '
+                                                      'for r1_kofs and r1_kload): each key slice read from the nope keys '
+                                                      'or the roped key, the base\'s words; ling.mlaFlashPrefillRope1, '
+                                                      'Config.mla_rope_once. The base text is unchanged (body.metal cut '
+                                                      'into body_1 .. body_5 at the key reads, the same bytes)')
+SPLIT_ADDED_KERNELS['turboexl3_test_ling_mla_flash_r1_nope_fault'] = ('test only: turboexl3_ling_mla_flash_r1 with every '
+                                                                      'key slice read from the nope keys\' row '
+                                                                      '(fault/mla_flash_r1_kofs_nope in r1_kofs\'s place), '
+                                                                      'a red check')
 
 def split_report(oprog, nprog, ounits, nunits, orig_dir, new_dir, problems, verbose):
     """--split (declarations moved between files, not only files): checks 1 to 4 over the whole tree instead of per file.

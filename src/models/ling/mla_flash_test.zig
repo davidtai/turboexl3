@@ -11,12 +11,20 @@
 //!   [1, 64, 32768, *] buffers (--ctx-size 32768) at layer-major's calls of the standard request (4096 query rows over
 //!   12,288 and 16,384 keys, 1965 over 18,349, 31 over 18,380) and the narrowest call the plugin hands it (17 over
 //!   18,380), the reference on sampled rows of heads 0, 21, 42 and 63, MLX's composed path one head at a time.
+//! - the rope-once cache (`mlaFlashPrefillRope1`, `Config.mla_rope_once`): over each head's nope keys and values in one
+//!   row a token (the outside plugin's kv_b rows) and the token's one roped key, read in place, the launch gives
+//!   `mlaFlashPrefill`'s words over the expanded key and the values built from the same words, every word, at bf16 and
+//!   f16, GQA and two batches, Ling's 64 heads and the served calls; red checks that must differ: a planted fault that
+//!   reads every key slice from the nope keys' row (`turboexl3_test_ling_mla_flash_r1_nope_fault`) and token 0's roped key
+//!   negated.
 //! TURBOEXL3_METAL_DUMP=1: the kernel as standalone translation units (Ling's bf16 heads aligned and not, f16 at 128)
 //! for an offline `xcrun metal` compile. Lines: TURBOEXL3_LING_FLASH_WORDS, TURBOEXL3_LING_FLASH,
-//! TURBOEXL3_LING_FLASH_SERVED.
+//! TURBOEXL3_LING_FLASH_SERVED, TURBOEXL3_LING_FLASH_ROPE1 (_RED, _DONE).
 const std = @import("std");
 const sdk = @import("sdk");
 const mlx = sdk.mlx;
+const ks = sdk.kernel_launch;
+const decode = @import("../../core/decode.zig");
 const support = @import("../../core/test_support.zig");
 const G = support.Graph;
 const config = @import("../../core/config.zig");
@@ -89,6 +97,89 @@ test "turboexl3 ling mla flash refusals: shapes and dtypes the kernel does not t
     c.nax = false;
     try config.configure(c);
     try testing.expectError(error.Exl3EngineNotImplemented, root.ling.mlaFlashPrefill(s, q, k, v, 0.125));
+}
+
+/// The planted fault: the rope-once text with the key tile's source pinned to the nope keys (`kernels/test/fault/`):
+/// every slice of a key's dims read from k's row at k's stride, the rope dims past KN too
+const fault_kofs_nope = @embedFile("kernels/test/fault/mla_flash_r1_kofs_nope.metal");
+const text_r1_nope: [:0]const u8 = flash.body_1 ++ flash.r1_setup ++ flash.body_2 ++ fault_kofs_nope ++ flash.body_3 ++ flash.r1_kload ++ flash.body_4 ++ flash.body_kstep ++ flash.r1_kstep ++ flash.body_5 ++ flash.text_close;
+
+test "turboexl3 ling mla flash rope once texts: the base body is its pieces in order; the rope-once body swaps the key tile's offset and load for reads from k or kr and adds kr's setup and step, every other statement the base's; the planted fault reads every slice from k" {
+    const pin = comptime support.pins(@embedFile("kernels/test/pins/mla_flash_r1.metal"));
+    // the rope-once statements: kr's setup, the slice's source, stride and offset, kr's step; once each, none in the base
+    for (pin[0..6]) |line| {
+        try testing.expectEqual(@as(usize, 1), std.mem.count(u8, flash.text_body_r1, line));
+        try testing.expect(!has(flash.text_body, line));
+    }
+    // both key tile loads (the partial last tile's and the whole tile's) read from the slice's source, never from K
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, flash.text_body_r1, pin[6]));
+    try testing.expectEqual(@as(usize, 0), std.mem.count(u8, flash.text_body_r1, pin[7]));
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, flash.text_body, pin[7]));
+    // the base's key offset gone; the nope keys' step kept, at k's stride
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, flash.text_body, pin[8]));
+    try testing.expect(!has(flash.text_body_r1, pin[8]));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, flash.text_body, pin[9]));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, flash.text_body_r1, pin[9]));
+    // every attention_nax statement the base's pin file holds is the rope-once body's too
+    const base_pin = comptime support.pins(@embedFile("kernels/test/pins/mla_flash.metal"));
+    for (base_pin[0 .. base_pin.len - 2]) |line| try testing.expect(has(flash.text_body_r1, line));
+    // the rope-once body: the base's pieces, the offset and the load swapped, the setup and the step added
+    try testing.expectEqual(flash.text_body.len - flash.body_kofs.len - flash.body_kload.len + flash.r1_setup.len + flash.r1_kofs.len + flash.r1_kload.len + flash.r1_kstep.len, flash.text_body_r1.len);
+    try testing.expect(std.mem.endsWith(u8, flash.source_r1, flash.text_close));
+    try testing.expect(std.mem.startsWith(u8, flash.source_r1, flash.body_1));
+    // the operand MLX binds by name for kr's strides, and the template's nope width
+    try testing.expect(has(flash.text_body_r1, "kr_strides") and !has(flash.text_body, "kr_strides"));
+    try testing.expect(has(flash.r1_kofs, "KN"));
+    // the fault: the rope-once text with the slice's source pinned to k
+    try testing.expect(has(fault_kofs_nope, pin[10]) and !has(flash.r1_kofs, pin[10]));
+    try testing.expectEqual(flash.text_body_r1.len - flash.r1_kofs.len + fault_kofs_nope.len + flash.text_close.len, text_r1_nope.len);
+    const before = flash.body_1.len + flash.r1_setup.len + flash.body_2.len;
+    try testing.expectEqualStrings(flash.source_r1[0..before], text_r1_nope[0..before]);
+    try testing.expectEqualStrings(flash.source_r1[before + flash.r1_kofs.len ..], text_r1_nope[before + fault_kofs_nope.len ..]);
+}
+
+test "turboexl3 ling mla flash rope once refusals: shapes and dtypes the rope-once launch does not take, Config.mla_rope_once off and the NAX gate, refused before any launch" {
+    const s = mlx.mlx_default_gpu_stream_new();
+    const a = std.heap.page_allocator;
+    var g = try G.init(a, s);
+    defer g.deinit();
+    const zeros = try a.alloc(u16, 4 * 64 * 256);
+    defer a.free(zeros);
+    @memset(zeros, 0);
+    const bytes = std.mem.sliceAsBytes(zeros);
+    const q = try g.hostArray(bytes, &.{ 1, 4, 32, 192 }, .bfloat16);
+    const k = try g.hostArray(bytes, &.{ 1, 4, 64, 128 }, .bfloat16);
+    const kr = try g.hostArray(bytes, &.{ 1, 1, 64, 64 }, .bfloat16);
+    const v = try g.hostArray(bytes, &.{ 1, 4, 64, 128 }, .bfloat16);
+    const rd = try flash.dimsOfRope1(q, k, kr, v);
+    try testing.expectEqual(flash.Rope1Dims{ .d = .{ .b = 1, .h = 4, .hk = 4, .ql = 32, .kl = 64, .qk = 192, .v = 128 }, .kn = 128 }, rd);
+    // a roped key a head (not one a token); kr's rows not k's; nope + rope not qk; a nope width off the 16-wide slices
+    const kr4 = try g.hostArray(bytes, &.{ 1, 4, 64, 64 }, .bfloat16);
+    try testing.expectError(error.BadExl3Shape, flash.dimsOfRope1(q, k, kr4, v));
+    const kr_short = try g.hostArray(bytes, &.{ 1, 1, 32, 64 }, .bfloat16);
+    try testing.expectError(error.BadExl3Shape, flash.dimsOfRope1(q, k, kr_short, v));
+    const kr48 = try g.hostArray(bytes, &.{ 1, 1, 64, 48 }, .bfloat16);
+    try testing.expectError(error.BadExl3Shape, flash.dimsOfRope1(q, k, kr48, v));
+    const k120 = try g.hostArray(bytes, &.{ 1, 4, 64, 120 }, .bfloat16);
+    const kr72 = try g.hostArray(bytes, &.{ 1, 1, 64, 72 }, .bfloat16);
+    try testing.expectError(error.BadExl3Shape, flash.dimsOfRope1(q, k120, kr72, v));
+    // kL < qL
+    const q_long = try g.hostArray(bytes, &.{ 1, 4, 96, 192 }, .bfloat16);
+    try testing.expectError(error.BadExl3Shape, flash.dimsOfRope1(q_long, k, kr, v));
+    // a mixed dtype
+    const krh = try g.astype(kr, .float16);
+    try testing.expectError(error.BadExl3Dtype, flash.dimsOfRope1(q, k, krh, v));
+    // the gates: Config.mla_rope_once off (the default), then on with the NAX gate off
+    const saved = config.get().*;
+    defer config.configure(saved) catch unreachable;
+    var c = saved;
+    c.mla_rope_once = false;
+    try config.configure(c);
+    try testing.expectError(error.Exl3EngineNotImplemented, root.ling.mlaFlashPrefillRope1(s, q, k, kr, v, 0.125));
+    c.mla_rope_once = true;
+    c.nax = false;
+    try config.configure(c);
+    try testing.expectError(error.Exl3EngineNotImplemented, root.ling.mlaFlashPrefillRope1(s, q, k, kr, v, 0.125));
 }
 
 test "turboexl3 ling mla flash metal source: the kernel as standalone translation units (TURBOEXL3_METAL_DUMP=1)" {
@@ -411,4 +502,154 @@ test "turboexl3 gpu ling mla flash: at Ling's heads (qk 192, v 128) the causal p
         }
     }
     try testing.expectEqual(@as(usize, 0), failed);
+}
+
+// ── the rope-once cache (`mlaFlashPrefillRope1`) ──
+
+/// Ling's MLA heads: a key's nope and roped dims, a value's dims
+const r1_kn: u32 = 128;
+const r1_rope: u32 = 64;
+const r1_v: u32 = 128;
+
+/// A rope-once case: B, query heads H, key heads Hk, qL query rows over kL keys of a cache of `cap` >= kL tokens; `both`:
+/// bf16 and f16, else bf16 only (the served calls)
+const Rope1Case = struct { b: u32 = 1, h: u32, hk: u32, ql: u32, kl: u32, cap: u32, both: bool = true };
+
+/// A case's operands from one set of words (`dt`'s bits): the rope-once cache's buffers, kv_b's rows [B, cap, Hk, KN + v]
+/// (each head's nope keys then its values, one row a token, as the outside plugin's cache keeps them) and the roped keys
+/// [B, 1, cap, rope] (one a token), with k, v and kr views of their first kL tokens; the served operands, the expanded key
+/// [B, Hk, kL, KN + rope] (each head's nope keys ++ the token's roped key) and the values [B, Hk, kL, v], each built
+/// contiguous on the host from the same words; q [B, H, qL, KN + rope]. `rope` keeps the roped keys' words (the red check
+/// changes them).
+const Rope1Ops = struct { q: mlx.mlx_array, k: mlx.mlx_array, kr: mlx.mlx_array, v: mlx.mlx_array, k_full: mlx.mlx_array, v_full: mlx.mlx_array, rope: []u16 };
+
+/// One word of `dt` drawn from N(0, sigma^2), as its bits
+fn wordOf(rnd: std.Random, dt: mlx.mlx_dtype, sigma: f32) u16 {
+    const x = sigma * rnd.floatNorm(f32);
+    return if (dt == .bfloat16) support.bf16Bits(x) else @bitCast(@as(f16, @floatCast(x)));
+}
+
+fn rope1Operands(a: std.mem.Allocator, g: *G, rnd: std.Random, c: Rope1Case, dt: mlx.mlx_dtype) !Rope1Ops {
+    const row = r1_kn + r1_v;
+    const qk = r1_kn + r1_rope;
+    const hq = try a.alloc(u16, c.b * c.h * c.ql * qk);
+    defer a.free(hq);
+    const rows = try a.alloc(u16, c.b * c.cap * c.hk * row);
+    defer a.free(rows);
+    const rope = try a.alloc(u16, c.b * c.cap * r1_rope);
+    errdefer a.free(rope);
+    const kf = try a.alloc(u16, c.b * c.hk * c.kl * qk);
+    defer a.free(kf);
+    const vf = try a.alloc(u16, c.b * c.hk * c.kl * r1_v);
+    defer a.free(vf);
+    for (hq) |*x| x.* = wordOf(rnd, dt, 2);
+    for (rows) |*x| x.* = wordOf(rnd, dt, 1);
+    for (rope) |*x| x.* = wordOf(rnd, dt, 1);
+    for (0..c.b) |b| for (0..c.hk) |h| for (0..c.kl) |t| {
+        const src = rows[((b * c.cap + t) * c.hk + h) * row ..][0..row];
+        const kd = kf[((b * c.hk + h) * c.kl + t) * qk ..][0..qk];
+        @memcpy(kd[0..r1_kn], src[0..r1_kn]);
+        @memcpy(kd[r1_kn..], rope[(b * c.cap + t) * r1_rope ..][0..r1_rope]);
+        @memcpy(vf[((b * c.hk + h) * c.kl + t) * r1_v ..][0..r1_v], src[r1_kn..]);
+    };
+    const q = try g.hostArray(std.mem.sliceAsBytes(hq), &.{ ci(c.b), ci(c.h), ci(c.ql), ci(qk) }, dt);
+    const rbuf = try g.hostArray(std.mem.sliceAsBytes(rows), &.{ ci(c.b), ci(c.cap), ci(c.hk), ci(row) }, dt);
+    const kbuf = try g.hostArray(std.mem.sliceAsBytes(rope), &.{ ci(c.b), 1, ci(c.cap), ci(r1_rope) }, dt);
+    const k_full = try g.hostArray(std.mem.sliceAsBytes(kf), &.{ ci(c.b), ci(c.hk), ci(c.kl), ci(qk) }, dt);
+    const v_full = try g.hostArray(std.mem.sliceAsBytes(vf), &.{ ci(c.b), ci(c.hk), ci(c.kl), ci(r1_v) }, dt);
+    try g.evalAll(&.{ q, rbuf, kbuf, k_full, v_full });
+    // [B, Hk, cap, KN + v]: each head's row at its own strides (head 256 words, token Hk x 256), no copy
+    const heads = try g.transposeAxes(rbuf, &.{ 0, 2, 1, 3 });
+    const k = try g.slice(heads, &.{ 0, 0, 0, 0 }, &.{ ci(c.b), ci(c.hk), ci(c.kl), ci(r1_kn) }, &.{ 1, 1, 1, 1 });
+    const v = try g.slice(heads, &.{ 0, 0, 0, ci(r1_kn) }, &.{ ci(c.b), ci(c.hk), ci(c.kl), ci(row) }, &.{ 1, 1, 1, 1 });
+    const kr = try g.slice(kbuf, &.{ 0, 0, 0, 0 }, &.{ ci(c.b), 1, ci(c.kl), ci(r1_rope) }, &.{ 1, 1, 1, 1 });
+    try g.evalAll(&.{ k, v, kr });
+    return .{ .q = q, .k = k, .kr = kr, .v = v, .k_full = k_full, .v_full = v_full, .rope = rope };
+}
+
+/// The words of x and y (n each, both T) that differ
+fn wordsDiffering(a: std.mem.Allocator, g: *G, x: mlx.mlx_array, y: mlx.mlx_array, n: usize) !usize {
+    const xf = try a.alloc(f32, n);
+    defer a.free(xf);
+    const yf = try a.alloc(f32, n);
+    defer a.free(yf);
+    _ = try g.hostF32(try g.astype(x, .float32), xf);
+    _ = try g.hostF32(try g.astype(y, .float32), yf);
+    var d: usize = 0;
+    for (xf, yf) |u, w| d += @intFromBool(@as(u32, @bitCast(u)) != @as(u32, @bitCast(w)));
+    return d;
+}
+
+test "turboexl3 gpu ling mla flash rope once: over the rope-once cache (each head's nope keys and values one row a token, the roped key once a token, read in place) the launch gives mlaFlashPrefill's words over the expanded key; a planted fault and a changed roped key differ (TURBOEXL3_GPU=1)" {
+    _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    const s = mlx.mlx_default_gpu_stream_new();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    if (!config.get().nax) return error.SkipZigTest;
+    const a = std.heap.page_allocator;
+    var g = try G.init(a, s);
+    defer g.deinit();
+    const saved = config.get().*;
+    defer config.configure(saved) catch {};
+    var cfg = saved;
+    cfg.mla_rope_once = true;
+    try config.configure(cfg);
+    const nope_fault = ks.newKernel("turboexl3_test_ling_mla_flash_r1_nope_fault", &flash.flash_r1_in, &flash.flash_out, text_r1_nope, flash.header, false) orelse return error.KernelCreateFailed;
+    defer decode.freeKernel(nope_fault);
+    // one aligned tile; partial query and key tiles (the red checks' case); a prompt chunk after a long prefix; two
+    // batches (kr's batch offset) with GQA; Ling's 64 heads; FL-1's served calls at a 18,432-token cache (bf16)
+    const cases = [_]Rope1Case{
+        .{ .h = 4, .hk = 4, .ql = 64, .kl = 64, .cap = 64 },
+        .{ .h = 4, .hk = 4, .ql = 100, .kl = 100, .cap = 128 },
+        .{ .h = 4, .hk = 4, .ql = 77, .kl = 4173, .cap = 4200 },
+        .{ .b = 2, .h = 4, .hk = 2, .ql = 333, .kl = 1024, .cap = 1100 },
+        .{ .h = 64, .hk = 64, .ql = 256, .kl = 4352, .cap = 4400 },
+        .{ .h = 64, .hk = 64, .ql = 4096, .kl = 16384, .cap = 18432, .both = false },
+        .{ .h = 64, .hk = 64, .ql = 17, .kl = 18380, .cap = 18432, .both = false },
+    };
+    const red_case: usize = 1;
+    var lines: usize = 0;
+    var failed: usize = 0;
+    var red_failed: usize = 0;
+    for (cases, 0..) |c, ci_| {
+        for ([_]mlx.mlx_dtype{ .bfloat16, .float16 }) |dt| {
+            if (dt == .float16 and !c.both) continue;
+            var prng = std.Random.DefaultPrng.init(0x201E ^ (@as(u64, ci_) << 8) ^ @as(u64, @intCast(@intFromEnum(dt))));
+            const mark = g.mark();
+            defer g.resetTo(mark);
+            const o = try rope1Operands(a, &g, prng.random(), c, dt);
+            defer a.free(o.rope);
+            const scale: f32 = 1.0 / @sqrt(@as(f32, @floatFromInt(r1_kn + r1_rope)));
+            const want = try g.adopt(try root.ling.mlaFlashPrefill(s, o.q, o.k_full, o.v_full, scale));
+            const got = try g.adopt(try root.ling.mlaFlashPrefillRope1(s, o.q, o.k, o.kr, o.v, scale));
+            const n = c.b * c.h * c.ql * r1_v;
+            const differing = try wordsDiffering(a, &g, got, want, n);
+            const ok = differing == 0;
+            std.debug.print("TURBOEXL3_LING_FLASH_ROPE1 b={d} h={d} hk={d} ql={d} kl={d} cap={d} qk={d}+{d} v={d} x={s} differing={d}/{d} {s}\n", .{ c.b, c.h, c.hk, c.ql, c.kl, c.cap, r1_kn, r1_rope, r1_v, @tagName(dt), differing, n, if (ok) "PASS" else "FAIL" });
+            lines += 1;
+            failed += @intFromBool(!ok);
+            if (ci_ != red_case or dt != .bfloat16) continue;
+            // red 1: the planted fault (every key slice from the nope keys' row: the rope dims read the head's values)
+            const rd = try flash.dimsOfRope1(o.q, o.k, o.kr, o.v);
+            const faulty = try g.adopt(try flash.rope1On(s, nope_fault, rd, o.q, o.k, o.kr, o.v, scale));
+            const d1 = try wordsDiffering(a, &g, faulty, want, n);
+            std.debug.print("TURBOEXL3_LING_FLASH_ROPE1_RED check=nope_fault ql={d} kl={d} x={s} differing={d}/{d} (a fault must differ) {s}\n", .{ c.ql, c.kl, @tagName(dt), d1, n, if (d1 > 0) "PASS" else "FAIL" });
+            red_failed += @intFromBool(d1 == 0);
+            // red 2: token 0's roped key negated (every query row attends key 0), the served operands as they were
+            const rope2 = try a.dupe(u16, o.rope);
+            defer a.free(rope2);
+            for (0..c.b) |b| for (rope2[b * c.cap * r1_rope ..][0..r1_rope]) |*w| {
+                w.* ^= 0x8000;
+            };
+            const kbuf2 = try g.hostArray(std.mem.sliceAsBytes(rope2), &.{ ci(c.b), 1, ci(c.cap), ci(r1_rope) }, dt);
+            const kr2 = try g.slice(kbuf2, &.{ 0, 0, 0, 0 }, &.{ ci(c.b), 1, ci(c.kl), ci(r1_rope) }, &.{ 1, 1, 1, 1 });
+            try g.evalAll(&.{kr2});
+            const changed = try g.adopt(try root.ling.mlaFlashPrefillRope1(s, o.q, o.k, kr2, o.v, scale));
+            const d2 = try wordsDiffering(a, &g, changed, want, n);
+            std.debug.print("TURBOEXL3_LING_FLASH_ROPE1_RED check=rope_token0_negated ql={d} kl={d} x={s} differing={d}/{d} (a changed roped key must differ) {s}\n", .{ c.ql, c.kl, @tagName(dt), d2, n, if (d2 > 0) "PASS" else "FAIL" });
+            red_failed += @intFromBool(d2 == 0);
+        }
+    }
+    std.debug.print("TURBOEXL3_LING_FLASH_ROPE1_DONE {d} lines, {d} failed; red checks failed {d}\n", .{ lines, failed, red_failed });
+    try testing.expectEqual(@as(usize, 0), failed);
+    try testing.expectEqual(@as(usize, 0), red_failed);
 }

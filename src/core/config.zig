@@ -91,6 +91,10 @@ pub const Config = struct {
     /// (`ling.mlaRows`): each weight tile read once for up to this many rows of a call (1 to 8), each row MLX's one-row
     /// gemv words; 0 refuses the calls (the host runs its own matmuls). The same bytes.
     mla_rows: u8 = 0,
+    /// Ling-3.1-flash's MLA prompt attention over the rope-once cache (`ling.mlaFlashPrefillRope1`: each head's nope keys
+    /// and the token's one roped key read in place, the expanded key never built); off refuses the calls. The same bytes
+    /// as `ling.mlaFlashPrefill` over the expanded key.
+    mla_rope_once: bool = false,
     /// A diagnostic: each routed decode call's routing read back (a sync per call), its expert multiplicities printed
     /// every 480 calls.
     slot_stats: bool = false,
@@ -175,6 +179,8 @@ test "turboexl3 config: the defaults are valid and served; an unserved form, sli
     try t.expectEqual(@as(u8, 0), d.mla_rows);
     for (1..9) |r| try t.expect((Config{ .mla_rows = @intCast(r) }).valid());
     for ([_]u8{ 9, 16, 255 }) |r| try t.expect(!(Config{ .mla_rows = r }).valid());
+    try t.expect(!d.mla_rope_once);
+    try t.expect((Config{ .mla_rope_once = true }).valid());
     const saved = current.get().*;
     defer current.get().* = saved;
     try t.expectError(error.InvalidTurboexl3Config, configure(.{ .decode_form = 4 }));

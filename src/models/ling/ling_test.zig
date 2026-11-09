@@ -1400,6 +1400,7 @@ const mla_latent = @import("mla_latent.zig");
 const mla_latent_test = @import("mla_latent_test.zig");
 const mla_rows = @import("mla_rows.zig");
 const mla_rows_test = @import("mla_rows_test.zig");
+const mla_flash = @import("mla_flash.zig");
 
 /// A serial decode step and the verify widths of 2 to 4 rows, the engine's prompt chunk and a layer-major call
 const time_rows = [_]u32{ 1, 2, 3, 4, 4096, 16384 };
@@ -1452,7 +1453,11 @@ fn drawDecodePairs(rnd: std.Random, rows: u32, k: u32, pool: []const u32, ids: [
 //   row, the plugin's denseRows from two) against `mlaRows` at 1, 2, 4 and 8 rows a threadgroup (each the served
 //   words): the min over the served one's, and one read of the weight's GB/s (the 8 calls of an evaluation read one
 //   weight, so part of it can come from the GPU's cache); then a verify's 9 MLA layers, the served sum against the
-//   fastest cap's.
+//   fastest cap's;
+// - third, the MLA prompt attention at FL-1's served calls (Ling's 64 heads in bf16, 4096 query rows over 12,288 and
+//   16,384 keys, 1965 over 18,349, 31 and 17 over 18,380; caches of 18,432 tokens): `mlaFlashPrefill` over views of
+//   the served cache's expanded keys and values against `mlaFlashPrefillRope1` over views of the rope-once cache's
+//   (kv_b's rows a token, the roped key once a token): the min over the served one's.
 // Each line: min and median us per call (deepseek_test's timeIt). TURBOEXL3_LING_N (default 40,32) narrows the rates.
 test "turboexl3 gpu ling timing: every trunk linear, moeLing and moeLingBanked at Ling-3.1-flash's shapes (TURBOEXL3_LING_TIME=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
@@ -1589,6 +1594,73 @@ test "turboexl3 gpu ling timing: every trunk linear, moeLing and moeLingBanked a
                 best_sum += 9 * best_us[si][ri];
             }
             std.debug.print("TURBOEXL3_LING_TIME mla_rows verify rows={d} nine_layers served_us={d:.1} best_cap_us={d:.1} saved_us={d:.1}\n", .{ rows, served_sum, best_sum, served_sum - best_sum });
+        }
+    }
+    {
+        const mark = g.mark();
+        defer g.resetTo(mark);
+        defer _ = mlx.mlx_clear_cache();
+        mla_latent_test.reportMlxErrors(true);
+        defer mla_latent_test.reportMlxErrors(false);
+        const r1_saved = config.get().*;
+        defer config.configure(r1_saved) catch {};
+        var r1_cfg = r1_saved;
+        r1_cfg.mla_rope_once = true;
+        try config.configure(r1_cfg);
+        // its own draw, so the arms after it draw as before
+        var r1_prng = std.Random.DefaultPrng.init(0x4D1A_201E);
+        const r1r = r1_prng.random();
+        const heads: u32 = 64;
+        const cap: u32 = 18432;
+        // the served cache's buffers (the expanded key, the values) and the rope-once cache's (kv_b's rows a token: each
+        // head's nope keys then its values; the roped key once a token)
+        const kbuf = try ds_test.randBf16(a, &g, r1r, &.{ 1, ci(heads), ci(cap), 192 });
+        const vbuf = try ds_test.randBf16(a, &g, r1r, &.{ 1, ci(heads), ci(cap), 128 });
+        const rows_buf = try ds_test.randBf16(a, &g, r1r, &.{ 1, ci(cap), ci(heads), 256 });
+        const rope_buf = try ds_test.randBf16(a, &g, r1r, &.{ 1, 1, ci(cap), 64 });
+        try g.evalAll(&.{ kbuf, vbuf, rows_buf, rope_buf });
+        const rows_heads = try g.transposeAxes(rows_buf, &.{ 0, 2, 1, 3 });
+        const FlashCtx = struct {
+            s: mlx.mlx_stream,
+            q: mlx.mlx_array,
+            k: mlx.mlx_array,
+            v: mlx.mlx_array,
+            pub fn call(cx: @This()) !mlx.mlx_array {
+                return mla_flash.mlaFlashPrefill(cx.s, cx.q, cx.k, cx.v, 1.0 / @sqrt(192.0));
+            }
+        };
+        const Rope1Ctx = struct {
+            s: mlx.mlx_stream,
+            q: mlx.mlx_array,
+            k: mlx.mlx_array,
+            kr: mlx.mlx_array,
+            v: mlx.mlx_array,
+            pub fn call(cx: @This()) !mlx.mlx_array {
+                return mla_flash.mlaFlashPrefillRope1(cx.s, cx.q, cx.k, cx.kr, cx.v, 1.0 / @sqrt(192.0));
+            }
+        };
+        for ([_][2]u32{ .{ 4096, 12288 }, .{ 4096, 16384 }, .{ 1965, 18349 }, .{ 31, 18380 }, .{ 17, 18380 } }) |qk_rows| {
+            const ql = qk_rows[0];
+            const kl = qk_rows[1];
+            const rm = g.mark();
+            defer g.resetTo(rm);
+            const q = try ds_test.randBf16(a, &g, r1r, &.{ 1, ci(heads), ci(ql), 192 });
+            const k = try g.slice(kbuf, &.{ 0, 0, 0, 0 }, &.{ 1, ci(heads), ci(kl), 192 }, &.{ 1, 1, 1, 1 });
+            const v = try g.slice(vbuf, &.{ 0, 0, 0, 0 }, &.{ 1, ci(heads), ci(kl), 128 }, &.{ 1, 1, 1, 1 });
+            const kn = try g.slice(rows_heads, &.{ 0, 0, 0, 0 }, &.{ 1, ci(heads), ci(kl), 128 }, &.{ 1, 1, 1, 1 });
+            const vr = try g.slice(rows_heads, &.{ 0, 0, 0, 128 }, &.{ 1, ci(heads), ci(kl), 256 }, &.{ 1, 1, 1, 1 });
+            const kr = try g.slice(rope_buf, &.{ 0, 0, 0, 0 }, &.{ 1, 1, ci(kl), 64 }, &.{ 1, 1, 1, 1 });
+            try g.evalAll(&.{ q, k, v, kn, vr, kr });
+            const served = ds_test.timeIt(&g, FlashCtx{ .s = s, .q = q, .k = k, .v = v }, 8) catch |e| {
+                std.debug.print("TURBOEXL3_LING_TIME mla_flash ql={d} kl={d} arm=served: {s}\n", .{ ql, kl, @errorName(e) });
+                continue;
+            };
+            std.debug.print("TURBOEXL3_LING_TIME mla_flash ql={d} kl={d} arm=served min_us={d:.1} med_us={d:.1}\n", .{ ql, kl, served.min, served.med });
+            const st = ds_test.timeIt(&g, Rope1Ctx{ .s = s, .q = q, .k = kn, .kr = kr, .v = vr }, 8) catch |e| {
+                std.debug.print("TURBOEXL3_LING_TIME mla_flash ql={d} kl={d} arm=rope_once: {s}\n", .{ ql, kl, @errorName(e) });
+                continue;
+            };
+            std.debug.print("TURBOEXL3_LING_TIME mla_flash ql={d} kl={d} arm=rope_once min_us={d:.1} med_us={d:.1} of_served={d:.3}\n", .{ ql, kl, st.min, st.med, st.min / served.min });
         }
     }
     var prng = std.Random.DefaultPrng.init(0x11A671);

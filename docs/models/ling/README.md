@@ -30,6 +30,7 @@ What it runs on turboexl3 (`root.ling`, `src/models/ling/api.zig`):
 | a MoE layer's router at decode rows (1 to 8) with the read-ahead predictor's scores (the next MoE layer's router on the call's rows) | `root.ling.router.route` (`routerLogits`, `select`, `tableF32`; a host's opt-in) | `turboexl3_ling_router_pred` (DeepSeek's sqrt(softplus(z)) + bias), `turboexl3_ling_router_pred_sig` (Ling's sigmoid(z) + bias) or, on the last MoE layer, `turboexl3_ling_router_logits`, each over the loader's f32 table (or its `_h` twin over the loaded f16 weight), then `turboexl3_ling_router_select` ([kernels](kernels.md)): the host's logits, scores, ids and bf16 weights word for word |
 | an MLA layer's attention at decode rows (1 to 16) over a latent cache (each token's normed 512-wide latent and 64-wide roped shared key) | `mlaLatentDecode` (`mla_latent.zig`) | three of its own: `turboexl3_ling_mla_qabs`, `turboexl3_ling_mla_attn`, `turboexl3_ling_mla_vabs` ([the Ling catalog](kernels.md)); a host's opt-in runs launch 2 on a variant with its words: `turboexl3_ling_mla_attn_rows` (`Config.mla_latent_rows`), `_stage` (`mla_latent_stage`) or `_block` (`mla_latent_block`) |
 | an MLA layer's prompt attention over the expanded KV (qk 192, v 128, 64 heads) | `root.ling.mlaFlashPrefill` | `turboexl3_ling_mla_flash` ([kernels.md](kernels.md)): MLX's NAX attention kernel at a tile MLX does not instantiate |
+| an MLA layer's prompt attention over the rope-once cache (each head's nope keys and values one row a token, the roped key once a token) | `root.ling.mlaFlashPrefillRope1` (a host's opt-in, `Config.mla_rope_once`) | `turboexl3_ling_mla_flash_r1` ([kernels.md](kernels.md)): `turboexl3_ling_mla_flash` with each 16-wide slice of a key read from the nope keys or the roped key, the expanded key's words, so `mlaFlashPrefill`'s words over it |
 | an MLA layer's kv_b (bf16 512 -> 16384) and head gate (bf16 4096 -> 64) at decode and verify rows (1 to 16) | `root.ling.mlaRows` (`mlaRowsTakes`; a host's opt-in, `Config.mla_rows`) | `turboexl3_ling_mla_rows` ([kernels.md](kernels.md)): MLX's one-row gemv statements for each row, each weight tile read once for up to `Config.mla_rows` rows of the call, so each row's words are the host's one-row matmul's (and its exact verify's denseRows') |
 
 The pairs share each member's K split (z \| a at KS 2, the shared gate \| up at KS 8, the dense gate \| up at KS 1);
@@ -63,7 +64,10 @@ dtype, about 9 TFLOPS on Ling's 4096-row chunks. `mlaFlashPrefill` is one launch
 keys and values read in place from the cache's views. Its numerics are MLX's fused kernel's (f32 scores, running max and
 sum, one output rounding), so it is a reordering against the composed path: held to an f64 reference within tolerance,
 and to MLX's fused kernel word for word at the head dims MLX instantiates it for. The plugin's switch decides whether a
-prompt takes it; the standard test decides that switch.
+prompt takes it; the standard test decides that switch. `mlaFlashPrefillRope1` is the same launch over the
+rope-once cache (`Config.mla_rope_once`): each head's nope keys and values kept as kv_b writes them, one row a token,
+and the roped key once a token for all 64 heads (16,448 words a token and layer, not 20,480), each key slice read from
+whichever holds it: the same words in the same tiles, so `mlaFlashPrefill`'s output words over the expanded key.
 
 `TURBOEXL3_LING_TIME=1` (with `TURBOEXL3_GPU=1`) times the Ling kernels at the model's shapes for the serving plan:
 `mlaLatentDecode` at the MTP head's cache of the standard request (19,404 keys, rows 1 to 4) on launch 2 and each of

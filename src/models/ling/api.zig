@@ -9,8 +9,9 @@
 //! (`combineRouted`, `combineParts`, combine.zig), and its MoE router at decode rows with the read-ahead predictor's
 //! scores in two launches (`router.route`, router.zig): each a host's opt-in. Its MLA attention
 //! at decode rows in the latent is `mlaLatentDecode` (`mla_latent.zig`, three launches of its own), its MLA prompt
-//! attention runs as one causal flash launch (`mlaFlashPrefill`, `mla_flash.zig`: MLX's NAX attention at qk 192, v 128),
-//! and its MLA chain's plain kv_b and head gate at decode and verify rows run as one GEMV launch for the call's rows
+//! attention runs as one causal flash launch (`mlaFlashPrefill`, `mla_flash.zig`: MLX's NAX attention at qk 192, v 128;
+//! over the rope-once cache, `mlaFlashPrefillRope1`, the same words), and its MLA chain's plain kv_b and head gate at
+//! decode and verify rows run as one GEMV launch for the call's rows
 //! (`mlaRows`, `mla_rows.zig`: MLX's one-row gemv words for each row).
 const std = @import("std");
 const mlx = @import("sdk").mlx;
@@ -157,3 +158,7 @@ pub const shared_state = .{ shared.shared_state, pair.shared_state, kdaproj.shar
 /// row i over keys 0 .. kL - qL + i, at Ling's heads (qk 192, v 128) or any pair `mla_flash.admits` takes; within
 /// tolerance of MLX's composed SDPA (a reordering), refused off the NAX gate (error.Exl3EngineNotImplemented).
 pub const mlaFlashPrefill = mla_flash.mlaFlashPrefill;
+/// The same attention over the rope-once cache (`mla_flash.zig` `text_body_r1`): each head's nope keys k [B, Hk, kL,
+/// 128] and the token's one roped key kr [B, 1, kL, 64] read in place, `mlaFlashPrefill`'s words over the expanded key
+/// k ++ kr; refused unless `Config.mla_rope_once` (off by default) and the NAX gate hold.
+pub const mlaFlashPrefillRope1 = mla_flash.mlaFlashPrefillRope1;
