@@ -14,6 +14,12 @@
             // round's (row, block) items runs the finish's statements (finish_2, finish_4) with the row's halves read from
             // dfz where the finish reads zd; at top-1 the slot at a sorted position is its row of y (r)
             const uint b = uint(n0g + (cb - 1) * BNC) / 128u;
+            // the round's staging (dfz, 128 halves a row): DFR 64 its own, past the weight stage; DFR 32 the stage buffer
+            // the pair's last stage was read from (8 KB: the K loop's last barrier ended its reads, and the next write to
+            // it is the next block's second stage, after this pair's last barrier; without the double buffer the one
+            // buffer, after a barrier that ends the last stage's reads)
+            threadgroup half* dfz = (DFRC == 64) ? Bs + NBUF * BSZ : Bs + ((DBUF != 0) ? ((cb * STAGES + STAGES - 1) & 1) * BSZ : 0);
+            if (DFRC == 32 && DBUF == 0) threadgroup_barrier(mem_flags::mem_threadgroup);
             for (int r0 = 0; r0 < rows; r0 += DFRC) {
                 if (sgp > 0 && tm >= r0 && tm < r0 + DFRC) {
                     dfk.template store<half, 128, 1>(dfz + (tm - r0) * 128 + tn);

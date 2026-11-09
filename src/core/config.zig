@@ -33,8 +33,9 @@ pub const Config = struct {
     /// The routed prefill's finish as the down GEMM's epilogue (`prefill.Options.dfin`): every top-1 routed prefill call
     /// (an expert streamer's prompt calls, `moeSwigluRows`, or `moe` at top-1), the down launch writing y. The same bytes.
     pf_dfin: bool = false,
-    /// The fused finish's tile rows per staging round (`prefill.Options.dfr`): 32 or 64. The same bytes.
-    pf_dfr: u16 = 64,
+    /// The fused finish's tile rows per staging round (`prefill.Options.dfr`): 32 (staged in the weight stage's freed
+    /// buffer, no threadgroup memory of its own) or 64 (16 KB of its own). The same bytes.
+    pf_dfr: u16 = 32,
     /// The routed prefill's M tile rows (`prefill.Options.bm`): 64 (served), 128 or 256; anything but 64 runs without the
     /// 128-row tiles (`pf_t128` needs bm 64). The same bytes.
     pf_bm: u16 = 64,
@@ -120,10 +121,10 @@ test "turboexl3 config: the defaults are valid and served; an unserved form, sli
     try t.expect(!(Config{ .shared_spt = 3 }).valid());
     try t.expect(!(Config{ .pf_alay = 3 }).valid());
     // the routed prefill's launch shapes: off, or the served shape, by default; each a value the chain serves
-    try t.expect(!d.pf_t256 and d.pf_cut == 64 and d.pf_gu_ncb == 1 and !d.pf_dfin and d.pf_dfr == 64 and d.pf_bm == 64 and d.pf_mixed);
+    try t.expect(!d.pf_t256 and d.pf_cut == 64 and d.pf_gu_ncb == 1 and !d.pf_dfin and d.pf_dfr == 32 and d.pf_bm == 64 and d.pf_mixed);
     for ([_]u8{ 2, 4 }) |n| try t.expect((Config{ .pf_gu_ncb = n }).valid());
     for ([_]u8{ 0, 3, 8 }) |n| try t.expect(!(Config{ .pf_gu_ncb = n }).valid());
-    try t.expect((Config{ .pf_dfr = 32 }).valid() and !(Config{ .pf_dfr = 128 }).valid());
+    try t.expect((Config{ .pf_dfr = 64 }).valid() and !(Config{ .pf_dfr = 128 }).valid());
     for ([_]u16{ 128, 256 }) |bm| try t.expect((Config{ .pf_bm = bm }).valid());
     try t.expect(!(Config{ .pf_bm = 32 }).valid() and !(Config{ .pf_bm = 512 }).valid());
     try t.expect((Config{ .pf_t256 = true, .pf_dfin = true, .pf_cut = 0, .pf_mixed = false }).valid());

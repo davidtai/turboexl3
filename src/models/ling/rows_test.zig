@@ -28,8 +28,9 @@
 //!   expert's rows (1-32, 33-64, 65-128, 129-256, 257-288, 289-512), the 4096-pair maximum call, many small experts,
 //!   lognormal-skewed counts, one hot expert, a padded 5-pair call. Red checks: a flipped output word, a planted
 //!   epilogue fault (one tile's f16 rounding dropped), a planted route fault (one 256-row tile on the wrong expert), the
-//!   GEMM's weight rounding changed (the deferred MUL1 map off) and a planted reduction-order fault (one tile's H128
-//!   stages reordered: the same values in exact arithmetic) must each show differing words. Lines:
+//!   GEMM's weight rounding changed (the deferred MUL1 map off) and two planted order faults (one tile's H128 stages
+//!   reordered, one tile's K stages in reverse order: the same values in exact arithmetic) must each show differing
+//!   words. Lines:
 //!   TURBOEXL3_LING_ROWS_VARIANT, TURBOEXL3_LING_ROWS_RED.
 //! - Timing (TURBOEXL3_LING_TIME=1 with TURBOEXL3_GPU=1; asserts nothing, guidance only): the rows path against the
 //!   plugin's chain at the plugin's call shape (the first chunk of a 4096- and a 16384-token layer's call over 512
@@ -365,17 +366,17 @@ fn variants(n: u32) [n_variants]Variant {
         .{ .name = "gu4", .o = vT(n, false, 64, 4, false, 64) },
         .{ .name = "t256.gu2", .o = vT(n, true, 64, 2, false, 64) },
         .{ .name = "t256.gu4", .o = vT(n, true, 64, 4, false, 64) },
-        .{ .name = "dfin", .o = vT(n, false, 64, 1, true, 64) },
-        .{ .name = "dfin.r32", .o = vT(n, false, 64, 1, true, 32) },
-        .{ .name = "t256.dfin", .o = vT(n, true, 64, 1, true, 64) },
-        .{ .name = "t256.dfin.r32", .o = vT(n, true, 64, 1, true, 32) },
-        .{ .name = "t256.gu2.dfin", .o = vT(n, true, 64, 2, true, 64) },
+        .{ .name = "dfin", .o = vT(n, false, 64, 1, true, 32) },
+        .{ .name = "dfin.r64", .o = vT(n, false, 64, 1, true, 64) },
+        .{ .name = "t256.dfin", .o = vT(n, true, 64, 1, true, 32) },
+        .{ .name = "t256.dfin.r64", .o = vT(n, true, 64, 1, true, 64) },
+        .{ .name = "t256.gu2.dfin", .o = vT(n, true, 64, 2, true, 32) },
         .{ .name = "m128", .o = vP(n, 128, true, false, 64) },
         .{ .name = "m256", .o = vP(n, 256, true, false, 64) },
         .{ .name = "p256", .o = vP(n, 256, false, false, 64) },
-        .{ .name = "p256.dfin", .o = vP(n, 256, false, true, 64) },
-        .{ .name = "p256.dfin.r32", .o = vP(n, 256, false, true, 32) },
-        .{ .name = "p128.dfin", .o = vP(n, 128, false, true, 64) },
+        .{ .name = "p256.dfin", .o = vP(n, 256, false, true, 32) },
+        .{ .name = "p256.dfin.r64", .o = vP(n, 256, false, true, 64) },
+        .{ .name = "p128.dfin", .o = vP(n, 128, false, true, 32) },
     };
 }
 
@@ -664,7 +665,7 @@ test "turboexl3 gpu ling rows variants: the routed chain's variants (256-row til
             {
                 var pf = try prefill.Prefill.init(geo, vT(n, false, 64, 1, true, 64));
                 defer pf.deinit();
-                const fault = ks.newKernel("turboexl3_test_pf_dfin_fault", &prefill.dfin_in, &prefill.dfin_out, comptime prefill.dfinText(@embedFile("kernels/test/fault/dfin_4.metal")), prefill.header_nax_dfin, true) orelse return error.KernelCreateFailed;
+                const fault = ks.newKernel("turboexl3_test_pf_dfin_fault", &prefill.dfin_in, &prefill.dfin_out, comptime prefill.dfinText(prefill.dfin_gemm_4, @embedFile("kernels/test/fault/dfin_4.metal")), prefill.header_nax_dfin, true) orelse return error.KernelCreateFailed;
                 defer root.decode.freeKernel(fault);
                 const kept = pf.dfin_k;
                 pf.dfin_k = fault;
@@ -709,9 +710,9 @@ test "turboexl3 gpu ling rows variants: the routed chain's variants (256-row til
             // 5. a reduction's order changed and nothing else: the fused finish with tile 0's H128 stages in another order
             // (the same transform in exact arithmetic, its f32 sums reassociated; a planted fault in the kernel)
             {
-                var pf = try prefill.Prefill.init(geo, vT(n, false, 64, 1, true, 64));
+                var pf = try prefill.Prefill.init(geo, vT(n, false, 64, 1, true, 32));
                 defer pf.deinit();
-                const fault = ks.newKernel("turboexl3_test_pf_dfin_order_fault", &prefill.dfin_in, &prefill.dfin_out, comptime prefill.dfinText(@embedFile("kernels/test/fault/dfin_4_order.metal")), prefill.header_nax_dfin, true) orelse return error.KernelCreateFailed;
+                const fault = ks.newKernel("turboexl3_test_pf_dfin_order_fault", &prefill.dfin_in, &prefill.dfin_out, comptime prefill.dfinText(prefill.dfin_gemm_4, @embedFile("kernels/test/fault/dfin_4_order.metal")), prefill.header_nax_dfin, true) orelse return error.KernelCreateFailed;
                 defer root.decode.freeKernel(fault);
                 const kept = pf.dfin_k;
                 pf.dfin_k = fault;
@@ -721,6 +722,23 @@ test "turboexl3 gpu ling rows variants: the routed chain's variants (256-row til
                 const c = try compare(a, &g, got, want);
                 const caught = c.differing > 0;
                 std.debug.print("TURBOEXL3_LING_ROWS_RED n={d} fault=dfin_tile0_h128_reordered differing={d}/{d} caught={}\n", .{ n, c.differing, c.of, caught });
+                if (!caught) failed = true;
+            }
+            // 6. the K loop's order changed and nothing else: the fused down GEMM with tile 0's K stages in reverse order
+            // (the same products, its accumulators summed in another order; a planted fault in the kernel)
+            {
+                var pf = try prefill.Prefill.init(geo, vT(n, false, 64, 1, true, 32));
+                defer pf.deinit();
+                const fault = ks.newKernel("turboexl3_test_pf_dfin_korder_fault", &prefill.dfin_in, &prefill.dfin_out, comptime prefill.dfinText(@embedFile("kernels/test/fault/gemm_4_krev.metal"), prefill.dfin_finish_4), prefill.header_nax_dfin, true) orelse return error.KernelCreateFailed;
+                defer root.decode.freeKernel(fault);
+                const kept = pf.dfin_k;
+                pf.dfin_k = fault;
+                defer pf.dfin_k = kept;
+                _ = mlx.mlx_clear_cache();
+                const got = try g.adopt(try engineRows(&pf, s, xb, o, ops));
+                const c = try compare(a, &g, got, want);
+                const caught = c.differing > 0;
+                std.debug.print("TURBOEXL3_LING_ROWS_RED n={d} fault=dfin_tile0_k_reversed differing={d}/{d} caught={}\n", .{ n, c.differing, c.of, caught });
                 if (!caught) failed = true;
             }
         }

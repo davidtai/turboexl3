@@ -1809,8 +1809,9 @@ RENAMED_TESTS[('router_test.zig', ("turboexl3 gpu ling router: routerLogits, sel
 SPLIT_ADDED_KERNELS['turboexl3_pf_t256_route'] = ('Options.t256: text_froute_t128 with its two 128-row lines at 256 rows '
                                                   '(froute_t128_2 cut at them; froute_t256_nq, froute_t256_store), the '
                                                   '128-row tiles\' launch then over 256-row tiles on the bm-256 body')
-SPLIT_ADDED_KERNELS['turboexl3_pf_dfin'] = ('Options.dfin: gemm1_text with its tile read from one of two tables '
-                                            '(gemm_dfin_tile in gemm_3_2\'s place) and its store replaced by the '
+SPLIT_ADDED_KERNELS['turboexl3_pf_dfin'] = ('Options.dfin: gemm1_text with its stage taking the finish\'s own staging '
+                                            'at DFR 64 (gemm_dfin_bs in gemm_2\'s place), its tile read from one of two '
+                                            'tables (gemm_dfin_tile in gemm_3_2\'s place) and its store replaced by the '
                                             'finish\'s own statements (gemm_dfin_epi_1 ++ finish_2 ++ gemm_dfin_load ++ '
                                             'finish_4 ++ gemm_dfin_epi_2 in gemm_op1_xsz_2 ++ gemm_5\'s place), header '
                                             'header_nax ++ h128')
@@ -1821,6 +1822,9 @@ SPLIT_ADDED_KERNELS['turboexl3_test_pf_t256_route_fault'] = ('test only: turboex
 SPLIT_ADDED_KERNELS['turboexl3_test_pf_dfin_order_fault'] = ('test only: turboexl3_pf_dfin with a planted reduction-order '
                                                              'fault (tile 0\'s H128 stages reordered, fault/dfin_4_order in '
                                                              'finish_4\'s place), a red check')
+SPLIT_ADDED_KERNELS['turboexl3_test_pf_dfin_korder_fault'] = ('test only: turboexl3_pf_dfin with a planted K-order fault '
+                                                              '(tile 0\'s K stages in reverse order, fault/gemm_4_krev in '
+                                                              'gemm_4\'s place), a red check')
 
 def split_report(oprog, nprog, ounits, nunits, orig_dir, new_dir, problems, verbose):
     """--split (declarations moved between files, not only files): checks 1 to 4 over the whole tree instead of per file.

@@ -1066,14 +1066,14 @@ test "turboexl3 root: the served prefill options follow the config, and the deco
         g8.topk = 8;
         try config.configure(.{});
         try t.expect(pfOptionsFor(g1).valid() and pfOptionsFor(g1).t128 and !pfOptionsFor(g1).dfin);
-        try config.configure(.{ .pf_t256 = true, .pf_cut = 32, .pf_gu_ncb = 2, .pf_dfin = true, .pf_dfr = 32 });
+        try config.configure(.{ .pf_t256 = true, .pf_cut = 32, .pf_gu_ncb = 2, .pf_dfin = true, .pf_dfr = 64 });
         const q = pfOptionsFor(g1);
-        try t.expect(q.valid() and q.t128 and q.t256 and q.cut == 32 and q.gu_ncb == 2 and q.dfin and q.dfr == 32 and q.bm == 64);
+        try t.expect(q.valid() and q.t128 and q.t256 and q.cut == 32 and q.gu_ncb == 2 and q.dfin and q.dfr == 64 and q.bm == 64);
         const q8 = pfOptionsFor(g8);
         try t.expect(q8.valid() and q8.t256 and !q8.dfin);
         try config.configure(.{ .pf_t128 = false, .pf_bm = 256, .pf_mixed = false, .pf_dfin = true });
         const r = pfOptionsFor(g1);
-        try t.expect(r.valid() and !r.t128 and r.bm == 256 and r.small == .off and !r.sintr and r.dfin and r.dfr == 64);
+        try t.expect(r.valid() and !r.t128 and r.bm == 256 and r.small == .off and !r.sintr and r.dfin and r.dfr == 32);
         // the fused finish needs one down launch over every row: the mixed launch at bm 256 has two bodies, so it drops it
         try config.configure(.{ .pf_t128 = false, .pf_bm = 256, .pf_dfin = true });
         const m = pfOptionsFor(g1);

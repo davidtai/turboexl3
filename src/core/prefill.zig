@@ -43,7 +43,8 @@
 //! `Options.dfin` runs the finish as the down GEMM's epilogue (top-1 calls: a row's one slot): the down launch writes y
 //! itself, so zd is never written or read and the finish launch is gone. A threadgroup owns `ncb` 64-column blocks, so
 //! whole 128-column blocks: it keeps an even block's outputs rounded to f16 as the store rounds them, then after the odd
-//! block stages both in threadgroup memory, `dfr` tile rows a round, and runs the finish's own statements on them. One
+//! block stages both in threadgroup memory, `dfr` tile rows a round (32 in the weight stage's buffer the pair's last stage
+//! freed, 64 in 16 KB of its own), and runs the finish's own statements on them. One
 //! down launch writes every row: over `small = .off`'s one table, or with `t128` over both of the route's tables (the
 //! 128-row tiles', then each mixed-table tile as a part-full tile on the same body). The same f16 words in, the same
 //! finish statements: the finish's y.
@@ -193,23 +194,30 @@ const gemm_op1_xsz = gemm_op1_xsz_1 ++ @embedFile("kernels/prefill/gemm_op1_xsz_
 const gemm_op1_xsz_1 = @embedFile("kernels/prefill/gemm_op1_xsz_1.metal");
 
 /// The down GEMM with the finish as its epilogue (`Options.dfin`, `Prefill.gemmDFin`): `gemm1_text` (the shared-decode
-/// body, its K loop and deferred map verbatim) with three changes. Its tile is read from `tiles` or, with T2, past its rows
-/// from `tiles2` (`gemm_dfin_tile`). Its store is replaced (`gemm_dfin_epi_1`): an even column block's outputs are kept in
+/// body, its K loop and deferred map verbatim) with four changes. Its weight stage takes, with DFR 64, the finish's own
+/// staging past it (`gemm_dfin_bs` in `gemm_2`'s place). Its tile is read from `tiles` or, with T2, past its rows from
+/// `tiles2` (`gemm_dfin_tile`). Its store is replaced (`gemm_dfin_epi_1`): an even column block's outputs are kept in
 /// registers rounded to f16 (dfk, NAXFrag::store's static_cast, the zd store's rounding), and after the odd block each
-/// round of DFR tile rows stores both blocks' f16 outputs in threadgroup memory (dfz, a 128-column block a row), then each
-/// (row, 128-block) item runs the finish's statements (`finish_2`, `finish_4`) with the row's halves read from dfz where
-/// the finish reads zd (`gemm_dfin_load`), y at the slot's row. `fin4` is `finish_4` (a test passes a planted fault).
-fn dfinBody(comptime fin4: []const u8) []const u8 {
-    return @embedFile("kernels/prefill/gemm_1.metal") ++ @embedFile("kernels/prefill/gemm_2.metal") ++ @embedFile("kernels/prefill/gemm_dfin_decl.metal") ++
+/// round of DFR tile rows stores both blocks' f16 outputs in threadgroup memory (dfz, a 128-column block a row: DFR 32 in
+/// the stage buffer the pair's last stage was read from, DFR 64 in its own), then each (row, 128-block) item runs the
+/// finish's statements (`finish_2`, `finish_4`) with the row's halves read from dfz where the finish reads zd
+/// (`gemm_dfin_load`), y at the slot's row. `g4` is `gemm_4` and `fin4` `finish_4` (a test passes a planted fault).
+fn dfinBody(comptime g4: []const u8, comptime fin4: []const u8) []const u8 {
+    return @embedFile("kernels/prefill/gemm_1.metal") ++ @embedFile("kernels/prefill/gemm_dfin_bs.metal") ++ @embedFile("kernels/prefill/gemm_dfin_decl.metal") ++
         gemm_3_1 ++ @embedFile("kernels/prefill/gemm_dfin_tile.metal") ++ gemm_3_3 ++ @embedFile("kernels/prefill/gemm_op1_wx.metal") ++
-        @embedFile("kernels/prefill/gemm_4.metal") ++ gemm_op1_xsz_1 ++ @embedFile("kernels/prefill/gemm_dfin_epi_1.metal") ++ finish_2 ++
+        g4 ++ gemm_op1_xsz_1 ++ @embedFile("kernels/prefill/gemm_dfin_epi_1.metal") ++ finish_2 ++
         @embedFile("kernels/prefill/gemm_dfin_load.metal") ++ fin4 ++ @embedFile("kernels/prefill/gemm_dfin_epi_2.metal");
 }
-pub const text_dfin: [:0]const u8 = sentinel(dfinBody(finish_4));
-/// `text_dfin` with `fin4` in `finish_4`'s place (a test's planted fault)
-pub fn dfinText(comptime fin4: []const u8) [:0]const u8 {
-    return sentinel(dfinBody(fin4));
+pub const text_dfin: [:0]const u8 = sentinel(dfinBody(gemm_4, finish_4));
+/// `text_dfin` with `g4` in `gemm_4`'s place and `fin4` in `finish_4`'s (a test's planted fault; `dfin_gemm_4` and
+/// `dfin_finish_4` are the served pieces)
+pub fn dfinText(comptime g4: []const u8, comptime fin4: []const u8) [:0]const u8 {
+    return sentinel(dfinBody(g4, fin4));
 }
+/// The GEMM's K loop (`gemmText`'s and `text_dfin`'s)
+const gemm_4 = @embedFile("kernels/prefill/gemm_4.metal");
+pub const dfin_gemm_4 = gemm_4;
+pub const dfin_finish_4 = finish_4;
 /// The fused down GEMM's header: the NAX GEMM's and the finish's H128 (`turboexl3_h128x4`)
 pub const header_nax_dfin: [:0]const u8 = sentinel(steel_nax ++ using_steel ++ decode.header ++ metal_small_helpers ++ metal_gemm_helpers ++ metal_h128);
 /// The fused down GEMM's inputs: the two tables (`tiles2` read only with T2), the down GEMM's, then the finish's (each
@@ -531,8 +539,9 @@ pub const Options = struct {
     /// blocks a threadgroup (ncb 2 or 4), every simdgroup a consumer (wsp 0), one down launch over every row (`small`
     /// `.off`, or `t128`: both tables in one launch) and its staging within 32 KB with the weight stage
     dfin: bool = false,
-    /// the fused finish's tile rows per staging round (`dfin`): 32 or 64 (64 x 128 halves = 16 KB beside the stage)
-    dfr: u16 = 64,
+    /// the fused finish's tile rows per staging round (`dfin`): 32, staged in the weight stage's buffer the pair's last
+    /// stage was read from (8 KB, no threadgroup memory of its own), or 64, in 16 KB of its own beside the stage
+    dfr: u16 = 32,
 
     pub const Small = enum { off, all, mixed };
 
@@ -581,9 +590,10 @@ pub const Options = struct {
         return if (o.t128) o.t128Rows() else o.bm;
     }
 
-    /// threadgroup memory of the fused down GEMM (`dfin`): its weight stage and a round's f16 staging (dfr x 128 halves)
+    /// threadgroup memory of the fused down GEMM (`dfin`): its weight stage, and with dfr 64 a round's f16 staging of its
+    /// own (64 x 128 halves; dfr 32 stages in the weight stage's buffers)
     pub fn dfinBytes(o: Options) u32 {
-        return o.stageBytes(o.downStage()) + @as(u32, o.dfr) * 128 * 2;
+        return o.stageBytes(o.downStage()) + (if (o.dfr == 64) @as(u32, 64 * 128 * 2) else 0);
     }
 
     /// the down GEMM's K stage depth (gate|up's is BK)
@@ -1768,20 +1778,23 @@ test "turboexl3 prefill variant texts: the 256-row route is the 128-row route at
         @embedFile("kernels/prefill/gemm_dfin_epi_2.metal");
     {
         const no_decl = comptime replace(text_dfin, @embedFile("kernels/prefill/gemm_dfin_decl.metal"), "");
-        const tile_back = comptime replace(no_decl, @embedFile("kernels/prefill/gemm_dfin_tile.metal"), @embedFile("kernels/prefill/gemm_3_2.metal"));
+        const bs_back = comptime replace(no_decl, @embedFile("kernels/prefill/gemm_dfin_bs.metal"), @embedFile("kernels/prefill/gemm_2.metal"));
+        const tile_back = comptime replace(bs_back, @embedFile("kernels/prefill/gemm_dfin_tile.metal"), @embedFile("kernels/prefill/gemm_3_2.metal"));
         const back = comptime replace(tile_back, epi, @embedFile("kernels/prefill/gemm_op1_xsz_2.metal") ++ @embedFile("kernels/prefill/gemm_5.metal"));
         try t.expectEqualStrings(gemm1_text, back);
     }
+    try t.expectEqualStrings(text_dfin, dfinText(dfin_gemm_4, dfin_finish_4));
     // the finish's statements read a row's halves where the finish reads zd: the same element of the 128-block (L + 32 j)
     try t.expectEqualStrings(@embedFile("kernels/prefill/gemm_dfin_load.metal"), comptime replace(finish_3, pin[2], pin[3]));
     // the kept even block takes the store's rounding (NAXFrag::store: static_cast<U> of each element), as the odd one
     // (stored through NAXTile::store) does
     try t.expect(std.mem.indexOf(u8, steel_nax, pin[4]) != null);
     try t.expectEqual(@as(usize, 1), std.mem.count(u8, text_dfin, pin[5]));
-    // no z store; the finish's y store, once; the round's two barriers beside the GEMM's
+    // no z store; the finish's y store, once; the round's two barriers and the single-buffered staging's one beside the
+    // GEMM's
     try t.expect(std.mem.indexOf(u8, gemm1_text, pin[6]) != null and std.mem.indexOf(u8, text_dfin, pin[6]) == null);
     try t.expectEqual(@as(usize, 1), std.mem.count(u8, text_dfin, pin[7]));
-    try t.expectEqual(std.mem.count(u8, gemm1_text, pin[8]) + 2, std.mem.count(u8, text_dfin, pin[8]));
+    try t.expectEqual(std.mem.count(u8, gemm1_text, pin[8]) + 3, std.mem.count(u8, text_dfin, pin[8]));
     // the header: the NAX GEMM's, then the finish's H128
     try t.expect(std.mem.startsWith(u8, header_nax_dfin, header_nax) and std.mem.endsWith(u8, header_nax_dfin, metal_h128));
     try t.expect(dfin_in.len == 8 and dfin_out.len == 1);
@@ -1810,12 +1823,13 @@ test "turboexl3 prefill variant options: t256 needs t128; gate|up takes 1, 2 or 
     o.gu_ncb = 3;
     try t.expect(!o.valid());
     try t.expect(!(Options{ .small = .all, .gu_ncb = 2 }).valid());
-    // the fused finish: over both tables with t128, over the one table with small .off, never over the mixed launch alone
+    // the fused finish: over both tables with t128, over the one table with small .off, never over the mixed launch alone;
+    // 32-row rounds in the weight stage's buffers, 64-row ones in 16 KB of their own
     o = served;
     o.dfin = true;
+    try t.expect(o.valid() and o.dfr == 32 and o.dfinBytes() == 16384);
+    o.dfr = 64;
     try t.expect(o.valid() and o.dfinBytes() == 32768);
-    o.dfr = 32;
-    try t.expect(o.valid() and o.dfinBytes() == 24576);
     o.dfr = 128;
     try t.expect(!o.valid());
     o = served;
@@ -1831,9 +1845,11 @@ test "turboexl3 prefill variant options: t256 needs t128; gate|up takes 1, 2 or 
     try t.expect(o.valid() and o.dfinRows() == 64);
     o.bm = 256;
     try t.expect(o.valid() and o.dfinRows() == 256);
-    // the padded stage (18 KB double-buffered) leaves room for a 32-row round, not a 64-row one
-    try t.expect(!(Options{ .small = .off, .dbuf = true, .ncb = 4, .dfin = true }).valid());
-    try t.expect((Options{ .small = .off, .dbuf = true, .ncb = 4, .dfin = true, .dfr = 32 }).valid());
+    // the padded stage (18 KB double-buffered) leaves no room for a 64-row staging of its own; 32-row rounds stage in it,
+    // and so does the 32 KB stage of 128-deep fragment-order stages
+    try t.expect(!(Options{ .small = .off, .dbuf = true, .ncb = 4, .dfin = true, .dfr = 64 }).valid());
+    try t.expect((Options{ .small = .off, .dbuf = true, .ncb = 4, .dfin = true }).valid());
+    try t.expect((Options{ .small = .off, .dbuf = true, .fragb = true, .bk128 = true, .ncb = 4, .dfin = true }).valid());
 }
 
 test "turboexl3 prefill 256-row tiles tables: every sorted position in exactly one tile; an expert's tiles never more than at 128 rows; at a cut of at most 64, ceil(rows / 256) of them; the 128-row tiles' bounds hold" {
