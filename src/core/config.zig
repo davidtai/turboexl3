@@ -59,11 +59,6 @@ pub const Config = struct {
     /// Max: output tiles per GEMV threadgroup, and DEC-ONE's prepare inside the launch or in its own); a shape the table
     /// does not name keeps the rest of this configuration's. Launch shape only: the same bytes.
     dec_one_row_table: bool = false,
-    /// DEC-ONE's GEMV over prepared rows on a variant (`dense.dec_variants`, `dec_variants` of them; 0 the served GEMV):
-    /// the dense dec0 launch (a decode call whose prepare runs in its own launch, and `Dense.decLinearPrepared`). 1 t4
-    /// (the MUL1 codeword's t as one half2, banked's group variant t4), 2 pf (each input tile's words loaded a pass ahead
-    /// of their decode), 3 both. Another schedule of the same reads, decodes and sums: the same bytes.
-    dec_variant: u8 = 0,
     /// Ling-3.1-flash's router (`ling.routerLogits`) at a call of 2 rows or more over the f16 weight on the rows launch
     /// (`turboexl3_ling_router_logits_hr`, `_pred_hr`, `_pred_sig_hr`): each router threadgroup 16 logits of each row of a
     /// group of up to 4 rows, every weight word read once for them, each row's statements the served launch's. The same
@@ -115,16 +110,13 @@ pub const Config = struct {
             (c.pf_gu_ncb == 1 or c.pf_gu_ncb == 2 or c.pf_gu_ncb == 4) and (c.pf_dfr == 32 or c.pf_dfr == 64) and
             (c.pf_bm == 64 or c.pf_bm == 128 or c.pf_bm == 256) and
             (c.banked_group == 2 or c.banked_group == 4) and (!c.banked_m3 or c.banked_group == 4) and
-            c.banked_variant_gu < banked_variants and c.banked_variant_dn < banked_variants and c.dec_variant < dec_variants and
+            c.banked_variant_gu < banked_variants and c.banked_variant_dn < banked_variants and
             ((c.banked_variant_gu == 0 and c.banked_variant_dn == 0) or c.banked_group == 4);
     }
 };
 
 /// The grouped banked GEMVs' variant count (`decode.group_variants.len`, checked there).
 pub const banked_variants: u8 = 12;
-
-/// DEC-ONE's GEMV variants' count (`dense.dec_variants.len`, checked there).
-pub const dec_variants: u8 = 4;
 
 const current = Global(Config, "config_current", .{});
 
@@ -177,9 +169,6 @@ test "turboexl3 config: the defaults are valid and served; an unserved form, sli
     try t.expect(d.fused_fin_fold);
     try t.expect(!d.dec_one_row_table);
     try t.expect((Config{ .dec_one_row_table = true }).valid());
-    try t.expectEqual(@as(u8, 0), d.dec_variant);
-    for (1..dec_variants) |v| try t.expect((Config{ .dec_variant = @intCast(v) }).valid());
-    try t.expect(!(Config{ .dec_variant = dec_variants }).valid());
     try t.expect(!d.router_rows and (Config{ .router_rows = true }).valid());
     try t.expect(!d.mla_latent_stage and (Config{ .mla_latent_stage = true }).valid());
     // the NAX launch: off by default, with the stage (ahead of it)

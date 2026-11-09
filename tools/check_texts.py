@@ -1714,6 +1714,12 @@ SPLIT_REMOVED_KERNELS['turboexl3_ling_kdaproj_dec0bv_pft4'] = _S2_KDA
 SPLIT_REMOVED_TESTS["turboexl3 ling kdaproj variant texts: the b launch's member is its two pieces; the variant launch is kbfirst in bmember_1's place, its head, the member choice, then DEC-ONE's statements over prepared rows in each member's branch (pf's in the pf text) and nothing else; every operand and argument named, no shape buffers"] = _S2_KDA
 SPLIT_REMOVED_TESTS["turboexl3 ling kdaproj variant plan: the configuration's variant launch per row count (the members' tiles apart at a verify's rows where they fit, b first and DEC-ONE's GEMV variant at every row count); the variant grid covers each member's (K slice, block) and b's output rows once, at every pair of tile counts, b first or last"] = _S2_KDA
 SPLIT_REMOVED_TESTS["turboexl3 gpu ling bproj variants: each variant launch (b first; q|k|v's and f and g's tiles apart; t4, pf, pft4; all together) gives kdaProjB's words, b's and the three members', at rows 1 to 8 and 16, operands as the loader keeps them; red checks: a flipped word, q|k|v at another K split, one word of b's weight (TURBOEXL3_GPU=1)"] = _S2_KDA
+_S2_DEC = "D35 DEC_T4/DEC_PF (closed by TIME in-family, no A/B: no consistent winner, pf and pft4 1.03-1.3 of the served, t4 about 1.0 at the big shapes, the small shapes 0.6-3.2 scatter): DEC-ONE's GEMV variants t4, pf and pft4 over prepared rows (Config.dec_variant, dense.dec_variants, dense.dec0For). D35's cut of dense/dec_gemv_arrive_2.metal (dec_gemv_arrive_2_1 ++ _2_2, the same value) stays"
+SPLIT_REMOVED_KERNELS['turboexl3_dense_dec0_t4'] = _S2_DEC
+SPLIT_REMOVED_KERNELS['turboexl3_dense_dec0_pf'] = _S2_DEC
+SPLIT_REMOVED_KERNELS['turboexl3_dense_dec0_pft4'] = _S2_DEC
+SPLIT_REMOVED_TESTS["turboexl3 dense DEC-ONE variants: t4 is text_dec0 after t4's define, pf is text_dec0 with each tile's words loaded a pass ahead (dec_tile's address, arrive_2_1's load) and nothing else; the variant table is the config's"] = _S2_DEC
+SPLIT_REMOVED_TESTS["turboexl3 gpu ling dense variants: each DEC-ONE GEMV variant (t4, pf, pft4) gives the served GEMV's words at every Ling-3.1-flash trunk shape and the LM head, rows 1 to 4, x bf16 and f32 (the head bf16), through linear and over prepared rows; red checks: a flipped word, each variant at another K split (TURBOEXL3_GPU=1)"] = _S2_DEC
 # --strip2 end--
 
 _R10 = ("R10 ROUTER_ADDNORM (M6, rejected): the post-attention add_norm folded into the router's launch 1 "
@@ -1895,14 +1901,6 @@ SPLIT_ADDED_KERNELS['turboexl3_test_ling_mla_flash_r1_nope_fault'] = ('test only
                                                                       'key slice read from the nope keys\' row '
                                                                       '(fault/mla_flash_r1_kofs_nope in r1_kofs\'s place), '
                                                                       'a red check')
-# D35, DEC-ONE's GEMV variants (Config.dec_variant, dense.dec_variants; ling-d35-gemv). The kernels the served path runs keep
-# their texts: dec_gemv_arrive_2 is cut into dec_gemv_arrive_2_1 (the tile's words) and _2_2, of the same value
-SPLIT_ADDED_KERNELS['turboexl3_dense_dec0_t4'] = ('dec_variant t4: text_dec0 verbatim, header header5_t4 (dense/t4\'s '
-                                                  'EXL3_T1V 4 before decode.header5): banked\'s group variant t4')
-SPLIT_ADDED_KERNELS['turboexl3_dense_dec0_pf'] = ('dec_variant pf: text_dec0 with each tile\'s words loaded a pass ahead '
-                                                  '(dec_pf_decl, dec_pf_next; dec_pf_ww in dec_tile ++ dec_gemv_arrive_2_1\'s '
-                                                  'place)')
-SPLIT_ADDED_KERNELS['turboexl3_dense_dec0_pft4'] = 'dec_variant pft4: text_dec0_pf over header5_t4'
 # D35, the router's rows launch (Config.router_rows; router.zig). The served texts keep theirs: the rows launch swaps
 # router/head, logits_1, logits_2 and pred_open for its own pieces around router/logits_wh, pred_one and pred_wide verbatim
 SPLIT_ADDED_KERNELS['turboexl3_ling_router_logits_hr'] = ('router_rows: turboexl3_ling_router_logits_h with each router '
