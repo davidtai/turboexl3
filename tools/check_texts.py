@@ -1869,6 +1869,15 @@ SPLIT_ADDED_KERNELS['turboexl3_ling_kdaproj_dec0bv_t4'] = 'turboexl3_ling_kdapro
 SPLIT_ADDED_KERNELS['turboexl3_ling_kdaproj_dec0bv_pf'] = ('turboexl3_ling_kdaproj_dec0bv with dense.dec_body0_pf in each '
                                                            'branch')
 SPLIT_ADDED_KERNELS['turboexl3_ling_kdaproj_dec0bv_pft4'] = 'turboexl3_ling_kdaproj_dec0bv_pf over dense.header5_t4'
+# D35, the router's rows launch (Config.router_rows; router.zig). The served texts keep theirs: the rows launch swaps
+# router/head, logits_1, logits_2 and pred_open for its own pieces around router/logits_wh, pred_one and pred_wide verbatim
+SPLIT_ADDED_KERNELS['turboexl3_ling_router_logits_hr'] = ('router_rows: turboexl3_ling_router_logits_h with each router '
+                                                          'threadgroup 16 logits of a group of up to 4 rows (head_rows, '
+                                                          'logits_rows_1 ++ logits_wh ++ logits_rows_2), the f16 weight '
+                                                          'read once for them, each row\'s statements the served one\'s')
+SPLIT_ADDED_KERNELS['turboexl3_ling_router_pred_hr'] = ('router_rows: turboexl3_ling_router_pred_h on the rows launch '
+                                                        '(pred_open_rows, then pred_one and pred_wide verbatim)')
+SPLIT_ADDED_KERNELS['turboexl3_ling_router_pred_sig_hr'] = 'router_rows: turboexl3_ling_router_pred_sig_h on the rows launch'
 
 def split_report(oprog, nprog, ounits, nunits, orig_dir, new_dir, problems, verbose):
     """--split (declarations moved between files, not only files): checks 1 to 4 over the whole tree instead of per file.

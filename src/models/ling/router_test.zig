@@ -627,3 +627,202 @@ test "turboexl3 gpu ling router refusals: rows past 8, a hidden size off the tex
     try testing.expectError(e, router.route(s, x, w, try g.zeros(&.{256}, .float32), scale, null));
     try testing.expectError(dt, router.tableF32(s, try g.zeros(&.{ ci(hidden), ci(ne) }, .float32)));
 }
+
+// ── D35: the rows launch (`router.routerLogitsWith`, Config.router_rows): the weight read once for a call's rows ──
+
+const ds_test = @import("../deepseek_v41/deepseek_test.zig");
+
+/// The rows launch against the served launch, word for word: `routerLogitsWith` with and without it over the loaded f16
+/// weight (the weight's view transposed back, what the plugin passes under ROUTER_F16) and over the loader's f32 table
+/// transposed back, without a predictor (the last MoE layer) and beside DeepSeek's and Ling's scores, x's rows by
+/// pattern at rows 1 to 8, two draws each. Each call is checked to have run the rows launch exactly where it acts (the
+/// f16 weight at 2 rows or more; one row and the f32 table keep the served launch). Red checks, which must differ: a
+/// flipped word is exactly one word; MLX's own matmul of the call's rows over the loader's table (another order of the
+/// same products) against the rows launch's logits at rows 2 to 4; with expert 7's largest weight word negated, the rows
+/// launch's logits differ in expert 7's column at every row whose x word there is not zero, and nowhere else. Lines:
+/// TURBOEXL3_LING_ROUTER_ROWS (96), TURBOEXL3_LING_ROUTER_ROWS_RED (5), TURBOEXL3_LING_ROUTER_ROWS_DONE.
+test "turboexl3 gpu ling router rows: the rows launch (each router threadgroup 16 logits of up to 4 rows, the f16 weight read once for them) gives the served launch's logits and predictor scores (none, DeepSeek's, Ling's) word for word at rows 1 to 8, and runs only over the f16 weight at 2 rows or more; red checks: a flipped word, MLX's several-row matmul, a weight word (TURBOEXL3_GPU=1)" {
+    _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    const s = mlx.mlx_default_gpu_stream_new();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    const a = std.heap.page_allocator;
+    var g = try G.init(a, s);
+    defer g.deinit();
+    var prng = std.Random.DefaultPrng.init(0xD35_0E0);
+    const rnd = prng.random();
+
+    // this layer's router weight as the loader reads it (its words kept for the weight red check), the next layer's (the
+    // predictor's gate) and its bias
+    const wwords = try a.alloc(u16, ne * hidden);
+    defer a.free(wwords);
+    fillWeight(rnd, wwords);
+    const wl = try loadedWeight(&g, wwords);
+    const buf = try a.alloc(u16, ne * hidden);
+    defer a.free(buf);
+    fillWeight(rnd, buf);
+    const pw = try routerRaw(&g, try loadedWeight(&g, buf));
+    var pbias: [ne]f32 = undefined;
+    for (&pbias) |*v| v.* = (rnd.float(f32) - 0.5) * 0.6;
+    const pba = try g.hostArray(std.mem.sliceAsBytes(&pbias), &.{ci(ne)}, .float32);
+    const table = try loaderTable(&g, wl);
+    try testing.expect(tableIsColumnMajor(table));
+    // what the fused router reads: the loaded weight's view transposed back (f16) or the table transposed back (f32)
+    const w16 = try g.transposeAxes(try loaderView(&g, wl), &.{ 1, 0 });
+    const w32 = try g.transposeAxes(table, &.{ 1, 0 });
+    try g.evalAll(&.{ pw, pba });
+
+    const xbits = try a.alloc(u16, 8 * hidden);
+    defer a.free(xbits);
+    const fbuf = try a.alloc(f32, 2 * 8 * ne);
+    defer a.free(fbuf);
+    var failed: usize = 0;
+    var checks: usize = 0;
+    var reds: usize = 0;
+    const preds = [_]?router.Predictor{ null, .{ .w = pw, .bias = pba }, .{ .w = pw, .bias = pba, .score = .sigmoid } };
+    const pred_names = [_][]const u8{ "none", "softplus_sqrt", "sigmoid" };
+    for (1..9) |rows| {
+        for (0..2) |rep| {
+            const mark = g.mark();
+            defer g.resetTo(mark);
+            for (0..rows) |r| {
+                const sc = row_scales[(r + rep * rows) % row_scales.len];
+                for (xbits[r * hidden ..][0..hidden]) |*v| v.* = support.bf16Bits(rnd.floatNorm(f32) * sc);
+            }
+            const xf = try g.hostArray(std.mem.sliceAsBytes(xbits[0 .. rows * hidden]), &.{ ci(rows), ci(hidden) }, .bfloat16);
+            const n = rows * ne;
+            const want = fbuf[0..n];
+            const got = fbuf[n .. 2 * n];
+            for ([_]T{ w16, w32 }, [_][]const u8{ "f16", "f32" }, [_]bool{ true, false }) |w, wname, half| {
+                for (preds, pred_names) |pred, pname| {
+                    const sl = try router.routerLogitsWith(s, xf, w, pred, false);
+                    const s_l = try g.adopt(sl.logits);
+                    const s_s = if (sl.scores) |sc| try g.adopt(sc) else null;
+                    const runs0 = router.rowsRuns();
+                    const rl = try router.routerLogitsWith(s, xf, w, pred, true);
+                    const ran = router.rowsRuns() - runs0;
+                    const r_l = try g.adopt(rl.logits);
+                    const r_s = if (rl.scores) |sc| try g.adopt(sc) else null;
+                    _ = try g.hostF32(s_l, want);
+                    _ = try g.hostF32(r_l, got);
+                    const d_l = differing("rows_logits", rows, rep, got, want, ne);
+                    var d_s: usize = 0;
+                    if (s_s) |ss| {
+                        _ = try g.hostF32(ss, want);
+                        _ = try g.hostF32(r_s orelse return error.TestUnexpectedResult, got);
+                        d_s = differing("rows_scores", rows, rep, got, want, ne);
+                    }
+                    const acts = rows >= 2 and half;
+                    const ok = d_l == 0 and d_s == 0 and ran == @intFromBool(acts);
+                    checks += 1;
+                    std.debug.print("TURBOEXL3_LING_ROUTER_ROWS rows={d} rep={d} weight={s} predictor={s} launch={s} logits_differing={d}/{d} scores_differing={d}/{d} rows_runs={d} expect={d} {s}\n", .{ rows, rep, wname, pname, if (ran != 0) "rows" else "served", d_l, n, d_s, if (pred != null) n else 0, ran, @intFromBool(acts), if (ok) "PASS" else "FAIL" });
+                    if (!ok) failed += 1;
+                }
+            }
+            if (rep != 0) continue;
+            // red: MLX's own matmul of the rows over the loader's table (the same products in another order) must differ
+            // from the rows launch's logits
+            if (rows >= 2 and rows <= 4) {
+                const lm = try router.routerLogitsWith(s, xf, w16, null, true);
+                _ = try g.hostF32(try g.adopt(lm.logits), want);
+                _ = try g.hostF32(try g.matmul(try g.astype(xf, .float32), table), got);
+                var d_m: usize = 0;
+                for (got, want) |u, v| d_m += @intFromBool(@as(u32, @bitCast(u)) != @as(u32, @bitCast(v)));
+                reds += 1;
+                std.debug.print("TURBOEXL3_LING_ROUTER_ROWS_RED check=mlx_matmul rows={d} differing={d}/{d} expect=nonzero {s}\n", .{ rows, d_m, n, if (d_m > 0) "PASS" else "FAIL" });
+                if (d_m == 0) failed += 1;
+            }
+            if (rows != 3) continue;
+            const lg = try router.routerLogitsWith(s, xf, w16, null, true);
+            _ = try g.hostF32(try g.adopt(lg.logits), want);
+            // red: one flipped word is exactly one differing word
+            @memcpy(got, want);
+            got[n / 2] = @bitCast(@as(u32, @bitCast(got[n / 2])) ^ 1);
+            var d_f: usize = 0;
+            for (got, want) |u, v| d_f += @intFromBool(@as(u32, @bitCast(u)) != @as(u32, @bitCast(v)));
+            reds += 1;
+            std.debug.print("TURBOEXL3_LING_ROUTER_ROWS_RED check=flipped_word rows={d} differing={d}/{d} expect=1 {s}\n", .{ rows, d_f, n, if (d_f == 1) "PASS" else "FAIL" });
+            if (d_f != 1) failed += 1;
+            // red: expert 7's largest weight word negated: the rows launch's logits differ in expert 7's column at every
+            // row whose x word at that k is not zero, and nowhere else
+            @memcpy(buf, wwords);
+            const row7 = buf[7 * hidden ..][0..hidden];
+            var kmax: usize = 0;
+            for (row7, 0..) |bits, k| {
+                if ((bits & 0x7FFF) > (row7[kmax] & 0x7FFF)) kmax = k;
+            }
+            row7[kmax] ^= 0x8000;
+            var nz: usize = 0;
+            for (0..rows) |r| nz += @intFromBool((xbits[r * hidden + kmax] & 0x7FFF) != 0);
+            const wb = try g.transposeAxes(try loaderView(&g, try loadedWeight(&g, buf)), &.{ 1, 0 });
+            const lb = try router.routerLogitsWith(s, xf, wb, null, true);
+            _ = try g.hostF32(try g.adopt(lb.logits), got);
+            var d_col: usize = 0;
+            var d_other: usize = 0;
+            for (got, want, 0..) |u, v, i| {
+                const d = @intFromBool(@as(u32, @bitCast(u)) != @as(u32, @bitCast(v)));
+                if (i % ne == 7) d_col += d else d_other += d;
+            }
+            const ok_w = nz > 0 and d_col == nz and d_other == 0;
+            reds += 1;
+            std.debug.print("TURBOEXL3_LING_ROUTER_ROWS_RED check=weight_word rows={d} k={d} expert7_differing={d} expect={d} others_differing={d} expect=0 {s}\n", .{ rows, kmax, d_col, nz, d_other, if (ok_w) "PASS" else "FAIL" });
+            if (!ok_w) failed += 1;
+        }
+    }
+    std.debug.print("TURBOEXL3_LING_ROUTER_ROWS_DONE checks={d} red={d} failed={d} {s}\n", .{ checks, reds, failed, if (failed == 0) "PASS" else "FAIL" });
+    try testing.expectEqual(@as(usize, 96), checks);
+    try testing.expectEqual(@as(usize, 5), reds);
+    try testing.expectEqual(@as(usize, 0), failed);
+}
+
+/// TURBOEXL3_LING_TIME's arm for the router's rows launch, guidance only: `routerLogitsWith` over a loaded f16 weight
+/// (the plugin's ROUTER_F16) at rows 1 to 4 and 8, with Ling's predictor (the plugin's PREDICTOR) and without one (the
+/// last MoE layer), on the served launch and on the rows launch (`Config.router_rows`; one row keeps the served launch
+/// on both, the noise floor): min and median us a call (8 calls an evaluation, deepseek_test's timeIt), the rows
+/// launch's min over the served one's, and the calls that ran the rows launch. Its own draw. Lines:
+/// TURBOEXL3_LING_TIME router_rows.
+pub fn timeRouterRows(a: std.mem.Allocator, g: *G, s: mlx.mlx_stream) !void {
+    var prng = std.Random.DefaultPrng.init(0xD35_7E0);
+    const rnd = prng.random();
+    const mark = g.mark();
+    defer g.resetTo(mark);
+    defer _ = mlx.mlx_clear_cache();
+    const words = try a.alloc(u16, ne * hidden);
+    defer a.free(words);
+    fillWeight(rnd, words);
+    const w16 = try g.transposeAxes(try loaderView(g, try loadedWeight(g, words)), &.{ 1, 0 });
+    fillWeight(rnd, words);
+    const pw = try routerRaw(g, try loadedWeight(g, words));
+    var pbias: [ne]f32 = undefined;
+    for (&pbias) |*v| v.* = (rnd.float(f32) - 0.5) * 0.6;
+    const pba = try g.hostArray(std.mem.sliceAsBytes(&pbias), &.{ci(ne)}, .float32);
+    try g.evalAll(&.{ w16, pw, pba });
+    const Ctx = struct {
+        s: mlx.mlx_stream,
+        x: T,
+        w: T,
+        pred: ?router.Predictor,
+        rows_launch: bool,
+        pub fn call(cx: @This()) !T {
+            const l = try router.routerLogitsWith(cx.s, cx.x, cx.w, cx.pred, cx.rows_launch);
+            // the scores are the launch's second output: evaluating the logits runs it
+            if (l.scores) |sc| _ = mlx.mlx_array_free(sc);
+            return l.logits;
+        }
+    };
+    const xbits = try a.alloc(u16, 8 * hidden);
+    defer a.free(xbits);
+    for ([_]usize{ 1, 2, 3, 4, 8 }) |rows| {
+        const rm = g.mark();
+        defer g.resetTo(rm);
+        for (xbits[0 .. rows * hidden]) |*v| v.* = support.bf16Bits(rnd.floatNorm(f32));
+        const xf = try g.hostArray(std.mem.sliceAsBytes(xbits[0 .. rows * hidden]), &.{ ci(rows), ci(hidden) }, .bfloat16);
+        const pl = [_]?router.Predictor{ .{ .w = pw, .bias = pba, .score = .sigmoid }, null };
+        for (pl) |pred| {
+            const served = try ds_test.timeIt(g, Ctx{ .s = s, .x = xf, .w = w16, .pred = pred, .rows_launch = false }, 8);
+            const runs0 = router.rowsRuns();
+            const rl = try ds_test.timeIt(g, Ctx{ .s = s, .x = xf, .w = w16, .pred = pred, .rows_launch = true }, 8);
+            const calls = router.rowsRuns() - runs0;
+            std.debug.print("TURBOEXL3_LING_TIME router_rows rows={d} predictor={s} served_min_us={d:.1} served_med_us={d:.1} rows_min_us={d:.1} rows_med_us={d:.1} of_served={d:.3} rows_calls={d}\n", .{ rows, if (pred != null) "sigmoid" else "none", served.min, served.med, rl.min, rl.med, rl.min / served.min, calls });
+        }
+    }
+}

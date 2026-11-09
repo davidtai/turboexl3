@@ -77,6 +77,11 @@ pub const Config = struct {
     /// room) keeps the plan's (member 0's `Dense.btDec`, every member's today). The same bytes.
     kda_bt0: u8 = 0,
     kda_bt1: u8 = 0,
+    /// Ling-3.1-flash's router (`ling.routerLogits`) at a call of 2 rows or more over the f16 weight on the rows launch
+    /// (`turboexl3_ling_router_logits_hr`, `_pred_hr`, `_pred_sig_hr`): each router threadgroup 16 logits of each row of a
+    /// group of up to 4 rows, every weight word read once for them, each row's statements the served launch's. The same
+    /// bytes.
+    router_rows: bool = false,
     /// The row chunks of the dense decode GEMV chain: at most 8 rows, a chunk of 6 to 8 rows on the lean GEMV text (its
     /// codeword loop by input element); false keeps chunks of at most 5 rows, all on the plain GEMV text. The same bytes.
     dense_lean: bool = true,
@@ -201,6 +206,7 @@ test "turboexl3 config: the defaults are valid and served; an unserved form, sli
         try t.expect(!(Config{ .kda_bt0 = bt }).valid());
         try t.expect(!(Config{ .kda_bt1 = bt }).valid());
     }
+    try t.expect(!d.router_rows and (Config{ .router_rows = true }).valid());
     try t.expect(d.mla_latent_rows == 0 and !d.mla_latent_stage and !d.mla_latent_block);
     for ([_]u8{ 2, 4 }) |r| try t.expect((Config{ .mla_latent_rows = r }).valid());
     for ([_]u8{ 1, 3, 8 }) |r| try t.expect(!(Config{ .mla_latent_rows = r }).valid());

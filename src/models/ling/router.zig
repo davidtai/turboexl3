@@ -118,7 +118,7 @@ pub const Selected = struct { inds: mlx.mlx_array, weights: mlx.mlx_array };
 /// `route`'s outputs: `Selected`'s and the predictor's scores. The caller frees them.
 pub const Routes = struct { inds: mlx.mlx_array, weights: mlx.mlx_array, scores: ?mlx.mlx_array };
 
-const Kind = enum(u3) { logits, pred, pred_sig, logits_h, pred_h, pred_sig_h, select };
+const Kind = enum(u4) { logits, pred, pred_sig, logits_h, pred_h, pred_sig_h, select, logits_hr, pred_hr, pred_sig_hr };
 const n_kinds = @typeInfo(Kind).@"enum".field_names.len;
 const Kernels = struct {
     logits: mlx.mlx_fast_metal_kernel,
@@ -136,7 +136,7 @@ const kernels = Global(?Kernels, "ling_router_kernels", null);
 const cfgs = Global([n_kinds][max_rows_u]?Slot, "ling_router_cfgs", @splat(@splat(null)));
 
 /// This file's module state (`Global`): what a host that shares its units' state registers.
-pub const shared_state = .{ lock, kernels, cfgs };
+pub const shared_state = .{ lock, kernels, cfgs, rows_kernels, rows_said, rows_runs };
 
 /// Whether the launches take x [rows, hidden]: rows 1 to `max_rows`; hidden a multiple of 1024 below 8192, where MLX's
 /// tiles are the texts' (gemv at BM 4 for 512 outputs and the predictor's gemv_wide) and none has a leftover block
@@ -224,6 +224,7 @@ fn launchFor(kind: Kind, rows: c_int, hidden: c_int) !Launch {
         .pred_h => k.pred_h,
         .pred_sig_h => k.pred_sig_h,
         .select => k.select,
+        .logits_hr, .pred_hr, .pred_sig_hr => try rowsKernelOf(kind),
     };
     const slot = &cfgs.get().*[@intFromEnum(kind)][@intCast(rows - 1)];
     if (slot.*) |cached| {
@@ -235,6 +236,8 @@ fn launchFor(kind: Kind, rows: c_int, hidden: c_int) !Launch {
         .select => try selectCfg(rows),
         .logits, .logits_h => try gemvCfg(rows, hidden, false),
         .pred, .pred_sig, .pred_h, .pred_sig_h => try gemvCfg(rows, hidden, true),
+        .logits_hr => try gemvRowsCfg(rows, hidden, false),
+        .pred_hr, .pred_sig_hr => try gemvRowsCfg(rows, hidden, true),
     };
     slot.* = .{ .hidden = hidden, .cfg = c };
     return .{ .k = kern, .c = c };
@@ -246,8 +249,16 @@ fn launchFor(kind: Kind, rows: c_int, hidden: c_int) !Launch {
 /// `matmul(astype(x_r, f32), table)` words (gemv over the table's memory); with `pred`, the predictor's scores f32
 /// [rows, 512], the words of MLX's `matmul(x, transpose(pred.w))` (bf16: gemv at one row, gemv_wide at 2 to 8, M3 and
 /// later), widened to f32 and scored (`Score`) with `pred.bias`. error.BadExl3Shape / error.BadExl3Dtype on anything
-/// else. The caller frees the outputs.
+/// else. The caller frees the outputs. Under `Config.router_rows` a call of 2 rows or more over the f16 weight takes the
+/// rows launch (`routerLogitsWith`), the same words.
 pub fn routerLogits(s: mlx.mlx_stream, x: mlx.mlx_array, w: mlx.mlx_array, pred: ?Predictor) !Logits {
+    return routerLogitsWith(s, x, w, pred, config.get().router_rows);
+}
+
+/// `routerLogits` with the rows launch (`turboexl3_ling_router_logits_hr`, `_pred_hr`, `_pred_sig_hr`: each router
+/// threadgroup 16 logits of a group of up to 4 rows, every word of the weight read once for them) taken where `rows_launch`
+/// and the call has 2 rows or more over the f16 weight; elsewhere `routerLogits`' launch. The same words either way.
+pub fn routerLogitsWith(s: mlx.mlx_stream, x: mlx.mlx_array, w: mlx.mlx_array, pred: ?Predictor, rows_launch: bool) !Logits {
     const xs = mlx.getShape(x);
     if (xs.len != 2 or !takes(xs[0], xs[1])) return error.BadExl3Shape;
     const rows = xs[0];
@@ -257,20 +268,23 @@ pub fn routerLogits(s: mlx.mlx_stream, x: mlx.mlx_array, w: mlx.mlx_array, pred:
     const wdt = mlx.mlx_array_dtype(w);
     if (mlx.mlx_array_dtype(x) != .bfloat16 or (wdt != .float32 and wdt != .float16)) return error.BadExl3Dtype;
     const half = wdt == .float16;
+    const rl = rowsLaunchFor(rows_launch, rows, half);
     const p = pred orelse {
-        const lo = try launchFor(if (half) .logits_h else .logits, rows, hidden);
+        const lo = try launchFor(if (rl) .logits_hr else if (half) .logits_h else .logits, rows, hidden);
         var o1: [1]mlx.mlx_array = undefined;
         try ks.applyConfig(lo.k, lo.c, &.{ x, w }, &o1, s);
+        if (rl) rowsRan(rows, false);
         return .{ .logits = o1[0], .scores = null };
     };
     const ps = mlx.getShape(p.w);
     const bs = mlx.getShape(p.bias);
     if (ps.len != 2 or ps[0] != n_experts or ps[1] != hidden or bs.len != 1 or bs[0] != n_experts) return error.BadExl3Shape;
     if (mlx.mlx_array_dtype(p.w) != .bfloat16 or mlx.mlx_array_dtype(p.bias) != .float32) return error.BadExl3Dtype;
-    const kind: Kind = if (p.score == .sigmoid) (if (half) .pred_sig_h else .pred_sig) else (if (half) .pred_h else .pred);
+    const kind: Kind = if (rl) (if (p.score == .sigmoid) .pred_sig_hr else .pred_hr) else if (p.score == .sigmoid) (if (half) .pred_sig_h else .pred_sig) else (if (half) .pred_h else .pred);
     const lp = try launchFor(kind, rows, hidden);
     var o2: [2]mlx.mlx_array = undefined;
     try ks.applyConfig(lp.k, lp.c, &.{ x, w, p.w, p.bias }, &o2, s);
+    if (rl) rowsRan(rows, true);
     return .{ .logits = o2[0], .scores = o2[1] };
 }
 
@@ -322,6 +336,101 @@ pub fn tableF32(s: mlx.mlx_stream, w: mlx.mlx_array) !mlx.mlx_array {
     return out;
 }
 
+// ── the rows launch (D35, Config.router_rows): the router's weight read once for a call's rows ──
+//
+// router/head's launch runs a router threadgroup for each (row, 16 logits), so a call of R rows reads the weight R times.
+// The rows launch gives each router threadgroup 16 logits of each row of a group of up to `rows_group` rows (RG; NRG
+// groups): each word of the weight is read once and taken by every row of the group in that row's own statement
+// (router/logits_rows_1 and _2 around router/logits_wh, verbatim), so each row's statements and their order, and so its
+// logits, are router/head's launch's. The predictor's threadgroups follow the router's (router/pred_open_rows) and run
+// pred_one and pred_wide verbatim. Over the f16 weight (ROUTER_F16's, the served one) at 2 rows or more; one row is
+// router/head's launch already (a group of one).
+
+const config = @import("../../core/config.zig");
+
+/// The rows launch's head (each router threadgroup 16 logits of a group of up to `rows_group` rows), MLX's gemv
+/// statements for the group's rows at once around the f16 weight's read, and the predictor's opening after the groups'
+/// threadgroups
+pub const head_rows = @embedFile("kernels/router/head_rows.metal");
+pub const logits_rows_1 = @embedFile("kernels/router/logits_rows_1.metal");
+pub const logits_rows_2 = @embedFile("kernels/router/logits_rows_2.metal");
+pub const pred_open_rows = @embedFile("kernels/router/pred_open_rows.metal");
+/// The router's GEMV over the f16 weight for a group of rows (`logits_wh`'s read verbatim)
+pub const logits_gemv_hr: [:0]const u8 = logits_rows_1 ++ logits_wh ++ logits_rows_2;
+/// `text_logits_h` on the rows launch
+pub const text_logits_hr: [:0]const u8 = head_rows ++ logits_gemv_hr ++ close;
+/// `text_pred_h` on the rows launch (its score the header's)
+pub const text_pred_hr: [:0]const u8 = head_rows ++ logits_gemv_hr ++ pred_open_rows ++ pred_one ++ pred_wide ++ close;
+
+/// The most rows a router threadgroup of the rows launch takes (its accumulators and coefficients, 8 floats a row)
+pub const rows_group: u32 = 4;
+
+/// Launch 1's threadgroups on the rows launch at `rows` rows: the router's 512 / 16 for each group of up to `rows_group`
+/// rows, then the predictor's as `threadgroups`
+pub fn threadgroupsRows(rows: u32, pred: bool) u32 {
+    const rg = @min(rows, rows_group);
+    const router = ((rows + rg - 1) / rg) * (n_experts_u / 16);
+    if (!pred) return router;
+    return router + threadgroups(rows, true) - rows * (n_experts_u / 16);
+}
+
+/// Whether a call takes the rows launch: asked (`Config.router_rows`), 2 rows or more, over the f16 weight
+pub fn rowsLaunchFor(asked: bool, rows: c_int, half: bool) bool {
+    return asked and rows >= 2 and half;
+}
+
+/// The rows launch's config: `gemvCfg`'s, on `threadgroupsRows`' grid
+fn gemvRowsCfg(rows: c_int, hidden: c_int, pred: bool) !mlx.mlx_fast_metal_kernel_config {
+    const out = [_]c_int{ rows, n_experts };
+    const tmpl = [_]ks.TemplateArg{
+        .{ .name = "R", .value = .{ .int = rows } },
+        .{ .name = "NE", .value = .{ .int = n_experts } },
+        .{ .name = "HK", .value = .{ .int = hidden } },
+    };
+    const grid: [3]u32 = .{ threadgroupsRows(@intCast(rows), pred) * threads, 1, 1 };
+    if (pred) return ks.buildConfig(.{ .grid = grid, .threadgroup = .{ threads, 1, 1 }, .out_shapes = &.{ &out, &out }, .out_dtypes = &.{ .float32, .float32 }, .template = &tmpl });
+    return ks.buildConfig(.{ .grid = grid, .threadgroup = .{ threads, 1, 1 }, .out_shapes = &.{&out}, .out_dtypes = &.{.float32}, .template = &tmpl });
+}
+
+/// The rows launch's three kernels (logits_hr, pred_hr, pred_sig_hr), each made at its first call
+const rows_kernels = Global([3]?mlx.mlx_fast_metal_kernel, "ling_router_rows_kernels", @splat(null));
+/// whether the rows launch's engagement line has printed
+const rows_said = Global(bool, "ling_router_rows_said", false);
+/// the rows launches this process has run (`rowsRuns`)
+const rows_runs = Global(u64, "ling_router_rows_runs", 0);
+
+/// The rows launch's kernel of `kind`, made at its first call (the caller holds the lock, as `kernelsFor`'s)
+fn rowsKernelOf(kind: Kind) !mlx.mlx_fast_metal_kernel {
+    const i: usize = switch (kind) {
+        .logits_hr => 0,
+        .pred_hr => 1,
+        .pred_sig_hr => 2,
+        else => return error.BadExl3Shape,
+    };
+    const slot = &rows_kernels.get().*[i];
+    if (slot.*) |made| return made;
+    const made = switch (kind) {
+        .logits_hr => ks.newKernel("turboexl3_ling_router_logits_hr", &logits_in, &logits_out, text_logits_hr, "", true),
+        .pred_hr => ks.newKernel("turboexl3_ling_router_pred_hr", &pred_in, &pred_out, text_pred_hr, score_softplus_sqrt, true),
+        else => ks.newKernel("turboexl3_ling_router_pred_sig_hr", &pred_in, &pred_out, text_pred_hr, score_sigmoid, true),
+    } orelse return error.KernelCreateFailed;
+    slot.* = made;
+    return made;
+}
+
+/// A rows launch ran: counted, and its engagement line at the first
+fn rowsRan(rows: c_int, pred: bool) void {
+    rows_runs.get().* += 1;
+    if (rows_said.get().*) return;
+    rows_said.get().* = true;
+    std.debug.print("[turboexl3] router rows engaged: the f16 weight read once for each group of up to {d} rows (first call {d} rows, {d} router threadgroups{s})\n", .{ rows_group, rows, threadgroupsRows(@intCast(rows), false), if (pred) " and the predictor's" else "" });
+}
+
+/// The rows launches this process has run (the tests' check that an arm ran it)
+pub fn rowsRuns() u64 {
+    return rows_runs.get().*;
+}
+
 test "turboexl3 ling router texts: the logits and predictor texts are one composition per weight dtype, the table's read the only piece the f16 texts swap and the predictor's branch spliced before the close; MLX's GEMV statements carry no contraction pragma and the scores' headers do; the select text is the host's statements; every operand a name its text reads" {
     const t = std.testing;
     const pin = comptime @import("../../core/test_support.zig").pins(@embedFile("kernels/test/pins/router.metal"));
@@ -366,4 +475,68 @@ test "turboexl3 ling router plan: launch 1's threadgroups per row count (the rou
     while (r <= 8) : (r += 1) try t.expectEqual(32 * r + 64, threadgroups(r, true));
     for ([_]c_int{ 1, 2, 5, 6, 8 }) |rows| for ([_]c_int{ 1024, 4096, 7168 }) |h| try t.expect(takes(rows, h));
     for ([_][2]c_int{ .{ 0, 4096 }, .{ 9, 4096 }, .{ 1, 8192 }, .{ 1, 4000 }, .{ 1, 512 }, .{ 1, 0 }, .{ -1, 4096 } }) |c| try t.expect(!takes(c[0], c[1]));
+}
+
+test "turboexl3 ling router rows texts: the rows launch's texts are the f16 texts with the head, the gemv's opening and close and the predictor's opening swapped for the rows launch's pieces, the table's read verbatim; every other gemv statement once each, a row's own in place of each per-row one; no contraction pragma; every operand named, no shape buffers" {
+    const t = std.testing;
+    const pin = comptime @import("../../core/test_support.zig").pins(@embedFile("kernels/test/pins/router_rows.metal"));
+    const count = struct {
+        fn f(hay: []const u8, needle: []const u8) usize {
+            return std.mem.count(u8, hay, needle);
+        }
+    }.f;
+    try t.expectEqualStrings(text_logits_hr, head_rows ++ logits_rows_1 ++ logits_wh ++ logits_rows_2 ++ close);
+    try t.expectEqualStrings(text_pred_hr, head_rows ++ logits_rows_1 ++ logits_wh ++ logits_rows_2 ++ pred_open_rows ++ pred_one ++ pred_wide ++ close);
+    // the served f16 texts are those with head, logits_1, logits_2 and pred_open in the four pieces' places
+    try t.expectEqualStrings(text_logits_h, head ++ logits_1 ++ logits_wh ++ logits_2 ++ close);
+    try t.expectEqualStrings(text_pred_h, head ++ logits_1 ++ logits_wh ++ logits_2 ++ pred_open ++ pred_one ++ pred_wide ++ close);
+    const served_gemv = logits_1 ++ logits_wh ++ logits_2;
+    // no contraction pragma in MLX's statements, as in the served texts
+    try t.expect(count(text_logits_hr, pin[0]) == 0 and count(text_pred_hr, pin[0]) == 0);
+    // each per-row statement as a row's own (the coefficients, the sum, the shuffle tree, the store), the served one
+    // nowhere in the rows gemv
+    for (pin[1..5], pin[7..11]) |rows_line, served_line| {
+        try t.expectEqual(@as(usize, 1), count(logits_gemv_hr, rows_line));
+        try t.expectEqual(@as(usize, 0), count(logits_gemv_hr, served_line));
+        try t.expectEqual(@as(usize, 1), count(served_gemv, served_line));
+    }
+    try t.expectEqual(@as(usize, 1), count(head_rows, pin[5]));
+    try t.expectEqual(@as(usize, 1), count(pred_open_rows, pin[6]));
+    // every other statement of MLX's gemv once in each
+    for (pin[11..]) |l| {
+        try t.expectEqual(@as(usize, 1), count(served_gemv, l));
+        try t.expectEqual(@as(usize, 1), count(logits_gemv_hr, l));
+    }
+    for ([_][:0]const u8{ text_logits_hr, text_pred_hr }, [_][]const [*:0]const u8{ &(logits_in ++ logits_out), &(pred_in ++ pred_out) }) |txt, names| {
+        for (names) |n| try t.expect(count(txt, std.mem.span(n)) > 0);
+        for ([_][]const u8{ "_shape", "_strides", "_ndim" }) |suf| try t.expectEqual(@as(usize, 0), count(txt, suf));
+        for ([_][]const u8{ "R", "NE", "HK" }) |n| try t.expect(count(txt, n) > 0);
+    }
+}
+
+test "turboexl3 ling router rows plan: the rows launch's threadgroups per row count (the router's 32 for each group of up to 4 rows, the predictor's as the served launch's), where it runs (asked, 2 rows or more, the f16 weight), and its head's cover of each (row, 16 logits) once" {
+    const t = std.testing;
+    for (1..max_rows_u + 1) |ru| {
+        const r: u32 = @intCast(ru);
+        const rg = @min(r, rows_group);
+        const groups = (r + rg - 1) / rg;
+        try t.expectEqual(groups * 32, threadgroupsRows(r, false));
+        try t.expectEqual(threadgroups(r, true) - threadgroups(r, false), threadgroupsRows(r, true) - threadgroupsRows(r, false));
+        // the head's arithmetic (kernels/router/head_rows.metal, logits_rows_2's store): each (row, block) stored once
+        var stored: [8][32]u8 = @splat(@splat(0));
+        for (0..groups * 32) |tgi| {
+            const tg: u32 = @intCast(tgi);
+            const grp = tg / 32;
+            const blk = tg % 32;
+            for (0..rg) |j| {
+                const row = grp * rg + @as(u32, @intCast(j));
+                if (row < r) stored[row][blk] += 1;
+            }
+        }
+        for (0..8) |row| for (0..32) |blk| try t.expectEqual(@as(u8, if (row < r) 1 else 0), stored[row][blk]);
+    }
+    try t.expectEqual(threadgroups(1, true), threadgroupsRows(1, true));
+    try t.expectEqual(@as(u32, 64), threadgroupsRows(8, false));
+    try t.expect(!rowsLaunchFor(true, 1, true) and rowsLaunchFor(true, 2, true) and rowsLaunchFor(true, 8, true));
+    try t.expect(!rowsLaunchFor(true, 4, false) and !rowsLaunchFor(false, 3, true));
 }

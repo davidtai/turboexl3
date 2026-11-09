@@ -600,7 +600,9 @@ each rounded to bf16 (the product's dtype), widened, then scored with the statem
 MLX's metallib is built `-fno-fast-math`, so its bare exp, log and sqrt are the precise ones: the scores spell them
 precise, and their headers keep each statement's rounding (`#pragma METAL fp contract(off)`). The GEMV statements carry
 no pragma: they compile as MLX's own do. `tableF32` rebuilds the loader's table from the f16 weight's view (astype, then
-+ 0) for a host that keeps the weight in f16 and runs its own matmul where these launches do not serve.
++ 0) for a host that keeps the weight in f16 and runs its own matmul where these launches do not serve. Under
+`Config.router_rows` a call of 2 rows or more over the f16 weight takes the rows launch (the `_hr` kernels): each router
+threadgroup computes its 16 logits for a group of up to 4 rows, so the weight is read once a group, not once a row.
 
 ### `turboexl3_ling_router_logits`
 
@@ -762,6 +764,94 @@ no pragma: they compile as MLX's own do. `tableF32` rebuilds the loader's table 
 - **Pinned by:** `src/models/ling/router_test.zig` "turboexl3 gpu ling router: ..." (GPU, the ids and weights against
   the host's launch then the astype, alone and in `route`, rows 1 to 8); `src/models/ling/router.zig` "turboexl3 ling
   router texts: ..." (CPU, the host's statements).
+
+### `turboexl3_ling_router_logits_hr`
+
+<!-- kernel-facts: turboexl3_ling_router_logits_hr -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/ling/router.zig:413` (`fn rowsKernelOf`) |
+| inputs | `x`, `w` |
+| outputs | `logits` |
+| source | `text_logits_hr` = `ling:router/head_rows` ++ `ling:router/logits_rows_1` ++ `ling:router/logits_wh` ++ `ling:router/logits_rows_2` ++ `ling:router/close` (3210 B, `64478f05ed17`) |
+| header | `""` = (empty) (0 B, `e3b0c44298fc`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** Ling-3.1-flash: `root.ling.router.routerLogits` (and `route`) over the loaded f16 weight at a call of 2
+  rows or more without a predictor (the last MoE layer and the NextN layer), under `Config.router_rows`
+  (`routerLogitsWith`): the outside plugin turboexl3_ling's candidate ROUTER_ROWS (with ROUTER_F16). Not served by
+  default.
+- **Shapes and dtypes:** `turboexl3_ling_router_logits_h`'s, R 2 to 8.
+- **Grid and threadgroup:** `(32·NRG · 128, 1, 1)` / `(128, 1, 1)`: 32 threadgroups (MLX's gemv tiles of 16 logits)
+  for each group of RG = min(R, 4) rows, NRG = ceil(R / RG) groups. Each threadgroup runs its tile for every row of its
+  group; a group past the call's last row repeats that row's reads and stores nothing for it.
+- **Template args:** R, NE, HK, as `turboexl3_ling_router_logits_h`'s (RG and NRG follow from R).
+- **Replaces:** `turboexl3_ling_router_logits_h` at those calls (the GEMV inventory's D5b): 32R threadgroups, each tile's
+  16 weight rows read once a row (R reads of the 4 MiB weight a call), with 32·NRG (one read a group of up to 4 rows).
+- **Bits:** `turboexl3_ling_router_logits_h`'s words. Each row keeps its own coefficients (its x words widened) and its
+  own 4 sums a lane. Each weight word is read once (`ling:router/logits_wh` verbatim: widened, then + 0) and taken by
+  every row of the group in that row's own statement, `result[r][tm] += inter[tn] * v_coeff[r][tn]`: the served
+  launch's statement with the row's index. A row's statements and their order (the K loop, the 4 × 4 tile, the shuffle
+  tree, the store) are those of its threadgroup in the served launch, so its contractions and roundings are too.
+- **Pinned by:** `src/models/ling/router.zig` "turboexl3 ling router rows texts: ..." (CPU: the composition, each per-row
+  statement a row's own and the served one nowhere, every other gemv statement once,
+  `kernels/test/pins/router_rows.metal`) and "turboexl3 ling router rows plan: ..." (CPU: the grid, the calls it takes,
+  the head's cover of each (row, tile) once); `src/models/ling/router_test.zig` "turboexl3 gpu ling router rows: ..."
+  (GPU: `TURBOEXL3_LING_ROUTER_ROWS`, the logits and scores against the served launch's word for word at rows 1 to 8,
+  over the f16 weight and the f32 table; red checks: a flipped word, MLX's several-row matmul, a negated weight word).
+
+### `turboexl3_ling_router_pred_hr`
+
+<!-- kernel-facts: turboexl3_ling_router_pred_hr -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/ling/router.zig:414` (`fn rowsKernelOf`) |
+| inputs | `x`, `w`, `pw`, `pb` |
+| outputs | `logits`, `scores` |
+| source | `text_pred_hr` = `ling:router/head_rows` ++ `ling:router/logits_rows_1` ++ `ling:router/logits_wh` ++ `ling:router/logits_rows_2` ++ `ling:router/pred_open_rows` ++ `ling:router/pred_one` ++ `ling:router/pred_wide` ++ `ling:router/close` (7284 B, `9bc4dd11a86f`) |
+| header | `score_softplus_sqrt` = `ling:router/score_softplus_sqrt` (1499 B, `0f43a7203e4b`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** as `turboexl3_ling_router_logits_hr`, with a `Predictor` at its default score (`.softplus_sqrt`): in
+  `turboexl3_ling_router_pred_h`'s place at a call of 2 rows or more under `Config.router_rows`.
+- **Shapes and dtypes:** `turboexl3_ling_router_pred_h`'s, R 2 to 8.
+- **Grid and threadgroup:** `((32·NRG + P) · 128, 1, 1)` / `(128, 1, 1)`: the router's 32·NRG threadgroups as
+  `turboexl3_ling_router_logits_hr`'s, then the predictor's P as `turboexl3_ling_router_pred`'s (128 at 2 to 5 rows, 64
+  at 6 to 8).
+- **Template args:** R, NE, HK.
+- **Replaces:** `turboexl3_ling_router_pred_h` at those calls (D5b).
+- **Bits:** the logits as `turboexl3_ling_router_logits_hr`'s; the scores `turboexl3_ling_router_pred_h`'s: the
+  predictor's threadgroups run `ling:router/pred_one` and `ling:router/pred_wide` verbatim, their index counted past the
+  router's 32·NRG threadgroups (`ling:router/pred_open_rows`) in place of 32R.
+- **Pinned by:** as `turboexl3_ling_router_logits_hr`'s (the GPU test's DeepSeek score).
+
+### `turboexl3_ling_router_pred_sig_hr`
+
+<!-- kernel-facts: turboexl3_ling_router_pred_sig_hr -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/ling/router.zig:415` (`fn rowsKernelOf`) |
+| inputs | `x`, `w`, `pw`, `pb` |
+| outputs | `logits`, `scores` |
+| source | `text_pred_hr` = `ling:router/head_rows` ++ `ling:router/logits_rows_1` ++ `ling:router/logits_wh` ++ `ling:router/logits_rows_2` ++ `ling:router/pred_open_rows` ++ `ling:router/pred_one` ++ `ling:router/pred_wide` ++ `ling:router/close` (7284 B, `9bc4dd11a86f`) |
+| header | `score_sigmoid` = `ling:router/score_sigmoid` (522 B, `765e609d7b4e`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** as `turboexl3_ling_router_pred_hr`, with `Predictor.score = .sigmoid` (Ling's score, the plugin's
+  PREDICTOR): in `turboexl3_ling_router_pred_sig_h`'s place at a call of 2 rows or more under `Config.router_rows`.
+- **Shapes and dtypes:** `turboexl3_ling_router_pred_sig_h`'s, R 2 to 8.
+- **Grid and threadgroup:** `turboexl3_ling_router_pred_hr`'s.
+- **Template args:** R, NE, HK.
+- **Replaces:** `turboexl3_ling_router_pred_sig_h` at those calls (D5b).
+- **Bits:** the logits as `turboexl3_ling_router_logits_hr`'s; the scores `turboexl3_ling_router_pred_sig_h`'s (the
+  predictor's pieces verbatim, as `turboexl3_ling_router_pred_hr`'s).
+- **Pinned by:** as `turboexl3_ling_router_logits_hr`'s (the GPU test's Ling score).
 
 ### `turboexl3_test_ling_router_host`
 
