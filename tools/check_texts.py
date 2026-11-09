@@ -1509,6 +1509,13 @@ CHANGED[('dense.zig', 'const shared_state')] += ', dec_host_zero and dec_host_ze
 CHANGED[('pair_ks.zig', 'fn linear2')] = 'its counters from dense.hostCounters where it launched dec_zero'
 CHANGED[('shared_gu.zig', 'fn gateUp')] = 'its counters from dense.hostCounters where it launched dec_zero'
 
+# Dense.decPrepared: DEC-ONE's GEMV launch alone over rows a caller prepared in a launch of its own (the GLM-5.3-Flash
+# plugin's producer texts, which write prep_sc's outputs), and decPrepSpec, what they write
+CHANGED[('dense.zig', 'const Dense')] += ('; DecPrep / decPrepSpec (what prep_sc hands DEC-ONE\'s GEMV at a row count) and '
+                                        'decPrepared (dec0 at decCfgs\' config over a caller\'s prepared rows)')
+ADDED[('root.zig', 'fn decPrepSpec')] = 'Dense.decPrepSpec on the Dense linear takes'
+ADDED[('root.zig', 'fn decPrepared')] = 'Dense.decPrepared on the Dense linear takes, its operands checked against the spec'
+
 
 def metal_strings(fn, toks, corpus):
     """(line, kind, value) of every literal in a .zig file that holds Metal"""

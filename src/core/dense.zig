@@ -625,6 +625,40 @@ pub const Dense = struct {
         return (try self.decCfgs(rows)).prep_in;
     }
 
+    /// What prep_sc's launch hands DEC-ONE's GEMV at `rows` rows, for a caller that makes it in a launch of its own
+    /// (`decPrepared`): xp [rows, in] (f32 where `xp_f32`, the variant's prep_scf; else f16), each value prep_s's half in
+    /// lane order; xs f32 [rows, nb], each 128-block's sum of its stored halves; cnt u32 [ncnt] zeroed, prep_sc's
+    /// threads striding it by `nth` (`(row nb + block) 32 + lane` from 0). Null where DEC-ONE does not take the call or
+    /// runs its prepare inside its launch.
+    pub const DecPrep = struct { xp_f32: bool, nb: u32, ncnt: u32, nth: u32 };
+    pub fn decPrepSpec(self: *Dense, rows: usize) !?DecPrep {
+        if (!self.decTakes(rows)) return null;
+        if ((try self.decCfgs(rows)).prep_in) return null;
+        const rows_u: u32 = @intCast(rows);
+        const rb: u32 = rbFor(rows_u);
+        const chunks: u32 = (rows_u + rb - 1) / rb;
+        const nb = self.shape.in / 128;
+        // decCfgs' counters (at least 8: MLX binds an input of fewer in the constant address space) and prep_sc's grid
+        return .{ .xp_f32 = self.xf, .nb = nb, .ncnt = @max((self.shape.out / 128) * chunks, 8), .nth = nb * 32 * rows_u };
+    }
+
+    /// DEC-ONE's GEMV launch alone (dec0 at decCfgs' config) over rows a launch before it prepared as `decPrepSpec` says:
+    /// the launch `decLinear` runs after prep_sc's, on the same operands, so its bytes. y [rows, out] in
+    /// `shape.out_dtype`; the caller frees y. error.Exl3EngineNotImplemented where `decPrepSpec` is null.
+    pub fn decPrepared(self: *Dense, s: mlx.mlx_stream, xp: mlx.mlx_array, xs: mlx.mlx_array, cnt: mlx.mlx_array, trellis: mlx.mlx_array, svh: mlx.mlx_array, rows: usize) !mlx.mlx_array {
+        if (!self.decTakes(rows)) return error.Exl3EngineNotImplemented;
+        const c = try self.decCfgs(rows);
+        if (c.prep_in) return error.Exl3EngineNotImplemented;
+        if (!dec_said.get().*) {
+            dec_said.get().* = true;
+            std.debug.print("[turboexl3] DEC-ONE engaged: one GEMV launch per dense linear at decode rows <= {d}\n", .{self.dec_rows});
+        }
+        var o: [2]mlx.mlx_array = undefined;
+        try ks.applyConfig(self.dec0, c.gemv, &.{ xp, xs, trellis, svh, cnt }, &o, s);
+        _ = mlx.mlx_array_free(o[1]);
+        return o[0];
+    }
+
     /// DEC-ONE: y [rows, out] in `shape.out_dtype`, the three-launch chain's bytes
     fn decLinear(self: *Dense, s: mlx.mlx_stream, x: mlx.mlx_array, trellis: mlx.mlx_array, suh: mlx.mlx_array, svh: mlx.mlx_array, rows: usize) !mlx.mlx_array {
         const c = try self.decCfgs(rows);

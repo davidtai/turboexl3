@@ -582,6 +582,32 @@ pub fn linearPrepared(s: mlx.mlx_stream, xp: mlx.mlx_array, p: Proj, dec: format
     return d.finishOf(s, z, p.svh, rows);
 }
 
+/// What `decPrepared` reads for one projection at `rows` decode rows (`dense.Dense.decPrepSpec` on the `Dense` `linear`
+/// takes for an x of `out_dtype`): null where DEC-ONE does not take the call or runs its prepare inside its GEMV launch
+/// (the caller runs `linear`).
+pub fn decPrepSpec(p: Proj, in_dim: u32, out_dtype: mlx.mlx_dtype, dec: format.Decode, rows: usize) !?dense.Dense.DecPrep {
+    if (out_dtype != .bfloat16 and out_dtype != .float32 and out_dtype != .float16) return error.BadExl3Dtype;
+    const d = try denseOf(p, in_dim, out_dtype, dec);
+    return d.decPrepSpec(rows);
+}
+
+/// `linear` at decode rows from rows a launch before it prepared as `decPrepSpec` says: xp [rows, in] (f32 or f16, the
+/// spec's), xs f32 [rows, in / 128], cnt u32 [ncnt] zeroed. DEC-ONE's GEMV launch on the `Dense` `linear` takes for an x
+/// of `out_dtype`, at its config, so `linear`'s bytes where xp, xs and cnt are prep_sc's. y [rows, out] in `out_dtype`.
+pub fn decPrepared(s: mlx.mlx_stream, xp: mlx.mlx_array, xs: mlx.mlx_array, cnt: mlx.mlx_array, p: Proj, dec: format.Decode, out_dtype: mlx.mlx_dtype) !mlx.mlx_array {
+    const psh = mlx.getShape(xp);
+    if (psh.len != 2 or psh[0] < 1) return error.BadExl3Shape;
+    if (out_dtype != .bfloat16 and out_dtype != .float32 and out_dtype != .float16) return error.BadExl3Dtype;
+    const d = try denseOf(p, @intCast(psh[1]), out_dtype, dec);
+    const rows: usize = @intCast(psh[0]);
+    const sp = (try d.decPrepSpec(rows)) orelse return error.Exl3EngineNotImplemented;
+    const xp_dt: mlx.mlx_dtype = if (sp.xp_f32) .float32 else .float16;
+    if (mlx.mlx_array_dtype(xp) != xp_dt or mlx.mlx_array_dtype(xs) != .float32 or mlx.mlx_array_dtype(cnt) != .uint32) return error.BadExl3Dtype;
+    const xsh = mlx.getShape(xs);
+    if (xsh.len != 2 or xsh[0] != psh[0] or xsh[1] != @as(c_int, @intCast(sp.nb)) or mlx.mlx_array_size(cnt) != sp.ncnt) return error.BadExl3Shape;
+    return d.decPrepared(s, xp, xs, cnt, p.trellis, p.svh, rows);
+}
+
 /// `linear`'s finish of an inner product z F16 [rows, out] at prefill rows: y [rows, out] in `out_dtype`.
 pub fn linearFinish(s: mlx.mlx_stream, z: mlx.mlx_array, p: Proj, dec: format.Decode, out_dtype: mlx.mlx_dtype) !mlx.mlx_array {
     const zsh = mlx.getShape(z);
