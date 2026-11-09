@@ -2440,7 +2440,8 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
   DFR 32 stages each round (32 · 128 halves, 8 KB) in the stage buffer the pair's last stage was read from, so the
   launch holds what the served down GEMM holds; DFR 64 adds 16 KB of its own past the stage, within 32 KB.
 - **Template args:** the 23 of `gemmCfg` (as `turboexl3_pf_gemm1`) at BMR `dfinRows`, NOPS 1, KD = inter, ND = hidden,
-  BKS 64, NCB 2 or 4 (a threadgroup owns whole 128-column blocks); DFR (tile rows a staging round: 32 or 64), T2 (1: the
+  BKS 64 (128 with bk128), NCB 2 or 4 (a threadgroup owns whole 128-column blocks); DFR (tile rows a staging round: 32
+  or 64), T2 (1: the
   second table: tiles2 bound and read), OUT_T (y's dtype).
 - **Replaces:** the down GEMM's launches and the finish: with t128, `turboexl3_pf_t128_dnm` + `turboexl3_pf_t128_dnt` +
   `turboexl3_pf_t128_fin` (3 launches, 2 dependent levels) with 1; zd ([S, hidden] f16) is never written or read.
@@ -2450,9 +2451,11 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
   the finish's own statements (`finish_2`, `finish_4`) on those f16 words at the element the finish reads zd (L + 32 j),
   the one slot of a top-1 row (the finish's sum over one slot, from 0).
 - **Pinned by:** `src/models/ling/rows_test.zig` "turboexl3 gpu ling rows variants: the routed chain's variants
-  (256-row tiles, the remainder cut, ..." (GPU: dfin, dfin.r32, t256.dfin, t256.dfin.r32, t256.gu2.dfin, p256.dfin,
-  p256.dfin.r32, p128.dfin word for word against the served engine at Ling's shapes, n 40 and 32, limits 0 and 10; a
-  planted epilogue fault and a planted reduction-order fault caught); `src/core/prefill.zig` "turboexl3 prefill variant texts: the 256-row route is the
+  (256-row tiles, the remainder cut, ..." (GPU: dfin, dfin.r64, t256.dfin, t256.dfin.r64, t256.gu2.dfin, p256.dfin,
+  p256.dfin.r64, p128.dfin word for word against the served engine at Ling's shapes, n 40 and 32, limits 0 and 10, and
+  dfin.k128, dfin.n2, dfin.mf, p128.dfin.sb, p128.dfin.pad against their own stage shapes with the fused finish off; a
+  planted epilogue fault and two planted order faults (the finish's H128, the K loop) caught, the order faults within
+  tolerance); `src/core/prefill.zig` "turboexl3 prefill variant texts: the 256-row route is the
   128-row route at 256 rows; ..." (CPU: swapped back, `gemm1_text`; the load is the finish's; the store's rounding);
   `src/core/prefill.zig` "turboexl3 prefill variant options: t256 needs t128; ..." (CPU: whole 128-column blocks, one
   down launch, 32 KB); `src/root.zig` "turboexl3 root: the served prefill options follow the config, and the decode

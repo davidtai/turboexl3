@@ -1783,7 +1783,7 @@ test "turboexl3 prefill variant texts: the 256-row route is the 128-row route at
         const back = comptime replace(tile_back, epi, @embedFile("kernels/prefill/gemm_op1_xsz_2.metal") ++ @embedFile("kernels/prefill/gemm_5.metal"));
         try t.expectEqualStrings(gemm1_text, back);
     }
-    try t.expectEqualStrings(text_dfin, dfinText(dfin_gemm_4, dfin_finish_4));
+    try t.expectEqualStrings(text_dfin, comptime dfinText(dfin_gemm_4, dfin_finish_4));
     // the finish's statements read a row's halves where the finish reads zd: the same element of the 128-block (L + 32 j)
     try t.expectEqualStrings(@embedFile("kernels/prefill/gemm_dfin_load.metal"), comptime replace(finish_3, pin[2], pin[3]));
     // the kept even block takes the store's rounding (NAXFrag::store: static_cast<U> of each element), as the odd one

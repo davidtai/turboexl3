@@ -22,15 +22,16 @@
 //!   engine (the served options, the 128-row tiles off and on), on the call's first chunk and the padded call.
 //!   Lines: TURBOEXL3_LING_ROWS, TURBOEXL3_LING_ROWS_ENGINE.
 //! - GPU, the routed chain's variants (`variants`: the 256-row tiles, the remainder rule's cut, gate|up's column blocks,
-//!   the finish as the down GEMM's epilogue, the plain launches at bm 128 and 256; each a `prefill.Options` change, off
-//!   by default), each held word for word to the served engine (`Prefill.moeT128With` at the served options) on the row
+//!   the finish as the down GEMM's epilogue, also at 128-deep, two-block, MMA-first, single-buffered and padded stages,
+//!   the plain launches at bm 128 and 256; each a `prefill.Options` change, off by default), each held word for word to
+//!   the served engine (`Prefill.moeT128With` at the served options) on the row
 //!   map, at n 40 and 32, limits 0 and 10, over synthetic calls (never a prompt's routing): every bucket edge of an
 //!   expert's rows (1-32, 33-64, 65-128, 129-256, 257-288, 289-512), the 4096-pair maximum call, many small experts,
 //!   lognormal-skewed counts, one hot expert, a padded 5-pair call. Red checks: a flipped output word, a planted
 //!   epilogue fault (one tile's f16 rounding dropped), a planted route fault (one 256-row tile on the wrong expert), the
 //!   GEMM's weight rounding changed (the deferred MUL1 map off) and two planted order faults (one tile's H128 stages
 //!   reordered, one tile's K stages in reverse order: the same values in exact arithmetic) must each show differing
-//!   words. Lines:
+//!   words, the order faults' all finite and within `order_tol` (a reordering, not garbage). Lines:
 //!   TURBOEXL3_LING_ROWS_VARIANT, TURBOEXL3_LING_ROWS_RED.
 //! - Timing (TURBOEXL3_LING_TIME=1 with TURBOEXL3_GPU=1; asserts nothing, guidance only): the rows path against the
 //!   plugin's chain at the plugin's call shape (the first chunk of a 4096- and a 16384-token layer's call over 512
@@ -319,8 +320,11 @@ fn engineRows(pf: *prefill.Prefill, s: mlx.mlx_stream, x: mlx.mlx_array, o: Rows
     return pf.moeWith(s, x, o.ids, o.sc, ops, o.n_call, .float32, o.rm);
 }
 
-/// A variant of the routed chain: its name and its options at rate n
-const Variant = struct { name: []const u8, o: prefill.Options };
+/// A variant of the routed chain: its name, its options at rate n, whether the TIME test times it (the byte test runs
+/// every variant), and the chain its bytes are held to: the served engine, or (`base`) the same stage shape with the
+/// variant's change off, where that stage shape is not the served chain's bytes by itself (the padded stage's natural-order
+/// A slots, say), so the line isolates the change
+const Variant = struct { name: []const u8, o: prefill.Options, time: bool = true, base: ?prefill.Options = null };
 
 /// The served options (the 128-row tiles) with the 256-row tiles, the remainder rule's cut, gate|up's column blocks and the
 /// fused finish set (`prefill.Options.t256`, `cut`, `gu_ncb`, `dfin`, `dfr`)
@@ -348,7 +352,28 @@ fn vP(n: u32, bm: u32, mixed: bool, dfin: bool, dfr: u16) prefill.Options {
     return o;
 }
 
-const n_variants = 22;
+/// `vT`'s fused finish (the 128-row tiles, 32-row rounds in the freed stage buffer; `dfin` false: its base) at another
+/// stage shape: 128-deep down stages (`bk128`: two sub-stages a buffer), two column blocks a threadgroup (`ncb` 2: the
+/// pair is the last block's), or the MMA before the next stage's decode (`mma_first`)
+fn vS(n: u32, bk128: bool, ncb: u8, mma_first: bool, dfin: bool) prefill.Options {
+    var o = vT(n, false, 64, 1, dfin, 32);
+    o.bk128 = bk128;
+    o.ncb = ncb;
+    o.mma_first = mma_first;
+    return o;
+}
+
+/// `vP`'s fused finish at bm 128 (32-row rounds; `dfin` false: its base) on a single-buffered stage (`dbuf` off: the one
+/// buffer, after a barrier), or on the padded stage (`fragb` off, so natural-order A: `alay` 0)
+fn vQ(n: u32, dbuf: bool, fragb: bool, dfin: bool) prefill.Options {
+    var o = vP(n, 128, false, dfin, 32);
+    o.dbuf = dbuf;
+    o.fragb = fragb;
+    if (!fragb) o.alay = 0;
+    return o;
+}
+
+const n_variants = 27;
 
 /// The routed chain's variants at rate n (the byte test's and the timing's arms): each one launch-shape change off the
 /// served options or one plain launch, every one `moeLingRows`'s bytes by construction (the same per-simdgroup K loop on
@@ -377,6 +402,13 @@ fn variants(n: u32) [n_variants]Variant {
         .{ .name = "p256.dfin", .o = vP(n, 256, false, true, 32) },
         .{ .name = "p256.dfin.r64", .o = vP(n, 256, false, true, 64) },
         .{ .name = "p128.dfin", .o = vP(n, 128, false, true, 32) },
+        // the fused finish's staging at the other stage shapes it takes (byte arms, not timed), each held to its own stage
+        // shape with the fused finish off
+        .{ .name = "dfin.k128", .o = vS(n, true, 4, false, true), .time = false, .base = vS(n, true, 4, false, false) },
+        .{ .name = "dfin.n2", .o = vS(n, false, 2, false, true), .time = false, .base = vS(n, false, 2, false, false) },
+        .{ .name = "dfin.mf", .o = vS(n, false, 4, true, true), .time = false, .base = vS(n, false, 4, true, false) },
+        .{ .name = "p128.dfin.sb", .o = vQ(n, false, true, true), .time = false, .base = vQ(n, false, true, false) },
+        .{ .name = "p128.dfin.pad", .o = vQ(n, true, false, true), .time = false, .base = vQ(n, true, false, false) },
     };
 }
 
@@ -457,6 +489,30 @@ fn synthCounts(kind: SynthKind, rnd: std.Random, buf: []u32) []const u32 {
             return buf[0..5];
         },
     }
+}
+
+/// A planted order fault's largest difference over the served words' RMS: a reordering's words differ by about an f16 ulp
+/// (about 2^-10 of a value), so well under this; a garbage kernel's by about 1
+const order_tol: f64 = 2e-2;
+
+/// `compare` with `ref.compare`'s largest difference over `want`'s RMS (a red check of a reordering: its words differ,
+/// every one finite and within `order_tol`)
+fn compareTol(a: std.mem.Allocator, g: *G, got: mlx.mlx_array, want: mlx.mlx_array) !struct { differing: usize, nonfinite: usize, of: usize, max_ratio: f64 } {
+    const n = mlx.mlx_array_size(want);
+    if (mlx.mlx_array_size(got) != n or mlx.mlx_array_dtype(got) != .float32 or mlx.mlx_array_dtype(want) != .float32) return error.SizeMismatch;
+    const p = try a.alloc(f32, n);
+    defer a.free(p);
+    const q = try a.alloc(f32, n);
+    defer a.free(q);
+    _ = try g.hostF32(got, p);
+    _ = try g.hostF32(want, q);
+    var d: usize = 0;
+    var nf: usize = 0;
+    for (p, q) |u, v| {
+        d += @intFromBool(@as(u32, @bitCast(u)) != @as(u32, @bitCast(v)));
+        nf += @intFromBool(!std.math.isFinite(u));
+    }
+    return .{ .differing = d, .nonfinite = nf, .of = n, .max_ratio = ref.compare(p, q).max_ratio };
 }
 
 /// `got`'s words with word `at`'s lowest bit flipped, as a new array (a red check's planted output fault)
@@ -609,11 +665,20 @@ test "turboexl3 gpu ling rows variants: the routed chain's variants (256-row til
             var served = try prefill.Prefill.init(geo, servedOptions(n, true));
             defer served.deinit();
             var engines: [n_variants]prefill.Prefill = undefined;
+            var bases: [n_variants]prefill.Prefill = undefined;
+            var has_base: [n_variants]bool = @splat(false);
             var made: usize = 0;
-            defer for (engines[0..made]) |*e| e.deinit();
-            for (vs, &engines) |v, *e| {
+            defer for (engines[0..made], bases[0..made], has_base[0..made]) |*e, *bse, hb2| {
+                e.deinit();
+                if (hb2) bse.deinit();
+            };
+            for (vs, &engines, &bases, &has_base) |v, *e, *bse, *hb2| {
                 e.* = try prefill.Prefill.init(geo, v.o);
                 made += 1;
+                if (v.base) |bo| {
+                    bse.* = try prefill.Prefill.init(geo, bo);
+                    hb2.* = true;
+                }
             }
             var cbuf: [160]u32 = undefined;
             for (std.enums.values(SynthKind)) |kind| {
@@ -625,15 +690,17 @@ test "turboexl3 gpu ling rows variants: the routed chain's variants (256-row til
                 defer a.free(call.slot);
                 const o = try rowsOps(&g, call.act, call.slot);
                 const want = try g.adopt(try engineRows(&served, s, xb, o, ops));
-                for (vs, &engines) |v, *e| {
+                for (vs, &engines, &bases, has_base) |v, *e, *bse, hb2| {
                     // fresh buffers for the variant's arrays: no word it fails to write can hold a served value
                     _ = mlx.mlx_clear_cache();
                     const m3 = g.mark();
                     defer g.resetTo(m3);
+                    const held = if (hb2) try g.adopt(try engineRows(bse, s, xb, o, ops)) else want;
+                    _ = mlx.mlx_clear_cache();
                     const got = try g.adopt(try engineRows(e, s, xb, o, ops));
-                    const c = try compare(a, &g, got, want);
+                    const c = try compare(a, &g, got, held);
                     const ok = c.differing == 0 and c.nonfinite == 0;
-                    std.debug.print("TURBOEXL3_LING_ROWS_VARIANT n={d} limit={d} call={s} pairs={d} experts={d} variant={s} differing={d}/{d} nonfinite={d} {s}\n", .{ n, lim, @tagName(kind), call.act.len, counts.len, v.name, c.differing, c.of, c.nonfinite, if (ok) "PASS" else "FAIL" });
+                    std.debug.print("TURBOEXL3_LING_ROWS_VARIANT n={d} limit={d} call={s} pairs={d} experts={d} variant={s} against={s} differing={d}/{d} nonfinite={d} {s}\n", .{ n, lim, @tagName(kind), call.act.len, counts.len, v.name, if (hb2) "base" else "served", c.differing, c.of, c.nonfinite, if (ok) "PASS" else "FAIL" });
                     if (!ok) failed = true;
                 }
             }
@@ -719,9 +786,9 @@ test "turboexl3 gpu ling rows variants: the routed chain's variants (256-row til
                 defer pf.dfin_k = kept;
                 _ = mlx.mlx_clear_cache();
                 const got = try g.adopt(try engineRows(&pf, s, xb, o, ops));
-                const c = try compare(a, &g, got, want);
-                const caught = c.differing > 0;
-                std.debug.print("TURBOEXL3_LING_ROWS_RED n={d} fault=dfin_tile0_h128_reordered differing={d}/{d} caught={}\n", .{ n, c.differing, c.of, caught });
+                const c = try compareTol(a, &g, got, want);
+                const caught = c.differing > 0 and c.nonfinite == 0 and c.max_ratio <= order_tol;
+                std.debug.print("TURBOEXL3_LING_ROWS_RED n={d} fault=dfin_tile0_h128_reordered differing={d}/{d} nonfinite={d} max_ratio={e:.3} caught={}\n", .{ n, c.differing, c.of, c.nonfinite, c.max_ratio, caught });
                 if (!caught) failed = true;
             }
             // 6. the K loop's order changed and nothing else: the fused down GEMM with tile 0's K stages in reverse order
@@ -736,9 +803,9 @@ test "turboexl3 gpu ling rows variants: the routed chain's variants (256-row til
                 defer pf.dfin_k = kept;
                 _ = mlx.mlx_clear_cache();
                 const got = try g.adopt(try engineRows(&pf, s, xb, o, ops));
-                const c = try compare(a, &g, got, want);
-                const caught = c.differing > 0;
-                std.debug.print("TURBOEXL3_LING_ROWS_RED n={d} fault=dfin_tile0_k_reversed differing={d}/{d} caught={}\n", .{ n, c.differing, c.of, caught });
+                const c = try compareTol(a, &g, got, want);
+                const caught = c.differing > 0 and c.nonfinite == 0 and c.max_ratio <= order_tol;
+                std.debug.print("TURBOEXL3_LING_ROWS_RED n={d} fault=dfin_tile0_k_reversed differing={d}/{d} nonfinite={d} max_ratio={e:.3} caught={}\n", .{ n, c.differing, c.of, c.nonfinite, c.max_ratio, caught });
                 if (!caught) failed = true;
             }
         }
@@ -891,6 +958,7 @@ fn timeVariants(a: std.mem.Allocator, g: *G, s: mlx.mlx_stream, n: u32, experts:
     const base = try timeArm(g, .{ .s = s, .pf = &served, .x = xb, .o = o, .ops = ops });
     std.debug.print("TURBOEXL3_LING_ROWS_TIME_ARM n={d} routing={s} of_tokens={d} pairs={d} experts={d} arm=served min_us={d:.1} med_us={d:.1} tflops={d:.2} vs_served_min=1.000 differing=0/0\n", .{ n, routing, tokens, act.len, runsOf(slot), base[0], base[1], flops / (base[0] * 1e6) });
     for (variants(n)) |v| {
+        if (!v.time) continue;
         const vm = g.mark();
         defer g.resetTo(vm);
         var pf = try prefill.Prefill.init(geo, v.o);
