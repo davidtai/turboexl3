@@ -1703,6 +1703,9 @@ SPLIT_REMOVED_TESTS["turboexl3 gpu ling mla rows: kv_b and the head gate in one 
 _S2_V2 = 'V2 rows, rows2 and block (MLA_LATENT_ROWS, _ROWS2, _BLOCK: candidates, superseded by MLA_LATENT_NAX, kept): launch 2 of the MLA attention in the latent for 2 or 4 rows a threadgroup, and on 2 x 2 / 4 x 4 tiles (Config.mla_latent_rows, mla_latent_block; mla_latent.Attn.rows2, rows4, block)'
 SPLIT_REMOVED_KERNELS['turboexl3_ling_mla_attn_rows'] = _S2_V2
 SPLIT_REMOVED_KERNELS['turboexl3_ling_mla_attn_block'] = _S2_V2
+_S2_VRT = "D35 VERIFY_ROW_TABLE (closed by TIME: 1.09/1.74/2.19 of the served at 2/3/4 rows): o_proj at a verify's rows on one output tile a GEMV threadgroup (Config.dec_verify_row_table, dense.verify_row_table)"
+SPLIT_REMOVED_TESTS["turboexl3 ling: Config.dec_verify_row_table gives o_proj's shape (8192 -> 4096 at K6) its verify_row_table launch at rows 2 to 4 only, every other trunk shape the rest of the configuration's, beside the one-row table"] = _S2_VRT
+SPLIT_REMOVED_TESTS["turboexl3 gpu ling verify-row table: o_proj's verify rows (2 to 4) on the table's launch (Config.dec_verify_row_table) give the served launch's words and the three-launch chain's, through linear and over prepared rows; red check: the table's launch at another K split (TURBOEXL3_GPU=1)"] = _S2_VRT
 # --strip2 end--
 
 _R10 = ("R10 ROUTER_ADDNORM (M6, rejected): the post-attention add_norm folded into the router's launch 1 "

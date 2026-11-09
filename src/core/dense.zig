@@ -454,13 +454,13 @@ pub const Dense = struct {
     }
 
     /// `bt_set` as a Dense of `shape` starts under `cfg`: none set, but a one-row call's `one_row_table` entry's under
-    /// `Config.dec_one_row_table`, and rows 2 to 4 at `verify_row_table`'s under `Config.dec_verify_row_table`
+    /// `Config.dec_one_row_table`
     pub fn btSetFor(cfg: config.Config, shape: Shape) [decode.Kernels.max_rows + 1]u8 {
         var b: [decode.Kernels.max_rows + 1]u8 = @splat(0);
         if (cfg.dec_one_row_table) if (oneRowFor(shape)) |e| {
             b[1] = e.bt;
         };
-        return verifyRowsInto(cfg, shape, b);
+        return b;
     }
 
     /// `one_prep_in` as a Dense of `shape` starts under `cfg`
@@ -489,7 +489,7 @@ pub const Dense = struct {
         const OUT: c_int = @intCast(self.shape.out);
         const t = self.templ();
         const rb: u32 = rbFor(rows_u);
-        const bt = verifyRowSaid(self, rows, self.btDec(rows, rb));
+        const bt = self.btDec(rows, rb);
         if (8 % bt != 0) return error.BadExl3Shape;
         const chunks: u32 = (rows_u + rb - 1) / rb;
         const ksv: c_int = @intCast(self.ks_split);
@@ -1697,54 +1697,6 @@ pub fn dec0VariantRuns(v: u8) u64 {
     return dec0v_runs.get().*[v];
 }
 
-// ---- The verify-row table (`Config.dec_verify_row_table`): a trunk shape's DEC-ONE launch at a verify's rows ----
-
-/// A trunk shape's launch at a verify's rows (2 to 4, DEC-ONE's) under `Config.dec_verify_row_table`: output tiles per
-/// GEMV threadgroup at each of those row counts (`btFor`'s is 2 there)
-pub const VerifyRow = struct { in: u32, out: u32, n: u32, bt: u8 };
-/// Ling-3.1-flash's o_proj at K6 (KDA o and the MLA output projection, 8192 -> 4096; the GEMV inventory's D5a): one
-/// output tile a threadgroup at 2 to 4 rows, twice `btFor`'s threadgroups (1024 at its K split of 4), as its one-row
-/// entry takes at one row. Launch shape only: a row's sums do not depend on the tiles a threadgroup.
-pub const verify_row_table = [_]VerifyRow{
-    .{ .in = 8192, .out = 4096, .n = 96, .bt = 1 },
-};
-
-/// `verify_row_table`'s entry for `shape`, null for a shape it does not name
-pub fn verifyRowFor(shape: Shape) ?VerifyRow {
-    return if (verifyRowIndex(shape)) |i| verify_row_table[i] else null;
-}
-
-fn verifyRowIndex(shape: Shape) ?u8 {
-    for (verify_row_table, 0..) |e, i| if (e.in == shape.in and e.out == shape.out and e.n == shape.rate.n) return @intCast(i);
-    return null;
-}
-
-/// `b` (a Dense's `bt_set` as `Dense.btSetFor` builds it) with `shape`'s `verify_row_table` entry at rows 2 to 4 under
-/// `Config.dec_verify_row_table`
-fn verifyRowsInto(cfg: config.Config, shape: Shape, b: [decode.Kernels.max_rows + 1]u8) [decode.Kernels.max_rows + 1]u8 {
-    var o = b;
-    if (cfg.dec_verify_row_table) if (verifyRowFor(shape)) |e| {
-        for (o[2..5]) |*v| v.* = e.bt;
-    };
-    return o;
-}
-
-/// the `verify_row_table` entries whose engagement line a DEC-ONE launch has printed (bit i = entry i)
-const verify_said = Global(u8, "dense_verify_row_said", 0);
-
-/// `bt`, DEC-ONE's tiles a threadgroup for `d`'s call of `rows` rows (`Dense.decLaunch`): where it is `d`'s
-/// `verify_row_table` entry's at a verify's rows, that entry's engagement line first (once an entry a process)
-fn verifyRowSaid(d: *const Dense, rows: usize, bt: u32) u32 {
-    if (rows < 2 or rows > 4) return bt;
-    const i = verifyRowIndex(d.shape) orelse return bt;
-    if (d.bt_set[rows] == 0 or bt != verify_row_table[i].bt) return bt;
-    const bit = @as(u8, 1) << @intCast(i);
-    if ((verify_said.get().* & bit) != 0) return bt;
-    verify_said.get().* |= bit;
-    std.debug.print("[turboexl3] verify-row table engaged: in={d} out={d} n={d} BT={d} at rows 2 to 4 (first launch {d} rows)\n", .{ d.shape.in, d.shape.out, d.shape.rate.n, bt, rows });
-    return bt;
-}
-
 // ---- The un-rotation's CPU checks: the kernels' arithmetic ported statement for statement against an f64 reference ----
 
 /// f32 to f16 and back (round to nearest even), as Metal's half() rounds.
@@ -2348,7 +2300,6 @@ pub const shared_state = .{
     dec0v_kernels,
     dec0v_said,
     dec0v_runs,
-    verify_said,
     resident_bypass,
     Resident.lock,
     Resident.armed,
