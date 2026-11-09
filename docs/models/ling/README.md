@@ -45,15 +45,13 @@ prompt call's `linear` to the same row of a whole-prompt call wherever both call
 layer-major prompt pass's trunk linears; `TURBOEXL3_LING_ROWINV` lines); `rows_test.zig` holds `moeLingRows` to the outside
 plugin's prompt chunk (its take, its casts and `moeLing` at top-1) byte for byte on the loader's views, every chunk of
 a prompt layer's call and a padded one (`TURBOEXL3_LING_ROWS` lines), and each variant of its routed chain (the 256-row
-tiles, the remainder rule's cut, gate|up's column blocks, the finish as the down GEMM's epilogue, also only for the
-experts of at least 64, 80 or 96 rows in the call, the plain launches at bm 128 and 256; `prefill.Options`, off by
-default) to the served engine word for word on synthetic calls at every row bucket of an expert, experts on both sides
-of each threshold and a lognormal-popularity call (the threshold arms also over a ladder of rows per expert; the fused
-finish at its other stage shapes to that stage shape without it), with ten red checks that must each be caught: a
-flipped word, four planted kernel faults (a value, a route, two pure reorderings), a rounding change, and for the
-threshold each half of the launch writing y marked (exactly its rows differ) and a threshold ignored or off by one
+tiles, the remainder rule's cut, gate|up's column blocks, the finish as the down GEMM's epilogue, the plain launches
+at bm 128 and 256; `prefill.Options`, off by default) to the served engine word for word on synthetic calls at every
+row bucket of an expert, experts on both sides of 64, 80 and 96 rows and a lognormal-popularity call (the fused finish
+at its other stage shapes to that stage shape without it), with six red checks that must each be caught: a flipped
+word, four planted kernel faults (a value, a route, two pure reorderings) and a rounding change
 (`TURBOEXL3_LING_ROWS_VARIANT` and `TURBOEXL3_LING_ROWS_RED` lines). The same test holds the outside plugin's PF_DFIN
-whole-call switch (`prefill.Call`): on the fused finish's engines (plain, and at the threshold of 80 rows) every
+whole-call switch (`prefill.Call`): on the fused finish's engine every
 synthetic call at both choices gives the served words, and its line names the ending the call ran from the engine's
 step counts (`prefill.Steps`); the plugin's rule (a wide call of R rows takes the fused finish at R · 8 ≥ 80 · 512) puts
 5,119 and 1,120 rows on the served ending and 5,120 and 16,384 on the fused finish, every call at call_min 0; and three

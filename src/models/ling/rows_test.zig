@@ -21,32 +21,29 @@
 //!   `Prefill.moeWith` and `moeT128With` with the row map against `moe` and `moeT128` over the gathered rows on one
 //!   engine (the served options, the 128-row tiles off and on), on the call's first chunk and the padded call.
 //!   Lines: TURBOEXL3_LING_ROWS, TURBOEXL3_LING_ROWS_ENGINE.
-//! - GPU, the routed chain's variants (`variants`: the 256-row tiles, the remainder rule's cut, gate|up's column blocks,
-//!   the finish as the down GEMM's epilogue, also at 128-deep, two-block, MMA-first, single-buffered and padded stages,
-//!   and only for the experts of at least 64, 80 or 96 rows in the call (the threshold arms), the plain launches at bm 128
-//!   and 256; each a `prefill.Options` change, off by default), each held word for word to the served engine
-//!   (`Prefill.moeT128With` at the served options) on the row map, at n 40 and 32, limits 0 and 10, over synthetic calls
-//!   (never a prompt's routing): every bucket edge of an expert's rows (1-32, 33-64, 65-128, 129-256, 257-288, 289-512),
-//!   the 4096-pair maximum call, many small experts, lognormal-skewed counts, one hot expert, a padded 5-pair call,
-//!   experts on both sides of each threshold (79, 80, 81 rows, ...), a call drawn from lognormal popularity; the
-//!   threshold arms also over the ladder of rows per expert (8 to 512). Red checks: a flipped output word, a planted
-//!   epilogue fault (one tile's f16 rounding dropped), a planted route fault (one 256-row tile on the wrong expert), the
-//!   GEMM's weight rounding changed (the deferred MUL1 map off) and two planted order faults (one tile's H128 stages
-//!   reordered, one tile's K stages in reverse order: the same values in exact arithmetic) must each show differing
-//!   words, the order faults' all finite and within `order_tol` (a reordering, not garbage); then the threshold's: each
-//!   half of the launch writing y, marked with a planted fault, must show in exactly its rows (the experts of 80 rows or
-//!   more for the GEMM half, the others for the finish half), and a threshold ignored (1) or off by one (81) must show in
-//!   the rows the test holds to the other path. Lines: TURBOEXL3_LING_ROWS_VARIANT, TURBOEXL3_LING_ROWS_RED.
+//! - GPU, the routed chain's variants (`variants`: the 256-row tiles, the remainder rule's cut, gate|up's column
+//!   blocks, the finish as the down GEMM's epilogue, also at 128-deep, two-block, MMA-first, single-buffered and padded
+//!   stages, the plain launches at bm 128 and 256; each a `prefill.Options` change, off by default), each held word for
+//!   word to the served engine (`Prefill.moeT128With` at the served options) on the row map, at n 40 and 32, limits 0
+//!   and 10, over synthetic calls (never a prompt's routing): every bucket edge of an expert's rows (1-32, 33-64,
+//!   65-128, 129-256, 257-288, 289-512), the 4096-pair maximum call, many small experts, lognormal-skewed counts, one
+//!   hot expert, a padded 5-pair call, experts on both sides of 64, 80 and 96 rows (63 to 65, 79 to 81, 95 to 97), a
+//!   call drawn from lognormal popularity. Red checks: a flipped output word, a planted epilogue fault (one tile's f16
+//!   rounding dropped), a planted route fault (one 256-row tile on the wrong expert), the GEMM's weight rounding
+//!   changed (the deferred MUL1 map off) and two planted order faults (one tile's H128 stages reordered, one tile's K
+//!   stages in reverse order: the same values in exact arithmetic) must each show differing words, the order faults'
+//!   all finite and within `order_tol` (a reordering, not garbage). Lines: TURBOEXL3_LING_ROWS_VARIANT,
+//!   TURBOEXL3_LING_ROWS_RED.
 //! - GPU, PF_DFIN's whole-call switch (`prefill.Call`; the outside plugin's MLX_SERVE_LING_PF_DFIN_CALL_MIN): a call
 //!   that declines the fused finish runs the served ending on an engine built with it. Both endings give the served
 //!   words, so each call's line also names the ending it ran, from the engine's counts (`prefill.Steps`, `endRan`). On
-//!   the plain fused finish's engine (every synthetic call and every rung of the ladder) and on the threshold's (80 rows;
-//!   every synthetic call), both choices, each the served engine's words and its ending the choice's; then the plugin's
-//!   rule (`callTakes`: a wide call of R rows at top-8 over 512 experts takes the fused finish at R * 8 >= 80 * 512, at
-//!   every R with call_min 0) at R 1,120, 5,119, 5,120 and 16,384, each on a chunk at its call's mean rows an expert, its
-//!   ending held to the side the case states. Three red checks the engagement check alone can see: the choice ignored
-//!   (the 5,119-row call run on the engine's own ending) and the rule off by one (5,119 rows a row early; 5,120 rows
-//!   under `>`). Lines: TURBOEXL3_LING_DFIN_CALL, TURBOEXL3_LING_ROWS_RED.
+//!   the fused finish's engine (every synthetic call and every rung of the ladder), both choices, each the served
+//!   engine's words and its ending the choice's; then the plugin's rule (`callTakes`: a wide call of R rows at top-8
+//!   over 512 experts takes the fused finish at R * 8 >= 80 * 512, at every R with call_min 0) at R 1,120, 5,119, 5,120
+//!   and 16,384, each on a chunk at its call's mean rows an expert, its ending held to the side the case states. Three
+//!   red checks the engagement check alone can see: the choice ignored (the 5,119-row call run on the engine's own
+//!   ending) and the rule off by one (5,119 rows a row early; 5,120 rows under `>`). Lines: TURBOEXL3_LING_DFIN_CALL,
+//!   TURBOEXL3_LING_ROWS_RED.
 //! - Timing (TURBOEXL3_LING_TIME=1 with TURBOEXL3_GPU=1; asserts nothing, guidance only): the rows path against the
 //!   plugin's chain at the plugin's call shape (the first chunk of a 4096- and a 16384-token layer's call over 512
 //!   experts at top-8, x bf16), min and median us per call over 8 rounds after 2 warm, each round's graph built and
@@ -337,9 +334,8 @@ fn engineRows(pf: *prefill.Prefill, s: mlx.mlx_stream, x: mlx.mlx_array, o: Rows
 /// A variant of the routed chain: its name, its options at rate n, whether the TIME test times it (the byte test runs
 /// every variant), the chain its bytes are held to: the served engine, or (`base`) the same stage shape with the
 /// variant's change off, where that stage shape is not the served chain's bytes by itself (the padded stage's natural-order
-/// A slots, say), so the line isolates the change; and whether the byte test also runs it over the ladder of rows per
-/// expert (`ladder`: the threshold arms, whose experts take one path or the other by their rows in the call)
-const Variant = struct { name: []const u8, o: prefill.Options, time: bool = true, base: ?prefill.Options = null, ladder: bool = false };
+/// A slots, say), so the line isolates the change
+const Variant = struct { name: []const u8, o: prefill.Options, time: bool = true, base: ?prefill.Options = null };
 
 /// The served options (the 128-row tiles) with the 256-row tiles, the remainder rule's cut, gate|up's column blocks and the
 /// fused finish set (`prefill.Options.t256`, `cut`, `gu_ncb`, `dfin`, `dfr`)
@@ -378,14 +374,6 @@ fn vS(n: u32, bk128: bool, ncb: u8, mma_first: bool, dfin: bool) prefill.Options
     return o;
 }
 
-/// `vT`'s fused finish (32-row rounds, the 256-row tiles as asked) only for the experts of at least `min` rows in the call
-/// (`prefill.Options.dfin_min`): the others keep the served down launches and the served finish's statements
-fn vM(n: u32, t256: bool, min: u16) prefill.Options {
-    var o = vT(n, t256, 64, 1, true, 32);
-    o.dfin_min = min;
-    return o;
-}
-
 /// `vP`'s fused finish at bm 128 (32-row rounds; `dfin` false: its base) on a single-buffered stage (`dbuf` off: the one
 /// buffer, after a barrier), or on the padded stage (`fragb` off, so natural-order A: `alay` 0)
 fn vQ(n: u32, dbuf: bool, fragb: bool, dfin: bool) prefill.Options {
@@ -396,7 +384,7 @@ fn vQ(n: u32, dbuf: bool, fragb: bool, dfin: bool) prefill.Options {
     return o;
 }
 
-const n_variants = 31;
+const n_variants = 27;
 
 /// The routed chain's variants at rate n (the byte test's and the timing's arms): each one launch-shape change off the
 /// served options or one plain launch, every one `moeLingRows`'s bytes by construction (the same per-simdgroup K loop on
@@ -425,13 +413,6 @@ fn variants(n: u32) [n_variants]Variant {
         .{ .name = "p256.dfin", .o = vP(n, 256, false, true, 32) },
         .{ .name = "p256.dfin.r64", .o = vP(n, 256, false, true, 64) },
         .{ .name = "p128.dfin", .o = vP(n, 128, false, true, 32) },
-        // the fused finish only for the experts of at least 80 rows in the call (where the ladder's fused finish breaks
-        // even), 64 and 96 beside it as guidance, and 80 on the 256-row tiles (byte arm); each byte-tested over the ladder
-        // too
-        .{ .name = "dfin.min80", .o = vM(n, false, 80), .ladder = true },
-        .{ .name = "dfin.min64", .o = vM(n, false, 64), .ladder = true },
-        .{ .name = "dfin.min96", .o = vM(n, false, 96), .ladder = true },
-        .{ .name = "t256.dfin.min80", .o = vM(n, true, 80), .time = false, .ladder = true },
         // the fused finish's staging at the other stage shapes it takes (byte arms, not timed), each held to its own stage
         // shape with the fused finish off
         .{ .name = "dfin.k128", .o = vS(n, true, 4, false, true), .time = false, .base = vS(n, true, 4, false, false) },
@@ -474,7 +455,7 @@ fn synthCall(a: std.mem.Allocator, rnd: std.Random, counts: []const u32, n_slots
 }
 
 /// The byte test's calls: an expert's rows at every tile edge, the plugin's 4096-pair maximum, many small experts,
-/// lognormal-skewed counts, one hot expert, a padded 5-pair call, experts on both sides of the fused finish's thresholds,
+/// lognormal-skewed counts, one hot expert, a padded 5-pair call, experts on both sides of 64, 80 and 96 rows,
 /// a call drawn from lognormal popularity (each count list at most 4096 pairs and 160 experts)
 const SynthKind = enum { buckets, max4096, small, skewed, hot, padded, threshold, lognormal };
 
@@ -519,8 +500,8 @@ fn synthCounts(kind: SynthKind, rnd: std.Random, buf: []u32) []const u32 {
             @memset(buf[0..5], 1);
             return buf[0..5];
         },
-        // the fused finish's thresholds (`prefill.Options.dfin_min`): experts on both sides of 64, 80 and 96 rows in one
-        // call, beside 1, 32, 128, 287 and 512 (1680 pairs, 14 experts)
+        // experts on both sides of 64, 80 and 96 rows in one call, beside 1, 32, 128, 287 and 512 (1680 pairs, 14
+        // experts)
         .threshold => {
             const rows = [_]u32{ 79, 80, 81, 63, 64, 65, 95, 96, 97, 1, 32, 128, 287, 512 };
             @memcpy(buf[0..rows.len], &rows);
@@ -553,40 +534,9 @@ fn synthCounts(kind: SynthKind, rnd: std.Random, buf: []u32) []const u32 {
     }
 }
 
-/// The ladder of rows per expert, every expert of a call at one count: the TIME ladder (`timeLadder`) and the threshold
-/// arms' byte calls
+/// The ladder of rows per expert, every expert of a call at one count: the TIME ladder (`timeLadder`) and the byte
+/// calls of PF_DFIN's whole-call switch
 const ladder_rows = [_]u32{ 8, 16, 24, 32, 48, 64, 80, 96, 112, 128, 160, 192, 224, 256, 272, 288, 320, 384, 448, 512 };
-
-/// The rows of `got` and `want` (f32 [pairs, hidden], row p the call's pair p, `slot` its slots) on each side of `min` rows
-/// an expert: a row is on the small side when its expert has fewer than `min` rows in the call; each side's rows and its
-/// rows with a differing word (a red check of the fused finish's threshold: which half of its launch wrote each row)
-const Sides = struct { small: usize = 0, small_differing: usize = 0, big: usize = 0, big_differing: usize = 0 };
-
-fn sidesOf(a: std.mem.Allocator, g: *G, got: mlx.mlx_array, want: mlx.mlx_array, slot: []const u32, min: u32) !Sides {
-    const n = mlx.mlx_array_size(want);
-    if (mlx.mlx_array_size(got) != n or n != slot.len * hidden or mlx.mlx_array_dtype(got) != .float32 or mlx.mlx_array_dtype(want) != .float32) return error.SizeMismatch;
-    const p = try a.alloc(f32, n);
-    defer a.free(p);
-    const q = try a.alloc(f32, n);
-    defer a.free(q);
-    _ = try g.hostF32(got, p);
-    _ = try g.hostF32(want, q);
-    var cnt: [prompt_slots]u32 = @splat(0);
-    for (slot) |sv| cnt[sv] += 1;
-    var sd: Sides = .{};
-    for (slot, 0..) |sv, row| {
-        var diff = false;
-        for (p[row * hidden ..][0..hidden], q[row * hidden ..][0..hidden]) |u, v| diff = diff or @as(u32, @bitCast(u)) != @as(u32, @bitCast(v));
-        if (cnt[sv] < min) {
-            sd.small += 1;
-            sd.small_differing += @intFromBool(diff);
-        } else {
-            sd.big += 1;
-            sd.big_differing += @intFromBool(diff);
-        }
-    }
-    return sd;
-}
 
 /// A planted order fault's largest difference over the served words' RMS: a reordering's words differ by about an f16 ulp
 /// (about 2^-10 of a value), so well under this; a garbage kernel's by about 1
@@ -630,22 +580,17 @@ fn engineCall(pf: *prefill.Prefill, s: mlx.mlx_stream, x: mlx.mlx_array, o: Rows
 }
 
 /// The ending a call ran on its engine, from the engine's step counts before and after it (`prefill.Steps`): the served
-/// route, down step and finish once each; the served route and the fused finish once each; or the threshold's route,
-/// down step and launch once each; nothing else. Null for any other mix (no ending, two, the threshold's route before the
-/// served ending, a step without its pair).
+/// route, down step and finish once each; or the served route and the fused finish once each; nothing else. Null for
+/// any other mix (no ending, two, a step without its pair).
 fn endRan(before: prefill.Steps, after: prefill.Steps) ?prefill.End {
     const d: prefill.Steps = .{
         .route = after.route -% before.route,
-        .routen = after.routen -% before.routen,
         .down = after.down -% before.down,
         .fin = after.fin -% before.fin,
         .dfin = after.dfin -% before.dfin,
-        .downn = after.downn -% before.downn,
-        .dfinn = after.dfinn -% before.dfinn,
     };
     if (std.meta.eql(d, prefill.Steps{ .route = 1, .down = 1, .fin = 1 })) return .served;
     if (std.meta.eql(d, prefill.Steps{ .route = 1, .dfin = 1 })) return .dfin;
-    if (std.meta.eql(d, prefill.Steps{ .routen = 1, .downn = 1, .dfinn = 1 })) return .dfinn;
     return null;
 }
 
@@ -887,32 +832,6 @@ test "turboexl3 gpu ling rows variants: the routed chain's variants (256-row til
                     if (!ok) failed = true;
                 }
             }
-            // the ladder of rows per expert (`ladder_rows`: every expert of a call at one count, at most 4096 pairs over the
-            // 160 slots) for the threshold arms, whose experts take one path or the other by their rows
-            for (ladder_rows) |rpe| {
-                const m2 = g.mark();
-                defer g.resetTo(m2);
-                const ne: usize = @min(cbuf.len, 4096 / rpe);
-                @memset(cbuf[0..ne], rpe);
-                const call = try synthCall(a, rnd, cbuf[0..ne], prompt_slots, prompt_tokens);
-                defer a.free(call.act);
-                defer a.free(call.slot);
-                const o = try rowsOps(&g, call.act, call.slot);
-                const want = try g.adopt(try engineRows(&served, s, xb, o, ops));
-                for (vs, &engines, &bases, has_base) |v, *e, *bse, hb2| {
-                    if (!v.ladder) continue;
-                    _ = mlx.mlx_clear_cache();
-                    const m3 = g.mark();
-                    defer g.resetTo(m3);
-                    const held = if (hb2) try g.adopt(try engineRows(bse, s, xb, o, ops)) else want;
-                    _ = mlx.mlx_clear_cache();
-                    const got = try g.adopt(try engineRows(e, s, xb, o, ops));
-                    const c = try compare(a, &g, got, held);
-                    const ok = c.differing == 0 and c.nonfinite == 0;
-                    std.debug.print("TURBOEXL3_LING_ROWS_VARIANT n={d} limit={d} call=ladder{d} pairs={d} experts={d} variant={s} against={s} differing={d}/{d} nonfinite={d} {s}\n", .{ n, lim, rpe, call.act.len, ne, v.name, if (hb2) "base" else "served", c.differing, c.of, c.nonfinite, if (ok) "PASS" else "FAIL" });
-                    if (!ok) failed = true;
-                }
-            }
         }
         // the red checks (limit 0, the bucket call): each planted fault must show differing words, or the byte lines above
         // could not have caught it
@@ -1017,50 +936,6 @@ test "turboexl3 gpu ling rows variants: the routed chain's variants (256-row til
                 std.debug.print("TURBOEXL3_LING_ROWS_RED n={d} fault=dfin_tile0_k_reversed differing={d}/{d} nonfinite={d} max_ratio={e:.3} caught={}\n", .{ n, c.differing, c.of, c.nonfinite, c.max_ratio, caught });
                 if (!caught) failed = true;
             }
-            // 7-10. the fused finish's threshold (`prefill.Options.dfin_min` 80) on the call with experts on both sides of it
-            // (`.threshold`: 79, 80 and 81 rows, ...). Both halves of the one launch writing y give the served words, so a
-            // misplaced threshold leaves the bytes alone; each half is marked instead with a planted fault (every product it
-            // finishes left unrounded, so each row it writes differs), and the rows each half wrote show. 7: the GEMM half
-            // marked, so exactly the rows of the experts of 80 rows or more differ (every one), the others are the served
-            // words; 8: the finish half marked, the reverse. Then the GEMM half marked on an engine whose threshold is
-            // ignored (9: 1, every expert takes the fused finish) and off by one (10: 81), the test still holding the experts
-            // under 80 rows to the served path and the rest to the fused finish: their rows show the other path's words.
-            {
-                var tbuf: [160]u32 = undefined;
-                const tcounts = synthCounts(.threshold, rnd, &tbuf);
-                const tcall = try synthCall(a, rnd, tcounts, prompt_slots, prompt_tokens);
-                defer a.free(tcall.act);
-                defer a.free(tcall.slot);
-                const to = try rowsOps(&g, tcall.act, tcall.slot);
-                const twant = try g.adopt(try engineRows(&served, s, xb, to, ops));
-                const gemm_fault = ks.newKernel("turboexl3_test_pf_dfinn_gemm_fault", &prefill.dfinn_in, &prefill.dfin_out, comptime prefill.dfinnText(@embedFile("kernels/test/fault/fin_4_unrounded.metal"), prefill.dfin_finish_4), prefill.header_nax_dfin, true) orelse return error.KernelCreateFailed;
-                defer root.decode.freeKernel(gemm_fault);
-                const fin_fault = ks.newKernel("turboexl3_test_pf_dfinn_fin_fault", &prefill.dfinn_in, &prefill.dfin_out, comptime prefill.dfinnText(prefill.dfin_finish_4, @embedFile("kernels/test/fault/fin_4_unrounded.metal")), prefill.header_nax_dfin, true) orelse return error.KernelCreateFailed;
-                defer root.decode.freeKernel(fin_fault);
-                const Case = struct { name: []const u8, min: u16, fault: mlx.mlx_fast_metal_kernel, gemm: bool };
-                const cases = [_]Case{
-                    .{ .name = "dfinn_gemm_half_marked", .min = 80, .fault = gemm_fault, .gemm = true },
-                    .{ .name = "dfinn_finish_half_marked", .min = 80, .fault = fin_fault, .gemm = false },
-                    .{ .name = "dfinn_threshold_ignored", .min = 1, .fault = gemm_fault, .gemm = true },
-                    .{ .name = "dfinn_threshold_off_by_one", .min = 81, .fault = gemm_fault, .gemm = true },
-                };
-                for (cases) |cs| {
-                    var pf = try prefill.Prefill.init(geo, vM(n, false, cs.min));
-                    defer pf.deinit();
-                    const kept = pf.dfn_k.?.fused;
-                    pf.dfn_k.?.fused = cs.fault;
-                    defer pf.dfn_k.?.fused = kept;
-                    _ = mlx.mlx_clear_cache();
-                    const got = try g.adopt(try engineRows(&pf, s, xb, to, ops));
-                    const sd = try sidesOf(a, &g, got, twant, tcall.slot, 80);
-                    // each row where the test holds it: the marked half's rows all differ, the other half's are the served words
-                    const placed = if (cs.gemm) sd.small_differing == 0 and sd.big_differing == sd.big else sd.big_differing == 0 and sd.small_differing == sd.small;
-                    // 7 and 8 must place every row so; 9 and 10 must not
-                    const caught = if (cs.min == 80) placed else !placed;
-                    std.debug.print("TURBOEXL3_LING_ROWS_RED n={d} fault={s} dfin_min={d} held_to=80 small_rows_differing={d}/{d} big_rows_differing={d}/{d} caught={}\n", .{ n, cs.name, cs.min, sd.small_differing, sd.small, sd.big_differing, sd.big, caught });
-                    if (!caught) failed = true;
-                }
-            }
         }
         // PF_DFIN's whole-call switch (`prefill.Call`; the outside plugin's MLX_SERVE_LING_PF_DFIN_CALL_MIN): a call keeps
         // or declines the fused finish on an engine built with it. Both endings give the served words, so each line also
@@ -1069,17 +944,13 @@ test "turboexl3 gpu ling rows variants: the routed chain's variants (256-row til
             const geo = rowsGeo(n, prompt_slots, lim);
             var served = try prefill.Prefill.init(geo, servedOptions(n, true));
             defer served.deinit();
-            // the plugin's engines: PF_DFIN (the plain fused finish, PF_DFIN_MIN unset) and PF_DFIN with PF_DFIN_MIN=80
-            // (the threshold's chain); a call that keeps the fused finish runs the engine's own ending, one that declines
-            // it the served one
+            // the plugin's engine: PF_DFIN (the plain fused finish); a call that keeps the fused finish runs the
+            // engine's own ending, one that declines it the served one
             var plain = try prefill.Prefill.init(geo, vT(n, false, 64, 1, true, 32));
             defer plain.deinit();
-            var thresh = try prefill.Prefill.init(geo, vM(n, false, 80));
-            defer thresh.deinit();
             const DfinArm = struct { name: []const u8, pf: *prefill.Prefill, own: prefill.End, ladder: bool };
             const dfin_arms = [_]DfinArm{
                 .{ .name = "dfin", .pf = &plain, .own = .dfin, .ladder = true },
-                .{ .name = "dfin.min80", .pf = &thresh, .own = .dfinn, .ladder = false },
             };
             var cbuf: [160]u32 = undefined;
             // every synthetic call, then every rung of the ladder (the plain engine's): both choices on each engine, each

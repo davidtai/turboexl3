@@ -688,7 +688,6 @@ fn pfOptions() prefill.Options {
     o.gu_ncb = config.get().pf_gu_ncb;
     o.dfin = config.get().pf_dfin;
     o.dfr = config.get().pf_dfr;
-    o.dfin_min = config.get().pf_dfin_min;
     o.bm = config.get().pf_bm;
     if (!config.get().pf_mixed) o.small = .off;
     return o;
@@ -720,8 +719,6 @@ fn pfOptionsFor(geo: prefill.Geometry) prefill.Options {
     // the fused finish: a row's one slot (top-1), whole 128-column blocks a threadgroup, one down launch over every row
     // (small .off, or the 128-row tiles' two tables), its staging within 32 KB
     if (geo.topk != 1 or (o.ncb != 2 and o.ncb != 4) or o.wsp != 0 or (o.small != .off and !o.t128) or o.dfinBytes() > 32768) o.dfin = false;
-    // its threshold: the 128-row tiles' chain keeps the served path for the experts under it; elsewhere every expert
-    if (!o.dfin or !o.t128) o.dfin_min = 0;
     return o;
 }
 
@@ -746,7 +743,7 @@ fn prefillFor(geo: prefill.Geometry) !*prefill.Prefill {
     // a variant's own line, at each geometry built with one on (a handful a process; the served shape prints none), so
     // the line names what the geometry runs: the top-1 rows path's dfin, say, beside a top-8 geometry's
     if (o.t256 or o.cut != prefill.t128_cut or o.gu_ncb != 1 or o.dfin or o.bm != 64 or o.small != .mixed)
-        std.debug.print("[turboexl3] prefill variant engaged: bm={d} small={s} t128={} t256={} cut={d} gu_ncb={d} dfin={} dfr={d} dfin_min={d} (topk {d}, experts {d})\n", .{ o.bm, @tagName(o.small), o.t128, o.t256, o.cut, o.gu_ncb, o.dfin, o.dfr, o.dfin_min, geo.topk, geo.experts });
+        std.debug.print("[turboexl3] prefill variant engaged: bm={d} small={s} t128={} t256={} cut={d} gu_ncb={d} dfin={} dfr={d} (topk {d}, experts {d})\n", .{ o.bm, @tagName(o.small), o.t128, o.t256, o.cut, o.gu_ncb, o.dfin, o.dfr, geo.topk, geo.experts });
     return &pf_cache.get().*[i].?;
 }
 
@@ -1107,17 +1104,6 @@ test "turboexl3 root: the served prefill options follow the config, and the deco
         try config.configure(.{ .pf_bm = 128, .pf_t256 = true });
         const w = pfOptionsFor(g1);
         try t.expect(w.valid() and !w.t128 and !w.t256 and w.bm == 128);
-        // the fused finish's threshold: kept on the 128-row tiles' chain; dropped with the fused finish (top-8) and where
-        // every tile is one table's (no 128-row tiles: every expert takes the fused finish)
-        try config.configure(.{ .pf_dfin = true, .pf_dfin_min = 80 });
-        const h = pfOptionsFor(g1);
-        try t.expect(h.valid() and h.t128 and h.dfin and h.dfin_min == 80);
-        try t.expect(prefill.endOf(h, .{}) == .dfinn and prefill.endOf(h, .{ .dfin = false }) == .served);
-        const h8 = pfOptionsFor(g8);
-        try t.expect(h8.valid() and !h8.dfin and h8.dfin_min == 0);
-        try config.configure(.{ .pf_dfin = true, .pf_dfin_min = 80, .pf_t128 = false, .pf_mixed = false });
-        const hp = pfOptionsFor(g1);
-        try t.expect(hp.valid() and !hp.t128 and hp.dfin and hp.dfin_min == 0);
     }
 }
 

@@ -1720,6 +1720,16 @@ SPLIT_REMOVED_KERNELS['turboexl3_dense_dec0_pf'] = _S2_DEC
 SPLIT_REMOVED_KERNELS['turboexl3_dense_dec0_pft4'] = _S2_DEC
 SPLIT_REMOVED_TESTS["turboexl3 dense DEC-ONE variants: t4 is text_dec0 after t4's define, pf is text_dec0 with each tile's words loaded a pass ahead (dec_tile's address, arrive_2_1's load) and nothing else; the variant table is the config's"] = _S2_DEC
 SPLIT_REMOVED_TESTS["turboexl3 gpu ling dense variants: each DEC-ONE GEMV variant (t4, pf, pft4) gives the served GEMV's words at every Ling-3.1-flash trunk shape and the LM head, rows 1 to 4, x bf16 and f32 (the head bf16), through linear and over prepared rows; red checks: a flipped word, each variant at another K split (TURBOEXL3_GPU=1)"] = _S2_DEC
+_S2_DFMIN = "V1 per-tile dfin_min (PF_DFIN_MIN, superseded by V1c's whole-call rule; dfin.min80 1.04-1.05 of the served in TIME, no A/B): the fused finish only for the experts of at least DFMIN rows in the call (prefill.Options.dfin_min, Config.pf_dfin_min, DfinMinKernels). V1's cuts of finish_1 (finish_1_1 ++ _2 ++ _3) and gemm_small_3 (gemm_small_3_1 ++ _2), the same values, stay"
+SPLIT_REMOVED_KERNELS['turboexl3_pf_t128n_route'] = _S2_DFMIN
+SPLIT_REMOVED_KERNELS['turboexl3_pf_t256n_route'] = _S2_DFMIN
+SPLIT_REMOVED_KERNELS['turboexl3_pf_t128_dnmn'] = _S2_DFMIN
+SPLIT_REMOVED_KERNELS['turboexl3_pf_t128_dntn'] = _S2_DFMIN
+SPLIT_REMOVED_KERNELS['turboexl3_pf_dfinn'] = _S2_DFMIN
+SPLIT_REMOVED_KERNELS['turboexl3_test_pf_dfinn_gemm_fault'] = _S2_DFMIN
+SPLIT_REMOVED_KERNELS['turboexl3_test_pf_dfinn_fin_fault'] = _S2_DFMIN
+SPLIT_REMOVED_TESTS["turboexl3 prefill dfin_min texts: the route also writes each expert's rows; the served down launches are theirs with the skip; the one launch writing y is text_dfin with its skip beside the served finish with its item index"] = _S2_DFMIN
+RENAMED_TESTS[('prefill.zig', "turboexl3 prefill call: a call runs the fused finish only where its engine was built with it and the call keeps it (its threshold's chain with dfin_min); .{} is the engine's own ending, .{ .dfin = false } the served one")] = "turboexl3 prefill call: a call runs the fused finish only where its engine was built with it and the call keeps it; .{} is the engine's own ending, .{ .dfin = false } the served one"
 # --strip2 end--
 
 _R10 = ("R10 ROUTER_ADDNORM (M6, rejected): the post-attention add_norm folded into the router's launch 1 "
@@ -1866,21 +1876,6 @@ SPLIT_ADDED_KERNELS['turboexl3_test_pf_dfin_order_fault'] = ('test only: turboex
 SPLIT_ADDED_KERNELS['turboexl3_test_pf_dfin_korder_fault'] = ('test only: turboexl3_pf_dfin with a planted K-order fault '
                                                               '(tile 0\'s K stages in reverse order, fault/gemm_4_krev in '
                                                               'gemm_4\'s place), a red check')
-# the fused finish's threshold (Options.dfin_min; finish_1 and gemm_small_3 cut into pieces of the same values)
-SPLIT_ADDED_KERNELS['turboexl3_pf_t128n_route'] = ('Options.dfin_min: text_froute_t128 with each expert\'s rows stored '
-                                                   '(froute_ecnt after froute_t128_2_2), one output more (ecnt)')
-SPLIT_ADDED_KERNELS['turboexl3_pf_t256n_route'] = 'Options.dfin_min with t256: text_froute_t256 with froute_ecnt, the same'
-SPLIT_ADDED_KERNELS['turboexl3_pf_t128_dnmn'] = ('Options.dfin_min: gemm1m_text with a tile of an expert of DFMIN rows or '
-                                                 'more returning (gemm_dn_skip after each body\'s tile read)')
-SPLIT_ADDED_KERNELS['turboexl3_pf_t128_dntn'] = 'Options.dfin_min: gemm1_text with gemm_dn_skip after its tile read'
-SPLIT_ADDED_KERNELS['turboexl3_pf_dfinn'] = ('Options.dfin_min: one launch writing y: text_dfin (stage at kernel scope, '
-                                             'gemm_dfinn_bs; gemm_dfinn_skip after its tile read) over the experts of '
-                                             'DFMIN rows or more, then text_finish_t128 (gemm_dfinn_item in finish_1_2\'s '
-                                             'place) over the rest, a (row, 128-block) item a simdgroup')
-SPLIT_ADDED_KERNELS['turboexl3_test_pf_dfinn_gemm_fault'] = ('test only: turboexl3_pf_dfinn with its GEMM half\'s products '
-                                                             'unrounded (fault/fin_4_unrounded), the threshold\'s red checks')
-SPLIT_ADDED_KERNELS['turboexl3_test_pf_dfinn_fin_fault'] = ('test only: turboexl3_pf_dfinn with its finish half\'s products '
-                                                            'unrounded (fault/fin_4_unrounded), a red check')
 # L1 (turboexl3_ling's MLX_SERVE_LING_PF_F16_PAIRS): a prompt call's routed pairs stored as f16 (moeLingRowsPairsF16)
 # and the JOINLESS combine over f16 sources (turboexl3_ling_combine_parts_h)
 ADDED_FILES['models/ling/f16pairs_test.zig'] = ('moeLingRowsPairsF16 and the combine over f16 sources held word for '

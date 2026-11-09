@@ -108,7 +108,7 @@ pub fn moeLingRowsWith(s: mlx.mlx_stream, x: mlx.mlx_array, rows: mlx.mlx_array,
 pub const PairsF16Call = struct { topk: u32, weights: []const f32 };
 
 /// Whether a routed call's f32 y holds only f16 values, so that storing it as f16 (`OUT_T` half) keeps every word. The
-/// chain's finish (prefill.zig's `text_finish`, `text_finish_t128` and the fused finishes `text_dfin` / `text_dfinn`, all
+/// chain's finish (prefill.zig's `text_finish`, `text_finish_t128` and the fused finish `text_dfin`, all
 /// ending in `finish_4`) computes `acc = 0 + w * float(half(v))` for each of a row's slots in slot order, then stores
 /// `OUT_T(acc)`. At top-1 with w exactly 1 that sum is the f16 value itself (0 + h = h; a -0 becomes +0, which f16 holds),
 /// at w +0 (a pad row) it is +0, so `half(acc)` widens back to the same f32 word. Any other weight scales h off the f16
