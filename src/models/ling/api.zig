@@ -112,6 +112,45 @@ pub fn moeLingRowsWith(s: mlx.mlx_stream, x: mlx.mlx_array, rows: mlx.mlx_array,
     return root.moeSwigluRowsWith(s, x, rows, bank, inds, scores, dec, @intCast(limit), .silu_out, out_dtype, call);
 }
 
+/// A routed call's facts that decide whether its y is f16-exact (`pairsF16Exact`): its top-k (each row's finish sums
+/// that many weighted terms) and its weights on the host.
+pub const PairsF16Call = struct { topk: u32, weights: []const f32 };
+
+/// Whether a routed call's f32 y holds only f16 values, so that storing it as f16 (`OUT_T` half) keeps every word. The
+/// chain's finish (prefill.zig's `text_finish`, `text_finish_t128` and the fused finishes `text_dfin` / `text_dfinn`, all
+/// ending in `finish_4`) computes `acc = 0 + w * float(half(v))` for each of a row's slots in slot order, then stores
+/// `OUT_T(acc)`. At top-1 with w exactly 1 that sum is the f16 value itself (0 + h = h; a -0 becomes +0, which f16 holds),
+/// at w +0 (a pad row) it is +0, so `half(acc)` widens back to the same f32 word. Any other weight scales h off the f16
+/// grid, and a second slot adds a second term (a split of partials): neither is f16-exact, so both are refused. True at
+/// top-1 with every weight bit for bit 1.0 or +0.0, and at least one weight.
+pub fn pairsF16Exact(c: PairsF16Call) bool {
+    if (c.topk != 1 or c.weights.len == 0) return false;
+    for (c.weights) |w| {
+        const b: u32 = @bitCast(w);
+        if (b != 0x3F80_0000 and b != 0) return false;
+    }
+    return true;
+}
+
+/// `moeLingRowsWith` with each pair's row stored as f16 instead of f32 (the outside plugin turboexl3_ling's
+/// MLX_SERVE_LING_PF_F16_PAIRS: half the bytes written and read for every routed pair of a prompt call), the same words:
+/// the call's weights are given on the host (`weights`, one a row-slot: 1 for a pair, +0 for a pad row), and a call that
+/// is not f16-exact (`pairsF16Exact` at top-1: any weight other than 1 or +0) is refused before any launch
+/// (error.Exl3PairsNotExact), so the caller keeps its f32 call. y f16 [S, hidden]: each word the f16 value of
+/// `moeLingRowsWith`'s f32 word at `out_dtype` f32, on either ending (`call`: the fused finish or the served one, each
+/// storing `OUT_T(acc)`), so any reader that widens it (`combine.combineParts` over f16 sources, MLX's astype) reads
+/// the served words. x, rows, bank, inds, `limit` and `call` as `moeLingRowsWith` takes them; `weights.len` the row map's
+/// length (error.BadExl3Shape otherwise). The caller frees y.
+pub fn moeLingRowsPairsF16(s: mlx.mlx_stream, x: mlx.mlx_array, rows: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array, weights: []const f32, dec: format.Decode, limit: c_int, call: root.prefill.Call) !mlx.mlx_array {
+    if (!pairsF16Exact(.{ .topk = 1, .weights = weights })) return error.Exl3PairsNotExact;
+    const rs = mlx.getShape(rows);
+    if (rs.len != 1 or rs[0] < 0 or @as(usize, @intCast(rs[0])) != weights.len) return error.BadExl3Shape;
+    const shape = [_]c_int{@intCast(weights.len)};
+    const scores = mlx.mlx_array_new_data(weights.ptr, &shape, 1, .float32);
+    defer freeArr(scores);
+    return moeLingRowsWith(s, x, rows, bank, inds, scores, dec, limit, .float16, call);
+}
+
 /// `moeClampedBanked` with Ling-3.1's SwiGLU (`moeLing`'s `limit`): each pair x's row r through the expert at `ids[r]`
 /// (bank << 24 | slot row) at weight 1, y f32 [rows, hidden], each pair's bytes `moeLing`'s on its bank at top-1 with
 /// score 1. The banks, ids and rows as `moeClampedBanked` takes them; `limit` 0..128, else error.InvalidExl3Clamp.

@@ -85,7 +85,7 @@ fn ci(x: anytype) c_int {
 }
 
 /// A comma list of numbers from the environment (at most buf.len of them), else `default`.
-fn envList(name: [*:0]const u8, default: []const u32, buf: []u32) []const u32 {
+pub fn envList(name: [*:0]const u8, default: []const u32, buf: []u32) []const u32 {
     const v = std.c.getenv(name) orelse return default;
     var n: usize = 0;
     var it = std.mem.splitScalar(u8, std.mem.span(v), ',');
@@ -124,7 +124,7 @@ fn viewAs(g: *G, x: mlx.mlx_array, dt: mlx.mlx_dtype) !mlx.mlx_array {
 
 /// A streamer's slot bank as its loader hands it over and the plugin hands it to turboexl3 (turboexl3_ling's `t3View`):
 /// each code the pack's I16 words viewed as U16 (the same bits), rin as suh and rout as svh, f16.
-fn loaderBank(g: *G, b: *const ref.Bank) !root.Bank {
+pub fn loaderBank(g: *G, b: *const ref.Bank) !root.Bank {
     const E = ci(b.experts);
     const ht = ci(b.hidden / 16);
     const it = ci(b.inter / 16);
@@ -143,7 +143,7 @@ fn drawPairs(a: std.mem.Allocator, rnd: std.Random, tokens: u32, n_slots: u32, a
 }
 
 /// `drawPairs` at lognormal popularity sigma `skew` (0: uniform)
-fn drawPairsAt(a: std.mem.Allocator, rnd: std.Random, tokens: u32, n_slots: u32, skew: f64, act: []u32, slot: []u32) !void {
+pub fn drawPairsAt(a: std.mem.Allocator, rnd: std.Random, tokens: u32, n_slots: u32, skew: f64, act: []u32, slot: []u32) !void {
     const logw = try a.alloc(f64, n_slots);
     defer a.free(logw);
     for (logw) |*w| w.* = skew * rnd.floatNorm(f64);
@@ -182,7 +182,7 @@ fn sortPairs(a: std.mem.Allocator, act: []const u32, slot: []const u32, s_act: [
 
 /// The end of the plugin's chunk from sorted pair `c0` (ling_math.zig `chunks()`): whole experts, at most
 /// `prefill_rows` pairs, a first expert wider alone.
-fn chunkEnd(s_slot: []const u32, c0: usize) usize {
+pub fn chunkEnd(s_slot: []const u32, c0: usize) usize {
     const n = s_slot.len;
     var c1 = c0;
     while (c1 < n) {
@@ -195,7 +195,7 @@ fn chunkEnd(s_slot: []const u32, c0: usize) usize {
 }
 
 /// The distinct slots of a chunk (sorted, so its runs)
-fn runsOf(s_slot: []const u32) usize {
+pub fn runsOf(s_slot: []const u32) usize {
     var r: usize = 0;
     for (s_slot, 0..) |sv, i| r += @intFromBool(i == 0 or sv != s_slot[i - 1]);
     return r;
@@ -248,9 +248,9 @@ fn pluginChain(g: *G, s: mlx.mlx_stream, x: mlx.mlx_array, act: []const u32, slo
 
 /// A rows-path call's operands (the plugin's chunk under the switch): the row map (the chunk's act rows), the slots and
 /// the weights, a chunk of 16 pairs or fewer padded to 17 with its first pair at score 0.
-const RowsOps = struct { rm: mlx.mlx_array, ids: mlx.mlx_array, sc: mlx.mlx_array, n_call: usize, small: bool };
+pub const RowsOps = struct { rm: mlx.mlx_array, ids: mlx.mlx_array, sc: mlx.mlx_array, n_call: usize, small: bool };
 
-fn rowsOps(g: *G, act: []const u32, slot: []const u32) !RowsOps {
+pub fn rowsOps(g: *G, act: []const u32, slot: []const u32) !RowsOps {
     const rows = act.len;
     const small = !root.kernels.usesPrefillArm(rows);
     if (!small) {
@@ -312,18 +312,18 @@ fn compare(a: std.mem.Allocator, g: *G, got: mlx.mlx_array, want: mlx.mlx_array)
 }
 
 /// The served prefill options (root's `pfOptions` with its clamps at rate n), the 128-row tiles as asked
-fn servedOptions(n: u32, t128: bool) prefill.Options {
+pub fn servedOptions(n: u32, t128: bool) prefill.Options {
     const intr = n % 16 == 0;
     return .{ .bm = 64, .small = .mixed, .dbuf = true, .unroll = true, .fragb = true, .intr = intr, .defer_affine = true, .ncb = 4, .sintr = intr, .froute = true, .alay = 2, .t128 = t128 };
 }
 
 /// A rows-path call's geometry (`root.moeSwigluRows`'s: top-1 over the bank's slots, Ling's clamp after the SiLU)
-fn rowsGeo(n: u32, experts: u32, limit: c_int) prefill.Geometry {
+pub fn rowsGeo(n: u32, experts: u32, limit: c_int) prefill.Geometry {
     return .{ .hidden = hidden, .inter = inter, .topk = 1, .experts = experts, .rate = format.Rate.fromN(n).?, .dec = .mul1, .limit = @intCast(limit), .clamp = .silu_out };
 }
 
 /// A bank's slot arrays as the engine takes them
-fn opsOf(b: root.Bank) prefill.Operands {
+pub fn opsOf(b: root.Bank) prefill.Operands {
     return .{ .gate_t = b.gate.trellis, .gate_suh = b.gate.suh, .gate_svh = b.gate.svh, .up_t = b.up.trellis, .up_suh = b.up.suh, .up_svh = b.up.svh, .down_t = b.down.trellis, .down_suh = b.down.suh, .down_svh = b.down.svh };
 }
 

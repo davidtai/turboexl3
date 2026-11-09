@@ -451,7 +451,7 @@ statement, then the fold in that order.
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/ling/combine.zig:64` (`fn kernelsFor`) |
+| made at | `src/models/ling/combine.zig:75` (`fn kernelsFor`) |
 | inputs | `routed`, `weights` |
 | outputs | `out` |
 | source | `text_routed` = `ling:combine/combine_1` ++ `ling:combine/src_routed` ++ `ling:combine/combine_2` (1286 B, `4040d9527524`) |
@@ -479,7 +479,7 @@ statement, then the fold in that order.
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/ling/combine.zig:66` (`fn kernelsFor`) |
+| made at | `src/models/ling/combine.zig:77` (`fn kernelsFor`) |
 | inputs | `s0`, `s1`, `s2`, `s3`, `s4`, `s5`, `s6`, `s7`, `s8`, `s9`, `s10`, `s11`, `s12`, `s13`, `s14`, `s15`, `s16`, `s17`, `s18`, `s19`, `s20`, `s21`, `s22`, `s23`, `loc`, `weights` |
 | outputs | `out` |
 | source | `text_parts` = `ling:combine/combine_1` ++ `ling:combine/src_parts` ++ `ling:combine/combine_2` (1480 B, `a5ba86627db1`) |
@@ -503,6 +503,38 @@ statement, then the fold in that order.
   outputs (5 read in place; 40 through the streamer's merge rule) gives the composed combine's bytes on the array the
   join builds (TURBOEXL3_GPU=1)" (GPU, words); `src/models/ling/combine.zig` "turboexl3 ling combine texts: ..." (CPU,
   the texts).
+
+### `turboexl3_ling_combine_parts_h`
+
+<!-- kernel-facts: turboexl3_ling_combine_parts_h -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/ling/combine.zig:79` (`fn kernelsFor`) |
+| inputs | `s0`, `s1`, `s2`, `s3`, `s4`, `s5`, `s6`, `s7`, `s8`, `s9`, `s10`, `s11`, `s12`, `s13`, `s14`, `s15`, `s16`, `s17`, `s18`, `s19`, `s20`, `s21`, `s22`, `s23`, `loc`, `weights` |
+| outputs | `out` |
+| source | `text_parts_h` = `ling:combine/combine_1` ++ `ling:combine/src_parts_h` ++ `ling:combine/combine_2` (1481 B, `901e2c2d2a55`) |
+| header | `header_parts_h` = `ling:combine/contract` ++ `ling:combine/pick_h` (1663 B, `b16712bbbc57`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** Ling-3.1-flash: `root.ling.combineParts` when every source is f16, the routed pairs of a wide prompt
+  call stored as f16 (`root.ling.moeLingRowsPairsF16`); the outside plugin's opt-in (turboexl3_ling's
+  `MLX_SERVE_LING_PF_F16_PAIRS=1`). A mix of f16 and f32 sources widens the f16 ones and runs
+  `turboexl3_ling_combine_parts`.
+- **Shapes and dtypes:** s0 to s23 f16 [r_i, D] (each word the f16 value of the f32 word the served call stores: a
+  top-1 pair at weight 1 or a pad row at +0), loc int32 [n, K, 2], weights f32 [n, K], K 1 to 8. Out: f32 [n, D].
+- **Grid and threadgroup:** `(n · ceil(D / 4), 1, 1)` / `(256, 1, 1)`, `turboexl3_ling_combine_parts`'s.
+- **Template args:** K (the top-k), D (the hidden size).
+- **Replaces:** `turboexl3_ling_combine_parts` over the same rows in f32: half the bytes read for every routed pair
+  (and half written by the chain's finish, `OUT_T` half).
+- **Bits:** `turboexl3_ling_combine_parts`' words on the f32 sources the f16 ones widen to: the same statements with
+  each source pointer half (`src_parts_h`, `pick_h`), and the product `pk[ok + i] * w` widens the half to f32
+  exactly before it rounds.
+- **Pinned by:** `src/models/ling/f16pairs_test.zig` "turboexl3 gpu ling f16 pairs: ..." (GPU, words: f16, mixed and
+  f32 sources at the standard request's call, a 2,048-token call and a padded call; a flipped f16 word caught);
+  `src/models/ling/combine.zig` "turboexl3 ling combine texts: the f16 sources' JOINLESS text is the f32 one with
+  each source pointer half ..." (CPU, the texts).
 
 ## `src/models/ling/tail.zig`
 

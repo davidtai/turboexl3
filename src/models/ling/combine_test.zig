@@ -195,7 +195,7 @@ const joinless_sources = combine.max_sources;
 /// Up to `joinless_sources` outputs each read in place; above, the smallest n - 23 (earlier first among equals) merged
 /// in join order into the last source, the rest sources 0.. in join order. Per output: `src[i]`, `off[i]` (its first
 /// row there); returns the sources.
-fn planJoinless(rows: []const u32, order: []u32, src: []u8, off: []u32) usize {
+pub fn planJoinless(rows: []const u32, order: []u32, src: []u8, off: []u32) usize {
     const n = rows.len;
     @memset(off, 0);
     if (n <= joinless_sources) {
@@ -227,7 +227,7 @@ fn planJoinless(rows: []const u32, order: []u32, src: []u8, off: []u32) usize {
 
 /// Each assignment's (source, row): output i's join-ordered rows (`pos`, the outputs' rows back to back) are rows
 /// `off[i]..` of source `src[i]`
-fn fillJoinlessLoc(rows: []const u32, src: []const u8, off: []const u32, pos: []const u32, loc: []i32) void {
+pub fn fillJoinlessLoc(rows: []const u32, src: []const u8, off: []const u32, pos: []const u32, loc: []i32) void {
     var j: usize = 0;
     for (rows, src, off) |r, sv, o| {
         for (pos[j..][0..r], o..) |p, row| {

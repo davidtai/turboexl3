@@ -6,7 +6,10 @@
 //! t = v_0 and t = v_k + t in k order (thread 0 over the threadgroup's values).
 //! - `combineRouted`: over the joined routed array [n, K, hidden];
 //! - `combineParts`: over the call's unjoined outputs (JOINLESS: up to `max_sources` f32 sources [r_i, hidden], each
-//!   pair's (source, row) in loc int32 [n, K, 2]), so the joined array is never built.
+//!   pair's (source, row) in loc int32 [n, K, 2]), so the joined array is never built. Sources all f16 (the outside
+//!   plugin's MLX_SERVE_LING_PF_F16_PAIRS: `ling.moeLingRowsPairsF16`'s rows, each the f16 value the served f32 row
+//!   holds) take the same statements with the source pointers half (`text_parts_h`): the product `pk[ok + i] * w` widens
+//!   the half to f32 exactly before it multiplies, so each product, and the fold, is the f32 sources' word for word.
 const std = @import("std");
 const mlx = @import("sdk").mlx;
 const ks = @import("sdk").kernel_launch;
@@ -25,6 +28,10 @@ pub const src_routed = @embedFile("kernels/combine/src_routed.metal");
 pub const src_parts = @embedFile("kernels/combine/src_parts.metal");
 /// The product, MLX's col_reduce_small fold, and the store
 pub const combine_2 = @embedFile("kernels/combine/combine_2.metal");
+/// JOINLESS's source choice over f16 sources: `pick` with each source pointer half (its own name, `_h`)
+pub const pick_h = @embedFile("kernels/combine/pick_h.metal");
+/// ... and the in-place read through it: `src_parts` with `pk` half (the product widens each word exactly)
+pub const src_parts_h = @embedFile("kernels/combine/src_parts_h.metal");
 
 pub const header_routed: [:0]const u8 = contract;
 pub const header_parts: [:0]const u8 = contract ++ pick;
@@ -32,6 +39,10 @@ pub const header_parts: [:0]const u8 = contract ++ pick;
 pub const text_routed: [:0]const u8 = combine_1 ++ src_routed ++ combine_2;
 /// The same over sources s0..s23 f32 [r_i, D] and loc int32 [n, K, 2]: out f32 [n, D]
 pub const text_parts: [:0]const u8 = combine_1 ++ src_parts ++ combine_2;
+pub const header_parts_h: [:0]const u8 = contract ++ pick_h;
+/// The same over sources s0..s23 f16 [r_i, D] (PF_F16_PAIRS: each word an f16 value an f32 source would hold): out f32
+/// [n, D], `text_parts`' words on those f32 sources
+pub const text_parts_h: [:0]const u8 = combine_1 ++ src_parts_h ++ combine_2;
 
 /// The sources a parts launch binds (MLX binds at most 31 buffers: 24 sources, loc, weights and the output)
 pub const max_sources: usize = 24;
@@ -49,14 +60,14 @@ comptime {
     if (parts_in.len != max_sources + 2) @compileError("parts_in must name max_sources sources, loc and weights");
 }
 
-const Kernels = struct { routed: mlx.mlx_fast_metal_kernel, parts: mlx.mlx_fast_metal_kernel };
+const Kernels = struct { routed: mlx.mlx_fast_metal_kernel, parts: mlx.mlx_fast_metal_kernel, parts_h: mlx.mlx_fast_metal_kernel };
 const lock = Global(std.atomic.Value(u32), "ling_combine_lock", std.atomic.Value(u32).init(0));
 const kernels = Global(?Kernels, "ling_combine_kernels", null);
 
 /// This file's module state (`Global`): what a host that shares its units' state registers (root's `shared_state`).
 pub const shared_state = .{ lock, kernels };
 
-/// The two kernels, made at the first call
+/// The three kernels, made at the first call
 fn kernelsFor() !Kernels {
     while (lock.get().*.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
     defer lock.get().*.store(0, .release);
@@ -64,7 +75,9 @@ fn kernelsFor() !Kernels {
     const r = ks.newKernel("turboexl3_ling_combine", &routed_in, &out_names, text_routed, header_routed, true) orelse return error.KernelCreateFailed;
     errdefer decode.freeKernel(r);
     const p = ks.newKernel("turboexl3_ling_combine_parts", &parts_in, &out_names, text_parts, header_parts, true) orelse return error.KernelCreateFailed;
-    kernels.get().* = .{ .routed = r, .parts = p };
+    errdefer decode.freeKernel(p);
+    const ph = ks.newKernel("turboexl3_ling_combine_parts_h", &parts_in, &out_names, text_parts_h, header_parts_h, true) orelse return error.KernelCreateFailed;
+    kernels.get().* = .{ .routed = r, .parts = p, .parts_h = ph };
     return kernels.get().*.?;
 }
 
@@ -107,6 +120,10 @@ pub fn combineRouted(s: mlx.mlx_stream, routed: mlx.mlx_array, weights: mlx.mlx_
 /// pair's row lies in its source), weights f32 [n, K] -> f32 [n, hidden], the bytes of `combineRouted` over the array
 /// the join would build (each pair's row copied from its source). Unused source slots bind source 0. The caller frees
 /// the result.
+/// Sources may be f16 (PF_F16_PAIRS: `ling.moeLingRowsPairsF16`'s rows, each word the f16 value of the f32 word the
+/// served call stores): every source f16 runs `text_parts_h` (the source pointers half, the same statements); a mix of
+/// f16 and f32 widens each f16 source to f32 first (MLX's astype, exact) and runs `text_parts`. Either way the words are
+/// `text_parts`' over those sources in f32. Any other source dtype is error.BadExl3Dtype.
 pub fn combineParts(s: mlx.mlx_stream, outs: []const mlx.mlx_array, loc: mlx.mlx_array, weights: mlx.mlx_array) !mlx.mlx_array {
     if (outs.len == 0 or outs.len > max_sources) return error.BadExl3Shape;
     const ls = mlx.getShape(loc);
@@ -118,17 +135,37 @@ pub fn combineParts(s: mlx.mlx_stream, outs: []const mlx.mlx_array, loc: mlx.mlx
         if (s0.len != 2 or s0[1] < 1) return error.BadExl3Shape;
         break :blk s0[1];
     };
+    var n_half: usize = 0;
     for (outs) |x| {
         const sh = mlx.getShape(x);
         if (sh.len != 2 or sh[0] < 1 or sh[1] != hidden) return error.BadExl3Shape;
-        if (mlx.mlx_array_dtype(x) != .float32) return error.BadExl3Dtype;
+        switch (mlx.mlx_array_dtype(x)) {
+            .float32 => {},
+            .float16 => n_half += 1,
+            else => return error.BadExl3Dtype,
+        }
     }
+    // a mix: each f16 source widened to f32 (exact), then the f32 sources' text
+    var wide: [max_sources]mlx.mlx_array = undefined;
+    var n_wide: usize = 0;
+    defer for (wide[0..n_wide]) |w| {
+        _ = mlx.mlx_array_free(w);
+    };
+    const mixed = n_half > 0 and n_half < outs.len;
     var ins: [max_sources + 2]mlx.mlx_array = undefined;
-    for (ins[0..max_sources], 0..) |*x, i| x.* = outs[if (i < outs.len) i else 0];
+    for (outs, 0..) |x, i| {
+        if (mixed and mlx.mlx_array_dtype(x) == .float16) {
+            wide[n_wide] = mlx.mlx_array_new();
+            n_wide += 1;
+            try mlx.check(mlx.mlx_astype(&wide[n_wide - 1], x, .float32, s));
+            ins[i] = wide[n_wide - 1];
+        } else ins[i] = x;
+    }
+    for (ins[outs.len..max_sources]) |*x| x.* = ins[0];
     ins[max_sources] = loc;
     ins[max_sources + 1] = weights;
     const k = try kernelsFor();
-    return launch(s, k.parts, &ins, ls[0], ls[1], hidden);
+    return launch(s, if (n_half == outs.len) k.parts_h else k.parts, &ins, ls[0], ls[1], hidden);
 }
 
 test "turboexl3 ling combine texts: the joined and JOINLESS texts are one composition with their row read swapped; the fold keeps MLX's rounding points (no contraction, each product alone, p + 0 then v + t)" {
@@ -152,4 +189,36 @@ test "turboexl3 ling combine texts: the joined and JOINLESS texts are one compos
         for (ins) |n| try t.expect(has(txt, std.mem.span(n)) or has(header_parts, std.mem.span(n)));
         for ([_][]const u8{ "_shape", "_strides", "_ndim" }) |suf| try t.expect(!has(txt, suf));
     }
+}
+
+/// `s` with every `needle` replaced by `with`, at comptime (the f16 texts' test compares the f32 pieces swapped this way;
+/// no kernel is built from it)
+fn replace(comptime s: []const u8, comptime needle: []const u8, comptime with: []const u8) []const u8 {
+    comptime {
+        @setEvalBranchQuota(10_000_000);
+        var out: []const u8 = "";
+        var i: usize = 0;
+        while (std.mem.indexOfPos(u8, s, i, needle)) |j| {
+            out = out ++ s[i..j] ++ with;
+            i = j + needle.len;
+        }
+        return out ++ s[i..];
+    }
+}
+
+test "turboexl3 ling combine texts: the f16 sources' JOINLESS text is the f32 one with each source pointer half and the pick's name its own (pick_h, src_parts_h), nothing else; the fold's statements are the f32 text's" {
+    const t = std.testing;
+    // pin 0 the f32 source pointer, 1 the f16 one, 2 the pick's call, 3 the f16 pick's
+    const pin = comptime @import("../../core/test_support.zig").pins(@embedFile("kernels/test/pins/combine_h.metal"));
+    try t.expect(std.mem.eql(u8, text_parts_h, combine_1 ++ src_parts_h ++ combine_2));
+    try t.expect(std.mem.eql(u8, header_parts_h, contract ++ pick_h));
+    // each f16 piece is its f32 piece with the pointers half and the pick renamed: the same statements otherwise
+    try t.expectEqualStrings(pick_h, comptime replace(replace(pick, pin[0], pin[1]), pin[2], pin[3]));
+    try t.expectEqualStrings(src_parts_h, comptime replace(replace(src_parts, pin[0], pin[1]), pin[2], pin[3]));
+    // the swap reached every pointer: no f32 source pointer is left in the f16 pieces, and none was f16 before
+    for ([_][]const u8{ pick_h, src_parts_h }) |p| try t.expect(std.mem.indexOf(u8, p, pin[0]) == null);
+    for ([_][]const u8{ pick, src_parts }) |p| try t.expect(std.mem.indexOf(u8, p, pin[1]) == null);
+    // the f16 text binds the same operands, and the product and fold are combine_2's (shared, not copied)
+    try t.expect(std.mem.endsWith(u8, text_parts_h, combine_2) and std.mem.startsWith(u8, text_parts_h, combine_1));
+    for (parts_in) |n| try t.expect(std.mem.indexOf(u8, text_parts_h, std.mem.span(n)) != null or std.mem.indexOf(u8, header_parts_h, std.mem.span(n)) != null);
 }

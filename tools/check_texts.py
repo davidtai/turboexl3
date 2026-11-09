@@ -1855,6 +1855,15 @@ SPLIT_ADDED_KERNELS['turboexl3_test_pf_dfinn_fin_fault'] = ('test only: turboexl
 ADDED_FILES['models/ling/mla_rows.zig'] = ('Ling-3.1\'s MLA kv_b and head gate at decode and verify rows in one GEMV launch '
                                            '(mlaRows, turboexl3_ling_mla_rows: MLX\'s one-row gemv words for each row, each '
                                            'weight tile read once for the call\'s rows), and its texts\' and plan\'s CPU tests')
+# L1 (turboexl3_ling's MLX_SERVE_LING_PF_F16_PAIRS): a prompt call's routed pairs stored as f16 (moeLingRowsPairsF16)
+# and the JOINLESS combine over f16 sources (turboexl3_ling_combine_parts_h)
+ADDED_FILES['models/ling/f16pairs_test.zig'] = ('moeLingRowsPairsF16 and the combine over f16 sources held word for '
+                                                'word to the served f32 pairs and combine at the standard request\'s '
+                                                'call, a 2,048-token call and a padded call, both endings, with red '
+                                                'checks (GPU); the exactness rule and the host round-trip (CPU)')
+SPLIT_ADDED_KERNELS['turboexl3_ling_combine_parts_h'] = ('turboexl3_ling_combine_parts over f16 sources (PF_F16_PAIRS): '
+                                                         'src_parts_h and pick_h, the source pointers half, the same '
+                                                         'statements; the product widens each word exactly')
 ADDED_FILES['models/ling/mla_rows_test.zig'] = ('mlaRows held to the served launches word for word (the one-row matmul, the '
                                                 'plugin\'s denseRows) at kv_b and the head gate, rows 1 to 16 and caps 1 to 8, '
                                                 'with red checks (GPU); the fault texts (CPU); servedCall and loaderWeight for '
