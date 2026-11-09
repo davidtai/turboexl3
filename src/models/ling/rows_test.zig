@@ -21,9 +21,9 @@
 //!   `Prefill.moeWith` and `moeT128With` with the row map against `moe` and `moeT128` over the gathered rows on one
 //!   engine (the served options, the 128-row tiles off and on), on the call's first chunk and the padded call.
 //!   Lines: TURBOEXL3_LING_ROWS, TURBOEXL3_LING_ROWS_ENGINE.
-//! - GPU, the routed chain's variants (`variants`: the finish as the down GEMM's epilogue, over the 128-row tiles' two
-//!   tables and over the plain chain's one at bm 128 and 256, also at 128-deep, two-block, MMA-first, single-buffered
-//!   and padded stages; each a `prefill.Options` change, off by default), each held word for word to the served engine
+//! - GPU, the routed chain's variants (`variants`: the finish as the down GEMM's epilogue over the 128-row tiles' two
+//!   tables at the served options, also at 128-deep, two-block and MMA-first stages; each a `prefill.Options` change,
+//!   off by default), each held word for word to the served engine
 //!   (`Prefill.moeT128With` at the served options) on the row map, at n 40 and 32, limits 0 and 10, over synthetic
 //!   calls (never a prompt's routing): every bucket edge of an expert's rows (1-32, 33-64, 65-128, 129-256, 257-288,
 //!   289-512), the 4096-pair maximum call, many small experts, lognormal-skewed counts, one hot expert, a padded 5-pair
@@ -331,27 +331,14 @@ fn engineRows(pf: *prefill.Prefill, s: mlx.mlx_stream, x: mlx.mlx_array, o: Rows
 }
 
 /// A variant of the routed chain: its name, its options at rate n, whether the TIME test times it (the byte test runs
-/// every variant), the chain its bytes are held to: the served engine, or (`base`) the same stage shape with the
-/// variant's change off, where that stage shape is not the served chain's bytes by itself (the padded stage's natural-order
-/// A slots, say), so the line isolates the change
+/// every variant), the chain its bytes are held to: the served engine (the unfused chain at the served options), or
+/// (`base`) the same stage shape with the variant's change off, where that stage shape is not the served chain's bytes
+/// by itself, so the line isolates the change
 const Variant = struct { name: []const u8, o: prefill.Options, time: bool = true, base: ?prefill.Options = null };
 
 /// The served options (the 128-row tiles) with the fused finish set (`prefill.Options.dfin`)
 fn vT(n: u32, dfin: bool) prefill.Options {
     var o = servedOptions(n, true);
-    o.dfin = dfin;
-    return o;
-}
-
-/// The plain chain (no 128-row tiles: one launch a GEMM) at M tile rows `bm`, the register path for <= 32-row remainders
-/// on or off (every tile on the shared-decode body), the fused finish set
-fn vP(n: u32, bm: u32, mixed: bool, dfin: bool) prefill.Options {
-    var o = servedOptions(n, false);
-    o.bm = bm;
-    if (!mixed) {
-        o.small = .off;
-        o.sintr = false;
-    }
     o.dfin = dfin;
     return o;
 }
@@ -367,33 +354,19 @@ fn vS(n: u32, bk128: bool, ncb: u8, mma_first: bool, dfin: bool) prefill.Options
     return o;
 }
 
-/// `vP`'s fused finish at bm 128 (32-row rounds; `dfin` false: its base) on a single-buffered stage (`dbuf` off: the one
-/// buffer, after a barrier), or on the padded stage (`fragb` off, so natural-order A: `alay` 0)
-fn vQ(n: u32, dbuf: bool, fragb: bool, dfin: bool) prefill.Options {
-    var o = vP(n, 128, false, dfin);
-    o.dbuf = dbuf;
-    o.fragb = fragb;
-    if (!fragb) o.alay = 0;
-    return o;
-}
-
-const n_variants = 8;
+const n_variants = 4;
 
 /// The routed chain's variants at rate n (the byte test's and the timing's arms): each one launch-shape change off the
-/// served options or one plain launch, every one `moeLingRows`'s bytes by construction (the same per-simdgroup K loop on
-/// every body, the finish's own statements on the store's f16 words)
+/// served options, every one `moeLingRows`'s bytes by construction (the same per-simdgroup K loop on every body, the
+/// finish's own statements on the store's f16 words)
 fn variants(n: u32) [n_variants]Variant {
     return .{
         .{ .name = "dfin", .o = vT(n, true) },
-        .{ .name = "p256.dfin", .o = vP(n, 256, false, true) },
-        .{ .name = "p128.dfin", .o = vP(n, 128, false, true) },
         // the fused finish's staging at the other stage shapes it takes (byte arms, not timed), each held to its own stage
         // shape with the fused finish off
         .{ .name = "dfin.k128", .o = vS(n, true, 4, false, true), .time = false, .base = vS(n, true, 4, false, false) },
         .{ .name = "dfin.n2", .o = vS(n, false, 2, false, true), .time = false, .base = vS(n, false, 2, false, false) },
         .{ .name = "dfin.mf", .o = vS(n, false, 4, true, true), .time = false, .base = vS(n, false, 4, true, false) },
-        .{ .name = "p128.dfin.sb", .o = vQ(n, false, true, true), .time = false, .base = vQ(n, false, true, false) },
-        .{ .name = "p128.dfin.pad", .o = vQ(n, true, false, true), .time = false, .base = vQ(n, true, false, false) },
     };
 }
 
@@ -579,7 +552,7 @@ fn endIs(ran: ?prefill.End, want: prefill.End) bool {
 }
 
 /// Ling-3.1-flash's routed experts and PF_DFIN's whole-call threshold in rows an expert (the outside plugin's
-/// MLX_SERVE_LING_PF_DFIN_CALL_MIN, 80 by default: the TIME ladder's step where the plain fused finish breaks even)
+/// MLX_SERVE_LING_PF_DFIN_CALL_MIN, 80 by default: the TIME ladder's step where the fused finish breaks even)
 const route_experts: u64 = 512;
 const dfin_call_min: u64 = 80;
 
@@ -613,7 +586,7 @@ fn chunkAtMean(rows: u64, buf: []u32) []const u32 {
     return buf[0..ne];
 }
 
-/// The rule's cases: a wide call's rows, its call_min, and the ending the case states on the plain fused finish's engine:
+/// The rule's cases: a wide call's rows, its call_min, and the ending the case states on the fused finish's engine:
 /// either side of 80 rows an expert (5,119 rows: 79.98; 5,120: 80.00), a layer-major call of 16,384 rows (256.00), a short
 /// call of 1,120 (17.50), and call_min 0, which takes the fused finish at every call
 const RuleCase = struct { rows: u64, call_min: u64, want: prefill.End };
@@ -735,7 +708,7 @@ test "turboexl3 gpu ling rows: moeLingRows is the plugin's prompt chunk (take, b
     try testing.expect(!failed);
 }
 
-test "turboexl3 gpu ling rows variants: the routed chain's fused finish (over both tables, over one, and at each stage shape it takes) is the served engine's words on synthetic calls at every row bucket, n 40 and 32, limits 0 and 10; planted faults are caught (TURBOEXL3_GPU=1)" {
+test "turboexl3 gpu ling rows variants: the routed chain's fused finish (over both tables at the served options, and at each other stage shape it takes) is the served engine's words on synthetic calls at every row bucket, n 40 and 32, limits 0 and 10; planted faults are caught (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
@@ -902,7 +875,7 @@ test "turboexl3 gpu ling rows variants: the routed chain's fused finish (over bo
             const geo = rowsGeo(n, prompt_slots, lim);
             var served = try prefill.Prefill.init(geo, servedOptions(n, true));
             defer served.deinit();
-            // the plugin's engine: PF_DFIN (the plain fused finish); a call that keeps the fused finish runs the
+            // the plugin's engine: PF_DFIN (the fused finish); a call that keeps the fused finish runs the
             // engine's own ending, one that declines it the served one
             var plain = try prefill.Prefill.init(geo, vT(n, true));
             defer plain.deinit();
@@ -911,7 +884,7 @@ test "turboexl3 gpu ling rows variants: the routed chain's fused finish (over bo
                 .{ .name = "dfin", .pf = &plain, .own = .dfin, .ladder = true },
             };
             var cbuf: [160]u32 = undefined;
-            // every synthetic call, then every rung of the ladder (the plain engine's): both choices on each engine, each
+            // every synthetic call, then every rung of the ladder (that engine's): both choices on each engine, each
             // the served engine's words, each ending the choice's
             const kinds = std.enums.values(SynthKind);
             for (0..kinds.len + ladder_rows.len) |at| {
@@ -950,7 +923,7 @@ test "turboexl3 gpu ling rows variants: the routed chain's fused finish (over bo
                     }
                 }
             }
-            // the plugin's rule (`callTakes`) on either side of 80 rows an expert and at call_min 0, on the plain engine:
+            // the plugin's rule (`callTakes`) on either side of 80 rows an expert and at call_min 0, on that engine:
             // each case's call decided by the rule and run on a chunk at its call's mean rows an expert (`chunkAtMean`),
             // the served engine's words, its ending the side the case states
             for (rule_cases) |rc| {

@@ -2384,17 +2384,18 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 
 <!-- /kernel-facts -->
 
-- **Used by:** not served: `Prefill.gemmDFin` with `Options.dfin` (`Config.pf_dfin`, off by default; the outside plugin
-  turboexl3_ling's candidate `MLX_SERVE_LING_PF_DFIN`), on every top-1 routed prefill call (`root.prefillFor` drops it at
-  another top-k): Ling-3.1-flash's prompt calls over gathered rows (`moeLingRows`) and its top-1 `moeLing` chunks. With
-  the 128-row tiles (`moeT128With`) it runs over
-  both of the route's tables in one launch in place of `turboexl3_pf_t128_dnm`, `turboexl3_pf_t128_dnt` and
-  `turboexl3_pf_t128_fin`; with small `.off` (`moeWith`) over the one table in place of `turboexl3_pf_gemm1` and
-  `turboexl3_pf_fin`. A call runs it only where it keeps the
-  fused finish (`prefill.Call`, `.{}` by default: `moeT128WithCall`, `moeWithCall`; root's `moeSwigluWith` and
-  `moeSwigluRowsWith`, Ling's `moeLingWith` and `moeLingRowsWith`); a call with `.dfin = false` runs the served route,
-  `turboexl3_pf_t128_dnm`, `turboexl3_pf_t128_dnt` and `turboexl3_pf_t128_fin` on the same engine. turboexl3_ling's
-  PF_DFIN decides it once a wide prompt call (`MLX_SERVE_LING_PF_DFIN_CALL_MIN`: a mean of at least 80 rows an expert).
+- **Used by:** Ling-3.1-flash, served: the outside plugin turboexl3_ling's PF_DFIN (kept with V1c's whole-call rule)
+  builds its prompt engine with `Options.dfin` (`Config.pf_dfin`, off by default) and decides the fused finish once a
+  wide prompt call, at a mean of at least 80 rows an expert (R · 8 ≥ 80 · 512 at top-8); below that cutoff the call runs
+  the served route. `Prefill.gemmDFin` runs on every top-1 routed prefill call that keeps it (`root.prefillFor` drops it
+  at another top-k): Ling-3.1-flash's prompt calls over gathered rows (`moeLingRows`) and its top-1 `moeLing` chunks.
+  With the 128-row tiles (`moeT128With`, the served options) it runs over both of the route's tables in one launch in
+  place of `turboexl3_pf_t128_dnm`, `turboexl3_pf_t128_dnt` and `turboexl3_pf_t128_fin`. The text also takes small
+  `.off`'s one table (`moeWith`, in place of `turboexl3_pf_gemm1` and `turboexl3_pf_fin`), which no host builds. A call
+  runs it only where it keeps the fused finish (`prefill.Call`, `.{}` by default: `moeT128WithCall`, `moeWithCall`;
+  root's `moeSwigluWith` and `moeSwigluRowsWith`, Ling's `moeLingWith` and `moeLingRowsWith`); a call with `.dfin =
+  false` runs the served route, `turboexl3_pf_t128_dnm`, `turboexl3_pf_t128_dnt` and `turboexl3_pf_t128_fin`, on the
+  same engine.
 - **Shapes and dtypes:** tiles int32 [ta, 4] (tiles128, or small `.off`'s table; one row binds it in the constant address
   space, so each tile word is read from its own table) and, with T2, tiles2 int32 [tb, 4] (the mixed table, each of its
   tiles run as a part-full tile; with T2 0 it is bound and never read); x0 = xd f16 [S, inter]
@@ -2418,8 +2419,9 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
   the finish's own statements (`finish_2`, `finish_4`) on those f16 words at the element the finish reads zd (L + 32 j),
   the one slot of a top-1 row (the finish's sum over one slot, from 0).
 - **Pinned by:** `src/models/ling/rows_test.zig` "turboexl3 gpu ling rows variants: the routed chain's fused
-  finish (over both tables, ..." (GPU: dfin, p256.dfin, p128.dfin word for word against the served engine at Ling's shapes, n 40 and 32, limits 0 and 10, and
-  dfin.k128, dfin.n2, dfin.mf, p128.dfin.sb, p128.dfin.pad against their own stage shapes with the fused finish off; a
+  finish (over both tables at the served options, ..." (GPU: dfin word for word against the served engine, the unfused
+  chain at the served options, at Ling's shapes, n 40 and 32, limits 0 and 10, and dfin.k128, dfin.n2, dfin.mf against
+  their own stage shapes with the fused finish off; a
   planted epilogue fault and two planted order faults (the finish's H128, the K loop) caught, the order faults within
   tolerance; then each call at both choices of `prefill.Call` on the dfin engine, the served words and the ending each
   ran named from the engine's counts, `TURBOEXL3_LING_DFIN_CALL` lines, with a choice ignored and the plugin's rule off
