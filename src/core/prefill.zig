@@ -34,11 +34,8 @@
 //! computed it. bm 128 and bm 64 run the same per-simdgroup K loop, so every output sums the same 16-deep MMAs in the same
 //! order: `moe`'s bytes.
 //!
-//! `Options.t256` runs that launch at tiles of up to 256 rows on the bm-256 body (16 simdgroups on one decoded weight
-//! stage): each expert's full 256-row runs, and a remainder of more than `Options.cut` rows, one tile each, so an expert's
-//! weights are decoded once per 256 rows instead of once per 128. bm 256 runs the same per-simdgroup K loop too:
-//! `moeT128`'s bytes. `Options.cut` is the remainder rule's cutoff (`t128_cut`, 64, served), `Options.gu_ncb` the gate|up
-//! GEMM's column blocks per threadgroup (the down GEMM's `ncb`): launch shapes, the same bytes.
+//! `Options.cut` is the remainder rule's cutoff (`t128_cut`, 64, served), `Options.gu_ncb` the gate|up GEMM's column
+//! blocks per threadgroup (the down GEMM's `ncb`): launch shapes, the same bytes.
 //!
 //! `Options.dfin` runs the finish as the down GEMM's epilogue (top-1 calls: a row's one slot): the down launch writes y
 //! itself, so zd is never written or read and the finish launch is gone. A threadgroup owns `ncb` 64-column blocks, so
@@ -363,38 +360,12 @@ pub const t128_cut: u8 = 64;
 pub const text_froute_t128: [:0]const u8 = sentinel(froute_t128_1 ++ froute_count ++ froute_t128_2);
 const froute_t128_1 = @embedFile("kernels/prefill/froute_t128_1.metal");
 /// `text_froute_t128`'s tables, cut at its two 128-row lines: each expert's full 128-row runs (`froute_t128_2_2`) and
-/// their table rows (`froute_t128_2_4`), where the 256-row tiles' route takes its own (`froute_t256_nq`,
-/// `froute_t256_store`)
+/// their table rows (`froute_t128_2_4`)
 const froute_t128_2 = froute_t128_2_1 ++ @embedFile("kernels/prefill/froute_t128_2_2.metal") ++ froute_t128_2_3 ++
     @embedFile("kernels/prefill/froute_t128_2_4.metal") ++ froute_t128_2_5;
 const froute_t128_2_1 = @embedFile("kernels/prefill/froute_t128_2_1.metal");
 const froute_t128_2_3 = @embedFile("kernels/prefill/froute_t128_2_3.metal");
 const froute_t128_2_5 = @embedFile("kernels/prefill/froute_t128_2_5.metal");
-
-// ── The 256-row tiles (`Options.t256`) ──
-//
-// With t256 the 128-row tiles' launch runs the bm-256 shared-decode body (16 simdgroups; each decodes one of a stage's 16
-// trellis tiles, where bm 128's decode two) over tiles of up to 256 rows: each expert's full 256-row runs, then one
-// part-full 256-row tile for a remainder of more than cu = min(`Options.cut`, 127) rows; the rest (at most cu rows) takes
-// the mixed launch as before, so an expert of r rows takes ceil(r / 256) decode passes over its weights for any cut of at
-// most 64 (a remainder of at most cu rows takes one mixed tile). The route is `text_froute_t128` with its two 128-row
-// lines at 256 rows; its tables' bounds and xbase are the 128-row tiles' (an expert's 256-row tiles are never more than
-// its 128-row ones, so `t128TileRows` holds them, and its remainder is the same at most cu rows, so `t128MixedRows` holds
-// the mixed table), and mid and finish read each row from the launch that computed it as before. bm 256 runs bm 128's
-// per-simdgroup K loop on the same decoded stages, so every output sums the same 16-deep MMAs in the same K order:
-// `moeT128`'s bytes.
-
-/// The 256-row tiles' route (`Options.t256`): `text_froute_t128` with its two 128-row lines at 256 rows (tiles128 holds
-/// tiles of up to 256 rows)
-pub const text_froute_t256: [:0]const u8 = froute256With(@embedFile("kernels/prefill/froute_t256_store.metal"));
-/// `text_froute_t256` with `store` in its tile row's line (`froute_t256_store`; a test passes a planted fault)
-pub fn froute256With(comptime store: []const u8) [:0]const u8 {
-    return sentinel(froute_t128_1 ++ froute_count ++ froute_t128_2_1 ++ @embedFile("kernels/prefill/froute_t256_nq.metal") ++ froute_t128_2_3 ++ store ++
-        froute_t128_2_5);
-}
-/// The route's inputs and outputs (`text_froute_t128`, `text_froute_t256`; a test's planted fault makes its own)
-pub const route_t128_in = froute_in;
-pub const route_t128_out = froute_t128_out;
 
 /// The 128-row tiles' mid: `text_mid` with each position's gate and up rows from the launch that computed them (zgt / zut,
 /// the 128-row tiles' outputs, for p < xbase[e]; zg / zu, the mixed launch's, otherwise); one simdgroup holds one position,
@@ -536,12 +507,8 @@ pub const Options = struct {
     /// launch of their own beside the mixed launch over the rest (`Prefill.moeT128`, the notes above `t128_cut`): `moe`'s
     /// bytes. Needs bm 64, the mixed table at split 1, froute's route and the strided mid and finish (aux 0)
     t128: bool = false,
-    /// the 128-row tiles' launch (`t128`) on the bm-256 body over tiles of up to 256 rows (`text_froute_t256`, the notes
-    /// above it): each expert's full 256-row runs and a remainder of more than `cut` rows, its weights decoded once a
-    /// tile; the same per-simdgroup K loop, so `moeT128`'s bytes. Needs `t128`
-    t256: bool = false,
-    /// the remainder rule of the 128-row (or 256-row) tiles: past an expert's full big tiles, a remainder of more than
-    /// min(cut, 127) rows takes one part-full big tile, the rest the mixed launch (`t128_cut` served). Any cut gives every
+    /// the remainder rule of the 128-row tiles: past an expert's full 128-row tiles, a remainder of more than
+    /// min(cut, 127) rows takes one part-full 128-row tile, the rest the mixed launch (`t128_cut` served). Any cut gives every
     /// row the same bytes (its tile's body runs the same K loop); a launch shape, swept over row counts and synthetic
     /// routing
     cut: u8 = t128_cut,
@@ -578,8 +545,6 @@ pub const Options = struct {
         // the bm-128 shared-decode body beside bm 64's
         if (o.t128 and (o.small != .mixed or o.split != 1 or !o.froute or o.aux != 0 or o.bm != 64)) return false;
         if (o.stageBytes(o.downStage()) > 32768) return false;
-        // the 256-row tiles: the 128-row tiles' launch at bm 256
-        if (o.t256 and !o.t128) return false;
         // gate|up's column blocks reshape the shared-decode body, as ncb does the down GEMM's
         if (o.gu_ncb != 1 and (o.small == .all or (o.gu_ncb != 2 and o.gu_ncb != 4))) return false;
         // the fused finish: whole 128-column blocks a threadgroup, every simdgroup a consumer, one down launch over every
@@ -594,14 +559,9 @@ pub const Options = struct {
         return if (o.small == .all) 32 else o.bm;
     }
 
-    /// rows per tile of the 128-row tiles' launch (`t128`): 128, or 256 with `t256`
-    pub fn t128Rows(o: Options) u32 {
-        return if (o.t256) 256 else 128;
-    }
-
     /// the fused down GEMM's body rows (`dfin`): the 128-row tiles' with `t128` (both tables on that body), else `bm`
     pub fn dfinRows(o: Options) u32 {
-        return if (o.t128) o.t128Rows() else o.bm;
+        return if (o.t128) 128 else o.bm;
     }
 
     /// threadgroup memory of the fused down GEMM (`dfin`): its weight stage, and with dfr 64 a round's f16 staging of its
@@ -696,8 +656,6 @@ pub const ZT128 = struct {
 /// more than cu = min(cut, 127) and an expert has at most one, so np part-full tiles leave at most (S - (cu + 1) np) / 128
 /// full ones; the count is largest at np = min(experts, S / (cu + 1)). Every routing fits, and the launch's grid stays near
 /// its tiles (each spare table row is a row of early-exit threadgroups). `text_froute_t128`'s TQ is the same expression.
-/// The 256-row tiles (`Options.t256`, `text_froute_t256`) fit it too: an expert's 256-row tiles are never more than its
-/// 128-row ones.
 pub fn t128TileRows(S: u32, experts: u32, cut: u8, t128: bool) u32 {
     if (!t128) return 1;
     const cu1: u32 = @as(u32, @min(cut, 127)) + 1;
@@ -734,27 +692,20 @@ pub const T128Tables = struct {
 };
 
 pub fn t128Tables(a: std.mem.Allocator, counts: []const u32, bm: u32, cut: u8, t128: bool) !T128Tables {
-    return tileTables(a, counts, bm, cut, t128, 128);
-}
-
-/// `t128Tables` with the big tiles at `rows_t` rows (128, or 256: `Options.t256`'s route, `text_froute_t256`): each
-/// expert's full `rows_t`-row runs, then one part-full tile for a remainder of more than cu = min(cut, 127) rows; the
-/// remainder's tiles as `t128Tables`'.
-pub fn tileTables(a: std.mem.Allocator, counts: []const u32, bm: u32, cut: u8, t128: bool, rows_t: u32) !T128Tables {
     var t: T128Tables = .{};
     errdefer t.deinit(a);
     const cu: u32 = @min(cut, 127);
     var lo: u32 = 0;
     for (counts, 0..) |c0, ei| {
         const e: u32 = @intCast(ei);
-        var nq: u32 = if (t128) c0 / rows_t else 0;
-        var cnt = c0 - rows_t * nq;
+        var nq: u32 = if (t128) c0 / 128 else 0;
+        var cnt = c0 - 128 * nq;
         if (t128 and cnt > cu) {
             nq += 1;
             cnt = 0;
         }
         var q: u32 = 0;
-        while (q < nq) : (q += 1) try t.t128.append(a, .{ e, lo + rows_t * q, @min(rows_t, c0 - rows_t * q) });
+        while (q < nq) : (q += 1) try t.t128.append(a, .{ e, lo + 128 * q, @min(128, c0 - 128 * q) });
         const base = lo + c0 - cnt;
         const nfull = cnt / bm;
         const r = cnt - nfull * bm;
@@ -769,8 +720,7 @@ pub fn tileTables(a: std.mem.Allocator, counts: []const u32, bm: u32, cut: u8, t
 
 /// The 128-row tiles' kernels (`Options.t128`): the route, both GEMMs' launches (over the remainder table: the mixed launch;
 /// over the 128-row tiles: the shared-decode body at bm 128; the mixed chain's texts, header, inputs and outputs), and mid
-/// and finish taking each row from the launch that computed it (mid's clamped variant where the geometry clamps). With
-/// `Options.t256` the route is the 256-row tiles' (`text_froute_t256`); the GEMM kernels are the same, launched at bm 256.
+/// and finish taking each row from the launch that computed it (mid's clamped variant where the geometry clamps).
 pub const T128Kernels = struct {
     route: mlx.mlx_fast_metal_kernel,
     gu_mixed: mlx.mlx_fast_metal_kernel,
@@ -780,12 +730,9 @@ pub const T128Kernels = struct {
     mid: mlx.mlx_fast_metal_kernel,
     fin: mlx.mlx_fast_metal_kernel,
 
-    fn init(limit: u32, clamp: format.ClampAt, t256: bool) !T128Kernels {
+    fn init(limit: u32, clamp: format.ClampAt) !T128Kernels {
         return .{
-            .route = (if (t256)
-                ks.newKernel("turboexl3_pf_t256_route", &froute_in, &froute_t128_out, text_froute_t256, header_small, true)
-            else
-                ks.newKernel("turboexl3_pf_t128_route", &froute_in, &froute_t128_out, text_froute_t128, header_small, true)) orelse return error.KernelCreateFailed,
+            .route = ks.newKernel("turboexl3_pf_t128_route", &froute_in, &froute_t128_out, text_froute_t128, header_small, true) orelse return error.KernelCreateFailed,
             .gu_mixed = ks.newKernel("turboexl3_pf_t128_gum", &gemm2_in, &gemm2_out, gemm2m_text, header_nax, true) orelse return error.KernelCreateFailed,
             .gu_t128 = ks.newKernel("turboexl3_pf_t128_gut", &gemm2_in, &gemm2_out, gemm2_text, header_nax, true) orelse return error.KernelCreateFailed,
             .dn_mixed = ks.newKernel("turboexl3_pf_t128_dnm", &gemm1_in, &gemm1_out, gemm1m_text, header_nax, true) orelse return error.KernelCreateFailed,
@@ -870,7 +817,7 @@ pub const Prefill = struct {
             else
                 ks.newKernel("turboexl3_pf_mid_vco", &mid_in, &mid_out, text_mid_vco, header_small, true)) orelse return error.KernelCreateFailed,
             .fin_v = ks.newKernel("turboexl3_pf_fin_v", &fin_in, &fin_out, text_finish_v, header_small, true) orelse return error.KernelCreateFailed,
-            .t128_k = if (!opts.t128) null else try T128Kernels.init(geo.limit, geo.clamp, opts.t256),
+            .t128_k = if (!opts.t128) null else try T128Kernels.init(geo.limit, geo.clamp),
             .dfin_k = if (!opts.dfin) null else ks.newKernel("turboexl3_pf_dfin", &dfin_in, &dfin_out, text_dfin, header_nax_dfin, true) orelse return error.KernelCreateFailed,
         };
     }
@@ -1220,7 +1167,7 @@ pub const Prefill = struct {
     /// `tq` table rows
     fn t128Cfg(self: *const Prefill, tmpl: *[23]ks.TemplateArg, tq: u32, kd: u32, nd: u32, nops: u32, bks: u32, ncb: u32) ks.Launch {
         var p = self.*;
-        p.opts.bm = self.opts.t128Rows();
+        p.opts.bm = 128;
         p.opts.small = .off;
         return p.gemmCfg(tmpl, tq, kd, nd, nops, bks, ncb);
     }
@@ -1830,15 +1777,9 @@ test "turboexl3 prefill 128-row tiles metal sources: the route, both GEMMs' laun
     printMetal("turboexl3_pf_t128_fin", header_small, pin[11], fin, text_finish_t128);
 }
 
-test "turboexl3 prefill variant texts: the 256-row route is the 128-row route at 256 rows; the fused down GEMM is gemm1_text with its tile read and its store swapped for the two-table read and the finish's own statements" {
+test "turboexl3 prefill variant texts: the fused down GEMM is gemm1_text with its tile read and its store swapped for the two-table read and the finish's own statements" {
     const pin = comptime @import("test_support.zig").pins(@embedFile("kernels/test/pins/prefill_v1.metal"));
     const t = std.testing;
-    // the 256-row tiles' route: the 128-row route's two 128-row lines at 256 rows, and nothing else (the 128-row route holds
-    // no 256-row token, so swapping every one back gives it)
-    try t.expectEqualStrings(@embedFile("kernels/prefill/froute_t128_2_2.metal"), comptime replace(@embedFile("kernels/prefill/froute_t256_nq.metal"), pin[1], pin[0]));
-    try t.expectEqualStrings(@embedFile("kernels/prefill/froute_t128_2_4.metal"), comptime replace(@embedFile("kernels/prefill/froute_t256_store.metal"), pin[1], pin[0]));
-    try t.expect(std.mem.indexOf(u8, text_froute_t128, pin[1]) == null);
-    try t.expectEqualStrings(text_froute_t128, comptime replace(text_froute_t256, pin[1], pin[0]));
     // the fused down GEMM: gemm1_text with its declarations inserted, its tile read from one of two tables and its store
     // replaced by the finish; swapped back, gemm1_text (the GEMM, its K loop and its deferred map verbatim)
     const epi = @embedFile("kernels/prefill/gemm_dfin_epi_1.metal") ++ finish_2 ++ @embedFile("kernels/prefill/gemm_dfin_load.metal") ++ finish_4 ++
@@ -1852,30 +1793,26 @@ test "turboexl3 prefill variant texts: the 256-row route is the 128-row route at
     }
     try t.expectEqualStrings(text_dfin, comptime dfinText(dfin_gemm_4, dfin_finish_4));
     // the finish's statements read a row's halves where the finish reads zd: the same element of the 128-block (L + 32 j)
-    try t.expectEqualStrings(@embedFile("kernels/prefill/gemm_dfin_load.metal"), comptime replace(finish_3, pin[2], pin[3]));
+    try t.expectEqualStrings(@embedFile("kernels/prefill/gemm_dfin_load.metal"), comptime replace(finish_3, pin[0], pin[1]));
     // the kept even block takes the store's rounding (NAXFrag::store: static_cast<U> of each element), as the odd one
     // (stored through NAXTile::store) does
-    try t.expect(std.mem.indexOf(u8, steel_nax, pin[4]) != null);
-    try t.expectEqual(@as(usize, 1), std.mem.count(u8, text_dfin, pin[5]));
+    try t.expect(std.mem.indexOf(u8, steel_nax, pin[2]) != null);
+    try t.expectEqual(@as(usize, 1), std.mem.count(u8, text_dfin, pin[3]));
     // no z store; the finish's y store, once; the round's two barriers and the single-buffered staging's one beside the
     // GEMM's
-    try t.expect(std.mem.indexOf(u8, gemm1_text, pin[6]) != null and std.mem.indexOf(u8, text_dfin, pin[6]) == null);
-    try t.expectEqual(@as(usize, 1), std.mem.count(u8, text_dfin, pin[7]));
-    try t.expectEqual(std.mem.count(u8, gemm1_text, pin[8]) + 3, std.mem.count(u8, text_dfin, pin[8]));
+    try t.expect(std.mem.indexOf(u8, gemm1_text, pin[4]) != null and std.mem.indexOf(u8, text_dfin, pin[4]) == null);
+    try t.expectEqual(@as(usize, 1), std.mem.count(u8, text_dfin, pin[5]));
+    try t.expectEqual(std.mem.count(u8, gemm1_text, pin[6]) + 3, std.mem.count(u8, text_dfin, pin[6]));
     // the header: the NAX GEMM's, then the finish's H128
     try t.expect(std.mem.startsWith(u8, header_nax_dfin, header_nax) and std.mem.endsWith(u8, header_nax_dfin, metal_h128));
     try t.expect(dfin_in.len == 8 and dfin_out.len == 1);
 }
 
-test "turboexl3 prefill variant options: t256 needs t128; gate|up takes 1, 2 or 4 column blocks; the fused finish needs whole 128-column blocks, one down launch over every row and its staging within 32 KB" {
+test "turboexl3 prefill variant options: gate|up takes 1, 2 or 4 column blocks; the fused finish needs whole 128-column blocks, one down launch over every row and its staging within 32 KB" {
     const t = std.testing;
     const served: Options = .{ .bm = 64, .small = .mixed, .dbuf = true, .unroll = true, .fragb = true, .intr = true, .defer_affine = true, .ncb = 4, .sintr = true, .froute = true, .alay = 2, .t128 = true };
-    try t.expect(served.valid() and served.cut == t128_cut and served.t128Rows() == 128 and served.dfinRows() == 128);
+    try t.expect(served.valid() and served.cut == t128_cut and served.dfinRows() == 128);
     var o = served;
-    o.t256 = true;
-    try t.expect(o.valid() and o.t128Rows() == 256 and o.dfinRows() == 256);
-    o.t128 = false;
-    try t.expect(!o.valid());
     for ([_]u8{ 0, 32, 127, 255 }) |cut| {
         o = served;
         o.cut = cut;
@@ -1919,76 +1856,10 @@ test "turboexl3 prefill variant options: t256 needs t128; gate|up takes 1, 2 or 
     try t.expect((Options{ .small = .off, .dbuf = true, .fragb = true, .bk128 = true, .ncb = 4, .dfin = true }).valid());
 }
 
-test "turboexl3 prefill 256-row tiles tables: every sorted position in exactly one tile; an expert's tiles never more than at 128 rows; at a cut of at most 64, ceil(rows / 256) of them; the 128-row tiles' bounds hold" {
-    const t = std.testing;
-    const a = t.allocator;
-    var prng = std.Random.DefaultPrng.init(0x256E);
-    const rnd = prng.random();
-    var counts: [512]u32 = undefined;
-    for (0..24) |ci| {
-        for (&counts, 0..) |*c, e| c.* = switch (ci % 6) {
-            0 => rnd.uintLessThan(u32, 600),
-            // skewed: a few hot experts, many cold ones
-            1 => if (rnd.uintLessThan(u32, 8) == 0) rnd.uintLessThan(u32, 3000) else rnd.uintLessThan(u32, 40),
-            2 => @intCast(e % 601),
-            // every count on a 256-row tile's edges, and on the cut's
-            3 => @intCast((e % 4) * 256 + 63 + (e % 3)),
-            4 => @intCast((e % 3) * 128 + 127 + (e % 4)),
-            else => if (e % 7 == 0) 0 else rnd.uintLessThan(u32, 1100),
-        };
-        var S: u32 = 0;
-        for (counts) |c| S += c;
-        for ([_]u8{ 0, 1, 32, 63, 64, 65, 96, 127, 200 }) |cut| {
-            var t2 = try tileTables(a, &counts, 64, cut, true, 256);
-            defer t2.deinit(a);
-            var t1 = try tileTables(a, &counts, 64, cut, true, 128);
-            defer t1.deinit(a);
-            const cover = try a.alloc(u8, S);
-            defer a.free(cover);
-            @memset(cover, 0);
-            const cu: u32 = @min(cut, 127);
-            for (t2.t128.items) |q| {
-                try t.expect(q[2] >= 1 and q[2] <= 256 and (q[2] == 256 or q[2] > cu));
-                for (q[1]..q[1] + q[2]) |p| cover[p] += 1;
-            }
-            for (t2.big.items) |q| {
-                try t.expect(q[2] >= 1 and q[2] <= 64);
-                for (q[1]..q[1] + q[2]) |p| cover[p] += 1;
-            }
-            for (t2.small.items) |q| {
-                try t.expect(q[2] >= 1 and q[2] <= 32);
-                for (q[1]..q[1] + q[2]) |p| cover[p] += 1;
-            }
-            for (cover) |v| try t.expectEqual(@as(u8, 1), v);
-            // each expert's weight decode passes (its tiles): never more than with the 128-row tiles, and ceil(rows / 256) where
-            // a remainder of at most the cut takes one mixed tile (cut <= 64)
-            var n2: [512]u32 = @splat(0);
-            var n1: [512]u32 = @splat(0);
-            for (t2.t128.items) |q| n2[q[0]] += 1;
-            for (t2.big.items) |q| n2[q[0]] += 1;
-            for (t2.small.items) |q| n2[q[0]] += 1;
-            for (t1.t128.items) |q| n1[q[0]] += 1;
-            for (t1.big.items) |q| n1[q[0]] += 1;
-            for (t1.small.items) |q| n1[q[0]] += 1;
-            for (counts, n2, n1) |c, p2, p1| {
-                try t.expect(p2 <= p1);
-                if (cut <= 64) try t.expectEqual((c + 255) / 256, p2);
-            }
-            // the route's output bounds are the 128-row tiles' (`text_froute_t256` keeps TQ and TBIG)
-            try t.expect(t2.t128.items.len <= t128TileRows(S, 512, cut, true));
-            try t.expect(t2.big.items.len <= t128MixedRows(S, 512, 64, 1, cut, true) and t2.small.items.len <= 512);
-        }
-    }
-}
-
-test "turboexl3 prefill variant metal sources: the 256-row tiles' route and launches, and the fused down GEMM over two tables and one, as standalone translation units (TURBOEXL3_METAL_DUMP=1)" {
+test "turboexl3 prefill variant metal sources: the fused down GEMM over two tables and one, as standalone translation units (TURBOEXL3_METAL_DUMP=1)" {
     const pin = comptime @import("test_support.zig").pins(@embedFile("kernels/test/dump/prefill_t128.metal"));
     const v1 = comptime @import("test_support.zig").pins(@embedFile("kernels/test/dump/prefill_v1.metal"));
     _ = std.c.getenv("TURBOEXL3_METAL_DUMP") orelse return error.SkipZigTest;
-    printMetal("turboexl3_pf_t256_route", header_small, pin[1], pin[0], text_froute_t256);
-    // the 256-row tiles' launches: the served gate|up and down texts at bm 256 (16 simdgroups)
-    printMetal("turboexl3_pf_t256_gut", header_nax, pin[2] ++ v1[0], pin[6], gemm2_text);
-    printMetal("turboexl3_pf_t256_dnt", header_nax, pin[3] ++ v1[0], pin[7], gemm1_text);
     // the fused down GEMM: the 128-row tiles' two tables at bm 128 (64-row rounds), one table at bm 256 (32-row rounds),
     // and the two tables with the first in the constant address space (MLX binds an input of fewer than 8 words there: a
     // call whose 128-row table has one row)

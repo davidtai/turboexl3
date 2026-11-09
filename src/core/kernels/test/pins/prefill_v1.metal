@@ -1,5 +1,3 @@
-128u
-256u
 float(zd[ulong(p) * HC + b * 128u
 float(dfz[uint(it) * 128u
 dst[r * str_x + c + j] = static_cast<U>(src[i * kElemCols + j]);

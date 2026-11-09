@@ -1730,6 +1730,13 @@ SPLIT_REMOVED_KERNELS['turboexl3_test_pf_dfinn_gemm_fault'] = _S2_DFMIN
 SPLIT_REMOVED_KERNELS['turboexl3_test_pf_dfinn_fin_fault'] = _S2_DFMIN
 SPLIT_REMOVED_TESTS["turboexl3 prefill dfin_min texts: the route also writes each expert's rows; the served down launches are theirs with the skip; the one launch writing y is text_dfin with its skip beside the served finish with its item index"] = _S2_DFMIN
 RENAMED_TESTS[('prefill.zig', "turboexl3 prefill call: a call runs the fused finish only where its engine was built with it and the call keeps it (its threshold's chain with dfin_min); .{} is the engine's own ending, .{ .dfin = false } the served one")] = "turboexl3 prefill call: a call runs the fused finish only where its engine was built with it and the call keeps it; .{} is the engine's own ending, .{ .dfin = false } the served one"
+_S2_T256 = "V1 t256 (PF_T256, never kept): the 128-row tiles' launch over tiles of up to 256 rows on the bm-256 body (prefill.Options.t256, Config.pf_t256, text_froute_t256). V1's cut of froute_t128_2 (froute_t128_2_1 .. _2_5, the same value) stays"
+SPLIT_REMOVED_KERNELS['turboexl3_pf_t256_route'] = _S2_T256
+SPLIT_REMOVED_KERNELS['turboexl3_test_pf_t256_route_fault'] = _S2_T256
+SPLIT_REMOVED_TESTS["turboexl3 prefill 256-row tiles tables: every sorted position in exactly one tile; an expert's tiles never more than at 128 rows; at a cut of at most 64, ceil(rows / 256) of them; the 128-row tiles' bounds hold"] = _S2_T256
+RENAMED_TESTS[('prefill.zig', "turboexl3 prefill variant texts: the 256-row route is the 128-row route at 256 rows; the fused down GEMM is gemm1_text with its tile read and its store swapped for the two-table read and the finish's own statements")] = "turboexl3 prefill variant texts: the fused down GEMM is gemm1_text with its tile read and its store swapped for the two-table read and the finish's own statements"
+RENAMED_TESTS[('prefill.zig', 'turboexl3 prefill variant options: t256 needs t128; gate|up takes 1, 2 or 4 column blocks; the fused finish needs whole 128-column blocks, one down launch over every row and its staging within 32 KB')] = 'turboexl3 prefill variant options: gate|up takes 1, 2 or 4 column blocks; the fused finish needs whole 128-column blocks, one down launch over every row and its staging within 32 KB'
+RENAMED_TESTS[('prefill.zig', "turboexl3 prefill variant metal sources: the 256-row tiles' route and launches, and the fused down GEMM over two tables and one, as standalone translation units (TURBOEXL3_METAL_DUMP=1)")] = 'turboexl3 prefill variant metal sources: the fused down GEMM over two tables and one, as standalone translation units (TURBOEXL3_METAL_DUMP=1)'
 # --strip2 end--
 
 _R10 = ("R10 ROUTER_ADDNORM (M6, rejected): the post-attention add_norm folded into the router's launch 1 "
@@ -1857,9 +1864,6 @@ RENAMED_TESTS[('router_test.zig', ("turboexl3 gpu ling router: routerLogits, sel
 
 # Ling-3.1-flash's routed-chain variants (ling-v1-routed, each a prefill.Options field off by default; the kernels the
 # served chain runs keep their texts: gemm_3, gemm_op1_xsz and froute_t128_2 are cut into pieces of the same values)
-SPLIT_ADDED_KERNELS['turboexl3_pf_t256_route'] = ('Options.t256: text_froute_t128 with its two 128-row lines at 256 rows '
-                                                  '(froute_t128_2 cut at them; froute_t256_nq, froute_t256_store), the '
-                                                  '128-row tiles\' launch then over 256-row tiles on the bm-256 body')
 SPLIT_ADDED_KERNELS['turboexl3_pf_dfin'] = ('Options.dfin: gemm1_text with its stage taking the finish\'s own staging '
                                             'at DFR 64 (gemm_dfin_bs in gemm_2\'s place), its tile read from one of two '
                                             'tables (gemm_dfin_tile in gemm_3_2\'s place) and its store replaced by the '
@@ -1868,8 +1872,6 @@ SPLIT_ADDED_KERNELS['turboexl3_pf_dfin'] = ('Options.dfin: gemm1_text with its s
                                             'header_nax ++ h128')
 SPLIT_ADDED_KERNELS['turboexl3_test_pf_dfin_fault'] = ('test only: turboexl3_pf_dfin with a planted fault (tile 0\'s '
                                                        'products unrounded, fault/dfin_4 in finish_4\'s place), a red check')
-SPLIT_ADDED_KERNELS['turboexl3_test_pf_t256_route_fault'] = ('test only: turboexl3_pf_t256_route with a planted fault (its '
-                                                             'first tile on the next expert, fault/t256_store), a red check')
 SPLIT_ADDED_KERNELS['turboexl3_test_pf_dfin_order_fault'] = ('test only: turboexl3_pf_dfin with a planted reduction-order '
                                                              'fault (tile 0\'s H128 stages reordered, fault/dfin_4_order in '
                                                              'finish_4\'s place), a red check')

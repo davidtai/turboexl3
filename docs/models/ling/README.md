@@ -44,12 +44,12 @@ reaches the limit. The combine is Ling's own kernel, held to MLX's three ops wor
 prompt call's `linear` to the same row of a whole-prompt call wherever both calls run MLX's regular matmul (a
 layer-major prompt pass's trunk linears; `TURBOEXL3_LING_ROWINV` lines); `rows_test.zig` holds `moeLingRows` to the outside
 plugin's prompt chunk (its take, its casts and `moeLing` at top-1) byte for byte on the loader's views, every chunk of
-a prompt layer's call and a padded one (`TURBOEXL3_LING_ROWS` lines), and each variant of its routed chain (the 256-row
-tiles, the remainder rule's cut, gate|up's column blocks, the finish as the down GEMM's epilogue, the plain launches
+a prompt layer's call and a padded one (`TURBOEXL3_LING_ROWS` lines), and each variant of its routed chain (the
+remainder rule's cut, gate|up's column blocks, the finish as the down GEMM's epilogue, the plain launches
 at bm 128 and 256; `prefill.Options`, off by default) to the served engine word for word on synthetic calls at every
 row bucket of an expert, experts on both sides of 64, 80 and 96 rows and a lognormal-popularity call (the fused finish
-at its other stage shapes to that stage shape without it), with six red checks that must each be caught: a flipped
-word, four planted kernel faults (a value, a route, two pure reorderings) and a rounding change
+at its other stage shapes to that stage shape without it), with five red checks that must each be caught: a flipped
+word, three planted kernel faults (a value, two pure reorderings) and a rounding change
 (`TURBOEXL3_LING_ROWS_VARIANT` and `TURBOEXL3_LING_ROWS_RED` lines). The same test holds the outside plugin's PF_DFIN
 whole-call switch (`prefill.Call`): on the fused finish's engine every
 synthetic call at both choices gives the served words, and its line names the ending the call ran from the engine's

@@ -683,7 +683,6 @@ fn pfOptions() prefill.Options {
     o.alay = config.get().pf_alay;
     o.t128 = config.get().pf_t128;
     // the routed prefill's launch-shape variants (off, or the served shape, by default; every one the same bytes)
-    o.t256 = config.get().pf_t256;
     o.cut = config.get().pf_cut;
     o.gu_ncb = config.get().pf_gu_ncb;
     o.dfin = config.get().pf_dfin;
@@ -712,8 +711,6 @@ fn pfOptionsFor(geo: prefill.Geometry) prefill.Options {
     // the 128-row tiles: their remainder tiles ride the mixed launch (froute's route at split 1, the strided mid and finish),
     // the 128-row tiles the bm-128 body beside bm 64's
     if (o.small != .mixed or o.split != 1 or !o.froute or o.aux != 0 or o.bm != 64) o.t128 = false;
-    // the 256-row tiles: the 128-row tiles' launch at bm 256
-    if (!o.t128) o.t256 = false;
     // gate|up's column blocks: the shared-decode body's, whole blocks of the expert width
     if (o.small == .all or (geo.inter / prefill.BN) % o.gu_ncb != 0) o.gu_ncb = 1;
     // the fused finish: a row's one slot (top-1), whole 128-column blocks a threadgroup, one down launch over every row
@@ -742,8 +739,8 @@ fn prefillFor(geo: prefill.Geometry) !*prefill.Prefill {
     }
     // a variant's own line, at each geometry built with one on (a handful a process; the served shape prints none), so
     // the line names what the geometry runs: the top-1 rows path's dfin, say, beside a top-8 geometry's
-    if (o.t256 or o.cut != prefill.t128_cut or o.gu_ncb != 1 or o.dfin or o.bm != 64 or o.small != .mixed)
-        std.debug.print("[turboexl3] prefill variant engaged: bm={d} small={s} t128={} t256={} cut={d} gu_ncb={d} dfin={} dfr={d} (topk {d}, experts {d})\n", .{ o.bm, @tagName(o.small), o.t128, o.t256, o.cut, o.gu_ncb, o.dfin, o.dfr, geo.topk, geo.experts });
+    if (o.cut != prefill.t128_cut or o.gu_ncb != 1 or o.dfin or o.bm != 64 or o.small != .mixed)
+        std.debug.print("[turboexl3] prefill variant engaged: bm={d} small={s} t128={} cut={d} gu_ncb={d} dfin={} dfr={d} (topk {d}, experts {d})\n", .{ o.bm, @tagName(o.small), o.t128, o.cut, o.gu_ncb, o.dfin, o.dfr, geo.topk, geo.experts });
     return &pf_cache.get().*[i].?;
 }
 
@@ -1078,18 +1075,18 @@ test "turboexl3 root: the served prefill options follow the config, and the deco
     try t.expectEqual(@as(u8, 3), decodeForm());
     // the routed prefill's variants: none by default (the served shape), each from its field; at Ling's routed geometries
     // (n 40 and 32) each set is a valid one, and a top-8 geometry drops the fused finish (a row's slots in other tiles)
-    try t.expect(!o.t256 and o.cut == prefill.t128_cut and o.gu_ncb == 1 and !o.dfin and o.small == .mixed);
+    try t.expect(o.cut == prefill.t128_cut and o.gu_ncb == 1 and !o.dfin and o.small == .mixed);
     for ([_]u32{ 40, 32 }) |n| {
         const g1: prefill.Geometry = .{ .hidden = 4096, .inter = 1280, .topk = 1, .experts = 512, .rate = format.Rate.fromN(n).?, .dec = .mul1, .limit = 10, .clamp = .silu_out };
         var g8 = g1;
         g8.topk = 8;
         try config.configure(.{});
         try t.expect(pfOptionsFor(g1).valid() and pfOptionsFor(g1).t128 and !pfOptionsFor(g1).dfin);
-        try config.configure(.{ .pf_t256 = true, .pf_cut = 32, .pf_gu_ncb = 2, .pf_dfin = true, .pf_dfr = 64 });
+        try config.configure(.{ .pf_cut = 32, .pf_gu_ncb = 2, .pf_dfin = true, .pf_dfr = 64 });
         const q = pfOptionsFor(g1);
-        try t.expect(q.valid() and q.t128 and q.t256 and q.cut == 32 and q.gu_ncb == 2 and q.dfin and q.dfr == 64 and q.bm == 64);
+        try t.expect(q.valid() and q.t128 and q.cut == 32 and q.gu_ncb == 2 and q.dfin and q.dfr == 64 and q.bm == 64);
         const q8 = pfOptionsFor(g8);
-        try t.expect(q8.valid() and q8.t256 and !q8.dfin);
+        try t.expect(q8.valid() and !q8.dfin);
         // a call's ending on those engines (`prefill.Call`): the top-1 engine's own is the fused finish, a call that
         // declines it the served ending; the top-8 engine has the served ending whatever the call keeps
         try t.expect(prefill.endOf(q, .{}) == .dfin and prefill.endOf(q, .{ .dfin = false }) == .served and prefill.endOf(q8, .{}) == .served);
@@ -1100,10 +1097,10 @@ test "turboexl3 root: the served prefill options follow the config, and the deco
         try config.configure(.{ .pf_t128 = false, .pf_bm = 256, .pf_dfin = true });
         const m = pfOptionsFor(g1);
         try t.expect(m.valid() and m.small == .mixed and !m.dfin);
-        // bm 128 or 256 runs without the 128-row tiles (they need bm 64), so the 256-row tiles drop too
-        try config.configure(.{ .pf_bm = 128, .pf_t256 = true });
+        // bm 128 or 256 runs without the 128-row tiles (they need bm 64)
+        try config.configure(.{ .pf_bm = 128 });
         const w = pfOptionsFor(g1);
-        try t.expect(w.valid() and !w.t128 and !w.t256 and w.bm == 128);
+        try t.expect(w.valid() and !w.t128 and w.bm == 128);
     }
 }
 
