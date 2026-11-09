@@ -251,6 +251,32 @@ const dec_said = Global(bool, "dense_dec_said", false);
 /// a glm variant's engage line (`DecVariant.glm`), once a process
 const dec_g_said = Global(bool, "dense_dec_g_said", false);
 
+/// DEC-ONE's arrival counters made on the host (the GLM-5.3-Flash plugin's TURBOEXL3_GLM53F_HOST_ZERO; false keeps
+/// `dec_zero`'s launch): a call whose prepare runs inside its launch, and glm53f's joined launches (`glm53f.pair_ks`,
+/// `glm53f.shared_gu`), take their counters as a new array of zeroed words copied from the host (`hostCounters`) where
+/// they launch `dec_zero` over them. The launch reads the same zeros, so the same bytes, with one launch fewer a call.
+/// Set before the first call.
+pub const dec_host_zero = Global(bool, "dense_dec_host_zero", false);
+/// The calls that took host-made counters since the process began (`hostCounters`).
+pub const dec_host_zeroed = Global(u64, "dense_dec_host_zeroed", 0);
+/// The most counters `hostCounters` makes (an output block a row chunk: GLM-5.3-Flash's widest call, the dense gate | up
+/// at 16 rows, takes 768); a call past it launches `dec_zero`.
+pub const host_counters_max: u32 = 4096;
+const host_zero_words: [host_counters_max]u32 = @splat(0);
+
+/// With `dec_host_zero` set: `n` arrival counters (8 or more: MLX binds an input of fewer than 8 elements in the constant
+/// address space) as a new u32 array of zeros copied from the host, no launch, the call's own buffer (no two calls share
+/// one, so no reset and no order between calls: ROUTER_ONE's counters in the plugin). Null with it unset or past
+/// `host_counters_max` (the caller launches `dec_zero`).
+pub fn hostCounters(n: u32) !?mlx.mlx_array {
+    if (!dec_host_zero.get().* or n > host_counters_max) return null;
+    if (n < 8) return error.BadExl3Shape;
+    const a = mlx.mlx_array_new_data(&host_zero_words, &[_]c_int{@intCast(n)}, 1, .uint32);
+    if (a.ctx == null) return error.MlxError;
+    dec_host_zeroed.get().* += 1;
+    return a;
+}
+
 /// The kernels of one dense linear shape; configs per row count (decode) plus the prefill set.
 pub const Dense = struct {
     shape: Shape,
@@ -320,8 +346,9 @@ pub const Dense = struct {
 
     /// `lean`: `gemv` is the lean GEMV text's config (text_dgemv_lean), not text_dgemv's
     pub const Cfg = struct { prep: mlx.mlx_fast_metal_kernel_config, gemv: mlx.mlx_fast_metal_kernel_config, finish: mlx.mlx_fast_metal_kernel_config, lean: bool = false };
-    /// DEC-ONE at one row count: `prep` is prep_sc's config (prepare outside) or dec_zero's (inside); `gemv` dec0's or dec1's
-    pub const DecCfg = struct { prep_in: bool, prep: mlx.mlx_fast_metal_kernel_config, gemv: mlx.mlx_fast_metal_kernel_config };
+    /// DEC-ONE at one row count: `prep` is prep_sc's config (prepare outside) or dec_zero's (inside); `gemv` dec0's or dec1's;
+    /// `ncnt` the arrival counters (`hostCounters`' length where the prepare runs inside)
+    pub const DecCfg = struct { prep_in: bool, prep: mlx.mlx_fast_metal_kernel_config, gemv: mlx.mlx_fast_metal_kernel_config, ncnt: u32 = 8 };
     const Small = struct { io: Cfg, gemm: mlx.mlx_fast_metal_kernel_config, tiles: mlx.mlx_array };
     pub const small_rows_cap: u32 = 128;
 
@@ -572,7 +599,7 @@ pub const Dense = struct {
             const nx: u32 = if (self.defer_affine) @max(nob * chunks * rb * nb, 8) else 8;
             const prep = try ks.buildConfig(.{ .grid = .{ ((ncnt + 127) / 128) * 128, 1, 1 }, .threadgroup = .{ 128, 1, 1 }, .out_shapes = &.{&ncnt_shape}, .out_dtypes = &.{.uint32}, .template = &.{.{ .name = "NCNT", .value = .{ .int = @intCast(ncnt) } }} });
             errdefer _ = mlx.mlx_fast_metal_kernel_config_free(prep);
-            c = .{ .prep_in = true, .prep = prep, .gemv = try ks.buildConfig(.{ .grid = grid, .threadgroup = .{ 128, 1, 1 }, .out_shapes = &.{ &y_shape, &z_shape, &[_]c_int{@intCast(nx)} }, .out_dtypes = &.{ self.shape.out_dtype, .float32, .float32 }, .template = &tmpl }) };
+            c = .{ .prep_in = true, .prep = prep, .gemv = try ks.buildConfig(.{ .grid = grid, .threadgroup = .{ 128, 1, 1 }, .out_shapes = &.{ &y_shape, &z_shape, &[_]c_int{@intCast(nx)} }, .out_dtypes = &.{ self.shape.out_dtype, .float32, .float32 }, .template = &tmpl }), .ncnt = ncnt };
         } else {
             const nth: u32 = nb * 32 * rows_u;
             const prep = try ks.buildConfig(.{ .grid = .{ nb * 32, rows_u, 1 }, .threadgroup = .{ 32, 1, 1 }, .out_shapes = &.{ &[_]c_int{ r, IN }, &[_]c_int{ r, @intCast(nb) }, &ncnt_shape }, .out_dtypes = &.{ if (self.xf) .float32 else .float16, .float32, .uint32 }, .template = &.{
@@ -606,7 +633,8 @@ pub const Dense = struct {
             std.debug.print("[turboexl3] DEC-ONE engaged: one GEMV launch per dense linear at decode rows <= {d}\n", .{self.dec_rows});
         }
         if (c.prep_in) {
-            const cnt = try one(self.dec_zero, c.prep, &.{svh}, s);
+            // the counters made on the host (`dec_host_zero`), else zeroed by dec_zero's launch
+            const cnt = (try hostCounters(c.ncnt)) orelse try one(self.dec_zero, c.prep, &.{svh}, s);
             defer _ = mlx.mlx_array_free(cnt);
             var o: [3]mlx.mlx_array = undefined;
             try ks.applyConfig(self.dec1, c.gemv, &.{ x, suh, trellis, svh, cnt }, &o, s);
@@ -2129,6 +2157,8 @@ test "turboexl3 dense lean GEMV text: text_dgemv but its input loads and codewor
 pub const shared_state = .{
     dec_said,
     dec_g_said,
+    dec_host_zero,
+    dec_host_zeroed,
     resident_bypass,
     Resident.lock,
     Resident.armed,
