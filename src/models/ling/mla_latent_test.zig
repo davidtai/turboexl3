@@ -12,8 +12,16 @@
 //!   view cast to bf16) transposed back to its stored rows, row-contiguous over the loaded buffer and taken by the
 //!   plan; `decodeLatent` over a wider cache buffer's first rows within 2 % of the plugin's expanded attention, which
 //!   reads that view through a plain matmul, at the standard prompt's 18,380 keys.
+//! - launch 2's variants (`mla_latent.Attn`: rows2, rows4, stage, block) give launch 2's words: each call's output and
+//!   launch 2's partials (pm, pl, po) word for word against `decodeLatentParts` on launch 2 as it is, at rows 1 to 4 and
+//!   keys 1, 2, 31, 32, 255, 256, 257, 4096, 16,669 and 19,404 (the MTP head's cache at the standard request), on the
+//!   plugin's operands (kv_b through the loader's rows view, the head's cache as the first T rows of a wider buffer, the
+//!   query halves as views of the transposed heads) and on two strided caches (the latent and the rope key interleaved
+//!   in one buffer; each transposed, a key's words a column apart); a planted fault (a key row zeroed, one flipped bit)
+//!   must differ.
 //! Lines: TURBOEXL3_LING_MLA_LATENT, TURBOEXL3_LING_MLA_LATENT_ROWS, TURBOEXL3_LING_MLA_LATENT_SERVED,
-//! TURBOEXL3_LING_MLA_LATENT_LOADER_KVB, TURBOEXL3_LING_MLA_LATENT_LOADER.
+//! TURBOEXL3_LING_MLA_LATENT_LOADER_KVB, TURBOEXL3_LING_MLA_LATENT_LOADER, TURBOEXL3_LING_MLA_LATENT_VARIANT (_RED,
+//! _DONE). The variants' test prints an MLX error (a launch MLX refuses) as its variant's FAIL line and goes on.
 const std = @import("std");
 const sdk = @import("sdk");
 const mlx = sdk.mlx;
@@ -553,4 +561,227 @@ test "turboexl3 gpu ling mla latent: the outside plugin's served operand, kv_b a
         failed += @intFromBool(!ok);
     }
     try testing.expectEqual(@as(usize, 0), failed);
+}
+
+// ── launch 2's variants: each launch 2's words ──
+
+/// The variants of launch 2 the byte test holds to it (`mla_latent.Attn` but `base`)
+const variants = [_]ml.Attn{ .rows2, .rows4, .stage, .block };
+
+/// mlx-c's `mlx_set_error_handler`: the consumer's binding where its `sdk.mlx` declares one, else a declaration of the
+/// same symbol
+const setErrorHandler = if (@hasDecl(mlx, "mlx_set_error_handler")) mlx.mlx_set_error_handler else struct {
+    extern "c" fn mlx_set_error_handler(handler: ?*const fn ([*:0]const u8, ?*anyopaque) callconv(.c) void, data: ?*anyopaque, dtor: ?*const fn (?*anyopaque) callconv(.c) void) void;
+}.mlx_set_error_handler;
+
+fn reportMlxError(msg: [*:0]const u8, _: ?*anyopaque) callconv(.c) void {
+    std.debug.print("MLX error: {s}\n", .{msg});
+}
+
+/// `on`: an MLX error is printed and its call returns an error code (mlx.check's error.MlxError), so a variant whose
+/// launch MLX refuses (its threadgroup past the pipeline's limit) fails its own lines and the run goes on; mlx-c's
+/// default handler ends the process. Off: that default again.
+pub fn reportMlxErrors(on: bool) void {
+    const Handler = @typeInfo(@TypeOf(setErrorHandler)).@"fn".params[0].type.?;
+    setErrorHandler(if (on) @as(Handler, @ptrCast(&reportMlxError)) else null, null, null);
+}
+
+/// Words of `got` whose bits differ from `want`'s
+fn diffWords(got: []const f32, want: []const f32) usize {
+    var n: usize = 0;
+    for (got, want) |u, w| n += @intFromBool(@as(u32, @bitCast(u)) != @as(u32, @bitCast(w)));
+    return n;
+}
+
+/// A call's words on the host: its output (as f32) and launch 2's partials
+const Words = struct {
+    out: []f32,
+    pm: []f32,
+    pl: []f32,
+    po: []f32,
+
+    fn init(a: std.mem.Allocator, h: usize, rows: usize, nj: usize) !Words {
+        const slots = rows * h * nj;
+        const out = try a.alloc(f32, h * rows * DV);
+        errdefer a.free(out);
+        const pm = try a.alloc(f32, slots);
+        errdefer a.free(pm);
+        const pl = try a.alloc(f32, slots);
+        errdefer a.free(pl);
+        return .{ .out = out, .pm = pm, .pl = pl, .po = try a.alloc(f32, slots * DL) };
+    }
+
+    fn deinit(w: *Words, a: std.mem.Allocator) void {
+        inline for (.{ w.out, w.pm, w.pl, w.po }) |x| a.free(x);
+    }
+
+    /// The words of the output, pm, pl and po that differ from `want`'s
+    fn differing(w: Words, want: Words) [4]usize {
+        return .{ diffWords(w.out, want.out), diffWords(w.pm, want.pm), diffWords(w.pl, want.pl), diffWords(w.po, want.po) };
+    }
+};
+
+/// `decodeLatentParts` with launch 2 on `attn`, its words copied into `dst`
+fn partsWords(g: *G, s: mlx.mlx_stream, qn: mlx.mlx_array, qr: mlx.mlx_array, lat: mlx.mlx_array, rot: mlx.mlx_array, w: mlx.mlx_array, scale: f64, attn: ml.Attn, dst: Words) !void {
+    const r = try ml.decodeLatentParts(s, qn, qr, lat, rot, w, @floatCast(scale), attn);
+    const out = try g.adopt(r.out);
+    const pm = try g.adopt(r.pm);
+    const pl = try g.adopt(r.pl);
+    const po = try g.adopt(r.po);
+    _ = try g.hostF32(try g.astype(out, .float32), dst.out);
+    _ = try g.hostF32(pm, dst.pm);
+    _ = try g.hostF32(pl, dst.pl);
+    _ = try g.hostF32(po, dst.po);
+}
+
+/// `x` [1, 1, T, D] as a view of a contiguous [1, 1, D, T] copy: the same words, a key's a column apart (strides
+/// [.., .., 1, T])
+fn transposedView(g: *G, s: mlx.mlx_stream, x: mlx.mlx_array) !mlx.mlx_array {
+    var c = mlx.mlx_array_new();
+    try mlx.check(mlx.mlx_contiguous(&c, try g.transposeAxes(x, &.{ 0, 1, 3, 2 }), false, s));
+    const cm = try g.adopt(c);
+    try mlx.check(mlx.mlx_array_eval(cm));
+    return g.transposeAxes(cm, &.{ 0, 1, 3, 2 });
+}
+
+/// The head's cache as the plugin keeps it: bf16 words `lat_host` [cap, DL] and `rot_host` [cap, DR] as two buffers, the
+/// views their first `t` rows
+fn headCache(g: *G, lat_host: []const u16, rot_host: []const u16, cap: usize, t: usize) ![2]mlx.mlx_array {
+    const lat_buf = try g.hostArray(std.mem.sliceAsBytes(lat_host), &.{ 1, 1, ci(cap), ci(DL) }, .bfloat16);
+    const rot_buf = try g.hostArray(std.mem.sliceAsBytes(rot_host), &.{ 1, 1, ci(cap), ci(DR) }, .bfloat16);
+    return .{
+        try g.slice(lat_buf, &.{ 0, 0, 0, 0 }, &.{ 1, 1, ci(t), ci(DL) }, &.{ 1, 1, 1, 1 }),
+        try g.slice(rot_buf, &.{ 0, 0, 0, 0 }, &.{ 1, 1, ci(t), ci(DR) }, &.{ 1, 1, 1, 1 }),
+    };
+}
+
+const CacheView = enum { plugin, interleaved, transposed };
+
+test "turboexl3 gpu ling mla latent variants: rows2, rows4, stage and block give launch 2's words, the output and launch 2's partials word for word, at rows 1 to 4 and keys 1 to 19,404, on the plugin's operands (kv_b through the loader's rows view, the head's cache as a wider buffer's first rows, the query halves as views) and two strided caches; a planted fault differs (TURBOEXL3_GPU=1)" {
+    _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    const s = mlx.mlx_default_gpu_stream_new();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    const a = std.heap.page_allocator;
+    var g = try G.init(a, s);
+    defer g.deinit();
+    reportMlxErrors(true);
+    defer reportMlxErrors(false);
+    const h: usize = 64;
+    const scale: f64 = 1.0 / @sqrt(192.0);
+    var prng = std.Random.DefaultPrng.init(0x7A11_A7E5);
+    const rnd = prng.random();
+    const kvb = try loaderKvB(&g, a, rnd, h);
+    // 1 to 257 keys: the sub-chunk (32) and key-group (256) edges; 4096 and 16,669: groups ending mid sub-chunk; 19,404:
+    // the MTP head's cache at the standard request
+    const key_counts = [_]usize{ 1, 2, 31, 32, 255, 256, 257, 4096, 16669, 19404 };
+    var failed: usize = 0;
+    var lines: usize = 0;
+    for (key_counts) |t| {
+        const km = g.mark();
+        defer g.resetTo(km);
+        // the buffer's rows past T hold other words, as after a rejected draft's rollback
+        const cap = t + 61;
+        const lat_host = try a.alloc(u16, cap * DL);
+        defer a.free(lat_host);
+        const rot_host = try a.alloc(u16, cap * DR);
+        defer a.free(rot_host);
+        for (lat_host) |*v| v.* = support.bf16Bits(rnd.floatNorm(f32));
+        for (rot_host) |*v| v.* = support.bf16Bits(rnd.floatNorm(f32));
+        const cache = try headCache(&g, lat_host, rot_host, cap, t);
+        const both = try g.concat(&.{ cache[0], cache[1] }, 3);
+        try mlx.check(mlx.mlx_array_eval(both));
+        const views = [3][2]mlx.mlx_array{
+            cache,
+            .{
+                try g.slice(both, &.{ 0, 0, 0, 0 }, &.{ 1, 1, ci(t), ci(DL) }, &.{ 1, 1, 1, 1 }),
+                try g.slice(both, &.{ 0, 0, 0, ci(DL) }, &.{ 1, 1, ci(t), ci(DL + DR) }, &.{ 1, 1, 1, 1 }),
+            },
+            .{ try transposedView(&g, s, cache[0]), try transposedView(&g, s, cache[1]) },
+        };
+        for (1..5) |rows| {
+            if (rows > t) continue;
+            const rm = g.mark();
+            defer g.resetTo(rm);
+            // the plugin's mlaAttn cut: the query heads [1, S, H, DN + DR] transposed to [1, H, S, DN + DR], each half a view
+            const qt = try g.transposeAxes(try devRandn(&g, a, rnd, &.{ 1, ci(rows), ci(h), ci(DN + DR) }, .bfloat16), &.{ 0, 2, 1, 3 });
+            const qn = try g.slice(qt, &.{ 0, 0, 0, 0 }, &.{ 1, ci(h), ci(rows), ci(DN) }, &.{ 1, 1, 1, 1 });
+            const qr = try g.slice(qt, &.{ 0, 0, 0, ci(DN) }, &.{ 1, ci(h), ci(rows), ci(DN + DR) }, &.{ 1, 1, 1, 1 });
+            const nj = ml.groupsOf(@intCast(t));
+            var want = try Words.init(a, h, rows, nj);
+            defer want.deinit(a);
+            var got = try Words.init(a, h, rows, nj);
+            defer got.deinit(a);
+            try partsWords(&g, s, qn, qr, cache[0], cache[1], kvb.rows, scale, .base, want);
+            for (variants) |v| for (views, 0..) |view, vi| {
+                const vm = g.mark();
+                defer g.resetTo(vm);
+                const kind: CacheView = @enumFromInt(vi);
+                lines += 1;
+                partsWords(&g, s, qn, qr, view[0], view[1], kvb.rows, scale, v, got) catch |e| {
+                    std.debug.print("TURBOEXL3_LING_MLA_LATENT_VARIANT keys={d} rows={d} variant={s} cache={s}: {s} FAIL\n", .{ t, rows, @tagName(v), @tagName(kind), @errorName(e) });
+                    failed += 1;
+                    continue;
+                };
+                const d = got.differing(want);
+                const ok = d[0] == 0 and d[1] == 0 and d[2] == 0 and d[3] == 0;
+                std.debug.print("TURBOEXL3_LING_MLA_LATENT_VARIANT keys={d} rows={d} variant={s} cache={s} words differing from launch 2's: out={d}/{d} pm={d}/{d} pl={d}/{d} po={d}/{d} {s}\n", .{ t, rows, @tagName(v), @tagName(kind), d[0], want.out.len, d[1], want.pm.len, d[2], want.pl.len, d[3], want.po.len, if (ok) "PASS" else "FAIL" });
+                failed += @intFromBool(!ok);
+            };
+        }
+    }
+    // Red checks: a planted fault in the cache (one key row zeroed; one bit of one word flipped), at a key every row
+    // sees, run on each variant, must differ from launch 2's words on the clean cache. A check that passes a faulted
+    // cache cannot catch a variant that reads a wrong key or word.
+    var red_failed: usize = 0;
+    for ([_][2]usize{ .{ 1, 1 }, .{ 257, 3 }, .{ 19404, 4 } }) |c| {
+        const t = c[0];
+        const rows = c[1];
+        const rm = g.mark();
+        defer g.resetTo(rm);
+        const cap = t + 61;
+        const lat_host = try a.alloc(u16, cap * DL);
+        defer a.free(lat_host);
+        const rot_host = try a.alloc(u16, cap * DR);
+        defer a.free(rot_host);
+        for (lat_host) |*v| v.* = support.bf16Bits(rnd.floatNorm(f32));
+        for (rot_host) |*v| v.* = support.bf16Bits(rnd.floatNorm(f32));
+        const qt = try g.transposeAxes(try devRandn(&g, a, rnd, &.{ 1, ci(rows), ci(h), ci(DN + DR) }, .bfloat16), &.{ 0, 2, 1, 3 });
+        const qn = try g.slice(qt, &.{ 0, 0, 0, 0 }, &.{ 1, ci(h), ci(rows), ci(DN) }, &.{ 1, 1, 1, 1 });
+        const qr = try g.slice(qt, &.{ 0, 0, 0, ci(DN) }, &.{ 1, ci(h), ci(rows), ci(DN + DR) }, &.{ 1, 1, 1, 1 });
+        const nj = ml.groupsOf(@intCast(t));
+        var want = try Words.init(a, h, rows, nj);
+        defer want.deinit(a);
+        var got = try Words.init(a, h, rows, nj);
+        defer got.deinit(a);
+        const clean = try headCache(&g, lat_host, rot_host, cap, t);
+        try partsWords(&g, s, qn, qr, clean[0], clean[1], kvb.rows, scale, .base, want);
+        // the faulted key: one every row of the call sees
+        const k = (t - rows) / 2;
+        for ([_][]const u8{ "zeroed_row", "flipped_bit" }) |fault| {
+            const faulty = try a.dupe(u16, lat_host);
+            defer a.free(faulty);
+            if (fault[0] == 'z') {
+                @memset(faulty[k * DL ..][0..DL], 0);
+            } else {
+                faulty[k * DL + 7] ^= 1;
+            }
+            const bad = try headCache(&g, faulty, rot_host, cap, t);
+            for (variants) |v| {
+                const vm = g.mark();
+                defer g.resetTo(vm);
+                partsWords(&g, s, qn, qr, bad[0], bad[1], kvb.rows, scale, v, got) catch |e| {
+                    std.debug.print("TURBOEXL3_LING_MLA_LATENT_VARIANT_RED keys={d} rows={d} variant={s} fault={s}: {s} FAIL\n", .{ t, rows, @tagName(v), fault, @errorName(e) });
+                    red_failed += 1;
+                    continue;
+                };
+                const d = got.differing(want);
+                const n = d[0] + d[1] + d[2] + d[3];
+                std.debug.print("TURBOEXL3_LING_MLA_LATENT_VARIANT_RED keys={d} rows={d} variant={s} fault={s} at key {d}: words differing from launch 2's on the clean cache out={d} pm={d} pl={d} po={d} (a fault must differ) {s}\n", .{ t, rows, @tagName(v), fault, k, d[0], d[1], d[2], d[3], if (n > 0) "PASS" else "FAIL" });
+                red_failed += @intFromBool(n == 0);
+            }
+        }
+    }
+    std.debug.print("TURBOEXL3_LING_MLA_LATENT_VARIANT_DONE {d} lines, {d} failed; red checks failed {d}\n", .{ lines, failed, red_failed });
+    try testing.expectEqual(@as(usize, 0), failed);
+    try testing.expectEqual(@as(usize, 0), red_failed);
 }

@@ -1396,6 +1396,8 @@ test "turboexl3 gpu ling prompt linears: a prompt call's rows of root.linear hav
 // ── timing (TURBOEXL3_LING_TIME=1): guidance for the serving plan, never a speed verdict ──
 
 const ds_test = @import("../deepseek_v41/deepseek_test.zig");
+const mla_latent = @import("mla_latent.zig");
+const mla_latent_test = @import("mla_latent_test.zig");
 
 /// A serial decode step and the verify widths of 2 to 4 rows, the engine's prompt chunk and a layer-major call
 const time_rows = [_]u32{ 1, 2, 3, 4, 4096, 16384 };
@@ -1437,7 +1439,12 @@ fn drawDecodePairs(rnd: std.Random, rows: u32, k: u32, pool: []const u32, ids: [
 //   16384-token one (the outside plugin's prompt calls: about 64 and about 16 experts a call);
 // - `root.moeLingBanked` over one bank of 200 slot rows (the 2.60 pack's decode rows) at the pairs of 1, 2 and 3 decode
 //   rows, each row's 8 slots drawn from 24 of them (8, about 13 and about 17 distinct slots), banked group 4 with the M = 3
-//   texts (the plugin's configuration); the distinct records' GB/s.
+//   texts (the plugin's configuration); the distinct records' GB/s;
+// - first, `mlaLatentDecode` (the MTP head's latent attention, `mla_latent.zig`) at the standard request's head cache
+//   (19,404 keys of bf16 latents and rope keys, the first rows of a wider buffer; kv_b bf16 [16384, 512]; the query halves
+//   as views of the transposed heads, as the plugin passes them) at rows 1 to 4, on launch 2 as it is and on each
+//   variant (`mla_latent.Attn`: rows2, rows4, stage, block, each launch 2's words): us a row, the variant's min over
+//   launch 2's, the attention's TFLOPS (64 heads x (576 + 512) multiply-adds a key and row).
 // Each line: min and median us per call (deepseek_test's timeIt). TURBOEXL3_LING_N (default 40,32) narrows the rates.
 test "turboexl3 gpu ling timing: every trunk linear, moeLing and moeLingBanked at Ling-3.1-flash's shapes (TURBOEXL3_LING_TIME=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
@@ -1453,6 +1460,55 @@ test "turboexl3 gpu ling timing: every trunk linear, moeLing and moeLingBanked a
     cfg.banked_group = 4;
     cfg.banked_m3 = true;
     try config.configure(cfg);
+    {
+        const mark = g.mark();
+        defer g.resetTo(mark);
+        defer _ = mlx.mlx_clear_cache();
+        // a variant MLX refuses to launch prints its error line and the arms go on
+        mla_latent_test.reportMlxErrors(true);
+        defer mla_latent_test.reportMlxErrors(false);
+        // its own draw, so the arms after it draw as before
+        var mla_prng = std.Random.DefaultPrng.init(0x4C47_4BC0);
+        const mr = mla_prng.random();
+        const keys: u32 = 19404;
+        const heads: u32 = 64;
+        const lat = try g.slice(try ds_test.randBf16(a, &g, mr, &.{ 1, 1, ci(keys + 64), 512 }), &.{ 0, 0, 0, 0 }, &.{ 1, 1, ci(keys), 512 }, &.{ 1, 1, 1, 1 });
+        const rot = try g.slice(try ds_test.randBf16(a, &g, mr, &.{ 1, 1, ci(keys + 64), 64 }), &.{ 0, 0, 0, 0 }, &.{ 1, 1, ci(keys), 64 }, &.{ 1, 1, 1, 1 });
+        const ws: f32 = 1.0 / @sqrt(512.0);
+        const kv_b = try g.astype(try g.mul(try g.astype(try ds_test.randBf16(a, &g, mr, &.{ ci(heads * 256), 512 }), .float32), try g.hostArray(std.mem.asBytes(&ws), &.{1}, .float32)), .bfloat16);
+        try g.evalAll(&.{ lat, rot, kv_b });
+        const MlaCtx = struct {
+            s: mlx.mlx_stream,
+            qn: mlx.mlx_array,
+            qr: mlx.mlx_array,
+            lat: mlx.mlx_array,
+            rot: mlx.mlx_array,
+            w: mlx.mlx_array,
+            attn: mla_latent.Attn,
+            pub fn call(cx: @This()) !mlx.mlx_array {
+                return mla_latent.decodeLatentWith(cx.s, cx.qn, cx.qr, cx.lat, cx.rot, cx.w, 1.0 / @sqrt(192.0), cx.attn);
+            }
+        };
+        const flops_row = 2.0 * @as(f64, @floatFromInt(keys)) * @as(f64, @floatFromInt(heads)) * @as(f64, @floatFromInt(mla_latent.dl + mla_latent.dr + mla_latent.dl));
+        for ([_]u32{ 1, 2, 3, 4 }) |rows| {
+            const rm = g.mark();
+            defer g.resetTo(rm);
+            const qt = try g.transposeAxes(try ds_test.randBf16(a, &g, mr, &.{ 1, ci(rows), ci(heads), 192 }), &.{ 0, 2, 1, 3 });
+            const qn = try g.slice(qt, &.{ 0, 0, 0, 0 }, &.{ 1, ci(heads), ci(rows), 128 }, &.{ 1, 1, 1, 1 });
+            const qr = try g.slice(qt, &.{ 0, 0, 0, 128 }, &.{ 1, ci(heads), ci(rows), 192 }, &.{ 1, 1, 1, 1 });
+            var base_min: f64 = 0;
+            for ([_]mla_latent.Attn{ .base, .rows2, .rows4, .stage, .block }) |v| {
+                const ctx: MlaCtx = .{ .s = s, .qn = qn, .qr = qr, .lat = lat, .rot = rot, .w = kv_b, .attn = v };
+                const st = ds_test.timeIt(&g, ctx, 8) catch |e| {
+                    std.debug.print("TURBOEXL3_LING_TIME mla_latent keys={d} rows={d} arm={s}: {s}\n", .{ keys, rows, @tagName(v), @errorName(e) });
+                    continue;
+                };
+                if (v == .base) base_min = st.min;
+                const r: f64 = @floatFromInt(rows);
+                std.debug.print("TURBOEXL3_LING_TIME mla_latent keys={d} rows={d} arm={s} min_us={d:.1} med_us={d:.1} us_per_row={d:.1} of_base={d:.3} tflops={d:.2}\n", .{ keys, rows, @tagName(v), st.min, st.med, st.min / r, if (base_min > 0) st.min / base_min else 0, r * flops_row / (st.min * 1e6) });
+            }
+        }
+    }
     var prng = std.Random.DefaultPrng.init(0x11A671);
     const rnd = prng.random();
     for (dense_cases) |c| {
