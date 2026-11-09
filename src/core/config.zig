@@ -58,6 +58,10 @@ pub const Config = struct {
     /// Max: output tiles per GEMV threadgroup, and DEC-ONE's prepare inside the launch or in its own); a shape the table
     /// does not name keeps the rest of this configuration's. Launch shape only: the same bytes.
     dec_one_row_table: bool = false,
+    /// A dense decode call of 2 to 4 rows (a verify's) on its trunk shape's entry of `dense.verify_row_table`
+    /// (Ling-3.1-flash's o_proj, 8192 -> 4096 at K6: one output tile a GEMV threadgroup in place of two); a shape the
+    /// table does not name keeps the rest of this configuration's. Launch shape only: the same bytes.
+    dec_verify_row_table: bool = false,
     /// DEC-ONE's GEMV over prepared rows on a variant (`dense.dec_variants`, `dec_variants` of them; 0 the served GEMV):
     /// the dense dec0 launch (a decode call whose prepare runs in its own launch, and `Dense.decLinearPrepared`) and
     /// Ling-3.1-flash's KDA projections' launch with b_proj (`ling.kdaProjB`). 1 t4 (the MUL1 codeword's t as one half2,
@@ -190,6 +194,7 @@ test "turboexl3 config: the defaults are valid and served; an unserved form, sli
     try t.expectEqual(@as(u8, 0), d.dec_variant);
     for (1..dec_variants) |v| try t.expect((Config{ .dec_variant = @intCast(v) }).valid());
     try t.expect(!(Config{ .dec_variant = dec_variants }).valid());
+    try t.expect(!d.dec_verify_row_table and (Config{ .dec_verify_row_table = true }).valid());
     try t.expect(!d.kda_bfirst and d.kda_bt0 == 0 and d.kda_bt1 == 0);
     for ([_]u8{ 1, 2, 4, 8 }) |bt| try t.expect((Config{ .kda_bfirst = true, .kda_bt0 = bt, .kda_bt1 = bt }).valid());
     for ([_]u8{ 3, 5, 16 }) |bt| {
