@@ -195,8 +195,11 @@ pub fn naxOf(a: Attn) ?Nax {
 /// Every NAX launch shape (TIME's arms)
 pub const nax_shapes = [_]Attn{ .nax_m1_k32, .nax_m1_k64, .nax_m2_k32, .nax_m2_k64, .nax_m4_k32, .nax_m4_k64, .nax_sd_m1_k32, .nax_sd_m1_k64, .nax_sd_m2_k32 };
 
-/// The shape `Config.mla_latent_nax` runs
-pub const nax_served: Attn = .nax_sd_m1_k32;
+/// The shape `Config.mla_latent_nax` runs: TIME's fastest at every row count of the MTP head's calls (fork D1,
+/// 2026-11-09, ~/lingc/logs/t3time-d1time.log: 18,380 keys, rows 1 to 5, 229 to 938 us, 0.161 to 0.189 of the stage
+/// form's 1,209 to 5,825; the split scores at 1 M tile next, 0.170 to 0.192; the whole scores 0.23 to 0.27; 64 keys a
+/// step 0.39 to 0.43)
+pub const nax_served: Attn = .nax_sd_m2_k32;
 
 const Variant = enum(u8) { rows, stage, block, nax };
 const variant_kernels = Global([4]?mlx.mlx_fast_metal_kernel, "ling_mla_latent_variant_kernels", @splat(null));
