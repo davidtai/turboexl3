@@ -168,9 +168,12 @@ pub const text_dec1_ku: [:0]const u8 = dec_head ++ dec_prep1 ++ dec_gemv1_head +
 /// (the same codewords, the same decoded values, the same FMA sequence into the same f32 accumulators and the same
 /// folds), so the same bytes. `t4`, `t1` and `t0` take the MUL1 helper's other instruction sequences from a codeword to
 /// its byte sum t (`EXL3_T1V`, each the same exact t: the banked decode's t4 / t1 / t0); `ku` loads both tiles' words of
-/// an input tile pair before either decodes; `kut4` both. Each has kernel names of its own (MLX keys a custom kernel's
-/// library by its name); a dense shape's engine reads the variant when it is made.
-pub const DecVariant = struct { name: []const u8, dec0: [:0]const u8, dec1: [:0]const u8, text0: [:0]const u8, text1: [:0]const u8, header: [:0]const u8 };
+/// an input tile pair before either decodes; `kut4` both; `g1` and `g2` (`text_dec0_g1` / `text_dec0_g2`, below) take a
+/// lane's tile word offsets once and step the tile and input pointers, g2 over the prepared rows as f32. Each has kernel
+/// names of its own (MLX keys a custom kernel's library by its name); a dense shape's engine reads the variant when it is
+/// made. `glm`: GLM-5.3-Flash's trunk shapes only (`Dense.glmShape`; any other shape takes today's texts); `xf`: the
+/// GEMV reads the prepared rows as f32 (prep_scf's).
+pub const DecVariant = struct { name: []const u8, dec0: [:0]const u8, dec1: [:0]const u8, text0: [:0]const u8, text1: [:0]const u8, header: [:0]const u8, glm: bool = false, xf: bool = false };
 const def_t4 = @embedFile("kernels/dense/dec_def_t4.metal");
 const def_t1 = @embedFile("kernels/dense/dec_def_t1.metal");
 const def_t0 = @embedFile("kernels/dense/dec_def_t0.metal");
@@ -181,10 +184,27 @@ pub const dec_variants = [_]DecVariant{
     .{ .name = "t0", .dec0 = "turboexl3_dense_dec0_t0", .dec1 = "turboexl3_dense_dec1_t0", .text0 = text_dec0, .text1 = text_dec1, .header = def_t0 ++ decode.header5 },
     .{ .name = "ku", .dec0 = "turboexl3_dense_dec0_ku", .dec1 = "turboexl3_dense_dec1_ku", .text0 = text_dec0_ku, .text1 = text_dec1_ku, .header = decode.header5 },
     .{ .name = "kut4", .dec0 = "turboexl3_dense_dec0_kut4", .dec1 = "turboexl3_dense_dec1_kut4", .text0 = text_dec0_ku, .text1 = text_dec1_ku, .header = def_t4 ++ decode.header5 },
+    .{ .name = "g1", .dec0 = "turboexl3_dense_dec0_g1", .dec1 = "turboexl3_dense_dec1_g1", .text0 = text_dec0_g1, .text1 = text_dec1, .header = decode.header5, .glm = true },
+    .{ .name = "g2", .dec0 = "turboexl3_dense_dec0_g2", .dec1 = "turboexl3_dense_dec1_g2", .text0 = text_dec0_g2, .text1 = text_dec1, .header = decode.header5, .glm = true, .xf = true },
 };
 comptime {
     if (dec_variants.len != config.dense_variants) @compileError("config.dense_variants is not dec_variants.len");
 }
+/// g1 / g2's GEMV (`dec_variants`; GLM-5.3-Flash's trunk shapes only, `Dense.glmShape`): text_dec0 with each lane's tile
+/// word offsets and shift (exl3_tile_load's, the rate's 64-bit window) taken once before the loop and the tile and x
+/// pointers stepped a constant per input tile (`dec_g_1` .. `dec_g_3`), in place of dec_gemv0_head, its loop, its x loads,
+/// the output-tile loop's head, the tile address and dec_gemv_arrive_2a's load; g1 reads the prepared rows as prep_sc's
+/// halves (`dec_g_xh_*`), g2 as f32 (`dec_g_xf_*`: prep_scf's, the same halves stored widened). The decodes, FMAs,
+/// folds, arrival and finish are text_dec0's pieces, so the same words, codewords, values and sums: the same bytes.
+pub const dec_g_1 = @embedFile("kernels/dense/dec_g_1.metal");
+pub const dec_g_2 = @embedFile("kernels/dense/dec_g_2.metal");
+pub const dec_g_3 = @embedFile("kernels/dense/dec_g_3.metal");
+pub const dec_g_xh_1 = @embedFile("kernels/dense/dec_g_xh_1.metal");
+pub const dec_g_xh_2 = @embedFile("kernels/dense/dec_g_xh_2.metal");
+pub const dec_g_xf_1 = @embedFile("kernels/dense/dec_g_xf_1.metal");
+pub const dec_g_xf_2 = @embedFile("kernels/dense/dec_g_xf_2.metal");
+pub const text_dec0_g1: [:0]const u8 = dec_head ++ dec_g_1 ++ dec_g_xh_1 ++ dec_g_2 ++ dec_g_xh_2 ++ dec_g_3 ++ dec_gemv_arrive_2b ++ dec_gemv_arrive_2c ++ dec_xsum0 ++ dec_finish;
+pub const text_dec0_g2: [:0]const u8 = dec_head ++ dec_g_1 ++ dec_g_xf_1 ++ dec_g_2 ++ dec_g_xf_2 ++ dec_g_3 ++ dec_gemv_arrive_2b ++ dec_gemv_arrive_2c ++ dec_xsum0 ++ dec_finish;
 /// dec_prep1's pieces (`dec_prep1`, above): the prepare to its store, the store of a prepared value at its offset in
 /// the slice (the slice's span from its first input; a joined launch whose members take their own K splits stores at
 /// its member's span, glm53f/pair_ks.zig), and the rest
@@ -284,6 +304,10 @@ pub const Dense = struct {
     prep_sc: mlx.mlx_fast_metal_kernel,
     dec_zero: mlx.mlx_fast_metal_kernel,
     dec_cfg: [decode.Kernels.max_rows + 1]?DecCfg = @splat(null),
+    /// the GEMV variant's prepared rows as f32 (`DecVariant.xf`): prep_scf (prep_sc's text, its xp an f32 array) in prep_sc's
+    /// place, made when the variant takes this shape
+    xf: bool = false,
+    prep_scf: ?mlx.mlx_fast_metal_kernel = null,
     /// the finish over row pieces (`text_finish_pieces`, `finishPieces`): made on first use, so a process that never
     /// splits a call never builds it
     finish_pieces: ?mlx.mlx_fast_metal_kernel = null,
@@ -415,6 +439,28 @@ pub const Dense = struct {
         };
     }
 
+    /// GLM-5.3-Flash's trunk linears (sc_3.10bpw): K6 for the 45 layers and the head, K4 for the MTP layer, MUL1, as
+    /// (in, out): KDA qkv and o, DSA q_a, q_b, kv_a, o and the indexer's wq_b, the shared expert's gate / up and down,
+    /// the dense MLP's gate / up and down, the head, the MTP layer's eh_proj
+    pub const glm_shapes = [_][2]u32{
+        .{ 4096, 24576 }, .{ 8192, 4096 }, .{ 4096, 1536 }, .{ 1536, 16384 }, .{ 4096, 512 }, .{ 16384, 4096 }, .{ 1536, 4096 },
+        .{ 4096, 2048 },  .{ 2048, 4096 }, .{ 4096, 12288 }, .{ 12288, 4096 }, .{ 4096, 154880 },
+    };
+
+    /// Whether `shape` is one of GLM-5.3-Flash's trunk linears at its stored rate (a `glm` variant's texts: K4 or K6, so
+    /// the 64-bit tile window, MUL1)
+    pub fn glmShape(shape: Shape) bool {
+        if (shape.dec.codebook != .mul1 or (shape.rate.n != 64 and shape.rate.n != 96)) return false;
+        for (glm_shapes) |g| if (shape.in == g[0] and shape.out == g[1]) return true;
+        return false;
+    }
+
+    /// The DEC-ONE variant a shape takes: `variant`'s, or today's where a `glm` variant meets another shape
+    pub fn variantFor(shape: Shape, variant: u8) *const DecVariant {
+        const dv = &dec_variants[variant];
+        return if (dv.glm and !glmShape(shape)) &dec_variants[0] else dv;
+    }
+
     /// the smallest K split that puts 160 threadgroups (4 per core of a 40-core GPU) in flight at one row (BT 4); fixed per
     /// shape, so every row count sums alike
     pub fn ksFor(in: u32, out: u32) u32 {
@@ -435,7 +481,7 @@ pub const Dense = struct {
 
     pub fn init(shape: Shape) !Dense {
         if (shape.in % 128 != 0 or shape.out % 128 != 0 or (shape.in / 16) % 4 != 0 or shape.in == 0 or shape.out == 0) return error.BadExl3Shape;
-        const dv = &dec_variants[config.get().dense_variant];
+        const dv = variantFor(shape, config.get().dense_variant);
         // DEC-ONE's output tiles per threadgroup at decode rows 1 to 4 as configured (0: btFor's)
         var bt_set: [decode.Kernels.max_rows + 1]u8 = @splat(0);
         for (config.get().dec_bt, 0..) |b, r| bt_set[r] = b;
@@ -467,6 +513,8 @@ pub const Dense = struct {
             .prep_sc = ks.newKernel("turboexl3_dense_prep_sc", &prep_in, &prep_sc_out, text_prep_sc, decode.header, true) orelse return error.KernelCreateFailed,
             .dec_zero = ks.newKernel("turboexl3_dense_dec_zero", &dec_zero_in, &dec_zero_out, text_dec_zero, decode.header, true) orelse return error.KernelCreateFailed,
             .bt_set = bt_set,
+            .xf = dv.xf,
+            .prep_scf = if (dv.xf) (ks.newKernel("turboexl3_dense_prep_scf", &prep_in, &prep_sc_out, text_prep_sc, decode.header, true) orelse return error.KernelCreateFailed) else null,
         };
     }
 
@@ -521,7 +569,7 @@ pub const Dense = struct {
             c = .{ .prep_in = true, .prep = prep, .gemv = try ks.buildConfig(.{ .grid = grid, .threadgroup = .{ 128, 1, 1 }, .out_shapes = &.{ &y_shape, &z_shape, &[_]c_int{@intCast(nx)} }, .out_dtypes = &.{ self.shape.out_dtype, .float32, .float32 }, .template = &tmpl }) };
         } else {
             const nth: u32 = nb * 32 * rows_u;
-            const prep = try ks.buildConfig(.{ .grid = .{ nb * 32, rows_u, 1 }, .threadgroup = .{ 32, 1, 1 }, .out_shapes = &.{ &[_]c_int{ r, IN }, &[_]c_int{ r, @intCast(nb) }, &ncnt_shape }, .out_dtypes = &.{ .float16, .float32, .uint32 }, .template = &.{
+            const prep = try ks.buildConfig(.{ .grid = .{ nb * 32, rows_u, 1 }, .threadgroup = .{ 32, 1, 1 }, .out_shapes = &.{ &[_]c_int{ r, IN }, &[_]c_int{ r, @intCast(nb) }, &ncnt_shape }, .out_dtypes = &.{ if (self.xf) .float32 else .float16, .float32, .uint32 }, .template = &.{
                 .{ .name = "DIM", .value = .{ .int = IN } },
                 .{ .name = "LANE_ORDER", .value = .{ .int = 1 } },
                 .{ .name = "NCNT", .value = .{ .int = @intCast(ncnt) } },
@@ -561,7 +609,7 @@ pub const Dense = struct {
             return o[0];
         }
         var po: [3]mlx.mlx_array = undefined;
-        try ks.applyConfig(self.prep_sc, c.prep, &.{ x, suh }, &po, s);
+        try ks.applyConfig(if (self.prep_scf) |k| k else self.prep_sc, c.prep, &.{ x, suh }, &po, s);
         defer for (po) |a| {
             _ = mlx.mlx_array_free(a);
         };
@@ -583,6 +631,8 @@ pub const Dense = struct {
         inline for (.{ self.prep, self.gemv, self.finish, self.dequant, self.dgemv, self.dgemv_lean, self.dfinish, self.prep_s, self.gemm_pf, self.gemm_rs, self.dec0, self.dec1, self.prep_sc, self.dec_zero }) |k| decode.freeKernel(k);
         if (self.finish_pieces) |k| decode.freeKernel(k);
         self.finish_pieces = null;
+        if (self.prep_scf) |k| decode.freeKernel(k);
+        self.prep_scf = null;
     }
 
     pub fn templ(self: *const Dense) [3]ks.TemplateArg {

@@ -1343,7 +1343,8 @@ VARIANT_TABLES = {('dense.zig', 'dv'): 'dec_variants'}
 ADDED[('config.zig', 'const dense_variants')] = 'DEC-ONE\'s GEMV variant count (dense.dec_variants.len, checked there)'
 ADDED[('dense.zig', 'const DecVariant')] = 'a DEC-ONE GEMV variant: its name, its two kernels\' names, their texts and header'
 ADDED[('dense.zig', 'const dec_variants')] = ('DEC-ONE\'s GEMV variants: the first today\'s dec0 and dec1 (check 1 reads the '
-                                             'calls as it), then t4, t1, t0, ku and kut4')
+                                             'calls as it), then t4, t1, t0, ku and kut4; g1 and g2 at GLM-5.3-Flash\'s trunk '
+                                             'shapes only')
 ADDED[('dense.zig', 'comptime #62')] = 'dec_variants.len checked against config.dense_variants'
 ADDED[('dense.zig', 'fn decVariantOf')] = 'dec_variants\' index by name (the plugin\'s TURBOEXL3_GLM53F_DEC)'
 ADDED_FILES['dense_dec_test.zig'] = ('DEC-ONE\'s schedules at sc_3.10\'s 20 dense shapes, rows 1 to 4, bf16 and f32: each variant '
@@ -1409,6 +1410,29 @@ ADDED[('dense.zig', 'const dec_prep1_2')] = 'dec_prep1\'s store (glm53f/pair_ks.
 ADDED[('dense.zig', 'const dec_prep1_3')] = 'dec_prep1 after its store'
 ADDED[('models/glm53f/api.zig', 'const pair_ks')] = 'pair_ks.zig, two linears at their own K splits in one launch (root\'s glm53f.pair_ks)'
 CHANGED[('root.zig', 'const shared_state')] = 'registers glm53f.shared_gu.shared_state and glm53f.pair_ks.shared_state'
+
+
+# GLM-5.3-Flash's DEC-ONE GEMV at its trunk shapes (dense.zig's `g1` and `g2` variants, the plugin's
+# TURBOEXL3_GLM53F_DEC=g1 / g2; Dense.glmShape: K6 and the MTP layer's K4, MUL1, the sc_3.10 dense shapes, any other shape
+# today's texts): text_dec0 with each lane's tile word offsets and shift taken once and the tile and input pointers stepped a
+# constant per input tile (dec_g_1, dec_g_2, dec_g_3), its codewords, decodes, FMAs, folds and finish today's pieces; g2's
+# GEMV reads the prepared rows as f32 (dec_g_xf_1, dec_g_xf_2), which prep_scf writes (prep_sc's text into an f32 xp: the
+# same halves, widened as stored)
+ADDED_KERNELS[('dense.zig', 'turboexl3_dense_prep_scf')] = ('prep_sc\'s text and header with its xp an f32 array (DecVariant.xf: '
+                                                            'g2), made only for that variant: the same halves, stored widened')
+CHANGED[('dense.zig', 'const DecVariant')] = ('glm (the variant serves GLM-5.3-Flash\'s trunk shapes only, Dense.glmShape) and xf '
+                                             '(its GEMV reads f32 prepared rows, prep_scf\'s)')
+CHANGED[('dense.zig', 'const dec_variants')] = ('g1 and g2: text_dec0_g1 / text_dec0_g2 (text_dec1 where the prepare runs inside), '
+                                               'their own kernel names, header5')
+CHANGED[('dense.zig', 'const Dense')] += ('; xf / prep_scf: a variant\'s f32 prepared rows (init makes prep_scf, decCfgs stores '
+                                        'xp as f32, decLinear launches it in prep_sc\'s place, deinit frees it through '
+                                        'freeKernel); glm_shapes / glmShape / variantFor: a glm variant at GLM-5.3-Flash\'s trunk '
+                                        'shapes only, today\'s texts at any other (init takes variantFor\'s)')
+CHANGED[('config.zig', 'const dense_variants')] = '8: g1, g2'
+EDITED_TESTS[('dense_dec_test.zig', 'turboexl3 glm53f dense decode texts: each variant is today\'s texts with ku\'s tile loop '
+              'in place of today\'s and its own kernel names; today\'s texts are today\'s pieces')] = (
+    'g1 and g2: their compositions (their own head, loop and tile words, then text_dec0\'s pieces from the codewords on), '
+    'g1\'s widening statement today\'s, and their reach (every served shape at its K; not K5, MCG or another model\'s shape)')
 
 
 def metal_strings(fn, toks, corpus):

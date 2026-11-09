@@ -112,6 +112,45 @@ test "turboexl3 glm53f dense decode texts: each variant is today's texts with ku
     try testing.expectEqual(@as(?u8, null), dense.decVariantOf("sh"));
     // every schedule the test and the switch name is a configuration turboexl3 serves
     for (scheds) |sc| try testing.expect((config.Config{ .dense_variant = sc.variant, .dec_bt = .{ 0, sc.bt, sc.bt, sc.bt, sc.bt } }).valid());
+    // g1 / g2: their own head, loop and tile words (the offsets taken once, the pointers stepped), then text_dec0's pieces
+    // from the codewords on; no tile load call, no tile address and no x load of today's in the loop
+    const tail = dense.dec_gemv_arrive_2b ++ dense.dec_gemv_arrive_2c ++ dense.dec_xsum0 ++ dense.dec_finish_v ++ dense.dec_finish_store;
+    try testing.expect(std.mem.endsWith(u8, dense.text_dec0, tail));
+    for ([_][:0]const u8{ dense.text_dec0_g1, dense.text_dec0_g2 }) |g| {
+        try testing.expect(std.mem.startsWith(u8, g, dense.dec_head ++ dense.dec_g_1));
+        try testing.expect(std.mem.endsWith(u8, g, tail));
+        try testing.expectEqual(@as(usize, 1), std.mem.count(u8, g, dense.dec_gemv_arrive_2b));
+        try testing.expectEqual(@as(usize, 0), std.mem.count(u8, g, dense.dec_gemv_arrive_2a));
+        try testing.expectEqual(@as(usize, 0), std.mem.count(u8, g, dense.dec_tile));
+        try testing.expectEqual(@as(usize, 0), std.mem.count(u8, g, dense.dec_gemv0_x));
+    }
+    // g1 widens prep_sc's halves with today's statement (dec_g_xh_2's second line, dec_gemv0_x's); g2 reads prep_scf's
+    // f32 rows (the same halves stored widened), so not that statement
+    var xh = std.mem.splitScalar(u8, dense.dec_g_xh_2, '\n');
+    _ = xh.next();
+    const widen = std.mem.trim(u8, xh.next().?, " ");
+    try testing.expect(widen.len > 0 and std.mem.indexOf(u8, dense.dec_gemv0_x, widen) != null);
+    try testing.expect(std.mem.indexOf(u8, dense.text_dec0_g1, widen) != null and std.mem.indexOf(u8, dense.text_dec0_g2, widen) == null);
+    // g1 and g2 serve GLM-5.3-Flash's trunk shapes only: every sc_3.10 dense linear at its K (K6, the MTP layer's K4),
+    // MUL1; another rate or codebook, or another model's shape, takes today's texts
+    const g1 = dense.decVariantOf("g1").?;
+    const g2 = dense.decVariantOf("g2").?;
+    for (dense.dec_variants, 0..) |v, i| try testing.expect(v.glm == (i == g1 or i == g2) and v.xf == (i == g2));
+    for (served) |c| {
+        const sh: dense.Shape = .{ .in = c.in, .out = c.out, .rate = format.Rate.fromK(c.k), .dec = .mul1, .out_dtype = .bfloat16 };
+        try testing.expect(dense.Dense.glmShape(sh));
+        try testing.expectEqual(&dense.dec_variants[g2], dense.Dense.variantFor(sh, g2));
+        var k5 = sh;
+        k5.rate = format.Rate.fromK(5);
+        try testing.expect(!dense.Dense.glmShape(k5));
+        var mcg = sh;
+        mcg.dec = .mcg;
+        try testing.expect(!dense.Dense.glmShape(mcg));
+    }
+    const qwen: dense.Shape = .{ .in = 2560, .out = 12288, .rate = format.Rate.fromK(6), .dec = .mul1, .out_dtype = .bfloat16 };
+    try testing.expect(!dense.Dense.glmShape(qwen));
+    try testing.expectEqual(&dense.dec_variants[0], dense.Dense.variantFor(qwen, g1));
+    try testing.expectEqual(&dense.dec_variants[1], dense.Dense.variantFor(qwen, 1));
 }
 
 /// `x`'s 32-bit words (an f32 array's bits, or a bf16 array's bits through its exact f32 widening).

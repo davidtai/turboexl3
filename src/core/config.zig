@@ -101,7 +101,7 @@ pub const Config = struct {
 /// The grouped banked GEMVs' variant count (`decode.group_variants.len`, checked there).
 pub const banked_variants: u8 = 12;
 /// DEC-ONE's GEMV variant count (`dense.dec_variants.len`, checked there).
-pub const dense_variants: u8 = 6;
+pub const dense_variants: u8 = 8;
 
 const current = Global(Config, "config_current", .{});
 
