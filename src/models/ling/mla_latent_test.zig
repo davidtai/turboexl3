@@ -19,9 +19,16 @@
 //!   query halves as views of the transposed heads) and on two strided caches (the latent and the rope key interleaved
 //!   in one buffer; each transposed, a key's words a column apart); a planted fault (a key row zeroed, one flipped bit)
 //!   must differ.
+//! - launch 2 on the matrix units (`mla_latent.Attn.nax_*`, `Config.mla_latent_nax`; not launch 2's words): every NAX
+//!   shape within a bound of the host's f64 absorbed attention on the plugin's operands at rows 1 to 5 and keys 1 to
+//!   19,404 (the bound: `naxBound`), the served stage form's error beside it; the strided caches on the served shape; a
+//!   planted fault (a key block's latents or rope keys set to 8) must break the bound; a call the NAX shape refuses (an
+//!   f32 cache, too few heads for its threadgroup) runs the served text with its words under the configuration and is
+//!   refused when a test names the shape; a wider call than the plan takes is refused with the NAX shape on as off.
 //! Lines: TURBOEXL3_LING_MLA_LATENT, TURBOEXL3_LING_MLA_LATENT_ROWS, TURBOEXL3_LING_MLA_LATENT_SERVED,
 //! TURBOEXL3_LING_MLA_LATENT_LOADER_KVB, TURBOEXL3_LING_MLA_LATENT_LOADER, TURBOEXL3_LING_MLA_LATENT_VARIANT (_RED,
-//! _DONE). The variants' test prints an MLX error (a launch MLX refuses) as its variant's FAIL line and goes on.
+//! _DONE), TURBOEXL3_LING_MLA_LATENT_NAX (_RED, _FALLBACK, _DONE). The variants' and the NAX test print an MLX error (a
+//! launch MLX refuses) as that launch's FAIL line and go on.
 const std = @import("std");
 const sdk = @import("sdk");
 const mlx = sdk.mlx;
@@ -29,6 +36,8 @@ const support = @import("../../core/test_support.zig");
 const G = support.Graph;
 const ref = @import("../../core/ref.zig");
 const ml = @import("mla_latent.zig");
+const config = @import("../../core/config.zig");
+const prefill = @import("../../core/prefill.zig");
 
 const testing = std.testing;
 
@@ -784,4 +793,329 @@ test "turboexl3 gpu ling mla latent variants: rows2, rows4, stage and block give
     std.debug.print("TURBOEXL3_LING_MLA_LATENT_VARIANT_DONE {d} lines, {d} failed; red checks failed {d}\n", .{ lines, failed, red_failed });
     try testing.expectEqual(@as(usize, 0), failed);
     try testing.expectEqual(@as(usize, 0), red_failed);
+}
+
+// ── launch 2 on the matrix units (`Attn.nax_*`): a bound of the f64 reference, not launch 2's words ──
+
+test "turboexl3 ling mla latent nax metal source: the kernel as standalone translation units, bf16 split at 1 M tile and whole at 4, f16 split at 2 (TURBOEXL3_METAL_DUMP=1)" {
+    _ = std.c.getenv("TURBOEXL3_METAL_DUMP") orelse return error.SkipZigTest;
+    const d = comptime support.pins(@embedFile("kernels/test/dump/mla_latent_nax.metal"));
+    prefill.printMetal("turboexl3_ling_mla_attn_nax_bf16_m1_k32_sd", ml.header_nax, d[0], d[3], ml.text_attn_nax);
+    prefill.printMetal("turboexl3_ling_mla_attn_nax_bf16_m4_k64", ml.header_nax, d[1], d[3], ml.text_attn_nax);
+    prefill.printMetal("turboexl3_ling_mla_attn_nax_f16_m2_k32_sd", ml.header_nax, d[2], d[4], ml.text_attn_nax);
+}
+
+/// The bound a NAX call's output holds against the f64 reference, as a ratio to the reference's RMS (the RMS error at
+/// most `bound`, the worst element at most 4 `bound`, each beyond the output's own bf16 store, `ref.compareRounded`).
+/// Why 2^-8 at Ling's scale: the one rounding the NAX launch adds to the served form's is the absorbed query's to bf16, a
+/// relative 2^-9 a word at most. It moves a row's score by about scale 2^-9 ||ql . lat|| (about 1e-3 at Ling's
+/// 1/sqrt(192) on unit-variance operands) and so each softmax weight by that relative amount; the matrix units sum in
+/// f32. So the output moves by about 2^-9 of its own size: within one bf16 half-ulp (2^-8) in RMS, a few in the worst
+/// element. The score error grows with the scale, so the bound does too (the peaked case).
+fn naxBound(scale: f64) f64 {
+    return @max(1.0, scale * @sqrt(192.0)) / 256.0;
+}
+
+fn bf16Value(bits: u16) f32 {
+    return @bitCast(@as(u32, bits) << 16);
+}
+
+/// One NAX case: the head's cache words `lat_host` [cap, DL], `rot_host` [cap, DR] (bf16 bits), the query heads on the
+/// device the plugin's way (`qn`, `qr`: views of [1, H, S, DN + DR] transposed from [1, S, H, DN + DR]), and the f64
+/// reference's operands (`o`: the same words as f32)
+const NaxCase = struct {
+    o: Ops,
+    lat_host: []u16,
+    rot_host: []u16,
+    cap: usize,
+    qn: mlx.mlx_array,
+    qr: mlx.mlx_array,
+
+    fn deinit(c: *NaxCase, a: std.mem.Allocator) void {
+        c.o.deinit(a);
+        a.free(c.lat_host);
+        a.free(c.rot_host);
+    }
+};
+
+/// A case of `rows` rows over `t` keys with kv_b's stored rows `w_host` (the loader's words, f32): the cache as a wider
+/// buffer's first rows (its rows past T other words, as after a rollback)
+fn naxCase(g: *G, a: std.mem.Allocator, rnd: std.Random, w_host: []const f32, h: usize, rows: usize, t: usize, scale: f64) !NaxCase {
+    const cap = t + 61;
+    const lat_host = try a.alloc(u16, cap * DL);
+    const rot_host = try a.alloc(u16, cap * DR);
+    for (lat_host) |*v| v.* = support.bf16Bits(rnd.floatNorm(f32));
+    for (rot_host) |*v| v.* = support.bf16Bits(rnd.floatNorm(f32));
+    const q_host = try a.alloc(f32, rows * h * (DN + DR));
+    defer a.free(q_host);
+    for (q_host) |*v| v.* = bfExact(rnd.floatNorm(f32));
+    const qd = try g.astype(try g.hostArray(std.mem.sliceAsBytes(q_host), &.{ 1, ci(rows), ci(h), ci(DN + DR) }, .float32), .bfloat16);
+    try mlx.check(mlx.mlx_array_eval(qd));
+    const qt = try g.transposeAxes(qd, &.{ 0, 2, 1, 3 });
+    const qn = try g.slice(qt, &.{ 0, 0, 0, 0 }, &.{ 1, ci(h), ci(rows), ci(DN) }, &.{ 1, 1, 1, 1 });
+    const qr = try g.slice(qt, &.{ 0, 0, 0, ci(DN) }, &.{ 1, ci(h), ci(rows), ci(DN + DR) }, &.{ 1, 1, 1, 1 });
+    const o: Ops = .{
+        .h = h,
+        .s = rows,
+        .t = t,
+        .qn = try a.alloc(f32, h * rows * DN),
+        .qr = try a.alloc(f32, h * rows * DR),
+        .lat = try a.alloc(f32, t * DL),
+        .rot = try a.alloc(f32, t * DR),
+        .w = try a.alloc(f32, w_host.len),
+        .scale = scale,
+    };
+    for (0..rows) |r| for (0..h) |hh| {
+        const src = q_host[(r * h + hh) * (DN + DR) ..][0 .. DN + DR];
+        @memcpy(o.qn[(hh * rows + r) * DN ..][0..DN], src[0..DN]);
+        @memcpy(o.qr[(hh * rows + r) * DR ..][0..DR], src[DN..]);
+    };
+    for (o.lat, lat_host[0 .. t * DL]) |*u, b| u.* = bf16Value(b);
+    for (o.rot, rot_host[0 .. t * DR]) |*u, b| u.* = bf16Value(b);
+    @memcpy(o.w, w_host);
+    return .{ .o = o, .lat_host = lat_host, .rot_host = rot_host, .cap = cap, .qn = qn, .qr = qr };
+}
+
+/// `decodeLatentParts` on `attn`: the output as f32 into `out` (the partials dropped)
+fn naxOut(g: *G, s: mlx.mlx_stream, qn: mlx.mlx_array, qr: mlx.mlx_array, lat: mlx.mlx_array, rot: mlx.mlx_array, w: mlx.mlx_array, scale: f64, attn: ?ml.Attn, out: []f32) !void {
+    const r = try ml.decodeLatentParts(s, qn, qr, lat, rot, w, @floatCast(scale), attn);
+    const y = try g.adopt(r.out);
+    _ = mlx.mlx_array_free(r.pm);
+    _ = mlx.mlx_array_free(r.pl);
+    _ = mlx.mlx_array_free(r.po);
+    _ = try g.hostF32(try g.astype(y, .float32), out);
+}
+
+/// The RMS and worst-element error of `got` against `want` (ratios to the reference's RMS, beyond the bf16 store)
+const NaxErr = struct { rms: f64, max: f64 };
+
+fn naxErr(got: []const f32, want: []const f32) NaxErr {
+    const e = ref.compareRounded(got, want, 1.0 / 256.0);
+    return .{ .rms = rmsRatio(got, want, e.rms_ref), .max = e.max_ratio };
+}
+
+fn naxWithin(e: NaxErr, bound: f64) bool {
+    return std.math.isFinite(e.rms) and std.math.isFinite(e.max) and e.rms <= bound and e.max <= 4.0 * bound;
+}
+
+test "turboexl3 gpu ling mla latent nax: every NAX shape within naxBound of the host's f64 absorbed attention on the plugin's operands at rows 1 to 5 and keys 1 to 19,404, beside the served stage form's error; the strided caches; a planted fault breaks the bound; a refused call falls back to the served text (TURBOEXL3_GPU=1)" {
+    _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    const s = mlx.mlx_default_gpu_stream_new();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    const a = std.heap.page_allocator;
+    var g = try G.init(a, s);
+    defer g.deinit();
+    reportMlxErrors(true);
+    defer reportMlxErrors(false);
+    const h: usize = 64;
+    var prng = std.Random.DefaultPrng.init(0x0D1A_7E55);
+    const rnd = prng.random();
+    const kvb = try loaderKvB(&g, a, rnd, h);
+    const w_host = try a.alloc(f32, h * (DN + DV) * DL);
+    defer a.free(w_host);
+    _ = try g.hostF32(try g.astype(kvb.rows, .float32), w_host);
+    const ling_scale: f64 = 1.0 / @sqrt(192.0);
+    // keys: the step (32), sub-chunk and key-group (256) edges, a group ending mid step, the standard request's head
+    // cache before and after its decode; rows: a serial step to the widest verify at --mtp-max-depth 4
+    const Case = struct { t: usize, rows: usize, scale: f64 };
+    const cases = [_]Case{
+        .{ .t = 1, .rows = 1, .scale = ling_scale },
+        .{ .t = 31, .rows = 5, .scale = ling_scale },
+        .{ .t = 32, .rows = 1, .scale = ling_scale },
+        .{ .t = 33, .rows = 2, .scale = ling_scale },
+        .{ .t = 255, .rows = 3, .scale = ling_scale },
+        .{ .t = 256, .rows = 1, .scale = ling_scale },
+        .{ .t = 257, .rows = 5, .scale = ling_scale },
+        .{ .t = 257, .rows = 5, .scale = 8.0 * ling_scale },
+        .{ .t = 4096, .rows = 2, .scale = ling_scale },
+        .{ .t = 18380, .rows = 1, .scale = ling_scale },
+        .{ .t = 18380, .rows = 3, .scale = ling_scale },
+        .{ .t = 18380, .rows = 5, .scale = ling_scale },
+        .{ .t = 18380, .rows = 1, .scale = 8.0 * ling_scale },
+        .{ .t = 19404, .rows = 4, .scale = ling_scale },
+    };
+    var failed: usize = 0;
+    var lines: usize = 0;
+    for (cases) |c| {
+        const cm = g.mark();
+        defer g.resetTo(cm);
+        var nc = try naxCase(&g, a, rnd, w_host, h, c.rows, c.t, c.scale);
+        defer nc.deinit(a);
+        const want64 = try a.alloc(f64, h * c.rows * DV);
+        defer a.free(want64);
+        try refAbsorbed(a, nc.o, want64);
+        const want = try a.alloc(f32, want64.len);
+        defer a.free(want);
+        for (want, want64) |*u, v| u.* = @floatCast(v);
+        const got = try a.alloc(f32, want.len);
+        defer a.free(got);
+        const served = try a.alloc(f32, want.len);
+        defer a.free(served);
+        const bound = naxBound(c.scale);
+        const cache = try headCache(&g, nc.lat_host, nc.rot_host, nc.cap, c.t);
+        // the served stage form (S40) against the same reference, for the record
+        try naxOut(&g, s, nc.qn, nc.qr, cache[0], cache[1], kvb.rows, c.scale, .stage, served);
+        const es = naxErr(served, want);
+        const both = try g.concat(&.{ cache[0], cache[1] }, 3);
+        try mlx.check(mlx.mlx_array_eval(both));
+        const views = [3][2]mlx.mlx_array{
+            cache,
+            .{
+                try g.slice(both, &.{ 0, 0, 0, 0 }, &.{ 1, 1, ci(c.t), ci(DL) }, &.{ 1, 1, 1, 1 }),
+                try g.slice(both, &.{ 0, 0, 0, ci(DL) }, &.{ 1, 1, ci(c.t), ci(DL + DR) }, &.{ 1, 1, 1, 1 }),
+            },
+            .{ try transposedView(&g, s, cache[0]), try transposedView(&g, s, cache[1]) },
+        };
+        for (ml.nax_shapes) |shape| for (views, 0..) |view, vi| {
+            // the strided caches on the served shape, and on every shape where the keys are few
+            if (vi != 0 and shape != ml.nax_served and c.t > 300) continue;
+            const vm = g.mark();
+            defer g.resetTo(vm);
+            const kind: CacheView = @enumFromInt(vi);
+            lines += 1;
+            naxOut(&g, s, nc.qn, nc.qr, view[0], view[1], kvb.rows, c.scale, shape, got) catch |e| {
+                std.debug.print("TURBOEXL3_LING_MLA_LATENT_NAX keys={d} rows={d} scale={d:.4} shape={s} cache={s}: {s} FAIL\n", .{ c.t, c.rows, c.scale, @tagName(shape), @tagName(kind), @errorName(e) });
+                failed += 1;
+                continue;
+            };
+            const e = naxErr(got, want);
+            const d = relErr(got, served);
+            const ok = naxWithin(e, bound);
+            std.debug.print("TURBOEXL3_LING_MLA_LATENT_NAX keys={d} rows={d} scale={d:.4} shape={s} cache={s} rms={e:.3} max={e:.3} bound={e:.3} (x4 max); served stage rms={e:.3} max={e:.3}; against the stage rel_l2={e:.3} rel_max={e:.3} {s}\n", .{ c.t, c.rows, c.scale, @tagName(shape), @tagName(kind), e.rms, e.max, bound, es.rms, es.max, d[0], d[1], if (ok) "PASS" else "FAIL" });
+            failed += @intFromBool(!ok);
+        };
+    }
+    // Red checks: a planted fault in one key block every row sees (its 32 keys' latents, or their rope keys, set to 8),
+    // run on the served shape against the clean cache's reference, must break the bound. A bound that passes a faulted
+    // cache cannot catch a shape that reads a wrong key block.
+    var red_failed: usize = 0;
+    for ([_][2]usize{ .{ 257, 3 }, .{ 19404, 4 } }) |rc| {
+        const t = rc[0];
+        const rows = rc[1];
+        const cm = g.mark();
+        defer g.resetTo(cm);
+        var nc = try naxCase(&g, a, rnd, w_host, h, rows, t, ling_scale);
+        defer nc.deinit(a);
+        const want64 = try a.alloc(f64, h * rows * DV);
+        defer a.free(want64);
+        try refAbsorbed(a, nc.o, want64);
+        const want = try a.alloc(f32, want64.len);
+        defer a.free(want);
+        for (want, want64) |*u, v| u.* = @floatCast(v);
+        const got = try a.alloc(f32, want.len);
+        defer a.free(got);
+        // the block: 32 keys from a multiple of 32, every one at or before the call's first row's position
+        const k0 = ((t - rows) / 2) / 32 * 32;
+        const eight = support.bf16Bits(8.0);
+        for ([_][]const u8{ "latent_block", "rope_block" }) |fault| {
+            const fm = g.mark();
+            defer g.resetTo(fm);
+            const lat_bad = try a.dupe(u16, nc.lat_host);
+            defer a.free(lat_bad);
+            const rot_bad = try a.dupe(u16, nc.rot_host);
+            defer a.free(rot_bad);
+            if (fault[0] == 'l') {
+                @memset(lat_bad[k0 * DL ..][0 .. 32 * DL], eight);
+            } else {
+                @memset(rot_bad[k0 * DR ..][0 .. 32 * DR], eight);
+            }
+            const bad = try headCache(&g, lat_bad, rot_bad, nc.cap, t);
+            naxOut(&g, s, nc.qn, nc.qr, bad[0], bad[1], kvb.rows, ling_scale, ml.nax_served, got) catch |e| {
+                std.debug.print("TURBOEXL3_LING_MLA_LATENT_NAX_RED keys={d} rows={d} fault={s}: {s} FAIL\n", .{ t, rows, fault, @errorName(e) });
+                red_failed += 1;
+                continue;
+            };
+            const e = naxErr(got, want);
+            const broke = !naxWithin(e, naxBound(ling_scale));
+            std.debug.print("TURBOEXL3_LING_MLA_LATENT_NAX_RED keys={d} rows={d} fault={s} at keys {d}..{d}: against the clean reference rms={e:.3} max={e:.3} (a fault must break the bound {e:.3}) {s}\n", .{ t, rows, fault, k0, k0 + 31, e.rms, e.max, naxBound(ling_scale), if (broke) "PASS" else "FAIL" });
+            red_failed += @intFromBool(!broke);
+        }
+    }
+    // Fallbacks: under the configuration (the NAX shape ahead of the stage), a call the NAX shape does not take runs the
+    // served text with its words; a test that names a refused shape gets the refusal; a call wider than the plan takes is
+    // refused with the NAX shape on as off.
+    var fb_failed: usize = 0;
+    {
+        const saved = config.get().*;
+        defer config.configure(saved) catch {};
+        var cfg = saved;
+        cfg.mla_latent_nax = true;
+        cfg.mla_latent_stage = true;
+        cfg.mla_latent_rows = 0;
+        cfg.mla_latent_block = false;
+        try config.configure(cfg);
+        const fm = g.mark();
+        defer g.resetTo(fm);
+        const t: usize = 600;
+        const rows: usize = 3;
+        var nc = try naxCase(&g, a, rnd, w_host, h, rows, t, ling_scale);
+        defer nc.deinit(a);
+        const n_out = h * rows * DV;
+        const got = try a.alloc(f32, n_out);
+        defer a.free(got);
+        const want = try a.alloc(f32, n_out);
+        defer a.free(want);
+        const cache = try headCache(&g, nc.lat_host, nc.rot_host, nc.cap, t);
+        // 1. a bf16 cache: the configuration runs the served NAX shape, its words those of the shape named
+        try naxOut(&g, s, nc.qn, nc.qr, cache[0], cache[1], kvb.rows, ling_scale, null, got);
+        const took_nax = ml.lastAttn() == ml.nax_served;
+        try naxOut(&g, s, nc.qn, nc.qr, cache[0], cache[1], kvb.rows, ling_scale, ml.nax_served, want);
+        const d1 = diffWords(got, want);
+        const ok1 = took_nax and d1 == 0;
+        std.debug.print("TURBOEXL3_LING_MLA_LATENT_NAX_FALLBACK bf16 cache: the configuration ran {s} (want {s}); words differing from the named shape's {d}/{d} {s}\n", .{ @tagName(ml.lastAttn()), @tagName(ml.nax_served), d1, n_out, if (ok1) "PASS" else "FAIL" });
+        fb_failed += @intFromBool(!ok1);
+        // 2. an f32 cache (no matrix-unit operands): the configuration runs the stage form, the served launch 2, with its
+        // words; naming a NAX shape is refused
+        const lat32 = try g.astype(cache[0], .float32);
+        const rot32 = try g.astype(cache[1], .float32);
+        try g.evalAll(&.{ lat32, rot32 });
+        try naxOut(&g, s, nc.qn, nc.qr, lat32, rot32, kvb.rows, ling_scale, null, got);
+        const took = ml.lastAttn();
+        try naxOut(&g, s, nc.qn, nc.qr, lat32, rot32, kvb.rows, ling_scale, .stage, want);
+        const d2 = diffWords(got, want);
+        var refused2 = false;
+        naxOut(&g, s, nc.qn, nc.qr, lat32, rot32, kvb.rows, ling_scale, ml.nax_served, want) catch |e| {
+            refused2 = e == error.Exl3EngineNotImplemented;
+        };
+        const ok2 = took == .stage and d2 == 0 and refused2;
+        std.debug.print("TURBOEXL3_LING_MLA_LATENT_NAX_FALLBACK f32 cache: the configuration ran {s} (want stage); words differing from the stage form's {d}/{d}; naming {s} refused: {s} {s}\n", .{ @tagName(took), d2, n_out, @tagName(ml.nax_served), yes(refused2), if (ok2) "PASS" else "FAIL" });
+        fb_failed += @intFromBool(!ok2);
+        // 3. 32 heads: a shape of 64 heads a threadgroup is refused by name; one of 16 heads a threadgroup takes them
+        const h32: usize = 32;
+        const kvb32 = try loaderKvB(&g, a, rnd, h32);
+        const q32 = try g.transposeAxes(try devRandn(&g, a, rnd, &.{ 1, 1, ci(h32), ci(DN + DR) }, .bfloat16), &.{ 0, 2, 1, 3 });
+        const qn32 = try g.slice(q32, &.{ 0, 0, 0, 0 }, &.{ 1, ci(h32), 1, ci(DN) }, &.{ 1, 1, 1, 1 });
+        const qr32 = try g.slice(q32, &.{ 0, 0, 0, ci(DN) }, &.{ 1, ci(h32), 1, ci(DN + DR) }, &.{ 1, 1, 1, 1 });
+        const out32 = try a.alloc(f32, h32 * DV);
+        defer a.free(out32);
+        var refused3 = false;
+        naxOut(&g, s, qn32, qr32, cache[0], cache[1], kvb32.rows, ling_scale, .nax_m4_k32, out32) catch |e| {
+            refused3 = e == error.Exl3EngineNotImplemented;
+        };
+        var ran3 = true;
+        naxOut(&g, s, qn32, qr32, cache[0], cache[1], kvb32.rows, ling_scale, .nax_m1_k32, out32) catch {
+            ran3 = false;
+        };
+        const ok3 = refused3 and ran3;
+        std.debug.print("TURBOEXL3_LING_MLA_LATENT_NAX_FALLBACK 32 heads: nax_m4_k32 refused: {s}; nax_m1_k32 ran: {s} {s}\n", .{ yes(refused3), yes(ran3), if (ok3) "PASS" else "FAIL" });
+        fb_failed += @intFromBool(!ok3);
+        // 4. 17 rows (past max_rows): refused before any launch, the NAX shape on (the configuration) as off
+        const q17 = try g.transposeAxes(try devRandn(&g, a, rnd, &.{ 1, 17, ci(h), ci(DN + DR) }, .bfloat16), &.{ 0, 2, 1, 3 });
+        const qn17 = try g.slice(q17, &.{ 0, 0, 0, 0 }, &.{ 1, ci(h), 17, ci(DN) }, &.{ 1, 1, 1, 1 });
+        const qr17 = try g.slice(q17, &.{ 0, 0, 0, ci(DN) }, &.{ 1, ci(h), 17, ci(DN + DR) }, &.{ 1, 1, 1, 1 });
+        const takes17 = ml.takes(qn17, qr17, cache[0], cache[1], kvb.rows);
+        var refused4 = false;
+        if (ml.decodeLatent(s, qn17, qr17, cache[0], cache[1], kvb.rows, @floatCast(ling_scale))) |y| {
+            _ = mlx.mlx_array_free(y);
+        } else |e| {
+            refused4 = e == error.Exl3EngineNotImplemented;
+        }
+        const ok4 = !takes17 and refused4;
+        std.debug.print("TURBOEXL3_LING_MLA_LATENT_NAX_FALLBACK 17 rows: takes={s} refused under the configuration: {s} {s}\n", .{ yes(takes17), yes(refused4), if (ok4) "PASS" else "FAIL" });
+        fb_failed += @intFromBool(!ok4);
+    }
+    std.debug.print("TURBOEXL3_LING_MLA_LATENT_NAX_DONE {d} lines, {d} failed; red checks failed {d}; fallbacks failed {d}\n", .{ lines, failed, red_failed, fb_failed });
+    try testing.expectEqual(@as(usize, 0), failed);
+    try testing.expectEqual(@as(usize, 0), red_failed);
+    try testing.expectEqual(@as(usize, 0), fb_failed);
 }

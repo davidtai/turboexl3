@@ -112,6 +112,12 @@ pub const Config = struct {
     /// The same launch with 2 x 2 score tiles and 4 x 4 output tiles a simdgroup (`mla_latent.Attn.block`), at the calls
     /// `mla_latent_rows` does not take; not with `mla_latent_stage`. The same bytes.
     mla_latent_block: bool = false,
+    /// The same launch on the matrix units (`mla_latent.Attn` `nax_served`; `turboexl3_ling_mla_attn_nax`): the query
+    /// rounded to the cache's dtype, the scores and the weighted sums on MLX steel's NAX tiles into f32. Not the same
+    /// bytes: a host serves it where the words move no output (the plugin: the MTP head, whose drafts the exact verify
+    /// checks). Ahead of `mla_latent_stage` at every call it takes (a bf16 or f16 cache), which keeps the rest; not with
+    /// `mla_latent_rows` or `mla_latent_block`.
+    mla_latent_nax: bool = false,
     /// Ling-3.1-flash's MLA kv_b and head gate (plain bf16 weights) at decode and verify rows in one GEMV launch
     /// (`ling.mlaRows`): each weight tile read once for up to this many rows of a call (1 to 8), each row MLX's one-row
     /// gemv words; 0 refuses the calls (the host runs its own matmuls). The same bytes.
@@ -139,7 +145,8 @@ pub const Config = struct {
             tilesValid(c.kda_bt0) and tilesValid(c.kda_bt1) and
             ((c.banked_variant_gu == 0 and c.banked_variant_dn == 0) or c.banked_group == 4) and
             (c.mla_latent_rows == 0 or c.mla_latent_rows == 2 or c.mla_latent_rows == 4) and
-            !(c.mla_latent_stage and c.mla_latent_block) and c.mla_rows <= 8;
+            !(c.mla_latent_stage and c.mla_latent_block) and
+            !(c.mla_latent_nax and (c.mla_latent_rows != 0 or c.mla_latent_block)) and c.mla_rows <= 8;
     }
 };
 
@@ -221,6 +228,12 @@ test "turboexl3 config: the defaults are valid and served; an unserved form, sli
     for ([_]u8{ 1, 3, 8 }) |r| try t.expect(!(Config{ .mla_latent_rows = r }).valid());
     try t.expect((Config{ .mla_latent_rows = 4, .mla_latent_block = true }).valid());
     try t.expect(!(Config{ .mla_latent_stage = true, .mla_latent_block = true }).valid());
+    // the NAX launch: off by default, with the stage (ahead of it) but not with the rows or the block variants
+    try t.expect(!d.mla_latent_nax);
+    try t.expect((Config{ .mla_latent_nax = true }).valid());
+    try t.expect((Config{ .mla_latent_nax = true, .mla_latent_stage = true }).valid());
+    for ([_]u8{ 2, 4 }) |r| try t.expect(!(Config{ .mla_latent_nax = true, .mla_latent_rows = r }).valid());
+    try t.expect(!(Config{ .mla_latent_nax = true, .mla_latent_block = true }).valid());
     try t.expectEqual(@as(u8, 0), d.mla_rows);
     for (1..9) |r| try t.expect((Config{ .mla_rows = @intCast(r) }).valid());
     for ([_]u8{ 9, 16, 255 }) |r| try t.expect(!(Config{ .mla_rows = r }).valid());

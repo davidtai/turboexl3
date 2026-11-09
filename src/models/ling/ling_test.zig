@@ -2660,3 +2660,65 @@ fn bytesDifferF32(p: []const f32, q: []const f32) usize {
     for (p, q) |u, w| n += @intFromBool(@as(u32, @bitCast(u)) != @as(u32, @bitCast(w)));
     return n;
 }
+
+// D1: launch 2 of the MTP head's latent attention on the matrix units (`mla_latent.Attn.nax_*`), TIME's arms only: each
+// NAX shape (16, 32 or 64 heads a threadgroup; 32 or 64 keys a step; the scores whole a simdgroup or split over an M
+// tile's 4) against the served stage form (S40, `Attn.stage`) and launch 2 as it is, at rows 1 to 5 over the standard
+// request's 18,380 keys, the operands as the plugin passes them (the cache the first rows of a wider bf16 buffer, kv_b
+// bf16 [16384, 512], the query halves as views of the transposed heads). Guidance that ranks the shapes; the standard
+// test decides the switch.
+test "turboexl3 gpu ling timing: D1, the MTP head's latent attention on the matrix units at rows 1 to 5 over 18,380 keys (TURBOEXL3_LING_TIME=1)" {
+    _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    _ = std.c.getenv("TURBOEXL3_LING_TIME") orelse return error.SkipZigTest;
+    const s = mlx.mlx_default_gpu_stream_new();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    const a = std.heap.page_allocator;
+    var g = try G.init(a, s);
+    defer g.deinit();
+    defer _ = mlx.mlx_clear_cache();
+    // a shape MLX refuses to launch prints its error line and the arms go on
+    mla_latent_test.reportMlxErrors(true);
+    defer mla_latent_test.reportMlxErrors(false);
+    var d1_prng = std.Random.DefaultPrng.init(0x0D1_71AE);
+    const mr = d1_prng.random();
+    const keys: u32 = 18380;
+    const heads: u32 = 64;
+    const lat = try g.slice(try ds_test.randBf16(a, &g, mr, &.{ 1, 1, ci(keys + 64), 512 }), &.{ 0, 0, 0, 0 }, &.{ 1, 1, ci(keys), 512 }, &.{ 1, 1, 1, 1 });
+    const rot = try g.slice(try ds_test.randBf16(a, &g, mr, &.{ 1, 1, ci(keys + 64), 64 }), &.{ 0, 0, 0, 0 }, &.{ 1, 1, ci(keys), 64 }, &.{ 1, 1, 1, 1 });
+    const ws: f32 = 1.0 / @sqrt(512.0);
+    const kv_b = try g.astype(try g.mul(try g.astype(try ds_test.randBf16(a, &g, mr, &.{ ci(heads * 256), 512 }), .float32), try g.hostArray(std.mem.asBytes(&ws), &.{1}, .float32)), .bfloat16);
+    try g.evalAll(&.{ lat, rot, kv_b });
+    const NaxCtx = struct {
+        s: mlx.mlx_stream,
+        qn: mlx.mlx_array,
+        qr: mlx.mlx_array,
+        lat: mlx.mlx_array,
+        rot: mlx.mlx_array,
+        w: mlx.mlx_array,
+        attn: mla_latent.Attn,
+        pub fn call(cx: @This()) !mlx.mlx_array {
+            return mla_latent.decodeLatentWith(cx.s, cx.qn, cx.qr, cx.lat, cx.rot, cx.w, 1.0 / @sqrt(192.0), cx.attn);
+        }
+    };
+    // the attention's multiply-adds a key and row: 64 heads x (576 + 512)
+    const flops_row = 2.0 * @as(f64, @floatFromInt(keys)) * @as(f64, @floatFromInt(heads)) * @as(f64, @floatFromInt(mla_latent.dl + mla_latent.dr + mla_latent.dl));
+    const arms = [_]mla_latent.Attn{ .stage, .base } ++ mla_latent.nax_shapes;
+    for ([_]u32{ 1, 2, 3, 4, 5 }) |rows| {
+        const rm = g.mark();
+        defer g.resetTo(rm);
+        const qt = try g.transposeAxes(try ds_test.randBf16(a, &g, mr, &.{ 1, ci(rows), ci(heads), 192 }), &.{ 0, 2, 1, 3 });
+        const qn = try g.slice(qt, &.{ 0, 0, 0, 0 }, &.{ 1, ci(heads), ci(rows), 128 }, &.{ 1, 1, 1, 1 });
+        const qr = try g.slice(qt, &.{ 0, 0, 0, 128 }, &.{ 1, ci(heads), ci(rows), 192 }, &.{ 1, 1, 1, 1 });
+        var stage_min: f64 = 0;
+        for (arms) |v| {
+            const ctx: NaxCtx = .{ .s = s, .qn = qn, .qr = qr, .lat = lat, .rot = rot, .w = kv_b, .attn = v };
+            const st = ds_test.timeIt(&g, ctx, 8) catch |e| {
+                std.debug.print("TURBOEXL3_LING_TIME mla_latent_nax keys={d} rows={d} arm={s}: {s}\n", .{ keys, rows, @tagName(v), @errorName(e) });
+                continue;
+            };
+            if (v == .stage) stage_min = st.min;
+            const r: f64 = @floatFromInt(rows);
+            std.debug.print("TURBOEXL3_LING_TIME mla_latent_nax keys={d} rows={d} arm={s} min_us={d:.1} med_us={d:.1} us_per_row={d:.1} of_stage={d:.3} tflops={d:.2}\n", .{ keys, rows, @tagName(v), st.min, st.med, st.min / r, if (stage_min > 0) st.min / stage_min else 0, r * flops_row / (st.min * 1e6) });
+        }
+    }
+}
