@@ -921,9 +921,8 @@ layer: 1,152 B a token where the expanded cache is 40,960), and the latent outpu
 attention (MLX's matmuls and softmax), not byte for byte. A row's values depend on its own operands and its key
 position only, so a verify call's rows have the bits of one-row calls at their positions.
 
-Launch 2 has three variants, each a host's opt-in in `Config` and each launch 2's words (`mla_latent.Attn`;
-`turboexl3_ling_mla_attn_rows`, `_stage`, `_block` below): one threadgroup for 2 or 4 rows of a call, the cache's f32
-words staged in threadgroup memory, more tiles a simdgroup.
+Launch 2 has one variant with its words, a host's opt-in in `Config` (`mla_latent.Attn.stage`;
+`turboexl3_ling_mla_attn_stage` below): the cache's f32 words staged in threadgroup memory.
 
 ## `src/models/ling/mla_latent.zig`
 
@@ -933,7 +932,7 @@ words staged in threadgroup memory, more tiles a simdgroup.
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/ling/mla_latent.zig:159` (`fn kernelOf`) |
+| made at | `src/models/ling/mla_latent.zig:142` (`fn kernelOf`) |
 | inputs | `ql`, `qr`, `lat`, `rot`, `scale`, `dims` |
 | outputs | `pm`, `pl`, `po` |
 | source | `text_attn` = `ling:mla_latent/attn_1` ++ `ling:mla_latent/attn_2` ++ `ling:mla_latent/attn_3` ++ `ling:mla_latent/attn_4` (8673 B, `7d50732448a0`) |
@@ -973,7 +972,7 @@ words staged in threadgroup memory, more tiles a simdgroup.
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/ling/mla_latent.zig:158` (`fn kernelOf`) |
+| made at | `src/models/ling/mla_latent.zig:141` (`fn kernelOf`) |
 | inputs | `qn`, `w` |
 | outputs | `ql` |
 | source | `text_qabs` = `ling:mla_latent/qabs` (1347 B, `184aa655ae1b`) |
@@ -1002,7 +1001,7 @@ words staged in threadgroup memory, more tiles a simdgroup.
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/ling/mla_latent.zig:160` (`fn kernelOf`) |
+| made at | `src/models/ling/mla_latent.zig:143` (`fn kernelOf`) |
 | inputs | `pm`, `pl`, `po`, `w`, `dims` |
 | outputs | `out` |
 | source | `text_vabs` = `ling:mla_latent/vabs` (2335 B, `d1d2a8e2e320`) |
@@ -1025,48 +1024,13 @@ words staged in threadgroup memory, more tiles a simdgroup.
 - **Pinned by:** `src/models/ling/mla_latent.zig` "turboexl3 ling mla latent texts: ..." (CPU: the merge's group bound from the
   pin file); `src/models/ling/mla_latent_test.zig`'s three GPU tests (the call).
 
-### `turboexl3_ling_mla_attn_rows`
-
-<!-- kernel-facts: turboexl3_ling_mla_attn_rows -->
-
-| fact | from the code |
-|---|---|
-| made at | `src/models/ling/mla_latent.zig:218` (`fn variantKernel`) |
-| inputs | `ql`, `qr`, `lat`, `rot`, `scale`, `dims` |
-| outputs | `pm`, `pl`, `po` |
-| source | `text_attn_rows` = `ling:mla_latent/rows_1` ++ `ling:mla_latent/attn_2` ++ `ling:mla_latent/rows_2` (11270 B, `83520e3440c5`) |
-| header | `text_header` = `ling:mla_latent/header` (175 B, `0f02dd5ef698`) |
-
-<!-- /kernel-facts -->
-
-- **Used by:** Ling-3.1-flash: `ling.mlaLatentDecode`, launch 2 of 3 at a call of 2 rows or more under
-  `Config.mla_latent_rows` 2 or 4 (`mla_latent.Attn.rows2`, `rows4`): the outside plugin's MTP head on its latent cache
-  (MTP_HEAD_LATENT), behind a candidate switch. Not served by default.
-- **Shapes and dtypes:** `turboexl3_ling_mla_attn`'s operands and outputs.
-- **Grid and threadgroup:** `(512, NJ, ceil(S / RPT)·H/32)` / `(512, 1, 1)`: a threadgroup for each (key group, 32 heads of
-  RPT rows; a call's last group of rows may hold fewer), 16 simdgroups in launch 2's layout, each running every row's
-  tiles. Threadgroup memory: RPT rows' scores and softmax state (4.4 KiB a row).
-- **Template args:** launch 2's, then RPT (rows a threadgroup: 2 or 4).
-- **Replaces:** `turboexl3_ling_mla_attn` at those calls: a threadgroup a row for each (key group, 32 heads), each reading
-  the group's latents and rope keys.
-- **Bits:** launch 2's words. Each row keeps launch 2's scores, max, sum, weights and 512 accumulators, each 8 × 8 tile at
-  its place with its products and sums in launch 2's order. A key's latent and rope words are read once for the rows (as
-  far as the last row sees) and each row takes the word, or 0 for a key past its position, as launch 2 reads it; a
-  sub-chunk at or past a row's bound runs nothing for that row, as launch 2 runs none. The online softmax update is
-  launch 2's piece (`attn_2`) on the row's own threadgroup words.
-- **Pinned by:** `src/models/ling/mla_latent.zig` "turboexl3 ling mla latent variant texts: ..." (CPU: launch 2's softmax
-  piece once, the operands and constants, the per-row bound statements from the pin file) and "turboexl3 ling mla
-  latent variants plan: ..." (CPU: its grid and the calls it takes); `src/models/ling/mla_latent_test.zig` "turboexl3 gpu
-  ling mla latent variants: ..." (GPU, bytes: the output, pm, pl and po against launch 2's at rows 1 to 4 and keys 1 to
-  19,404, on the plugin's operands and two strided caches; red checks: a faulted cache must differ).
-
 ### `turboexl3_ling_mla_attn_stage`
 
 <!-- kernel-facts: turboexl3_ling_mla_attn_stage -->
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/ling/mla_latent.zig:219` (`fn variantKernel`) |
+| made at | `src/models/ling/mla_latent.zig:200` (`fn variantKernel`) |
 | inputs | `ql`, `qr`, `lat`, `rot`, `scale`, `dims` |
 | outputs | `pm`, `pl`, `po` |
 | source | `text_attn_stage` = `ling:mla_latent/stage_1` ++ `ling:mla_latent/attn_2` ++ `ling:mla_latent/stage_2` ++ `ling:mla_latent/attn_4` (9347 B, `8bed636fe06a`) |
@@ -1074,8 +1038,9 @@ words staged in threadgroup memory, more tiles a simdgroup.
 
 <!-- /kernel-facts -->
 
-- **Used by:** Ling-3.1-flash: `ling.mlaLatentDecode`, launch 2 of 3 under `Config.mla_latent_stage` at the calls
-  `mla_latent_rows` does not take (`mla_latent.Attn.stage`), behind the plugin's candidate switch. Not served by default.
+- **Used by:** Ling-3.1-flash: `ling.mlaLatentDecode`, launch 2 of 3 under `Config.mla_latent_stage`
+  (`mla_latent.Attn.stage`): the outside plugin's MTP head on its latent cache (MLA_LATENT_STAGE, kept), at the calls the
+  NAX launch (`Config.mla_latent_nax`) does not take.
 - **Shapes and dtypes:** `turboexl3_ling_mla_attn`'s operands and outputs.
 - **Grid and threadgroup:** launch 2's, `(512, NJ, S·H/32)` / `(512, 1, 1)`, with 17 KiB more threadgroup memory: the scores'
   two slabs of 32 keys × 64 dims (68 words a key), or the values' 8 keys × 516 words. Per sub-chunk 19 barriers (launch
@@ -1087,40 +1052,11 @@ words staged in threadgroup memory, more tiles a simdgroup.
 - **Bits:** launch 2's words: a staged word is the word launch 2 reads (the cache word converted to f32, or 0 past the row's
   bound), the tiles, their operands and their order are launch 2's, and the softmax update and the outputs are launch
   2's pieces (`attn_2`, `attn_4`).
-- **Pinned by:** as `turboexl3_ling_mla_attn_rows` (the staged words' statements from the pin file; the GPU test's stage
-  lines).
-
-### `turboexl3_ling_mla_attn_block`
-
-<!-- kernel-facts: turboexl3_ling_mla_attn_block -->
-
-| fact | from the code |
-|---|---|
-| made at | `src/models/ling/mla_latent.zig:220` (`fn variantKernel`) |
-| inputs | `ql`, `qr`, `lat`, `rot`, `scale`, `dims` |
-| outputs | `pm`, `pl`, `po` |
-| source | `text_attn_block` = `ling:mla_latent/block_1` ++ `ling:mla_latent/attn_2` ++ `ling:mla_latent/block_2` (12459 B, `5e9316b29042`) |
-| header | `text_header` = `ling:mla_latent/header` (175 B, `0f02dd5ef698`) |
-
-<!-- /kernel-facts -->
-
-- **Used by:** Ling-3.1-flash: `ling.mlaLatentDecode`, launch 2 of 3 under `Config.mla_latent_block` at the calls
-  `mla_latent_rows` does not take (`mla_latent.Attn.block`; not with `mla_latent_stage`), behind the plugin's candidate
-  switch. Not served by default.
-- **Shapes and dtypes:** `turboexl3_ling_mla_attn`'s operands and outputs.
-- **Grid and threadgroup:** launch 2's, `(512, NJ, S·H/32)` / `(512, 1, 1)`, 16 simdgroups: for the scores, 2 × 2 tiles each
-  over a block of 4 sub-chunks (M tiles 2·(sgi / 8) and the next, N tiles 2·(sgi % 8) and the next of the block's 16); for
-  the weights times the latents, 4 × 4 output tiles each (the 4 M tiles at columns 32·sgi .. 32·sgi + 31). Threadgroup
-  memory: a block's scores (16 KiB).
-- **Template args:** launch 2's.
-- **Replaces:** `turboexl3_ling_mla_attn`'s one score tile and 1 × 16 output tiles a simdgroup: a query word now serves 2 score
-  tiles and a key word 2, a weight word 4 output tiles and a latent word 4.
-- **Bits:** launch 2's words: each tile at its place with launch 2's operands and its products and sums in launch 2's order
-  (a score tile's 64 latent steps, then 8 rope steps; an output tile's rescale, then 4 steps a sub-chunk); the score tiles
-  of a block's sub-chunks at or past the row's bound are computed and never read, as those sub-chunks run no softmax
-  update and no product. The softmax update is launch 2's piece (`attn_2`).
-- **Pinned by:** as `turboexl3_ling_mla_attn_rows` (the tiles' operand, score and rescale statements from the pin file; the
-  GPU test's block lines).
+- **Pinned by:** `src/models/ling/mla_latent.zig` "turboexl3 ling mla latent variant texts: ..." (CPU: launch 2's softmax
+  and output pieces once, the operands and constants, the staged words' statements from the pin file) and "turboexl3 ling
+  mla latent variants plan: ..." (CPU: its grid and the calls it takes); `src/models/ling/mla_latent_test.zig` "turboexl3
+  gpu ling mla latent variants: ..." (GPU, bytes: the output, pm, pl and po against launch 2's at rows 1 to 4 and keys 1
+  to 19,404 on the plugin's operands and two strided caches; a planted fault differs).
 
 ### `turboexl3_ling_mla_attn_nax`
 
@@ -1128,7 +1064,7 @@ words staged in threadgroup memory, more tiles a simdgroup.
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/ling/mla_latent.zig:221` (`fn variantKernel`) |
+| made at | `src/models/ling/mla_latent.zig:201` (`fn variantKernel`) |
 | inputs | `qlb`, `qrb`, `lat`, `rot`, `scale`, `dims` |
 | outputs | `pm`, `pl`, `po` |
 | source | `text_attn_nax` = `ling:mla_latent/nax` ++ `ling:mla_latent/nax_close` (10326 B, `973fcfb5fb1c`) |

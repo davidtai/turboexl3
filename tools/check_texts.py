@@ -1659,16 +1659,10 @@ SPLIT_ADDED_KERNELS['turboexl3_ling_mla_attn'] = ('the same: the attention\'s pa
                                                   '0, an online softmax a row')
 SPLIT_ADDED_KERNELS['turboexl3_ling_mla_vabs'] = ('the same: a row\'s group partials merged in group order, then kv_b\'s '
                                                   'value half')
-SPLIT_ADDED_KERNELS['turboexl3_ling_mla_attn_rows'] = ('V2 rows: launch 2 of the MLA attention in the latent for 2 or 4 rows '
-                                                       'a threadgroup (models/ling/mla_latent.zig text_attn_rows: rows_1 ++ '
-                                                       'attn_2 ++ rows_2; Config.mla_latent_rows), launch 2\'s words')
 SPLIT_ADDED_KERNELS['turboexl3_ling_mla_attn_stage'] = ('V2 stage: launch 2 with each sub-chunk\'s latents and rope keys '
                                                         'staged in f32 in threadgroup memory (text_attn_stage: stage_1 ++ '
                                                         'attn_2 ++ stage_2 ++ attn_4; Config.mla_latent_stage), launch 2\'s '
                                                         'words')
-SPLIT_ADDED_KERNELS['turboexl3_ling_mla_attn_block'] = ('V2 block: launch 2 on 2 x 2 score tiles and 4 x 4 output tiles a '
-                                                        'simdgroup (text_attn_block: block_1 ++ attn_2 ++ block_2; '
-                                                        'Config.mla_latent_block), launch 2\'s words')
 SPLIT_ADDED_KERNELS['turboexl3_ling_kdaproj_pf'] = ('P4: a KDA layer\'s q|k|v, f and g at prompt rows in one launch '
                                                     '(models/ling/kdaproj_pf.zig text_pf: kdaproj/pf_1, pg2\'s fused_2, '
                                                     'kdaproj/pf_3, pg2\'s fused_4, kdaproj/pf_5, pg2\'s fused_6, the '
@@ -1706,6 +1700,9 @@ SPLIT_REMOVED_TESTS["turboexl3 ling mla rows texts: the launch is its five piece
 SPLIT_REMOVED_TESTS["turboexl3 ling mla rows plan: MLX's gemv tile for kv_b (BM 8) and the head gate (BN 8), and the router's (BM 4) its text names; the rows a threadgroup takes and their chunks at rows 1 to 16 and caps 1 to 8; a verify's 2 to 4 rows in one chunk from cap 4; the declines"] = _S2_MLAROWS
 SPLIT_REMOVED_TESTS["turboexl3 ling mla rows faults: each planted fault is the launch's text with one piece swapped, the accumulate for its reverse K order, the threadgroup sum for its reverse simdgroup order"] = _S2_MLAROWS
 SPLIT_REMOVED_TESTS["turboexl3 gpu ling mla rows: kv_b and the head gate in one GEMV launch give the served words (the one-row matmul, the exact verify's denseRows) at rows 1 to 8, 12 and 16 and caps 1 to 8, on random rows and on built rows an order change moves, weights as the loader keeps them; red checks (two planted reorderings, a changed weight word, swapped rows) differ; the configuration's path and the refusals (TURBOEXL3_GPU=1)"] = _S2_MLAROWS
+_S2_V2 = 'V2 rows, rows2 and block (MLA_LATENT_ROWS, _ROWS2, _BLOCK: candidates, superseded by MLA_LATENT_NAX, kept): launch 2 of the MLA attention in the latent for 2 or 4 rows a threadgroup, and on 2 x 2 / 4 x 4 tiles (Config.mla_latent_rows, mla_latent_block; mla_latent.Attn.rows2, rows4, block)'
+SPLIT_REMOVED_KERNELS['turboexl3_ling_mla_attn_rows'] = _S2_V2
+SPLIT_REMOVED_KERNELS['turboexl3_ling_mla_attn_block'] = _S2_V2
 # --strip2 end--
 
 _R10 = ("R10 ROUTER_ADDNORM (M6, rejected): the post-attention add_norm folded into the router's launch 1 "
@@ -1807,6 +1804,10 @@ RENAMED_TESTS[('ling_test.zig', "turboexl3 gpu ling banked: every pair of moeLin
     "turboexl3 gpu ling banked: every pair of moeLingBanked over three banks is moeLing's on its bank at top-1 with "
     "score 1, byte for byte, at limits 0 and 10, on the configured texts (group 2), the grouped texts (g4) and the M = 3 "
     "path (g4m3), each selected (TURBOEXL3_GPU=1)")
+
+# strip2 V2: the latent variants test holds only the stage now
+RENAMED_TESTS[('mla_latent_test.zig', "turboexl3 gpu ling mla latent variants: rows2, rows4, stage and block give launch 2's words, the output and launch 2's partials word for word, at rows 1 to 4 and keys 1 to 19,404, on the plugin's operands (kv_b through the loader's rows view, the head's cache as a wider buffer's first rows, the query halves as views) and two strided caches; a planted fault differs (TURBOEXL3_GPU=1)")] = (
+    "turboexl3 gpu ling mla latent variants: stage gives launch 2's words, the output and launch 2's partials word for word, at rows 1 to 4 and keys 1 to 19,404, on the plugin's operands (kv_b through the loader's rows view, the head's cache as a wider buffer's first rows, the query halves as views) and two strided caches; a planted fault differs (TURBOEXL3_GPU=1)")
 
 # the router's column-major table (E2's fix) and its f16 weight (E10): the router tests' names say what they now hold
 RENAMED_TESTS[('router.zig', ("turboexl3 ling router texts: the logits and predictor texts are one composition, the predictor's "

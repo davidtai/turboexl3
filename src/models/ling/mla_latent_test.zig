@@ -12,7 +12,7 @@
 //!   view cast to bf16) transposed back to its stored rows, row-contiguous over the loaded buffer and taken by the
 //!   plan; `decodeLatent` over a wider cache buffer's first rows within 2 % of the plugin's expanded attention, which
 //!   reads that view through a plain matmul, at the standard prompt's 18,380 keys.
-//! - launch 2's variants (`mla_latent.Attn`: rows2, rows4, stage, block) give launch 2's words: each call's output and
+//! - launch 2's variant (`mla_latent.Attn.stage`) gives launch 2's words: each call's output and
 //!   launch 2's partials (pm, pl, po) word for word against `decodeLatentParts` on launch 2 as it is, at rows 1 to 4 and
 //!   keys 1, 2, 31, 32, 255, 256, 257, 4096, 16,669 and 19,404 (the MTP head's cache at the standard request), on the
 //!   plugin's operands (kv_b through the loader's rows view, the head's cache as the first T rows of a wider buffer, the
@@ -574,8 +574,8 @@ test "turboexl3 gpu ling mla latent: the outside plugin's served operand, kv_b a
 
 // ── launch 2's variants: each launch 2's words ──
 
-/// The variants of launch 2 the byte test holds to it (`mla_latent.Attn` but `base`)
-const variants = [_]ml.Attn{ .rows2, .rows4, .stage, .block };
+/// The variant of launch 2 the byte test holds to it (`mla_latent.Attn` but `base` and the NAX shapes)
+const variants = [_]ml.Attn{.stage};
 
 /// mlx-c's `mlx_set_error_handler`: the consumer's binding where its `sdk.mlx` declares one, else a declaration of the
 /// same symbol
@@ -666,7 +666,7 @@ fn headCache(g: *G, lat_host: []const u16, rot_host: []const u16, cap: usize, t:
 
 const CacheView = enum { plugin, interleaved, transposed };
 
-test "turboexl3 gpu ling mla latent variants: rows2, rows4, stage and block give launch 2's words, the output and launch 2's partials word for word, at rows 1 to 4 and keys 1 to 19,404, on the plugin's operands (kv_b through the loader's rows view, the head's cache as a wider buffer's first rows, the query halves as views) and two strided caches; a planted fault differs (TURBOEXL3_GPU=1)" {
+test "turboexl3 gpu ling mla latent variants: stage gives launch 2's words, the output and launch 2's partials word for word, at rows 1 to 4 and keys 1 to 19,404, on the plugin's operands (kv_b through the loader's rows view, the head's cache as a wider buffer's first rows, the query halves as views) and two strided caches; a planted fault differs (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
@@ -1041,8 +1041,6 @@ test "turboexl3 gpu ling mla latent nax: every NAX shape within naxBound of the 
         var cfg = saved;
         cfg.mla_latent_nax = true;
         cfg.mla_latent_stage = true;
-        cfg.mla_latent_rows = 0;
-        cfg.mla_latent_block = false;
         try config.configure(cfg);
         const fm = g.mark();
         defer g.resetTo(fm);

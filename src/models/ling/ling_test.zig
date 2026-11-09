@@ -1892,8 +1892,8 @@ fn drawDecodePairs(rnd: std.Random, rows: u32, k: u32, pool: []const u32, ids: [
 //   texts (the plugin's configuration); the distinct records' GB/s;
 // - first, `mlaLatentDecode` (the MTP head's latent attention, `mla_latent.zig`) at the standard request's head cache
 //   (19,404 keys of bf16 latents and rope keys, the first rows of a wider buffer; kv_b bf16 [16384, 512]; the query halves
-//   as views of the transposed heads, as the plugin passes them) at rows 1 to 4, on launch 2 as it is and on each
-//   variant (`mla_latent.Attn`: rows2, rows4, stage, block, each launch 2's words): us a row, the variant's min over
+//   as views of the transposed heads, as the plugin passes them) at rows 1 to 4, on launch 2 as it is and on its
+//   variant (`mla_latent.Attn.stage`, launch 2's words): us a row, the variant's min over
 //   launch 2's, the attention's TFLOPS (64 heads x (576 + 512) multiply-adds a key and row);
 // - second, the MLA prompt attention at FL-1's served calls (Ling's 64 heads in bf16, 4096 query rows over 12,288 and
 //   16,384 keys, 1965 over 18,349, 31 and 17 over 18,380; caches of 18,432 tokens): `mlaFlashPrefill` over views of
@@ -1951,7 +1951,7 @@ test "turboexl3 gpu ling timing: every trunk linear, moeLing and moeLingBanked a
             const qn = try g.slice(qt, &.{ 0, 0, 0, 0 }, &.{ 1, ci(heads), ci(rows), 128 }, &.{ 1, 1, 1, 1 });
             const qr = try g.slice(qt, &.{ 0, 0, 0, 128 }, &.{ 1, ci(heads), ci(rows), 192 }, &.{ 1, 1, 1, 1 });
             var base_min: f64 = 0;
-            for ([_]mla_latent.Attn{ .base, .rows2, .rows4, .stage, .block }) |v| {
+            for ([_]mla_latent.Attn{ .base, .stage }) |v| {
                 const ctx: MlaCtx = .{ .s = s, .qn = qn, .qr = qr, .lat = lat, .rot = rot, .w = kv_b, .attn = v };
                 const st = ds_test.timeIt(&g, ctx, 8) catch |e| {
                     std.debug.print("TURBOEXL3_LING_TIME mla_latent keys={d} rows={d} arm={s}: {s}\n", .{ keys, rows, @tagName(v), @errorName(e) });

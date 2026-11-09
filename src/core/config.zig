@@ -102,21 +102,13 @@ pub const Config = struct {
     /// runs (today's, or hw4b's with `banked_m3`). Any but 0 needs `banked_group` 4.
     banked_variant_gu: u8 = 0,
     banked_variant_dn: u8 = 0,
-    /// Ling-3.1-flash's MLA attention in the latent (`ling.mlaLatentDecode`): launch 2 of a call of 2 rows or more on one
-    /// threadgroup for this many of its rows (2 or 4; `mla_latent.Attn.rows2`, `rows4`), each key group's latents and rope
-    /// keys read once for them; 0 keeps a threadgroup a row. The same bytes.
-    mla_latent_rows: u8 = 0,
-    /// The same launch with each sub-chunk's latents and rope keys staged in f32 in threadgroup memory
-    /// (`mla_latent.Attn.stage`), at the calls `mla_latent_rows` does not take. The same bytes.
+    /// Ling-3.1-flash's MLA attention in the latent (`ling.mlaLatentDecode`): launch 2 with each sub-chunk's latents and
+    /// rope keys staged in f32 in threadgroup memory (`mla_latent.Attn.stage`). The same bytes.
     mla_latent_stage: bool = false,
-    /// The same launch with 2 x 2 score tiles and 4 x 4 output tiles a simdgroup (`mla_latent.Attn.block`), at the calls
-    /// `mla_latent_rows` does not take; not with `mla_latent_stage`. The same bytes.
-    mla_latent_block: bool = false,
     /// The same launch on the matrix units (`mla_latent.Attn` `nax_served`; `turboexl3_ling_mla_attn_nax`): the query
     /// rounded to the cache's dtype, the scores and the weighted sums on MLX steel's NAX tiles into f32. Not the same
     /// bytes: a host serves it where the words move no output (the plugin: the MTP head, whose drafts the exact verify
-    /// checks). Ahead of `mla_latent_stage` at every call it takes (a bf16 or f16 cache), which keeps the rest; not with
-    /// `mla_latent_rows` or `mla_latent_block`.
+    /// checks). Ahead of `mla_latent_stage` at every call it takes (a bf16 or f16 cache), which keeps the rest.
     mla_latent_nax: bool = false,
     /// Ling-3.1-flash's MLA prompt attention over the rope-once cache (`ling.mlaFlashPrefillRope1`: each head's nope keys
     /// and the token's one roped key read in place, the expanded key never built); off refuses the calls. The same bytes
@@ -139,10 +131,7 @@ pub const Config = struct {
             (c.banked_group == 2 or c.banked_group == 4) and (!c.banked_m3 or c.banked_group == 4) and
             c.banked_variant_gu < banked_variants and c.banked_variant_dn < banked_variants and c.dec_variant < dec_variants and
             tilesValid(c.kda_bt0) and tilesValid(c.kda_bt1) and
-            ((c.banked_variant_gu == 0 and c.banked_variant_dn == 0) or c.banked_group == 4) and
-            (c.mla_latent_rows == 0 or c.mla_latent_rows == 2 or c.mla_latent_rows == 4) and
-            !(c.mla_latent_stage and c.mla_latent_block) and
-            !(c.mla_latent_nax and (c.mla_latent_rows != 0 or c.mla_latent_block));
+            ((c.banked_variant_gu == 0 and c.banked_variant_dn == 0) or c.banked_group == 4);
     }
 };
 
@@ -219,17 +208,11 @@ test "turboexl3 config: the defaults are valid and served; an unserved form, sli
         try t.expect(!(Config{ .kda_bt1 = bt }).valid());
     }
     try t.expect(!d.router_rows and (Config{ .router_rows = true }).valid());
-    try t.expect(d.mla_latent_rows == 0 and !d.mla_latent_stage and !d.mla_latent_block);
-    for ([_]u8{ 2, 4 }) |r| try t.expect((Config{ .mla_latent_rows = r }).valid());
-    for ([_]u8{ 1, 3, 8 }) |r| try t.expect(!(Config{ .mla_latent_rows = r }).valid());
-    try t.expect((Config{ .mla_latent_rows = 4, .mla_latent_block = true }).valid());
-    try t.expect(!(Config{ .mla_latent_stage = true, .mla_latent_block = true }).valid());
-    // the NAX launch: off by default, with the stage (ahead of it) but not with the rows or the block variants
+    try t.expect(!d.mla_latent_stage and (Config{ .mla_latent_stage = true }).valid());
+    // the NAX launch: off by default, with the stage (ahead of it)
     try t.expect(!d.mla_latent_nax);
     try t.expect((Config{ .mla_latent_nax = true }).valid());
     try t.expect((Config{ .mla_latent_nax = true, .mla_latent_stage = true }).valid());
-    for ([_]u8{ 2, 4 }) |r| try t.expect(!(Config{ .mla_latent_nax = true, .mla_latent_rows = r }).valid());
-    try t.expect(!(Config{ .mla_latent_nax = true, .mla_latent_block = true }).valid());
     try t.expect(!d.mla_rope_once);
     try t.expect((Config{ .mla_rope_once = true }).valid());
     const saved = current.get().*;

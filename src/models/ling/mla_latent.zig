@@ -15,15 +15,10 @@
 //! its rows in one call. Against the host's composed latent attention (MLX's matmuls and softmax) the sums run in other
 //! orders: within tolerance, not byte for byte (`mla_latent_test.zig`).
 //!
-//! Launch 2 has three variants (`Attn`), each a host's opt-in (`Config.mla_latent_rows`, `mla_latent_stage`,
-//! `mla_latent_block`) and each launch 2's words, every tile at its place and every product and sum in its order
-//! (`mla_latent_test.zig`, word for word):
-//! - `turboexl3_ling_mla_attn_rows`: one threadgroup a (key group, 32 heads) for 2 or 4 rows of a call (`rows2`,
-//!   `rows4`), the group's latents and rope keys read once for those rows, each row's softmax and sums its own;
-//! - `turboexl3_ling_mla_attn_stage`: each sub-chunk's latents and rope keys converted to f32 once a threadgroup, in
-//!   threadgroup memory, and every simdgroup's tiles read there;
-//! - `turboexl3_ling_mla_attn_block`: 2 x 2 score tiles a simdgroup over 4 sub-chunks at a time and 4 x 4 output tiles,
-//!   so each word a simdgroup reads serves more tiles.
+//! Launch 2 has one variant (`Attn.stage`), a host's opt-in (`Config.mla_latent_stage`) and launch 2's words, every tile
+//! at its place and every product and sum in its order (`mla_latent_test.zig`, word for word):
+//! `turboexl3_ling_mla_attn_stage`: each sub-chunk's latents and rope keys converted to f32 once a threadgroup, in
+//! threadgroup memory, and every simdgroup's tiles read there.
 //! One more host opt-in (`Config.mla_latent_nax`) runs launch 2 on the matrix units, not with launch 2's words
 //! (`turboexl3_ling_mla_attn_nax`, `Attn.nax_*`): MLX steel's NAX tiles (16 x 32 x 16 multiply-accumulates into f32)
 //! over the query rounded to the cache's dtype and the cache's bf16 or f16 words, 16 heads of a row an M tile, each M
@@ -86,24 +81,12 @@ pub const attn_3 = @embedFile("kernels/mla_latent/attn_3.metal");
 pub const attn_4 = @embedFile("kernels/mla_latent/attn_4.metal");
 /// Launch 2, the attention's partials: pm, pl f32 [S H NJ], po f32 [S H NJ, DL]
 pub const text_attn: [:0]const u8 = attn_1 ++ attn_2 ++ attn_3 ++ attn_4;
-/// The rows variant's pieces around launch 2's softmax update: its head and every row's scores; each row's weights times
-/// the latents, the loop's end and every row's outputs
-pub const rows_1 = @embedFile("kernels/mla_latent/rows_1.metal");
-pub const rows_2 = @embedFile("kernels/mla_latent/rows_2.metal");
-/// Launch 2 for RPT rows a threadgroup (`Attn.rows2`, `rows4`): launch 2's partials, each row's words
-pub const text_attn_rows: [:0]const u8 = rows_1 ++ attn_2 ++ rows_2;
 /// The stage variant's pieces around launch 2's softmax update and outputs: its head and the scores from staged slabs;
 /// the weights times the staged latents and the loop's end
 pub const stage_1 = @embedFile("kernels/mla_latent/stage_1.metal");
 pub const stage_2 = @embedFile("kernels/mla_latent/stage_2.metal");
 /// Launch 2 over f32 staged in threadgroup memory (`Attn.stage`): launch 2's partials, word for word
 pub const text_attn_stage: [:0]const u8 = stage_1 ++ attn_2 ++ stage_2 ++ attn_4;
-/// The block variant's pieces around launch 2's softmax update: its head and a block's scores on 2 x 2 tiles; the 4 x 4
-/// output tiles, the loops' ends and the outputs
-pub const block_1 = @embedFile("kernels/mla_latent/block_1.metal");
-pub const block_2 = @embedFile("kernels/mla_latent/block_2.metal");
-/// Launch 2 on more tiles a simdgroup (`Attn.block`): launch 2's partials, word for word
-pub const text_attn_block: [:0]const u8 = block_1 ++ attn_2 ++ block_2;
 /// Launch 3, the merge and the value half: out OT [1, H, S, DV]
 pub const text_vabs: [:0]const u8 = @embedFile("kernels/mla_latent/vabs.metal");
 /// Launch 2 on the matrix units (`Attn.nax_*`): its header piece after MLX steel's NAX tiles (the tile row ops in
@@ -163,11 +146,10 @@ fn kernelOf(k: Kind) !mlx.mlx_fast_metal_kernel {
     return made;
 }
 
-/// Launch 2's text a call runs (`attnFor`, or a test's choice): launch 2 as it is, or a variant with its words: 2 or 4
-/// rows a threadgroup (`text_attn_rows` at RPT 2 or 4; a call of fewer rows takes them all), its latents and rope keys
-/// staged in f32 (`text_attn_stage`), more tiles a simdgroup (`text_attn_block`); or launch 2 on the matrix units, not
-/// with its words (`text_attn_nax`, each `nax_*` a launch shape: `naxOf`)
-pub const Attn = enum(u8) { base, rows2, rows4, stage, block, nax_m1_k32, nax_m1_k64, nax_m2_k32, nax_m2_k64, nax_m4_k32, nax_m4_k64, nax_sd_m1_k32, nax_sd_m1_k64, nax_sd_m2_k32 };
+/// Launch 2's text a call runs (`attnFor`, or a test's choice): launch 2 as it is, or its variant with its words, its
+/// latents and rope keys staged in f32 (`text_attn_stage`); or launch 2 on the matrix units, not with its words
+/// (`text_attn_nax`, each `nax_*` a launch shape: `naxOf`)
+pub const Attn = enum(u8) { base, stage, nax_m1_k32, nax_m1_k64, nax_m2_k32, nax_m2_k64, nax_m4_k32, nax_m4_k64, nax_sd_m1_k32, nax_sd_m1_k64, nax_sd_m2_k32 };
 
 /// A NAX launch shape: M tiles of 16 heads a threadgroup (`mt`, each M tile's 4 simdgroups a quarter of the latent's
 /// columns), the keys a step (`bk`), and whether an M tile's 4 simdgroups split the scores' 36 slices and sum their
@@ -179,7 +161,7 @@ pub const Nax = struct { mt: u32, bk: u32, sd: bool };
 /// holds (at most 18 KiB).
 pub fn naxOf(a: Attn) ?Nax {
     return switch (a) {
-        .base, .rows2, .rows4, .stage, .block => null,
+        .base, .stage => null,
         .nax_m1_k32 => .{ .mt = 1, .bk = 32, .sd = false },
         .nax_m1_k64 => .{ .mt = 1, .bk = 64, .sd = false },
         .nax_m2_k32 => .{ .mt = 2, .bk = 32, .sd = false },
@@ -201,8 +183,8 @@ pub const nax_shapes = [_]Attn{ .nax_m1_k32, .nax_m1_k64, .nax_m2_k32, .nax_m2_k
 /// step 0.39 to 0.43)
 pub const nax_served: Attn = .nax_sd_m2_k32;
 
-const Variant = enum(u8) { rows, stage, block, nax };
-const variant_kernels = Global([4]?mlx.mlx_fast_metal_kernel, "ling_mla_latent_variant_kernels", @splat(null));
+const Variant = enum(u8) { stage, nax };
+const variant_kernels = Global([2]?mlx.mlx_fast_metal_kernel, "ling_mla_latent_variant_kernels", @splat(null));
 /// The variants whose engagement line has printed (bit `@intFromEnum(Attn)`)
 const variant_said = Global(u16, "ling_mla_latent_variant_said", 0);
 /// The text the last call's launch 2 ran (`lastAttn`): a host's engagement line reads it after its call
@@ -215,9 +197,7 @@ fn variantKernel(v: Variant) !mlx.mlx_fast_metal_kernel {
     if (slot.*) |made| return made;
     // as launch 2: the cache views read through their strides
     const made = switch (v) {
-        .rows => ks.newKernel("turboexl3_ling_mla_attn_rows", &attn_in, &attn_out, text_attn_rows, text_header, false),
         .stage => ks.newKernel("turboexl3_ling_mla_attn_stage", &attn_in, &attn_out, text_attn_stage, text_header, false),
-        .block => ks.newKernel("turboexl3_ling_mla_attn_block", &attn_in, &attn_out, text_attn_block, text_header, false),
         .nax => ks.newKernel("turboexl3_ling_mla_attn_nax", &attn_nax_in, &attn_out, text_attn_nax, header_nax, false),
     } orelse return error.KernelCreateFailed;
     slot.* = made;
@@ -228,9 +208,7 @@ fn variantKernel(v: Variant) !mlx.mlx_fast_metal_kernel {
 fn attnKernel(a: Attn) !mlx.mlx_fast_metal_kernel {
     return switch (a) {
         .base => kernelOf(.attn),
-        .rows2, .rows4 => variantKernel(.rows),
         .stage => variantKernel(.stage),
-        .block => variantKernel(.block),
         .nax_m1_k32, .nax_m1_k64, .nax_m2_k32, .nax_m2_k64, .nax_m4_k32, .nax_m4_k64, .nax_sd_m1_k32, .nax_sd_m1_k64, .nax_sd_m2_k32 => variantKernel(.nax),
     };
 }
@@ -245,7 +223,7 @@ fn sayEngaged(a: Attn, p: Plan) void {
         std.debug.print("[turboexl3] mla latent attn engaged: {s} (launch 2 on the matrix units, {d} heads a group, {d} keys a step, {s} scores; first call {d} rows over {d} keys)\n", .{ @tagName(a), 16 * n.mt, n.bk, if (n.sd) "split" else "whole", p.s, p.t });
         return;
     }
-    std.debug.print("[turboexl3] mla latent attn engaged: {s} (launch 2's variant, {d} rows a group; first call {d} rows over {d} keys)\n", .{ @tagName(a), rowsPerGroup(a), p.s, p.t });
+    std.debug.print("[turboexl3] mla latent attn engaged: {s} (launch 2's variant, {d} rows a group; first call {d} rows over {d} keys)\n", .{ @tagName(a), @as(u32, 1), p.s, p.t });
 }
 
 /// The text the last `decodeLatent` call's launch 2 ran (`.base` before any call)
@@ -305,27 +283,16 @@ pub fn groupsOf(t: u32) u32 {
     return (t + kpt - 1) / kpt;
 }
 
-/// The query rows a launch-2 threadgroup takes under `a` (the rows text's RPT): 2 or 4 for the rows variants, else 1
-pub fn rowsPerGroup(a: Attn) u32 {
-    return switch (a) {
-        .rows2 => 2,
-        .rows4 => 4,
-        else => 1,
-    };
-}
-
 /// Launch 2's threads a threadgroup under `a`: 512, or 128 an M tile of a NAX shape
 pub fn attnThreadsOf(a: Attn) u32 {
     return if (naxOf(a)) |n| 128 * n.mt else attn_threads;
 }
 
-/// Launch 2's grid under `a` (in threads along x, as MLX takes it): a threadgroup for each (key group, 32 heads of
-/// `rowsPerGroup(a)` rows; a call's last group of rows may hold fewer); launch 2's own (`Plan.attnGrid`) at one row a
-/// threadgroup; a NAX shape's, one for each (key group, 16 mt heads of a row)
+/// Launch 2's grid under `a` (in threads along x, as MLX takes it): launch 2's own (`Plan.attnGrid`), a threadgroup for
+/// each (key group, 32 heads of a row); a NAX shape's, one for each (key group, 16 mt heads of a row)
 pub fn attnGridOf(p: Plan, a: Attn) [3]u32 {
     if (naxOf(a)) |n| return .{ 128 * n.mt, p.nj, p.s * (p.h / (16 * n.mt)) };
-    const rpt = rowsPerGroup(a);
-    return .{ attn_threads, p.nj, ((p.s + rpt - 1) / rpt) * (p.h / heads_per_group) };
+    return .{ attn_threads, p.nj, p.s * (p.h / heads_per_group) };
 }
 
 /// Whether NAX shape `n` takes a call of plan `p`: the cache in bf16 or f16 (the matrix units' operands) and the heads a
@@ -336,19 +303,15 @@ pub fn naxTakes(p: Plan, n: Nax) bool {
     return (p.c == .bfloat16 or p.c == .float16) and p.h % (16 * n.mt) == 0;
 }
 
-/// Launch 2's text for a call of `rows` rows under `c`: `mla_latent_nax` (`nax_served`, where `naxTakes` the call),
-/// else `mla_latent_rows` (2 or 4) at 2 rows or more, else `mla_latent_block`, else `mla_latent_stage`, else launch 2 as
-/// it is (the defaults)
-pub fn attnFor(c: config.Config, rows: u32) Attn {
+/// Launch 2's text under `c`, the same at every row count: `mla_latent_nax` (`nax_served`, where `naxTakes` the call),
+/// else `mla_latent_stage`, else launch 2 as it is (the defaults)
+pub fn attnFor(c: config.Config) Attn {
     if (c.mla_latent_nax) return nax_served;
-    return attnServedFor(c, rows);
+    return attnServedFor(c);
 }
 
 /// `attnFor` without `mla_latent_nax`: the text a call runs where the NAX shape does not take it
-pub fn attnServedFor(c: config.Config, rows: u32) Attn {
-    if (rows >= 2 and c.mla_latent_rows == 2) return .rows2;
-    if (rows >= 2 and c.mla_latent_rows == 4) return .rows4;
-    if (c.mla_latent_block) return .block;
+pub fn attnServedFor(c: config.Config) Attn {
     if (c.mla_latent_stage) return .stage;
     return .base;
 }
@@ -405,8 +368,8 @@ pub fn decodeLatent(s: mlx.mlx_stream, q_nope: mlx.mlx_array, q_rot: mlx.mlx_arr
     return decodeLatentWith(s, q_nope, q_rot, lat, rot, kv_b, scale, null);
 }
 
-/// `decodeLatent` with launch 2 on `attn` (null: `attnFor` the configuration and the call's rows), the tests' and the
-/// timing's choice of text
+/// `decodeLatent` with launch 2 on `attn` (null: `attnFor` the configuration), the tests' and the timing's choice of
+/// text
 pub fn decodeLatentWith(s: mlx.mlx_stream, q_nope: mlx.mlx_array, q_rot: mlx.mlx_array, lat: mlx.mlx_array, rot: mlx.mlx_array, kv_b: mlx.mlx_array, scale: f32, attn: ?Attn) !mlx.mlx_array {
     const r = try decodeLatentParts(s, q_nope, q_rot, lat, rot, kv_b, scale, attn);
     freeArr(r.pm);
@@ -425,10 +388,10 @@ pub fn decodeLatentParts(s: mlx.mlx_stream, q_nope: mlx.mlx_array, q_rot: mlx.ml
     // a NAX shape the call's operands do not take: a test's choice is refused, the configuration's runs its text without
     // it (`attnServedFor`)
     const a = blk: {
-        const want = attn orelse attnFor(config.get().*, p.s);
+        const want = attn orelse attnFor(config.get().*);
         if (naxOf(want)) |n| if (!naxTakes(p, n)) {
             if (attn != null) return error.Exl3EngineNotImplemented;
-            break :blk attnServedFor(config.get().*, p.s);
+            break :blk attnServedFor(config.get().*);
         };
         break :blk want;
     };
@@ -463,7 +426,7 @@ pub fn decodeLatentParts(s: mlx.mlx_stream, q_nope: mlx.mlx_array, q_rot: mlx.ml
     defer freeArr(dims);
     const slots: c_int = ci(p.s * p.h * p.nj);
     var parts: [3]mlx.mlx_array = undefined;
-    // launch 2's constants; the rows text's RPT after them
+    // launch 2's constants
     const attn_t = [_]ks.TemplateArg{
         .{ .name = "H", .value = .{ .int = ci(p.h) } },
         .{ .name = "S", .value = .{ .int = ci(p.s) } },
@@ -473,9 +436,7 @@ pub fn decodeLatentParts(s: mlx.mlx_stream, q_nope: mlx.mlx_array, q_rot: mlx.ml
         .{ .name = "CK", .value = .{ .int = ci(ck) } },
         .{ .name = "QT", .value = .{ .dtype = p.q } },
         .{ .name = "CT", .value = .{ .dtype = p.c } },
-        .{ .name = "RPT", .value = .{ .int = ci(rowsPerGroup(a)) } },
     };
-    const attn_tl: []const ks.TemplateArg = if (a == .rows2 or a == .rows4) attn_t[0..9] else attn_t[0..8];
     if (naxOf(a)) |n| {
         // the NAX launch's query halves in the cache's dtype: launch 1's f32 rounded once, the rope half converted where
         // its dtype differs (contiguous already: the text indexes them flat)
@@ -508,7 +469,7 @@ pub fn decodeLatentParts(s: mlx.mlx_stream, q_nope: mlx.mlx_array, q_rot: mlx.ml
             .threadgroup = .{ attn_threads, 1, 1 },
             .out_shapes = &.{ &[_]c_int{slots}, &[_]c_int{slots}, &[_]c_int{ slots, ci(dl) } },
             .out_dtypes = &.{ .float32, .float32, .float32 },
-            .template = attn_tl,
+            .template = &attn_t,
         }, &.{ ql[0], qr, lat, rot, scale_arr, dims }, &parts);
     }
     errdefer for (parts) |x| freeArr(x);
@@ -589,7 +550,7 @@ test "turboexl3 ling mla latent plan: Ling's shapes are taken, a batch, an odd h
 
 test "turboexl3 ling mla latent variant texts: each is launch 2's online softmax update (attn_2) between pieces of its own, the stage text launch 2's outputs (attn_4) too; each reads every operand launch 2 binds, its constants and the cache's strides; the statements a row's words rest on" {
     const pin = comptime support.pins(@embedFile("kernels/test/pins/mla_latent_variants.metal"));
-    for ([_][]const u8{ text_attn, text_attn_rows, text_attn_stage, text_attn_block }) |txt| {
+    for ([_][]const u8{ text_attn, text_attn_stage }) |txt| {
         try testing.expectEqual(@as(usize, 1), std.mem.count(u8, txt, attn_2));
         for (attn_in) |n| try testing.expect(has(txt, std.mem.span(n)));
         for (attn_out) |n| try testing.expect(has(txt, std.mem.span(n)));
@@ -598,22 +559,17 @@ test "turboexl3 ling mla latent variant texts: each is launch 2's online softmax
         // a key group counted from position 0
         try testing.expect(has(txt, pin[0]));
     }
-    // launch 2, rows and block read the cache through CT pointers. The stage text reads `lat` and `rot` themselves,
-    // whose element type MLX writes into the signature from the cache's dtype (the type CT names), so it names no CT.
-    for ([_][]const u8{ text_attn, text_attn_rows, text_attn_block }) |txt| try testing.expect(has(txt, "CT"));
+    // launch 2 reads the cache through CT pointers. The stage text reads `lat` and `rot` themselves, whose element type
+    // MLX writes into the signature from the cache's dtype (the type CT names), so it names no CT.
+    try testing.expect(has(text_attn, "CT"));
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, text_attn_stage, attn_4));
-    try testing.expect(has(text_attn_rows, "RPT"));
-    // rows: each row's bound, the sub-chunks it runs, a key it does not see read as 0 and scored -inf
-    for (pin[1..6]) |line| try testing.expect(has(text_attn_rows, line));
     // stage: the staged word is launch 2's (the converted word, 0 past the bound), launch 2's score statement
-    for (pin[6..9]) |line| try testing.expect(has(text_attn_stage, line));
-    // block: launch 2's operand and score statements on each tile, the rescale of each output tile
-    for (pin[9..13]) |line| try testing.expect(has(text_attn_block, line));
-    for ([_][]const u8{ text_attn, text_attn_stage, text_attn_block }) |txt| try testing.expect(has(txt, pin[13]));
-    try testing.expect(has(text_attn, pin[8]));
+    for (pin[1..4]) |line| try testing.expect(has(text_attn_stage, line));
+    for ([_][]const u8{ text_attn, text_attn_stage }) |txt| try testing.expect(has(txt, pin[4]));
+    try testing.expect(has(text_attn, pin[3]));
     // MLX writes a kernel's signature from its text's words: a variant names no thread attribute launch 2 does not
-    for ([_][]const u8{ text_attn, text_attn_rows, text_attn_stage, text_attn_block }) |txt| {
-        try testing.expect(!has(txt, pin[14]) and !has(txt, pin[15]));
+    for ([_][]const u8{ text_attn, text_attn_stage }) |txt| {
+        try testing.expect(!has(txt, pin[5]) and !has(txt, pin[6]));
     }
 }
 
@@ -623,29 +579,17 @@ test "turboexl3 ling mla latent variants plan: the configuration's choice of lau
     try testing.expect(p.nj == 76);
     try testing.expectEqual(p.attnGrid(), attnGridOf(p, .base));
     try testing.expectEqual([3]u32{ 512, 76, 6 }, attnGridOf(p, .stage));
-    try testing.expectEqual([3]u32{ 512, 76, 6 }, attnGridOf(p, .block));
-    try testing.expectEqual([3]u32{ 512, 76, 4 }, attnGridOf(p, .rows2));
-    try testing.expectEqual([3]u32{ 512, 76, 2 }, attnGridOf(p, .rows4));
-    const w = try planOf(&.{ 1, 64, 16, 128 }, &.{ 1, 64, 16, 64 }, &.{ 1, 1, 300, 512 }, &.{ 1, 1, 300, 64 }, &.{ 16384, 512 }, .{ bf, bf }, .{ bf, bf }, bf);
-    try testing.expectEqual([3]u32{ 512, 2, 8 }, attnGridOf(w, .rows4));
-    try testing.expectEqual([3]u32{ 512, 2, 16 }, attnGridOf(w, .rows2));
-    try testing.expectEqual(@as(u32, 1), rowsPerGroup(.block));
     const none: config.Config = .{};
-    for ([_]u32{ 1, 2, 3, 4, 16 }) |rows| try testing.expectEqual(Attn.base, attnFor(none, rows));
-    const r2: config.Config = .{ .mla_latent_rows = 2 };
-    const r4b: config.Config = .{ .mla_latent_rows = 4, .mla_latent_block = true };
     const st: config.Config = .{ .mla_latent_stage = true };
-    try testing.expectEqual(Attn.base, attnFor(r2, 1));
-    try testing.expectEqual(Attn.rows2, attnFor(r2, 2));
-    try testing.expectEqual(Attn.rows2, attnFor(r2, 16));
-    try testing.expectEqual(Attn.block, attnFor(r4b, 1));
-    try testing.expectEqual(Attn.rows4, attnFor(r4b, 3));
-    try testing.expectEqual(Attn.stage, attnFor(st, 1));
-    try testing.expectEqual(Attn.stage, attnFor(st, 4));
-    for ([_]u8{ 0, 2, 4 }) |r| try testing.expect((config.Config{ .mla_latent_rows = r }).valid());
-    for ([_]u8{ 1, 3, 8 }) |r| try testing.expect(!(config.Config{ .mla_latent_rows = r }).valid());
-    try testing.expect(!(config.Config{ .mla_latent_stage = true, .mla_latent_block = true }).valid());
-    try testing.expect((config.Config{ .mla_latent_rows = 4, .mla_latent_stage = true }).valid());
+    try testing.expectEqual(Attn.base, attnFor(none));
+    try testing.expectEqual(Attn.stage, attnFor(st));
+    // at every row count of a launch the choice is the same text, on that launch's grid
+    for ([_]c_int{ 1, 2, 3, 4, 16 }) |rows| {
+        const pr = try planOf(&[_]c_int{ 1, 64, rows, 128 }, &[_]c_int{ 1, 64, rows, 64 }, &.{ 1, 1, 19404, 512 }, &.{ 1, 1, 19404, 64 }, &.{ 16384, 512 }, .{ bf, bf }, .{ bf, bf }, bf);
+        try testing.expectEqual(pr.attnGrid(), attnGridOf(pr, attnFor(none)));
+        try testing.expectEqual([3]u32{ 512, 76, 2 * @as(u32, @intCast(rows)) }, attnGridOf(pr, attnFor(st)));
+    }
+    try testing.expect(st.valid());
 }
 
 test "turboexl3 ling mla latent nax text: it reads every operand it binds and the constants its launch passes, the cache through its strides; the statements a row's bound, its mask, the split's sum and the partials rest on" {
@@ -688,20 +632,24 @@ test "turboexl3 ling mla latent nax plan: each shape's grid and threads, the con
             try testing.expect(n.mt == 1 or n.mt == 2 or n.mt == 4);
             // a split shape's partial tiles: MT x 4 x 16 x (bk + 4) floats, under the 32 KiB a threadgroup holds
             if (n.sd) try testing.expect(n.mt * 4 * 16 * (n.bk + 4) * 4 < 32 * 1024);
-            try testing.expectEqual(@as(u32, 1), rowsPerGroup(a));
         }
     }
     try testing.expectEqual(nax_shapes.len, n_nax);
-    for ([_]Attn{ .base, .rows2, .rows4, .stage, .block }) |a| try testing.expect(naxOf(a) == null);
+    for ([_]Attn{ .base, .stage }) |a| try testing.expect(naxOf(a) == null);
     try testing.expect(naxOf(nax_served) != null);
-    // the configuration: the NAX shape at every row count, ahead of the stage; without it the stage as before
+    // the configuration: the NAX shape ahead of the stage; without it the stage as before
     const nax_st: config.Config = .{ .mla_latent_nax = true, .mla_latent_stage = true };
-    for ([_]u32{ 1, 2, 3, 4, 16 }) |rows| {
-        try testing.expectEqual(nax_served, attnFor(nax_st, rows));
-        try testing.expectEqual(Attn.stage, attnServedFor(nax_st, rows));
-    }
+    try testing.expectEqual(nax_served, attnFor(nax_st));
+    try testing.expectEqual(Attn.stage, attnServedFor(nax_st));
     const none: config.Config = .{};
-    for ([_]u32{ 1, 4 }) |rows| try testing.expectEqual(Attn.base, attnServedFor(none, rows));
+    try testing.expectEqual(Attn.base, attnServedFor(none));
+    // at every row count of a launch the NAX shape takes the call (`naxTakes` reads the cache's dtype and the heads, never
+    // the rows), so the configuration's text runs, on that launch's grid
+    for ([_]c_int{ 1, 2, 3, 4, 16 }) |rows| {
+        const pr = try planOf(&[_]c_int{ 1, 64, rows, 128 }, &[_]c_int{ 1, 64, rows, 64 }, &.{ 1, 1, 18380, 512 }, &.{ 1, 1, 18380, 64 }, &.{ 16384, 512 }, .{ bf, bf }, .{ bf, bf }, bf);
+        try testing.expect(naxTakes(pr, naxOf(attnFor(nax_st)).?));
+        try testing.expectEqual([3]u32{ 256, 72, 2 * @as(u32, @intCast(rows)) }, attnGridOf(pr, attnFor(nax_st)));
+    }
     // the calls a shape takes: a bf16 or f16 cache, the heads a whole number of its threadgroups
     for (nax_shapes) |a| try testing.expect(naxTakes(p, naxOf(a).?));
     const f16p = try planOf(&.{ 1, 64, 1, 128 }, &.{ 1, 64, 1, 64 }, &.{ 1, 1, 300, 512 }, &.{ 1, 1, 300, 64 }, &.{ 16384, 512 }, .{ .float16, .float16 }, .{ .float16, .float16 }, .float16);
