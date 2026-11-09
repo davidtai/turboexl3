@@ -37,6 +37,7 @@ const G = support.Graph;
 const ref = @import("../../core/ref.zig");
 const ml = @import("mla_latent.zig");
 const config = @import("../../core/config.zig");
+const prefill = @import("../../core/prefill.zig");
 
 const testing = std.testing;
 
@@ -795,6 +796,14 @@ test "turboexl3 gpu ling mla latent variants: rows2, rows4, stage and block give
 }
 
 // ── launch 2 on the matrix units (`Attn.nax_*`): a bound of the f64 reference, not launch 2's words ──
+
+test "turboexl3 ling mla latent nax metal source: the kernel as standalone translation units, bf16 split at 1 M tile and whole at 4, f16 split at 2 (TURBOEXL3_METAL_DUMP=1)" {
+    _ = std.c.getenv("TURBOEXL3_METAL_DUMP") orelse return error.SkipZigTest;
+    const d = comptime support.pins(@embedFile("kernels/test/dump/mla_latent_nax.metal"));
+    prefill.printMetal("turboexl3_ling_mla_attn_nax_bf16_m1_k32_sd", ml.header_nax, d[0], d[3], ml.text_attn_nax);
+    prefill.printMetal("turboexl3_ling_mla_attn_nax_bf16_m4_k64", ml.header_nax, d[1], d[3], ml.text_attn_nax);
+    prefill.printMetal("turboexl3_ling_mla_attn_nax_f16_m2_k32_sd", ml.header_nax, d[2], d[4], ml.text_attn_nax);
+}
 
 /// The bound a NAX call's output holds against the f64 reference, as a ratio to the reference's RMS (the RMS error at
 /// most `bound`, the worst element at most 4 `bound`, each beyond the output's own bf16 store, `ref.compareRounded`).
