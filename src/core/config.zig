@@ -77,6 +77,16 @@ pub const Config = struct {
     /// runs (today's, or hw4b's with `banked_m3`). Any but 0 needs `banked_group` 4.
     banked_variant_gu: u8 = 0,
     banked_variant_dn: u8 = 0,
+    /// Ling-3.1-flash's MLA attention in the latent (`ling.mlaLatentDecode`): launch 2 of a call of 2 rows or more on one
+    /// threadgroup for this many of its rows (2 or 4; `mla_latent.Attn.rows2`, `rows4`), each key group's latents and rope
+    /// keys read once for them; 0 keeps a threadgroup a row. The same bytes.
+    mla_latent_rows: u8 = 0,
+    /// The same launch with each sub-chunk's latents and rope keys staged in f32 in threadgroup memory
+    /// (`mla_latent.Attn.stage`), at the calls `mla_latent_rows` does not take. The same bytes.
+    mla_latent_stage: bool = false,
+    /// The same launch with 2 x 2 score tiles and 4 x 4 output tiles a simdgroup (`mla_latent.Attn.block`), at the calls
+    /// `mla_latent_rows` does not take; not with `mla_latent_stage`. The same bytes.
+    mla_latent_block: bool = false,
     /// A diagnostic: each routed decode call's routing read back (a sync per call), its expert multiplicities printed
     /// every 480 calls.
     slot_stats: bool = false,
@@ -93,7 +103,9 @@ pub const Config = struct {
             (c.pf_bm == 64 or c.pf_bm == 128 or c.pf_bm == 256) and
             (c.banked_group == 2 or c.banked_group == 4) and (!c.banked_m3 or c.banked_group == 4) and
             c.banked_variant_gu < banked_variants and c.banked_variant_dn < banked_variants and
-            ((c.banked_variant_gu == 0 and c.banked_variant_dn == 0) or c.banked_group == 4);
+            ((c.banked_variant_gu == 0 and c.banked_variant_dn == 0) or c.banked_group == 4) and
+            (c.mla_latent_rows == 0 or c.mla_latent_rows == 2 or c.mla_latent_rows == 4) and
+            !(c.mla_latent_stage and c.mla_latent_block);
     }
 };
 
@@ -151,6 +163,11 @@ test "turboexl3 config: the defaults are valid and served; an unserved form, sli
     try t.expect(d.fused_fin_fold);
     try t.expect(!d.dec_one_row_table);
     try t.expect((Config{ .dec_one_row_table = true }).valid());
+    try t.expect(d.mla_latent_rows == 0 and !d.mla_latent_stage and !d.mla_latent_block);
+    for ([_]u8{ 2, 4 }) |r| try t.expect((Config{ .mla_latent_rows = r }).valid());
+    for ([_]u8{ 1, 3, 8 }) |r| try t.expect(!(Config{ .mla_latent_rows = r }).valid());
+    try t.expect((Config{ .mla_latent_rows = 4, .mla_latent_block = true }).valid());
+    try t.expect(!(Config{ .mla_latent_stage = true, .mla_latent_block = true }).valid());
     const saved = current.get().*;
     defer current.get().* = saved;
     try t.expectError(error.InvalidTurboexl3Config, configure(.{ .decode_form = 4 }));
