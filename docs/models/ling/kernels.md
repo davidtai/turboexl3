@@ -853,7 +853,8 @@ words staged in threadgroup memory, more tiles a simdgroup.
 - **Grid and threadgroup:** launch 2's, `(512, NJ, S·H/32)` / `(512, 1, 1)`, with 17 KiB more threadgroup memory: the scores'
   two slabs of 32 keys × 64 dims (68 words a key), or the values' 8 keys × 516 words. Per sub-chunk 19 barriers (launch
   2: 3): 10 for the 9 slabs, 1 after the softmax update, 8 for the 4 value stages.
-- **Template args:** launch 2's.
+- **Template args:** launch 2's. Its text names no CT: it reads `lat` and `rot` themselves, whose element type MLX's
+  signature gives from the cache's dtype (the type CT names).
 - **Replaces:** `turboexl3_ling_mla_attn` at those calls: each simdgroup's own reads of the cache (a latent word read and
   converted by 8 simdgroups of the threadgroup, 4 for the scores and 4 for the values).
 - **Bits:** launch 2's words: a staged word is the word launch 2 reads (the cache word converted to f32, or 0 past the row's

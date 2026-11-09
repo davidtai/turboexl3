@@ -458,11 +458,14 @@ test "turboexl3 ling mla latent variant texts: each is launch 2's online softmax
         try testing.expectEqual(@as(usize, 1), std.mem.count(u8, txt, attn_2));
         for (attn_in) |n| try testing.expect(has(txt, std.mem.span(n)));
         for (attn_out) |n| try testing.expect(has(txt, std.mem.span(n)));
-        for ([_][]const u8{ "H", "S", "DL", "DR", "KPT", "CK", "QT", "CT" }) |n| try testing.expect(has(txt, n));
+        for ([_][]const u8{ "H", "S", "DL", "DR", "KPT", "CK", "QT" }) |n| try testing.expect(has(txt, n));
         try testing.expect(has(txt, "lat_strides") and has(txt, "rot_strides") and !has(txt, "_shape"));
         // a key group counted from position 0
         try testing.expect(has(txt, pin[0]));
     }
+    // launch 2, rows and block read the cache through CT pointers. The stage text reads `lat` and `rot` themselves,
+    // whose element type MLX writes into the signature from the cache's dtype (the type CT names), so it names no CT.
+    for ([_][]const u8{ text_attn, text_attn_rows, text_attn_block }) |txt| try testing.expect(has(txt, "CT"));
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, text_attn_stage, attn_4));
     try testing.expect(has(text_attn_rows, "RPT"));
     // rows: each row's bound, the sub-chunks it runs, a key it does not see read as 0 and scored -inf
