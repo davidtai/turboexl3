@@ -1603,8 +1603,8 @@ fn residentPlain(s: mlx.mlx_stream, x: mlx.mlx_array, trellis: mlx.mlx_array) !?
 // ---- DEC-ONE's GEMV variants (`Config.dec_variant`): other schedules of DEC-ONE's own reads, decodes and sums ----
 //
 // banked's grouped-GEMV ILP variants (`banked.group_variants`, hw2) carried to DEC-ONE's GEMV over prepared rows: the
-// dense dec0 launch (`Dense.decLinear` with the prepare in its own launch, and `Dense.decLinearPrepared`) and
-// Ling-3.1-flash's KDA projections' launch with b_proj (`models/ling/kdaproj.zig`). t4 runs the MUL1 codeword's t through
+// dense dec0 launch (`Dense.decLinear` with the prepare in its own launch, and `Dense.decLinearPrepared`).
+// t4 runs the MUL1 codeword's t through
 // both pair sums as one half2 (a define before the header, kernels/dense/t4.metal: lane/helpers.metal's EXL3_T1V 4, the
 // route BANKED_T4 runs for the routed GEMVs), the same exact t. pf loads each input tile's words a pass ahead of their
 // decode (`dec_pf_decl`, `dec_pf_next`, `dec_pf_ww`), the same words. Each runs DEC-ONE's codeword, decode, FMA, fold,

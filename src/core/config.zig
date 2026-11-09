@@ -60,20 +60,10 @@ pub const Config = struct {
     /// does not name keeps the rest of this configuration's. Launch shape only: the same bytes.
     dec_one_row_table: bool = false,
     /// DEC-ONE's GEMV over prepared rows on a variant (`dense.dec_variants`, `dec_variants` of them; 0 the served GEMV):
-    /// the dense dec0 launch (a decode call whose prepare runs in its own launch, and `Dense.decLinearPrepared`) and
-    /// Ling-3.1-flash's KDA projections' launch with b_proj (`ling.kdaProjB`). 1 t4 (the MUL1 codeword's t as one half2,
-    /// banked's group variant t4), 2 pf (each input tile's words loaded a pass ahead of their decode), 3 both. Another
-    /// schedule of the same reads, decodes and sums: the same bytes.
+    /// the dense dec0 launch (a decode call whose prepare runs in its own launch, and `Dense.decLinearPrepared`). 1 t4
+    /// (the MUL1 codeword's t as one half2, banked's group variant t4), 2 pf (each input tile's words loaded a pass ahead
+    /// of their decode), 3 both. Another schedule of the same reads, decodes and sums: the same bytes.
     dec_variant: u8 = 0,
-    /// Ling-3.1-flash's KDA projections' launch with b_proj (`ling.kdaProjB`) with b's threadgroups first in its grid and
-    /// each row of b's chunk on its own simdgroup (`turboexl3_ling_kdaproj_dec0bv`), so b's threadgroups run beside the
-    /// members' instead of after them. The same bytes.
-    kda_bfirst: bool = false,
-    /// The same launch at a verify's rows (2 or more) with member 0 (q|k|v) at `kda_bt0` output tiles a threadgroup and
-    /// members 1 and 2 (f and g) at `kda_bt1`: 1, 2, 4 or 8, where the call's row chunks take it; 0 (or past a chunk's
-    /// room) keeps the plan's (member 0's `Dense.btDec`, every member's today). The same bytes.
-    kda_bt0: u8 = 0,
-    kda_bt1: u8 = 0,
     /// Ling-3.1-flash's router (`ling.routerLogits`) at a call of 2 rows or more over the f16 weight on the rows launch
     /// (`turboexl3_ling_router_logits_hr`, `_pred_hr`, `_pred_sig_hr`): each router threadgroup 16 logits of each row of a
     /// group of up to 4 rows, every weight word read once for them, each row's statements the served launch's. The same
@@ -126,7 +116,6 @@ pub const Config = struct {
             (c.pf_bm == 64 or c.pf_bm == 128 or c.pf_bm == 256) and
             (c.banked_group == 2 or c.banked_group == 4) and (!c.banked_m3 or c.banked_group == 4) and
             c.banked_variant_gu < banked_variants and c.banked_variant_dn < banked_variants and c.dec_variant < dec_variants and
-            tilesValid(c.kda_bt0) and tilesValid(c.kda_bt1) and
             ((c.banked_variant_gu == 0 and c.banked_variant_dn == 0) or c.banked_group == 4);
     }
 };
@@ -136,11 +125,6 @@ pub const banked_variants: u8 = 12;
 
 /// DEC-ONE's GEMV variants' count (`dense.dec_variants.len`, checked there).
 pub const dec_variants: u8 = 4;
-
-/// An output-tile count a GEMV threadgroup takes (`kda_bt0`, `kda_bt1`): 0 (the plan's), 1, 2, 4 or 8.
-fn tilesValid(bt: u8) bool {
-    return bt == 0 or bt == 1 or bt == 2 or bt == 4 or bt == 8;
-}
 
 const current = Global(Config, "config_current", .{});
 
@@ -196,12 +180,6 @@ test "turboexl3 config: the defaults are valid and served; an unserved form, sli
     try t.expectEqual(@as(u8, 0), d.dec_variant);
     for (1..dec_variants) |v| try t.expect((Config{ .dec_variant = @intCast(v) }).valid());
     try t.expect(!(Config{ .dec_variant = dec_variants }).valid());
-    try t.expect(!d.kda_bfirst and d.kda_bt0 == 0 and d.kda_bt1 == 0);
-    for ([_]u8{ 1, 2, 4, 8 }) |bt| try t.expect((Config{ .kda_bfirst = true, .kda_bt0 = bt, .kda_bt1 = bt }).valid());
-    for ([_]u8{ 3, 5, 16 }) |bt| {
-        try t.expect(!(Config{ .kda_bt0 = bt }).valid());
-        try t.expect(!(Config{ .kda_bt1 = bt }).valid());
-    }
     try t.expect(!d.router_rows and (Config{ .router_rows = true }).valid());
     try t.expect(!d.mla_latent_stage and (Config{ .mla_latent_stage = true }).valid());
     // the NAX launch: off by default, with the stage (ahead of it)

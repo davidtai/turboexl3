@@ -1706,6 +1706,14 @@ SPLIT_REMOVED_KERNELS['turboexl3_ling_mla_attn_block'] = _S2_V2
 _S2_VRT = "D35 VERIFY_ROW_TABLE (closed by TIME: 1.09/1.74/2.19 of the served at 2/3/4 rows): o_proj at a verify's rows on one output tile a GEMV threadgroup (Config.dec_verify_row_table, dense.verify_row_table)"
 SPLIT_REMOVED_TESTS["turboexl3 ling: Config.dec_verify_row_table gives o_proj's shape (8192 -> 4096 at K6) its verify_row_table launch at rows 2 to 4 only, every other trunk shape the rest of the configuration's, beside the one-row table"] = _S2_VRT
 SPLIT_REMOVED_TESTS["turboexl3 gpu ling verify-row table: o_proj's verify rows (2 to 4) on the table's launch (Config.dec_verify_row_table) give the served launch's words and the three-launch chain's, through linear and over prepared rows; red check: the table's launch at another K split (TURBOEXL3_GPU=1)"] = _S2_VRT
+_S2_KDA = "D35 KDA_BFIRST/KDA_BT (closed by TIME in-family, no A/B: KDA_BFIRST 0.996-1.007 of the served, KDA_BT pairs 1.004-1.54): kdaProjB's variant launch, b's threadgroups first and the members' tiles a threadgroup apart, with its DEC_T4/DEC_PF twins (Config.kda_bfirst, kda_bt0 / kda_bt1; kdaproj.variantFor). D35's cut of kdaproj/bmember.metal (bmember_1 ++ bmember_2, the same value) stays"
+SPLIT_REMOVED_KERNELS['turboexl3_ling_kdaproj_dec0bv'] = _S2_KDA
+SPLIT_REMOVED_KERNELS['turboexl3_ling_kdaproj_dec0bv_t4'] = _S2_KDA
+SPLIT_REMOVED_KERNELS['turboexl3_ling_kdaproj_dec0bv_pf'] = _S2_KDA
+SPLIT_REMOVED_KERNELS['turboexl3_ling_kdaproj_dec0bv_pft4'] = _S2_KDA
+SPLIT_REMOVED_TESTS["turboexl3 ling kdaproj variant texts: the b launch's member is its two pieces; the variant launch is kbfirst in bmember_1's place, its head, the member choice, then DEC-ONE's statements over prepared rows in each member's branch (pf's in the pf text) and nothing else; every operand and argument named, no shape buffers"] = _S2_KDA
+SPLIT_REMOVED_TESTS["turboexl3 ling kdaproj variant plan: the configuration's variant launch per row count (the members' tiles apart at a verify's rows where they fit, b first and DEC-ONE's GEMV variant at every row count); the variant grid covers each member's (K slice, block) and b's output rows once, at every pair of tile counts, b first or last"] = _S2_KDA
+SPLIT_REMOVED_TESTS["turboexl3 gpu ling bproj variants: each variant launch (b first; q|k|v's and f and g's tiles apart; t4, pf, pft4; all together) gives kdaProjB's words, b's and the three members', at rows 1 to 8 and 16, operands as the loader keeps them; red checks: a flipped word, q|k|v at another K split, one word of b's weight (TURBOEXL3_GPU=1)"] = _S2_KDA
 # --strip2 end--
 
 _R10 = ("R10 ROUTER_ADDNORM (M6, rejected): the post-attention add_norm folded into the router's launch 1 "
@@ -1895,17 +1903,6 @@ SPLIT_ADDED_KERNELS['turboexl3_dense_dec0_pf'] = ('dec_variant pf: text_dec0 wit
                                                   '(dec_pf_decl, dec_pf_next; dec_pf_ww in dec_tile ++ dec_gemv_arrive_2_1\'s '
                                                   'place)')
 SPLIT_ADDED_KERNELS['turboexl3_dense_dec0_pft4'] = 'dec_variant pft4: text_dec0_pf over header5_t4'
-# D35, the KDA projections' variant launch (Config.kda_bfirst, kda_bt0 / kda_bt1, dec_variant; kdaproj.zig). The served
-# dec0b keeps its text: kdaproj/bmember.metal is cut into bmember_1 (b's threadgroups and rows) and bmember_2
-SPLIT_ADDED_KERNELS['turboexl3_ling_kdaproj_dec0bv'] = ('kdaProjB\'s variant launch: kdaproj/bfirst in bmember_1\'s place '
-                                                        '(BF: b\'s threadgroups first, a row a simdgroup), head_v (BT0 for '
-                                                        'member 0, BT1 for members 1 and 2) in head\'s, then the member '
-                                                        'choice and DEC-ONE\'s statements verbatim in each member\'s branch '
-                                                        '(bt_0, bt_1, bt_close set BTC)')
-SPLIT_ADDED_KERNELS['turboexl3_ling_kdaproj_dec0bv_t4'] = 'turboexl3_ling_kdaproj_dec0bv over dense.header5_t4'
-SPLIT_ADDED_KERNELS['turboexl3_ling_kdaproj_dec0bv_pf'] = ('turboexl3_ling_kdaproj_dec0bv with dense.dec_body0_pf in each '
-                                                           'branch')
-SPLIT_ADDED_KERNELS['turboexl3_ling_kdaproj_dec0bv_pft4'] = 'turboexl3_ling_kdaproj_dec0bv_pf over dense.header5_t4'
 # D35, the router's rows launch (Config.router_rows; router.zig). The served texts keep theirs: the rows launch swaps
 # router/head, logits_1, logits_2 and pred_open for its own pieces around router/logits_wh, pred_one and pred_wide verbatim
 SPLIT_ADDED_KERNELS['turboexl3_ling_router_logits_hr'] = ('router_rows: turboexl3_ling_router_logits_h with each router '

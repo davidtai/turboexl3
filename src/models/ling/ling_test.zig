@@ -38,8 +38,8 @@
 //! Timing (TURBOEXL3_LING_TIME=1 with TURBOEXL3_GPU=1; asserts nothing, guidance only): every trunk linear, `moeLing`
 //! and `moeLingBanked` at Ling's shapes and rows, the decode forward's linears chained over the 72 layers, and the dense
 //! decode GEMV's launch shapes swept per trunk shape on that chain at rows 1 to 8 (asserting bytes only); D35's arms:
-//! the DEC-ONE GEMV variants, `kdaProjB`'s variant launch (bproj_test.zig) and the router's rows launch
-//! (router_test.zig). Lines: TURBOEXL3_LING_TIME, TURBOEXL3_LING_CHAIN, TURBOEXL3_LING_GEMV (_BEST, _TABLE, _DONE).
+//! the DEC-ONE GEMV variants and the router's rows launch (router_test.zig). Lines: TURBOEXL3_LING_TIME,
+//! TURBOEXL3_LING_CHAIN, TURBOEXL3_LING_GEMV (_BEST, _TABLE, _DONE).
 const std = @import("std");
 const sdk = @import("sdk");
 const mlx = sdk.mlx;
@@ -1637,7 +1637,6 @@ const ds_test = @import("../deepseek_v41/deepseek_test.zig");
 const mla_latent = @import("mla_latent.zig");
 const mla_latent_test = @import("mla_latent_test.zig");
 const mla_flash = @import("mla_flash.zig");
-const bproj_test = @import("bproj_test.zig");
 const router_test = @import("router_test.zig");
 
 /// A serial decode step and the verify widths of 2 to 4 rows, the engine's prompt chunk and a layer-major call
@@ -1848,7 +1847,6 @@ test "turboexl3 gpu ling timing: every trunk linear, moeLing and moeLingBanked a
         }
     }
     try timeDecVariants(a, &g, s, cfg);
-    try bproj_test.timeKdaVariants(a, &g, s);
     try router_test.timeRouterRows(a, &g, s);
     var nbuf: [8]u32 = undefined;
     const rates = envList("TURBOEXL3_LING_N", &.{ 40, 32 }, &nbuf);
