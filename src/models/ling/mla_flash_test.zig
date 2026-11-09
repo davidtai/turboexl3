@@ -143,7 +143,7 @@ test "turboexl3 ling mla flash rope once refusals: shapes and dtypes the rope-on
     const a = std.heap.page_allocator;
     var g = try G.init(a, s);
     defer g.deinit();
-    const zeros = try a.alloc(u16, 4 * 64 * 256);
+    const zeros = try a.alloc(u16, 4 * 96 * 256); // the largest operand here: q_long [1, 4, 96, 192]
     defer a.free(zeros);
     @memset(zeros, 0);
     const bytes = std.mem.sliceAsBytes(zeros);
