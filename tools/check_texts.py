@@ -1852,7 +1852,14 @@ SPLIT_ADDED_KERNELS['turboexl3_test_pf_dfinn_fin_fault'] = ('test only: turboexl
                                                             'unrounded (fault/fin_4_unrounded), a red check')
 # D4: the MLA chain's plain kv_b and head gate at decode and verify rows in one GEMV launch (ling-d4-mla,
 # Config.mla_rows, off by default; turboexl3_ling's MLX_SERVE_LING_MLA_ROWS)
-SPLIT_ADDED_KERNELS['turboexl3_ling_mla_rows'] = ('D4: MLX\'s gemv statements (BM 8, BN 1 or BM 1, BN 8; SM 1, SN 32, TM 4, '
+ADDED_FILES['models/ling/mla_rows.zig'] = ('Ling-3.1\'s MLA kv_b and head gate at decode and verify rows in one GEMV launch '
+                                           '(mlaRows, turboexl3_ling_mla_rows: MLX\'s one-row gemv words for each row, each '
+                                           'weight tile read once for the call\'s rows), and its texts\' and plan\'s CPU tests')
+ADDED_FILES['models/ling/mla_rows_test.zig'] = ('mlaRows held to the served launches word for word (the one-row matmul, the '
+                                                'plugin\'s denseRows) at kv_b and the head gate, rows 1 to 16 and caps 1 to 8, '
+                                                'with red checks (GPU); the fault texts (CPU); servedCall and loaderWeight for '
+                                                'the timing')
+SPLIT_ADDED_KERNELS['turboexl3_ling_mla_rows'] =('D4: MLX\'s gemv statements (BM 8, BN 1 or BM 1, BN 8; SM 1, SN 32, TM 4, '
                                                   'TN 4) for up to RB rows a threadgroup, each weight tile read once a K '
                                                   'block, each row its own accumulators (models/ling/mla_rows.zig '
                                                   'text_rows: mla_rows/head ++ acc ++ simd ++ tgsum ++ store), each row '
