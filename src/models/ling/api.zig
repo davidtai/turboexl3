@@ -54,6 +54,9 @@ pub const kdaProjB = kdaproj.kdaProjB;
 /// (`kdaproj_pf.zig`; `kdaproj_pf.takes` says where it runs)
 pub const kdaproj_pf = @import("kdaproj_pf.zig");
 pub const kdaProjPrompt = kdaproj_pf.kdaProjPrompt;
+/// `kdaProjPrompt` over W_hats the caller decoded once (`kdaproj_pf.kdaProjPromptW`: each member's prepare, then the one
+/// launch over the given W_hats), `kdaProjPrompt`'s words with each trellis's own W_hat
+pub const kdaProjPromptW = kdaproj_pf.kdaProjPromptW;
 
 /// The MoE router at decode rows 1 to 8 in two launches, with the read-ahead predictor's scores (`router.zig`): the
 /// router's logits and the predictor's scores in one launch (`router.routerLogits`), the host's fused router over them
