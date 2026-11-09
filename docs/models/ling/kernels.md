@@ -999,7 +999,7 @@ words staged in threadgroup memory, more tiles a simdgroup.
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/ling/mla_latent.zig:215` (`fn variantKernel`) |
+| made at | `src/models/ling/mla_latent.zig:218` (`fn variantKernel`) |
 | inputs | `ql`, `qr`, `lat`, `rot`, `scale`, `dims` |
 | outputs | `pm`, `pl`, `po` |
 | source | `text_attn_rows` = `ling:mla_latent/rows_1` ++ `ling:mla_latent/attn_2` ++ `ling:mla_latent/rows_2` (11270 B, `83520e3440c5`) |
@@ -1034,7 +1034,7 @@ words staged in threadgroup memory, more tiles a simdgroup.
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/ling/mla_latent.zig:216` (`fn variantKernel`) |
+| made at | `src/models/ling/mla_latent.zig:219` (`fn variantKernel`) |
 | inputs | `ql`, `qr`, `lat`, `rot`, `scale`, `dims` |
 | outputs | `pm`, `pl`, `po` |
 | source | `text_attn_stage` = `ling:mla_latent/stage_1` ++ `ling:mla_latent/attn_2` ++ `ling:mla_latent/stage_2` ++ `ling:mla_latent/attn_4` (9347 B, `8bed636fe06a`) |
@@ -1064,7 +1064,7 @@ words staged in threadgroup memory, more tiles a simdgroup.
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/ling/mla_latent.zig:217` (`fn variantKernel`) |
+| made at | `src/models/ling/mla_latent.zig:220` (`fn variantKernel`) |
 | inputs | `ql`, `qr`, `lat`, `rot`, `scale`, `dims` |
 | outputs | `pm`, `pl`, `po` |
 | source | `text_attn_block` = `ling:mla_latent/block_1` ++ `ling:mla_latent/attn_2` ++ `ling:mla_latent/block_2` (12459 B, `5e9316b29042`) |
@@ -1096,7 +1096,7 @@ words staged in threadgroup memory, more tiles a simdgroup.
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/ling/mla_latent.zig:218` (`fn variantKernel`) |
+| made at | `src/models/ling/mla_latent.zig:221` (`fn variantKernel`) |
 | inputs | `qlb`, `qrb`, `lat`, `rot`, `scale`, `dims` |
 | outputs | `pm`, `pl`, `po` |
 | source | `text_attn_nax` = `ling:mla_latent/nax` ++ `ling:mla_latent/nax_close` (10326 B, `973fcfb5fb1c`) |
