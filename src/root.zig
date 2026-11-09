@@ -706,9 +706,9 @@ fn pfOptionsFor(geo: prefill.Geometry) prefill.Options {
     // the 128-row tiles: their remainder tiles ride the mixed launch (froute's route at split 1, the strided mid and finish),
     // the 128-row tiles the bm-128 body beside bm 64's
     if (o.small != .mixed or o.split != 1 or !o.froute or o.aux != 0 or o.bm != 64) o.t128 = false;
-    // the fused finish: a row's one slot (top-1), whole 128-column blocks a threadgroup, one down launch over every row
-    // (small .off, or the 128-row tiles' two tables), its staging within 32 KB
-    if (geo.topk != 1 or (o.ncb != 2 and o.ncb != 4) or o.wsp != 0 or (o.small != .off and !o.t128) or o.dfinBytes() > 32768) o.dfin = false;
+    // the fused finish: a row's one slot (top-1), the 128-row tiles (one down launch over both tables), whole 128-column
+    // blocks a threadgroup, its staging within 32 KB
+    if (geo.topk != 1 or !o.t128 or (o.ncb != 2 and o.ncb != 4) or o.wsp != 0 or o.dfinBytes() > 32768) o.dfin = false;
     return o;
 }
 
@@ -891,7 +891,7 @@ fn moePrefill(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx.mlx_arr
         .down_suh = bank.down.suh,
         .down_svh = bank.down.svh,
     };
-    const y0 = if (pf.opts.t128) try pf.moeT128WithCall(s, x2, inds1, s1, ops, rows, mlx.mlx_array_dtype(x), null, call) else try pf.moeWithCall(s, x2, inds1, s1, ops, rows, mlx.mlx_array_dtype(x), null, call);
+    const y0 = if (pf.opts.t128) try pf.moeT128WithCall(s, x2, inds1, s1, ops, rows, mlx.mlx_array_dtype(x), null, call) else try pf.moeWith(s, x2, inds1, s1, ops, rows, mlx.mlx_array_dtype(x), null);
     defer freeArr(y0);
     var y = mlx.mlx_array_new();
     errdefer freeArr(y);
@@ -985,7 +985,7 @@ pub fn moeSwigluRowsWith(s: mlx.mlx_stream, x: mlx.mlx_array, rows: mlx.mlx_arra
         .down_svh = bank.down.svh,
     };
     if (pf.opts.t128) return pf.moeT128WithCall(s, x, inds, scores, ops, S, out_dtype, rows, call);
-    return pf.moeWithCall(s, x, inds, scores, ops, S, out_dtype, rows, call);
+    return pf.moeWith(s, x, inds, scores, ops, S, out_dtype, rows);
 }
 
 /// DeepSeek-V4.1's clamped routed experts over an expert streamer's slot banks (models/deepseek_v41/api.zig)
@@ -1086,8 +1086,7 @@ test "turboexl3 root: the served prefill options follow the config, and the deco
         // a call's ending on those engines (`prefill.Call`): the top-1 engine's own is the fused finish, a call that
         // declines it the served ending; the top-8 engine has the served ending whatever the call keeps
         try t.expect(prefill.endOf(q, .{}) == .dfin and prefill.endOf(q, .{ .dfin = false }) == .served and prefill.endOf(q8, .{}) == .served);
-        // the fused finish needs one down launch over every row: without the 128-row tiles the mixed launch has two
-        // bodies, so it drops it
+        // the fused finish needs the 128-row tiles (one down launch over both tables): without them it drops it
         try config.configure(.{ .pf_t128 = false, .pf_dfin = true });
         const m = pfOptionsFor(g1);
         try t.expect(m.valid() and m.small == .mixed and !m.dfin);

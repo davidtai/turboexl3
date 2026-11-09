@@ -520,10 +520,11 @@ fn flipOne(a: std.mem.Allocator, g: *G, got: mlx.mlx_array, at: usize) !mlx.mlx_
 }
 
 /// PF_DFIN's whole-call switch: one rows-path call on engine `pf` through the row map at the call's own choice
-/// (`prefill.Call`: `moeT128WithCall` with the 128-row tiles, else `moeWithCall`), y f32 [o.n_call, hidden]
+/// (`prefill.Call`: `moeT128WithCall` with the 128-row tiles; an engine without them has no fused finish, so `moeWith`),
+/// y f32 [o.n_call, hidden]
 fn engineCall(pf: *prefill.Prefill, s: mlx.mlx_stream, x: mlx.mlx_array, o: RowsOps, ops: prefill.Operands, choice: prefill.Call) !mlx.mlx_array {
     if (pf.opts.t128) return pf.moeT128WithCall(s, x, o.ids, o.sc, ops, o.n_call, .float32, o.rm, choice);
-    return pf.moeWithCall(s, x, o.ids, o.sc, ops, o.n_call, .float32, o.rm, choice);
+    return pf.moeWith(s, x, o.ids, o.sc, ops, o.n_call, .float32, o.rm);
 }
 
 /// The ending a call ran on its engine, from the engine's step counts before and after it (`prefill.Steps`): the served

@@ -293,14 +293,14 @@ constants, except `alay` and `t128`: the fields `pf_alay` and `pf_t128` of `Conf
 
 One more option reshapes the chain's launches, off by default and held to the served chain's bytes: `dfin` (the finish
 as the down GEMM's epilogue at top-1: `turboexl3_pf_dfin`, one launch over every row in place of the down GEMM's
-launches and `fin`, so 6 launches in 5 levels with `t128`), which `Config.pf_dfin` sets. The remainder rule's cutoff
+launches and `fin`, so 6 launches in 5 levels; it needs `t128`), which `Config.pf_dfin` sets. The remainder rule's cutoff
 (`prefill.t128_cut`, 64), the gate and up GEMM's output blocks per threadgroup (`prefill.gu_ncb`, 1) and the fused
 finish's tile rows per staging round (`prefill.dfr`, 32) are constants.
 
-A call can decline the fused finish (`prefill.Call`; `Prefill.moeT128WithCall` and `moeWithCall`, root's `moeSwigluWith`
-and `moeSwigluRowsWith`): on an engine built with `dfin`, a call with `.dfin = false` runs the served route
-(`turboexl3_pf_t128_route`), `turboexl3_pf_t128_dnm`, `_t128_dnt` and `_t128_fin` (over
-the one table: `_gemm1` and `_fin`), which every such engine builds as the served engine does, at the served launch
+A call can decline the fused finish (`prefill.Call`; `Prefill.moeT128WithCall`, root's `moeSwigluWith` and
+`moeSwigluRowsWith`): on an engine built with `dfin`, a call with `.dfin = false` runs the served route
+(`turboexl3_pf_t128_route`), `turboexl3_pf_t128_dnm`, `_t128_dnt` and `_t128_fin`, which every such engine builds as
+the served engine does, at the served launch
 shapes, so the call's launches and bytes are the served engine's. `prefill.endOf` gives a call's ending, and
 `Prefill.steps` counts the steps an engine ran (its route and its ending). One engine a geometry runs both endings.
 turboexl3_ling's PF_DFIN decides it once a wide prompt call, from the call's rows alone.
@@ -316,7 +316,7 @@ turboexl3_ling's PF_DFIN decides it once a wide prompt call, from the call's row
 | `turboexl3_pf_gemm2m`, `turboexl3_pf_gemm1m` | the mixed launch: the table's large tiles through the shared-decode body, and its tiles of at most 32 rows through the register path | `_gemm2` and `_gemm2s` (`_gemm1` and `_gemm1s`) as one launch |
 | `turboexl3_pf_t128_gum`, `turboexl3_pf_t128_dnm` | the mixed launch over the remainder table | `_gemm2m` (`_gemm1m`), with `_gut` (`_dnt`) beside it |
 | `turboexl3_pf_t128_gut`, `turboexl3_pf_t128_dnt` | the shared-decode body at 128 rows over the 128-row tiles, beside the mixed launch; each launch writes its own output | as above |
-| `turboexl3_pf_dfin` | `dfin`: the down GEMM (`_gemm1`'s body) with the finish's statements as its epilogue, over one table or both of the 128-row tiles' tables; y written, zd never | `_t128_dnm`, `_t128_dnt` and `_t128_fin` (or `_gemm1` and `_fin`) |
+| `turboexl3_pf_dfin` | `dfin`: the down GEMM (`_gemm1`'s body) with the finish's statements as its epilogue, over both of the 128-row tiles' tables (`t128`); y written, zd never | `_t128_dnm`, `_t128_dnt` and `_t128_fin` |
 | `turboexl3_pf_mid`, `turboexl3_pf_t128_mid` | the gate and up finishes, SwiGLU in `f32`, the down input prepared, and its block sums (`t128`: each row from the launch that computed it) | — |
 | `turboexl3_pf_fin`, `turboexl3_pf_t128_fin` | the down finish and the score-weighted sum of the slots, in slot order, through `inv` (`t128`: each row from the launch that computed it) | — |
 | `turboexl3_pf_prep_v`, `turboexl3_pf_mid_v`, `turboexl3_pf_fin_v` | `aux`: prep, mid and finish with four consecutive elements per lane and several simdgroups per threadgroup | `_prep`, `_mid`, `_fin` |

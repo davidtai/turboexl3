@@ -34,19 +34,18 @@
 //! computed it. bm 128 and bm 64 run the same per-simdgroup K loop, so every output sums the same 16-deep MMAs in the same
 //! order: `moe`'s bytes.
 //!
-//! `Options.dfin` runs the finish as the down GEMM's epilogue (top-1 calls: a row's one slot): the down launch writes y
-//! itself, so zd is never written or read and the finish launch is gone. A threadgroup owns `ncb` 64-column blocks, so
-//! whole 128-column blocks: it keeps an even block's outputs rounded to f16 as the store rounds them, then after the odd
-//! block stages both in threadgroup memory, `dfr` (32) tile rows a round in the weight stage's buffer the pair's last
-//! stage freed, and runs the finish's own statements on them. One
-//! down launch writes every row: over `small = .off`'s one table, or with `t128` over both of the route's tables (the
-//! 128-row tiles', then each mixed-table tile as a part-full tile on the same body). The same f16 words in, the same
-//! finish statements: the finish's y.
+//! `Options.dfin` runs the finish as the down GEMM's epilogue (top-1 calls: a row's one slot) on the 128-row tiles'
+//! engine (`t128`): the down launch writes y itself, so zd is never written or read and the finish launch is gone. A
+//! threadgroup owns `ncb` 64-column blocks, so whole 128-column blocks: it keeps an even block's outputs rounded to f16
+//! as the store rounds them, then after the odd block stages both in threadgroup memory, `dfr` (32) tile rows a round
+//! in the weight stage's buffer the pair's last stage freed, and runs the finish's own statements on them. One down
+//! launch writes every row, over both of the route's tables (the 128-row tiles', then each mixed-table tile as a
+//! part-full tile on the same body). The same f16 words in, the same finish statements: the finish's y.
 //!
-//! A call may decline the fused finish (`Call`, `endOf`; `moeWithCall`, `moeT128WithCall`): on an engine built with
-//! `Options.dfin`, a call with `Call.dfin` false runs the served route, down launches and finish, kernels such an engine
-//! builds as the served engine does (`T128Kernels`; `Prefill.init`'s `gemm1` and `fin`), at the served launch shapes: the
-//! served engine's launches and bytes. `Prefill.steps` counts the steps an engine ran (its route and its ending).
+//! A call may decline the fused finish (`Call`, `endOf`; `moeT128WithCall`): on an engine built with `Options.dfin`, a
+//! call with `Call.dfin` false runs the served route, down launches and finish, kernels such an engine builds as the
+//! served engine does (`T128Kernels`), at the served launch shapes: the served engine's launches and bytes.
+//! `Prefill.steps` counts the steps an engine ran (its route and its ending).
 const std = @import("std");
 const mlx = @import("sdk").mlx;
 const ks = @import("sdk").kernel_launch;
@@ -512,10 +511,10 @@ pub const Options = struct {
     /// launch of their own beside the mixed launch over the rest (`Prefill.moeT128`, the notes above `t128_cut`): `moe`'s
     /// bytes. Needs bm 64, the mixed table at split 1, froute's route and the strided mid and finish (aux 0)
     t128: bool = false,
-    /// the finish as the down GEMM's epilogue (`text_dfin`, `Prefill.gemmDFin`, the module notes): the down launch writes
-    /// y, zd and the finish launch are gone. Top-1 only (`Prefill.init` refuses another top-k); needs whole 128-column
-    /// blocks a threadgroup (ncb 2 or 4), every simdgroup a consumer (wsp 0), one down launch over every row (`small`
-    /// `.off`, or `t128`: both tables in one launch) and its staging within 32 KB with the weight stage
+    /// the finish as the down GEMM's epilogue (`text_dfin`, `Prefill.gemmDFin`, the module notes): the down launch
+    /// writes y, zd and the finish launch are gone. Top-1 only (`Prefill.init` refuses another top-k); needs the
+    /// 128-row tiles (`t128`: one down launch over both tables), whole 128-column blocks a threadgroup (ncb 2 or 4),
+    /// every simdgroup a consumer (wsp 0) and its staging within 32 KB with the weight stage
     dfin: bool = false,
 
     pub const Small = enum { off, all, mixed };
@@ -539,20 +538,15 @@ pub const Options = struct {
         // the bm-128 shared-decode body beside bm 64's
         if (o.t128 and (o.small != .mixed or o.split != 1 or !o.froute or o.aux != 0 or o.bm != 64)) return false;
         if (o.stageBytes(o.downStage()) > 32768) return false;
-        // the fused finish: whole 128-column blocks a threadgroup, every simdgroup a consumer, one down launch over every
-        // row, its staging within 32 KB beside the weight stage
-        if (o.dfin and ((o.ncb != 2 and o.ncb != 4) or o.wsp != 0 or (o.small != .off and !o.t128) or o.dfinBytes() > 32768)) return false;
+        // the fused finish: the 128-row tiles (one down launch over both tables), whole 128-column blocks a threadgroup,
+        // every simdgroup a consumer, its staging within 32 KB beside the weight stage
+        if (o.dfin and (!o.t128 or (o.ncb != 2 and o.ncb != 4) or o.wsp != 0 or o.dfinBytes() > 32768)) return false;
         return (o.bm == 64 or o.bm == 128 or o.bm == 256) and (o.sgt == 1 or o.sgt == 2 or o.sgt == 4 or o.sgt == 8);
     }
 
     /// rows per M tile of the table
     pub fn tileRows(o: Options) u32 {
         return if (o.small == .all) 32 else o.bm;
-    }
-
-    /// the fused down GEMM's body rows (`dfin`): the 128-row tiles' with `t128` (both tables on that body), else `bm`
-    pub fn dfinRows(o: Options) u32 {
-        return if (o.t128) 128 else o.bm;
     }
 
     /// threadgroup memory of the fused down GEMM (`dfin`): its weight stage (`dfr` 32 stages each round in the weight
@@ -574,9 +568,10 @@ pub const Options = struct {
     }
 };
 
-/// A call's own choices on its engine (`Prefill.moeWithCall`, `moeT128WithCall`; root's `moeSwigluWith`,
-/// `moeSwigluRowsWith`): the options an engine is built with say what it can run, a call which of it runs. `.{}` runs
-/// what the engine was built for (`moeWith`, `moeT128With`).
+/// A call's own choices on its engine (`Prefill.moeT128WithCall`; root's `moeSwigluWith`, `moeSwigluRowsWith`): the
+/// options an engine is built with say what it can run, a call which of it runs. `.{}` runs what the engine was built
+/// for (`moeT128With`). An engine without the 128-row tiles has no fused finish, so a call has no choice there
+/// (`moeWith`).
 pub const Call = struct {
     /// the fused finish (`Options.dfin`) where the engine was built with it; false runs the served route, down launches
     /// and finish: the served engine's launches and bytes (an engine without the fused finish runs those either way)
@@ -1071,12 +1066,6 @@ pub const Prefill = struct {
     /// `moe` with each slot's x row from `rmap` (`prepWith`): y [rows, hidden] for x [n, hidden] (any n), inds / scores /
     /// rmap [rows * topk]; row r's bytes are `moe`'s over x's rows gathered by `rmap`. rmap null: `moe` itself.
     pub fn moeWith(self: *Prefill, s: mlx.mlx_stream, x: mlx.mlx_array, inds: mlx.mlx_array, scores: mlx.mlx_array, b: Operands, rows: usize, out_dtype: mlx.mlx_dtype, rmap: ?mlx.mlx_array) !mlx.mlx_array {
-        return self.moeWithCall(s, x, inds, scores, b, rows, out_dtype, rmap, .{});
-    }
-
-    /// `moeWith` with the call's own choices (`Call`): the ending `endOf` gives, the fused finish (`Options.dfin`, small
-    /// `.off`) or the served down launch and finish. `.{}`: `moeWith` itself.
-    pub fn moeWithCall(self: *Prefill, s: mlx.mlx_stream, x: mlx.mlx_array, inds: mlx.mlx_array, scores: mlx.mlx_array, b: Operands, rows: usize, out_dtype: mlx.mlx_dtype, rmap: ?mlx.mlx_array, call: Call) !mlx.mlx_array {
         const S: u32 = @intCast(rows * self.geo.topk);
         const r = try self.route(s, inds, S);
         defer r.deinit();
@@ -1092,34 +1081,31 @@ pub const Prefill = struct {
         defer for (xd) |a| {
             _ = mlx.mlx_array_free(a);
         };
-        // the fused finish (`Options.dfin`, small `.off`) where the call takes it: the down launch over the route's one
-        // table writes y
-        if (endOf(self.opts, call) != .served) return self.gemmDFin(s, r.tiles, null, xd[0], xd[1], r.order, scores, b, S, out_dtype);
         const zd = try self.gemmD(s, r, xd[0], xd[1], b, S);
         defer _ = mlx.mlx_array_free(zd);
         return self.finish(s, zd, inds, po[2], scores, b, rows, out_dtype);
     }
 
     /// The down GEMM with the finish as its epilogue (`Options.dfin`, `text_dfin`): y [S, hidden] in `out_dtype`, the
-    /// finish's y at top-1 (S slots, each its own row), in one launch over `ta`'s tiles and, past them, `tb`'s (with
-    /// `t128`: `ta` the 128-row tiles, `tb` the mixed table, each of whose tiles runs as a part-full tile on the same body;
-    /// null over `small = .off`'s one table), on the shared-decode body at `Options.dfinRows` rows. `order` is the route's
-    /// (sorted position -> slot), `scores` the call's.
-    pub fn gemmDFin(self: *Prefill, s: mlx.mlx_stream, ta: mlx.mlx_array, tb: ?mlx.mlx_array, xd: mlx.mlx_array, xsd: mlx.mlx_array, order: mlx.mlx_array, scores: mlx.mlx_array, b: Operands, S: u32, out_dtype: mlx.mlx_dtype) !mlx.mlx_array {
+    /// finish's y at top-1 (S slots, each its own row), in one launch over `ta`'s tiles (the 128-row tiles) and, past
+    /// them, `tb`'s (the mixed table, each of whose tiles runs as a part-full tile on the same body), on the 128-row
+    /// tiles' shared-decode body (bm 128; T2 1, as the text also takes one table, which no engine launches). `order` is
+    /// the route's (sorted position -> slot), `scores` the call's.
+    pub fn gemmDFin(self: *Prefill, s: mlx.mlx_stream, ta: mlx.mlx_array, tb: mlx.mlx_array, xd: mlx.mlx_array, xsd: mlx.mlx_array, order: mlx.mlx_array, scores: mlx.mlx_array, b: Operands, S: u32, out_dtype: mlx.mlx_dtype) !mlx.mlx_array {
         const k = self.dfin_k orelse return error.Exl3EngineNotImplemented;
         const g = self.geo;
         self.steps.dfin +%= 1;
         const na: u32 = @intCast(mlx.getShape(ta)[0]);
-        const nb: u32 = if (tb) |t| @intCast(mlx.getShape(t)[0]) else 0;
+        const nb: u32 = @intCast(mlx.getShape(tb)[0]);
         var p = self.*;
-        p.opts.bm = self.opts.dfinRows();
+        p.opts.bm = 128;
         p.opts.small = .off;
         var tg: [23]ks.TemplateArg = undefined;
         var l = p.gemmCfg(&tg, na + nb, g.inter, g.hidden, 1, self.opts.downStage(), self.opts.ncb);
         var tmpl: [26]ks.TemplateArg = undefined;
         @memcpy(tmpl[0..23], &tg);
         tmpl[23] = .{ .name = "DFR", .value = .{ .int = dfr } };
-        tmpl[24] = .{ .name = "T2", .value = .{ .int = @intFromBool(tb != null) } };
+        tmpl[24] = .{ .name = "T2", .value = .{ .int = 1 } };
         tmpl[25] = .{ .name = "OUT_T", .value = .{ .dtype = out_dtype } };
         l.template = &tmpl;
         const shape = [_]c_int{ @intCast(S), @intCast(g.hidden) };
@@ -1128,7 +1114,7 @@ pub const Prefill = struct {
         l.out_shapes = &shapes;
         l.out_dtypes = &dtypes;
         var y: [1]mlx.mlx_array = undefined;
-        try run(k, l, &.{ ta, tb orelse ta, xd, b.down_t, xsd, order, scores, b.down_svh }, &y, s);
+        try run(k, l, &.{ ta, tb, xd, b.down_t, xsd, order, scores, b.down_svh }, &y, s);
         return y[0];
     }
 
@@ -1799,12 +1785,12 @@ test "turboexl3 prefill variant texts: the fused down GEMM is gemm1_text with it
     try t.expect(dfin_in.len == 8 and dfin_out.len == 1);
 }
 
-test "turboexl3 prefill variant options: the fused finish needs whole 128-column blocks, one down launch over every row and its staging within 32 KB" {
+test "turboexl3 prefill variant options: the fused finish needs the 128-row tiles, whole 128-column blocks and its staging within 32 KB" {
     const t = std.testing;
     const served: Options = .{ .bm = 64, .small = .mixed, .dbuf = true, .unroll = true, .fragb = true, .intr = true, .defer_affine = true, .ncb = 4, .sintr = true, .froute = true, .alay = 2, .t128 = true };
-    try t.expect(served.valid() and served.dfinRows() == 128);
-    // the fused finish: over both tables with t128, over the one table with small .off, never over the mixed launch alone;
-    // its 32-row rounds (`dfr`) in the weight stage's buffers
+    try t.expect(served.valid());
+    // the fused finish: over both of the 128-row tiles' tables, never over the mixed launch alone nor small .off's one
+    // table; its 32-row rounds (`dfr`) in the weight stage's buffers
     var o = served;
     o.dfin = true;
     try t.expect(o.valid() and o.dfinBytes() == 16384);
@@ -1818,45 +1804,39 @@ test "turboexl3 prefill variant options: the fused finish needs whole 128-column
     try t.expect(!o.valid());
     o.small = .off;
     o.sintr = false;
-    try t.expect(o.valid() and o.dfinRows() == 64);
-    o.bm = 256;
-    try t.expect(o.valid() and o.dfinRows() == 256);
-    // 32-row rounds stage in the padded stage (18 KB double-buffered), and so do they in the 32 KB stage of 128-deep
-    // fragment-order stages
-    try t.expect((Options{ .small = .off, .dbuf = true, .ncb = 4, .dfin = true }).valid());
-    try t.expect((Options{ .small = .off, .dbuf = true, .fragb = true, .bk128 = true, .ncb = 4, .dfin = true }).valid());
+    try t.expect(!o.valid());
+    // (that engine without the fused finish is valid: the fused finish alone needs the 128-row tiles)
+    o.dfin = false;
+    try t.expect(o.valid());
+    // 32-row rounds stage in the 32 KB stage of 128-deep fragment-order stages too
+    o = served;
+    o.dfin = true;
+    o.bk128 = true;
+    try t.expect(o.valid() and o.dfinBytes() == 32768);
 }
 
-test "turboexl3 prefill variant metal sources: the fused down GEMM over two tables and one, as standalone translation units (TURBOEXL3_METAL_DUMP=1)" {
+test "turboexl3 prefill variant metal sources: the fused down GEMM over the two tables, as standalone translation units (TURBOEXL3_METAL_DUMP=1)" {
     const pin = comptime @import("test_support.zig").pins(@embedFile("kernels/test/dump/prefill_t128.metal"));
     const v1 = comptime @import("test_support.zig").pins(@embedFile("kernels/test/dump/prefill_v1.metal"));
     _ = std.c.getenv("TURBOEXL3_METAL_DUMP") orelse return error.SkipZigTest;
-    // the fused down GEMM: the 128-row tiles' two tables at bm 128 (64-row rounds), one table at bm 256 (32-row rounds),
-    // and the two tables with the first in the constant address space (MLX binds an input of fewer than 8 words there: a
-    // call whose 128-row table has one row)
-    printMetal("turboexl3_pf_dfin_t2", header_nax_dfin, pin[3] ++ pin[5] ++ v1[2], v1[1], text_dfin);
-    printMetal("turboexl3_pf_dfin_t1", header_nax_dfin, pin[3] ++ v1[0] ++ v1[3], v1[1], text_dfin);
-    printMetal("turboexl3_pf_dfin_t2c", header_nax_dfin, pin[3] ++ pin[5] ++ v1[2], v1[4], text_dfin);
+    // the fused down GEMM: the 128-row tiles' two tables at bm 128 (64-row rounds), and the same with the first in the
+    // constant address space (MLX binds an input of fewer than 8 words there: a call whose 128-row table has one row)
+    printMetal("turboexl3_pf_dfin_t2", header_nax_dfin, pin[3] ++ pin[5] ++ v1[1], v1[0], text_dfin);
+    printMetal("turboexl3_pf_dfin_t2c", header_nax_dfin, pin[3] ++ pin[5] ++ v1[1], v1[2], text_dfin);
 }
 
 test "turboexl3 prefill call: a call runs the fused finish only where its engine was built with it and the call keeps it; .{} is the engine's own ending, .{ .dfin = false } the served one" {
     const t = std.testing;
     const base: Options = .{ .bm = 64, .small = .mixed, .dbuf = true, .unroll = true, .fragb = true, .intr = true, .defer_affine = true, .ncb = 4, .sintr = true, .froute = true, .alay = 2, .t128 = true };
-    // the 128-row tiles' engine with the fused finish; small .off's over its one table
+    // the 128-row tiles' engine with the fused finish
     var fused = base;
     fused.dfin = true;
-    var one = fused;
-    one.t128 = false;
-    one.small = .off;
-    one.sintr = false;
-    one.bm = 256;
-    const engines = [_]Options{ base, fused, one };
+    const engines = [_]Options{ base, fused };
     for (engines) |o| try t.expect(o.valid());
     // the default call runs what its engine was built for
     try t.expect((Call{}).dfin);
     try t.expectEqual(End.served, endOf(base, .{}));
     try t.expectEqual(End.dfin, endOf(fused, .{}));
-    try t.expectEqual(End.dfin, endOf(one, .{}));
     // a call that declines the fused finish runs the served ending on every engine; one that keeps it changes nothing on
     // an engine built without it
     for (engines) |o| try t.expectEqual(End.served, endOf(o, .{ .dfin = false }));
