@@ -33,6 +33,11 @@ pub const Config = struct {
     /// `pf_t128`): each expert's remainder back to back, in arrays of `prefill.t128ZCap` rows where the caller names the
     /// call's experts (`root.moeClampedRowsFit`). The same bytes.
     pf_t128_zfit: bool = false,
+    /// The routed prefill's row-slot-sized arrays (prep's, both GEMMs' and mid's outputs, and y) allocated at the call's
+    /// row-slots rounded up to a multiple of `prefill.size_class_rows` (`prefill.Options.size_class`; with `pf_t128`,
+    /// without `pf_t128_zfit`): successive calls' buffers then match MLX's cache, which reuses a buffer only within two
+    /// pages of a request. The kernels run over the call's rows and nothing reads the padding. The same bytes.
+    pf_size_class: bool = false,
     /// Routed prefill rows on the fused GEMM chain; false refuses them (`error.Exl3EngineNotImplemented`).
     prefill: bool = true,
     /// The device passes MLX's NAX gate (an M5-class GPU and macOS 26.2 or later), the consumer's to say. False keeps

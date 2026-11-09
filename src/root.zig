@@ -674,6 +674,8 @@ pub fn linearPiecesFinish(s: mlx.mlx_stream, inners: []const mlx.mlx_array, p: P
 const pf_lock = Global(std.atomic.Value(u32), "root_pf_lock", std.atomic.Value(u32).init(0));
 const pf_cache = Global([prefill_cache_slots]?prefill.Prefill, "root_pf_cache", @splat(null));
 const pf_logged = Global(bool, "root_pf_logged", false);
+/// `Config.pf_size_class`'s engage line, once a process
+const pf_class_logged = Global(bool, "root_pf_class_logged", false);
 
 /// The served prefill variant: 64-row tiles (bm 64) with the register path for <= 32-row remainders in one launch (mixed),
 /// the double-buffered weight stage, unrolled MMA sub-steps, the stage in NAX fragment order and the integer-rate reader
@@ -693,6 +695,7 @@ fn pfOptions() prefill.Options {
     o.half_rows = config.get().pf_half_rows;
     o.t128_bk128 = config.get().pf_t128_bk128;
     o.t128_zfit = config.get().pf_t128_zfit;
+    o.size_class = config.get().pf_size_class;
     return o;
 }
 
@@ -729,10 +732,16 @@ fn prefillFor(geo: prefill.Geometry) !*prefill.Prefill {
     if (!o.t128 or o.stageBytes(128) > 32768) o.t128_bk128 = false;
     // the compact mixed outputs: the 128-row tiles' mixed launch
     if (!o.t128) o.t128_zfit = false;
+    // the size classes: the 128-row tiles' arrays at their sorted positions (not the compact mixed outputs)
+    if (!o.t128 or o.t128_zfit) o.size_class = false;
     pf_cache.get().*[i] = try prefill.Prefill.init(geo, o);
     if (!pf_logged.get().*) {
         pf_logged.get().* = true;
         std.debug.print("[turboexl3] prefill engaged: fused EXL3 GEMM chain (bm={d} dbuf={} unroll={} fragb={} intr={} sintr={} defer={} split={d} small={s} down_bk={d} down_ncb={d} froute={} aux={d} alay={d} t128={} t128_bk128={} t128_zfit={})\n", .{ o.bm, o.dbuf, o.unroll, o.fragb, o.intr, o.sintr, o.defer_affine, o.split, @tagName(o.small), o.downStage(), o.ncb, o.froute, o.aux, o.alay, o.t128, o.t128_bk128, o.t128_zfit });
+    }
+    if (o.size_class and !pf_class_logged.get().*) {
+        pf_class_logged.get().* = true;
+        std.debug.print("[turboexl3] prefill size classes engaged: a routed call's row-slot-sized arrays at multiples of {d} rows\n", .{prefill.size_class_rows});
     }
     return &pf_cache.get().*[i].?;
 }
@@ -1113,6 +1122,7 @@ pub const shared_state = .{
     pf_lock,
     pf_cache,
     pf_logged,
+    pf_class_logged,
     PfCapture.calls,
     clamp_logged,
     attn_io.shared_state,

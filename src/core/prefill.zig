@@ -347,6 +347,16 @@ pub fn t128ZCap(S: u32, call_experts: ?u32) u32 {
     return @max(1, @min(S, cu *| d));
 }
 
+/// `Options.size_class`'s step: a call's row-slot-sized arrays take whole multiples of this many rows. A general size
+/// policy, whatever the prompt: a call of n rows pads at most size_class_rows - 1 of them.
+pub const size_class_rows: u32 = 256;
+
+/// The rows `Options.size_class` allocates for an n-row array: n rounded up to a multiple of `size_class_rows` (n 0 stays
+/// 0).
+pub fn classRows(n: u32) u32 {
+    return (n + (size_class_rows - 1)) / size_class_rows * size_class_rows;
+}
+
 const table_in = [_][*:0]const u8{ "inds", "order" };
 const table_out = [_][*:0]const u8{"tiles"};
 const froute_in = [_][*:0]const u8{"inds"};
@@ -485,6 +495,13 @@ pub const Options = struct {
     /// expert's remainder back to back in [zcap, N] arrays instead of at its sorted positions in [S, N] ones. The same
     /// products and sums at other addresses: `moeT128`'s bytes. Needs `t128`
     t128_zfit: bool = false,
+    /// `moeT128With`'s row-slot-sized arrays (prep's xg, xu and sums, both GEMMs' outputs, mid's, and y) allocated at
+    /// `classRows` of the call's row-slots: successive calls then ask MLX for buffers of the same few sizes, which its
+    /// cache serves (it reuses a buffer only within two pages of a request). Every launch keeps the call's grid and route;
+    /// no kernel reads past the call's rows (the small arrays a kernel takes its row count from, the order, inv and the
+    /// tables, keep their sizes), and y comes back as its first rows' view: the same bytes. Needs `t128` without
+    /// `t128_zfit`
+    size_class: bool = false,
 
     pub const Small = enum { off, all, mixed };
 
@@ -511,6 +528,8 @@ pub const Options = struct {
         if (o.t128_bk128 and (!o.t128 or o.stageBytes(128) > 32768)) return false;
         // the compact mixed outputs: the 128-row tiles' mixed launch
         if (o.t128_zfit and !o.t128) return false;
+        // the size classes: the 128-row tiles' arrays at the sorted positions
+        if (o.size_class and (!o.t128 or o.t128_zfit)) return false;
         return (o.bm == 64 or o.bm == 128 or o.bm == 256) and (o.sgt == 1 or o.sgt == 2 or o.sgt == 4 or o.sgt == 8);
     }
 
@@ -838,6 +857,13 @@ pub const Prefill = struct {
     /// `prep`'s over x's rows gathered by `rmap` first. rmap null: `prep` itself. The vector layout (`Options.aux`) has no
     /// row-map text: error.Exl3EngineNotImplemented, nothing launched.
     pub fn prepWith(self: *Prefill, s: mlx.mlx_stream, x: mlx.mlx_array, inds: mlx.mlx_array, order: mlx.mlx_array, b: Operands, S: u32, rmap: ?mlx.mlx_array) ![5]mlx.mlx_array {
+        return self.prepCap(s, x, inds, order, b, S, rmap, S);
+    }
+
+    /// `prepWith` with xg, xu, xsg and xsu at `cap` rows (`Options.size_class`'s `classRows(S)`; S itself otherwise): the
+    /// same launch over S rows, rows S .. cap never written. inv keeps S rows (the vector layout's kernels count from its
+    /// shape; the strided ones never read it), and the vector layout keeps S everywhere.
+    fn prepCap(self: *Prefill, s: mlx.mlx_stream, x: mlx.mlx_array, inds: mlx.mlx_array, order: mlx.mlx_array, b: Operands, S: u32, rmap: ?mlx.mlx_array, cap: u32) ![5]mlx.mlx_array {
         const g = self.geo;
         const H: c_int = @intCast(g.hidden);
         const bpt = bptFor(g.hidden / 128);
@@ -856,9 +882,10 @@ pub const Prefill = struct {
             return po;
         }
         // the launch's arrays named here, so the one launch serves either kernel
-        const xs = [_]c_int{ @intCast(S), H };
+        const xs = [_]c_int{ @intCast(cap), H };
         const ivs = [_]c_int{@intCast(S)};
-        const shapes = [_][]const c_int{ &xs, &xs, &ivs, &sums, &sums };
+        const sums_c = [_]c_int{ @intCast(cap), @intCast(g.hidden / 128) };
+        const shapes = [_][]const c_int{ &xs, &xs, &ivs, &sums_c, &sums_c };
         const dtypes = [_]mlx.mlx_dtype{ .float16, .float16, .uint32, .float32, .float32 };
         const tmpl = [_]ks.TemplateArg{
             .{ .name = "HID", .value = .{ .int = H } },
@@ -1091,11 +1118,12 @@ pub const Prefill = struct {
     /// an output of its own launch: no data between the two, so no barrier between them, and MLX orders every reader after
     /// both. `ins_m` / `ins_t` are the launches' inputs. The mixed launch's K stages are `bks` deep, the 128-row tiles'
     /// `Options.t128Stage(bks)`.
-    fn t128Gemm(self: *Prefill, s: mlx.mlx_stream, rt: RouteT128, k_m: mlx.mlx_fast_metal_kernel, k_t: mlx.mlx_fast_metal_kernel, nops: u32, kd: u32, nd: u32, bks: u32, ncb: u32, ins_m: []const mlx.mlx_array, ins_t: []const mlx.mlx_array, S: u32) !ZT128 {
-        const shape = [_]c_int{ @intCast(S), @intCast(nd) };
+    fn t128Gemm(self: *Prefill, s: mlx.mlx_stream, rt: RouteT128, k_m: mlx.mlx_fast_metal_kernel, k_t: mlx.mlx_fast_metal_kernel, nops: u32, kd: u32, nd: u32, bks: u32, ncb: u32, ins_m: []const mlx.mlx_array, ins_t: []const mlx.mlx_array, cap: u32) !ZT128 {
+        // `cap` rows: the call's S, or `Options.size_class`'s classRows(S) (the launches write rows below S only)
+        const shape = [_]c_int{ @intCast(cap), @intCast(nd) };
         const shapes = [_][]const c_int{ &shape, &shape };
-        // the mixed launch's: zcap rows (t128_zfit's compact outputs; S otherwise)
-        const shape_m = [_]c_int{ @intCast(if (rt.zmb.ctx != null) rt.zcap else S), @intCast(nd) };
+        // the mixed launch's: zcap rows (t128_zfit's compact outputs; cap otherwise)
+        const shape_m = [_]c_int{ @intCast(if (rt.zmb.ctx != null) rt.zcap else cap), @intCast(nd) };
         const shapes_m = [_][]const c_int{ &shape_m, &shape_m };
         const dtypes = [_]mlx.mlx_dtype{ .float16, .float16 };
         var x: ZT128 = .{ .m = undefined, .t = undefined, .n = @intCast(nops), .zmb = rt.zmb };
@@ -1118,20 +1146,30 @@ pub const Prefill = struct {
     /// The gate and up inner products, half [S, inter] each (sorted order, `ZT128`): `gemmGU`'s per-output MMAs from the
     /// 128-row tiles and the mixed tiles.
     pub fn gemmGUT128(self: *Prefill, s: mlx.mlx_stream, rt: RouteT128, xg: mlx.mlx_array, xu: mlx.mlx_array, xsg: mlx.mlx_array, xsu: mlx.mlx_array, b: Operands, S: u32) !ZT128 {
+        return self.gemmGUT128Cap(s, rt, xg, xu, xsg, xsu, b, S);
+    }
+
+    /// `gemmGUT128` with its outputs at `cap` rows (`prepCap`'s)
+    fn gemmGUT128Cap(self: *Prefill, s: mlx.mlx_stream, rt: RouteT128, xg: mlx.mlx_array, xu: mlx.mlx_array, xsg: mlx.mlx_array, xsu: mlx.mlx_array, b: Operands, cap: u32) !ZT128 {
         const k = self.t128_k orelse return error.Exl3EngineNotImplemented;
         const g = self.geo;
-        return self.t128Gemm(s, rt, if (k.z) |z| z.gu_mixed else k.gu_mixed, k.gu_t128, 2, g.hidden, g.inter, BK, 1, &.{ rt.tiles, xg, xu, b.gate_t, b.up_t, xsg, xsu }, &.{ rt.tiles128, xg, xu, b.gate_t, b.up_t, xsg, xsu }, S);
+        return self.t128Gemm(s, rt, if (k.z) |z| z.gu_mixed else k.gu_mixed, k.gu_t128, 2, g.hidden, g.inter, BK, 1, &.{ rt.tiles, xg, xu, b.gate_t, b.up_t, xsg, xsu }, &.{ rt.tiles128, xg, xu, b.gate_t, b.up_t, xsg, xsu }, cap);
     }
 
     /// `mid`'s strided launch with `text_mid_t128` (each position's rows from the launch that computed them)
     pub fn midT128(self: *Prefill, s: mlx.mlx_stream, zt: ZT128, rt: RouteT128, inds: mlx.mlx_array, b: Operands, S: u32) ![2]mlx.mlx_array {
+        return self.midT128Cap(s, zt, rt, inds, b, S, S);
+    }
+
+    /// `midT128` with xd and xsd at `cap` rows (`prepCap`'s): the same launch over S positions
+    fn midT128Cap(self: *Prefill, s: mlx.mlx_stream, zt: ZT128, rt: RouteT128, inds: mlx.mlx_array, b: Operands, S: u32, cap: u32) ![2]mlx.mlx_array {
         const k = self.t128_k orelse return error.Exl3EngineNotImplemented;
         const g = self.geo;
         const I: c_int = @intCast(g.inter);
         const bpt = bptFor(g.inter / 128);
         var xd: [2]mlx.mlx_array = undefined;
         var tm: [4]ks.TemplateArg = undefined;
-        try run(if (k.z) |z| z.mid else k.mid, .{ .grid = .{ (g.inter / 128 / bpt) * 32 * bpt, S, 1 }, .threadgroup = .{ 32 * bpt, 1, 1 }, .out_shapes = &.{ &[_]c_int{ @intCast(S), I }, &[_]c_int{ @intCast(S), @intCast(g.inter / 128) } }, .out_dtypes = &.{ .float16, .float32 }, .template = self.midTempl(&tm, .{
+        try run(if (k.z) |z| z.mid else k.mid, .{ .grid = .{ (g.inter / 128 / bpt) * 32 * bpt, S, 1 }, .threadgroup = .{ 32 * bpt, 1, 1 }, .out_shapes = &.{ &[_]c_int{ @intCast(cap), I }, &[_]c_int{ @intCast(cap), @intCast(g.inter / 128) } }, .out_dtypes = &.{ .float16, .float32 }, .template = self.midTempl(&tm, .{
             .{ .name = "INTER", .value = .{ .int = I } },
             .{ .name = "BPT", .value = .{ .int = @intCast(bpt) } },
             .{ .name = "ALAY", .value = .{ .int = self.opts.alay } },
@@ -1141,19 +1179,30 @@ pub const Prefill = struct {
 
     /// The down inner product, half [S, hidden] (sorted order, `ZT128` with one op), as `gemmGUT128`
     pub fn gemmDT128(self: *Prefill, s: mlx.mlx_stream, rt: RouteT128, xd: mlx.mlx_array, xsd: mlx.mlx_array, b: Operands, S: u32) !ZT128 {
+        return self.gemmDT128Cap(s, rt, xd, xsd, b, S);
+    }
+
+    /// `gemmDT128` with its outputs at `cap` rows (`prepCap`'s)
+    fn gemmDT128Cap(self: *Prefill, s: mlx.mlx_stream, rt: RouteT128, xd: mlx.mlx_array, xsd: mlx.mlx_array, b: Operands, cap: u32) !ZT128 {
         const k = self.t128_k orelse return error.Exl3EngineNotImplemented;
         const g = self.geo;
-        return self.t128Gemm(s, rt, if (k.z) |z| z.dn_mixed else k.dn_mixed, k.dn_t128, 1, g.inter, g.hidden, self.opts.downStage(), self.opts.ncb, &.{ rt.tiles, xd, b.down_t, xsd }, &.{ rt.tiles128, xd, b.down_t, xsd }, S);
+        return self.t128Gemm(s, rt, if (k.z) |z| z.dn_mixed else k.dn_mixed, k.dn_t128, 1, g.inter, g.hidden, self.opts.downStage(), self.opts.ncb, &.{ rt.tiles, xd, b.down_t, xsd }, &.{ rt.tiles128, xd, b.down_t, xsd }, cap);
     }
 
     /// `finish`'s strided launch with `text_finish_t128` (each slot's row from the launch that computed it)
     pub fn finishT128(self: *Prefill, s: mlx.mlx_stream, zt: ZT128, xbase: mlx.mlx_array, inds: mlx.mlx_array, inv: mlx.mlx_array, scores: mlx.mlx_array, b: Operands, rows: usize, out_dtype: mlx.mlx_dtype) !mlx.mlx_array {
+        return self.finishT128Cap(s, zt, xbase, inds, inv, scores, b, rows, rows, out_dtype);
+    }
+
+    /// `finishT128` with y at `cap` rows (`Options.size_class`'s classRows(rows); rows itself otherwise): the same launch
+    /// over its rows, rows .. cap never written (`moeT128With` hands back the first rows' view)
+    fn finishT128Cap(self: *Prefill, s: mlx.mlx_stream, zt: ZT128, xbase: mlx.mlx_array, inds: mlx.mlx_array, inv: mlx.mlx_array, scores: mlx.mlx_array, b: Operands, rows: usize, cap: usize, out_dtype: mlx.mlx_dtype) !mlx.mlx_array {
         const k = self.t128_k orelse return error.Exl3EngineNotImplemented;
         const g = self.geo;
         const H: c_int = @intCast(g.hidden);
         const bpt = bptFor(g.hidden / 128);
         var y: [1]mlx.mlx_array = undefined;
-        try run(if (k.z) |z| z.fin else k.fin, .{ .grid = .{ (g.hidden / 128 / bpt) * 32 * bpt, @intCast(rows), 1 }, .threadgroup = .{ 32 * bpt, 1, 1 }, .out_shapes = &.{&[_]c_int{ @intCast(rows), H }}, .out_dtypes = &.{out_dtype}, .template = &.{
+        try run(if (k.z) |z| z.fin else k.fin, .{ .grid = .{ (g.hidden / 128 / bpt) * 32 * bpt, @intCast(rows), 1 }, .threadgroup = .{ 32 * bpt, 1, 1 }, .out_shapes = &.{&[_]c_int{ @intCast(cap), H }}, .out_dtypes = &.{out_dtype}, .template = &.{
             .{ .name = "HID", .value = .{ .int = H } },
             .{ .name = "TOPK", .value = .{ .int = @intCast(g.topk) } },
             .{ .name = "BPT", .value = .{ .int = @intCast(bpt) } },
@@ -1177,19 +1226,28 @@ pub const Prefill = struct {
         var rt = try self.routeT128(s, inds, S);
         defer rt.deinit();
         rt.zcap = t128ZCap(S, call_experts);
-        const po = try self.prepWith(s, x, inds, rt.order, b, S, rmap);
+        // `Options.size_class`: the row-slot-sized arrays at the class's rows, y back as its first rows
+        const cap: u32 = if (self.opts.size_class) classRows(S) else S;
+        const rows_cap: usize = if (self.opts.size_class) classRows(@intCast(rows)) else rows;
+        const po = try self.prepCap(s, x, inds, rt.order, b, S, rmap, cap);
         defer for (po) |a| {
             _ = mlx.mlx_array_free(a);
         };
-        const zgu = try self.gemmGUT128(s, rt, po[0], po[1], po[3], po[4], b, S);
+        const zgu = try self.gemmGUT128Cap(s, rt, po[0], po[1], po[3], po[4], b, cap);
         defer zgu.deinit();
-        const xd = try self.midT128(s, zgu, rt, inds, b, S);
+        const xd = try self.midT128Cap(s, zgu, rt, inds, b, S, cap);
         defer for (xd) |a| {
             _ = mlx.mlx_array_free(a);
         };
-        const zd = try self.gemmDT128(s, rt, xd[0], xd[1], b, S);
+        const zd = try self.gemmDT128Cap(s, rt, xd[0], xd[1], b, cap);
         defer zd.deinit();
-        return self.finishT128(s, zd, rt.xbase, inds, po[2], scores, b, rows, out_dtype);
+        const y = try self.finishT128Cap(s, zd, rt.xbase, inds, po[2], scores, b, rows, rows_cap, out_dtype);
+        if (rows_cap == rows) return y;
+        defer _ = mlx.mlx_array_free(y);
+        var v = mlx.mlx_array_new();
+        errdefer _ = mlx.mlx_array_free(v);
+        try mlx.check(mlx.mlx_slice(&v, y, &[_]c_int{ 0, 0 }, 2, &[_]c_int{ @intCast(rows), @intCast(self.geo.hidden) }, 2, &[_]c_int{ 1, 1 }, 2, s));
+        return v;
     }
 };
 
