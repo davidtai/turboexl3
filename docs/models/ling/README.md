@@ -100,6 +100,10 @@ opt-in and each launch 2's words (the output and the partials, word for word, `m
 in one threadgroup (`Config.mla_latent_rows` 2 or 4: a key group's latents read once for its rows), the cache's words
 staged in f32 in threadgroup memory (`mla_latent_stage`), and more tiles a simdgroup (`mla_latent_block`: 2 × 2 score
 tiles over 4 sub-chunks, 4 × 4 output tiles). A product or sum in another order is not a variant: it would change the
-words.
+words. One opt-in does change them: launch 2 on the matrix units (`Config.mla_latent_nax`, `turboexl3_ling_mla_attn_nax`):
+the query rounded to the cache's dtype, the scores and the weighted sums on MLX steel's NAX tiles into f32, the partials
+launch 3 merges unchanged. It is held to a bound of the f64 reference (`mla_latent_test.zig` `naxBound`), not to launch
+2's words, so a host serves it only where the words move no output: the outside plugin, for the MTP head's drafts, which
+its exact verify checks.
 
 No speed verdict comes from this repository: the standard test through the outside plugin decides.

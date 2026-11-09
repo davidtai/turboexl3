@@ -901,7 +901,7 @@ words staged in threadgroup memory, more tiles a simdgroup.
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/ling/mla_latent.zig:130` (`fn kernelOf`) |
+| made at | `src/models/ling/mla_latent.zig:159` (`fn kernelOf`) |
 | inputs | `ql`, `qr`, `lat`, `rot`, `scale`, `dims` |
 | outputs | `pm`, `pl`, `po` |
 | source | `text_attn` = `ling:mla_latent/attn_1` ++ `ling:mla_latent/attn_2` ++ `ling:mla_latent/attn_3` ++ `ling:mla_latent/attn_4` (8673 B, `7d50732448a0`) |
@@ -941,7 +941,7 @@ words staged in threadgroup memory, more tiles a simdgroup.
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/ling/mla_latent.zig:129` (`fn kernelOf`) |
+| made at | `src/models/ling/mla_latent.zig:158` (`fn kernelOf`) |
 | inputs | `qn`, `w` |
 | outputs | `ql` |
 | source | `text_qabs` = `ling:mla_latent/qabs` (1347 B, `184aa655ae1b`) |
@@ -970,7 +970,7 @@ words staged in threadgroup memory, more tiles a simdgroup.
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/ling/mla_latent.zig:131` (`fn kernelOf`) |
+| made at | `src/models/ling/mla_latent.zig:160` (`fn kernelOf`) |
 | inputs | `pm`, `pl`, `po`, `w`, `dims` |
 | outputs | `out` |
 | source | `text_vabs` = `ling:mla_latent/vabs` (2335 B, `d1d2a8e2e320`) |
@@ -999,7 +999,7 @@ words staged in threadgroup memory, more tiles a simdgroup.
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/ling/mla_latent.zig:154` (`fn variantKernel`) |
+| made at | `src/models/ling/mla_latent.zig:215` (`fn variantKernel`) |
 | inputs | `ql`, `qr`, `lat`, `rot`, `scale`, `dims` |
 | outputs | `pm`, `pl`, `po` |
 | source | `text_attn_rows` = `ling:mla_latent/rows_1` ++ `ling:mla_latent/attn_2` ++ `ling:mla_latent/rows_2` (11270 B, `83520e3440c5`) |
@@ -1034,7 +1034,7 @@ words staged in threadgroup memory, more tiles a simdgroup.
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/ling/mla_latent.zig:155` (`fn variantKernel`) |
+| made at | `src/models/ling/mla_latent.zig:216` (`fn variantKernel`) |
 | inputs | `ql`, `qr`, `lat`, `rot`, `scale`, `dims` |
 | outputs | `pm`, `pl`, `po` |
 | source | `text_attn_stage` = `ling:mla_latent/stage_1` ++ `ling:mla_latent/attn_2` ++ `ling:mla_latent/stage_2` ++ `ling:mla_latent/attn_4` (9347 B, `8bed636fe06a`) |
@@ -1064,7 +1064,7 @@ words staged in threadgroup memory, more tiles a simdgroup.
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/ling/mla_latent.zig:156` (`fn variantKernel`) |
+| made at | `src/models/ling/mla_latent.zig:217` (`fn variantKernel`) |
 | inputs | `ql`, `qr`, `lat`, `rot`, `scale`, `dims` |
 | outputs | `pm`, `pl`, `po` |
 | source | `text_attn_block` = `ling:mla_latent/block_1` ++ `ling:mla_latent/attn_2` ++ `ling:mla_latent/block_2` (12459 B, `5e9316b29042`) |
@@ -1089,6 +1089,46 @@ words staged in threadgroup memory, more tiles a simdgroup.
   update and no product. The softmax update is launch 2's piece (`attn_2`).
 - **Pinned by:** as `turboexl3_ling_mla_attn_rows` (the tiles' operand, score and rescale statements from the pin file; the
   GPU test's block lines).
+
+### `turboexl3_ling_mla_attn_nax`
+
+<!-- kernel-facts: turboexl3_ling_mla_attn_nax -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/ling/mla_latent.zig:218` (`fn variantKernel`) |
+| inputs | `qlb`, `qrb`, `lat`, `rot`, `scale`, `dims` |
+| outputs | `pm`, `pl`, `po` |
+| source | `text_attn_nax` = `ling:mla_latent/nax` ++ `ling:mla_latent/nax_close` (10326 B, `973fcfb5fb1c`) |
+| header | `header_nax` = `steel_nax` ++ `ling:mla_latent/nax_head` (32072 B, `59af53abaaa3`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** Ling-3.1-flash: `ling.mlaLatentDecode`, launch 2 of 3 under `Config.mla_latent_nax` (`mla_latent.Attn`
+  `nax_served`, ahead of `mla_latent_stage`) at every call whose cache is bf16 or f16, behind the plugin's candidate switch
+  `MLX_SERVE_LING_MLA_LATENT_NAX`. The plugin serves it to the MTP head alone, whose words move the drafts and never the
+  verified text. Not served by default.
+- **Shapes and dtypes:** launch 2's outputs (`pm`, `pl` f32 [S·H·NJ], `po` f32 [S·H·NJ, DL]); `qlb` [S, H, DL] and `qrb`
+  [1, H, S, DR] contiguous in the cache's dtype (launch 1's f32 `ql` and the rope half cast once on the host); `lat`,
+  `rot` bf16 or f16 views read through their strides (a key's dims as one run where both views hold them contiguous, else
+  word by word). Refused (`mla_latent.naxTakes`): an f32 cache, heads not a multiple of 16·MT.
+- **Grid and threadgroup:** `(128·MT, NJ, S·H/(16·MT))` / `(128·MT, 1, 1)`: a threadgroup for each (key group of 256,
+  16·MT heads of a row), 4 simdgroups an M tile of 16 heads, each simdgroup 128 of the latent's 512 columns. With SD 1,
+  4·16·(BKN + 4) floats an M tile of threadgroup memory for the partial score tiles (9 to 18 KiB), 2 barriers a step.
+- **Template args:** H, S, DL, DR, KPT (launch 2's); MT (M tiles: 1, 2, 4), BKN (keys a step: 32, 64), SD (0: each
+  simdgroup scores the 36 dim slices; 1: 9 each, the M tile's partials summed in simdgroup order), CT (the cache's dtype,
+  the matrix units' operand type).
+- **Replaces:** `turboexl3_ling_mla_attn_stage` (or launch 2) at those calls: the scores and the weighted sums on f32
+  simdgroup matrices at 8 × 8 × 8 (about 1.35 TFLOPS at the head's calls, A1) become MLX steel's NAX tiles at
+  16 × 32 × 16 into f32.
+- **Bits:** not launch 2's words: the query rounds to the cache's dtype and the products sum in the matrix units' order.
+  Held to a bound of the host's f64 absorbed attention (`mla_latent_test.zig` `naxBound`: the RMS error within 2^-8 of the
+  reference's RMS at Ling's scale, the worst element within 4 times that, beyond the output's bf16 store). The partials
+  keep launch 2's key groups from position 0 and its online softmax in natural units, so launch 3 merges them unchanged
+  and a row's values depend on its own operands and position only.
+- **Pinned by:** the CPU test's pin file (`kernels/test/pins/mla_latent_nax.metal`: the bound, the step's keys, the mask,
+  the split's sum, the partials, the header's row op, finite minimum and attribute); the GPU test's
+  `TURBOEXL3_LING_MLA_LATENT_NAX` lines (every shape within the bound, the strided caches, the red checks, the fallbacks).
 
 ## `src/models/ling/mla_flash.zig`
 
