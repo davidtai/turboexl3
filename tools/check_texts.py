@@ -1430,6 +1430,12 @@ CHANGED[('root.zig', 'fn prefillFor')] += '; size_class off without the 128-row 
 CHANGED[('root.zig', 'const shared_state')] += ', and pf_class_logged'
 ADDED[('root.zig', 'const pf_class_logged')] = 'the size classes\' engage line, once a process'
 
+# The routed prefill chain in the plugin's prompt calls (glm53f/chain_time_test.zig): the tile-aligned cut (the plugin's
+# TURBOEXL3_GLM53F_PF_ALIGN) and the chain's timing arms (TURBOEXL3_GLM_TIME)
+ADDED_FILES['chain_time_test.zig'] = ('the tile-aligned cut\'s rule (CPU) and its calls against fixed 4096-row calls byte for byte '
+                                      '(GPU); the control chain over 455-row runs and a lognormal routing at both cuts, its '
+                                      'stages cumulatively and the GEMM probes (TURBOEXL3_GLM_TIME)')
+
 
 def metal_strings(fn, toks, corpus):
     """(line, kind, value) of every literal in a .zig file that holds Metal"""

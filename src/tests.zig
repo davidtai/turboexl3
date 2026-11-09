@@ -53,6 +53,7 @@ comptime {
     _ = @import("models/glm53f/pair_ks.zig");
     _ = @import("models/glm53f/pair_ks_test.zig");
     _ = @import("models/glm53f/size_class_test.zig");
+    _ = @import("models/glm53f/chain_time_test.zig");
 }
 
 
