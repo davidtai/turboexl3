@@ -1873,9 +1873,9 @@ SPLIT_ADDED_KERNELS['turboexl3_ling_moe_tail_wide'] = ('the MoE tail at prompt w
 SPLIT_ADDED_KERNELS['turboexl3_ling_moe_tail_wide_h'] = ('turboexl3_ling_moe_tail_wide over f16 sources (PF_F16_PAIRS): '
                                                           'tail_delta_wide_h, the source pointer half and the combine\'s '
                                                           'pick_h, the same statements')
-SPLIT_ADDED_KERNELS['turboexl3_test_ling_moe_tail_wide_sumsq_rev_fault'] = ('test only: turboexl3_ling_moe_tail_wide_h '
-                                                                             'with the sum of squares reversed '
-                                                                             '(fault/tail_2_sumsq_rev), a red check')
+SPLIT_ADDED_KERNELS['turboexl3_test_ling_moe_tail_wide_tgsum_rev_fault'] = ('test only: turboexl3_ling_moe_tail_wide_h '
+                                                                             'with the threadgroup sum reversed '
+                                                                             '(fault/tail_2_tgsum_rev), a red check')
 ADDED_FILES['models/ling/mla_rows_test.zig'] = ('mlaRows held to the served launches word for word (the one-row matmul, the '
                                                 'plugin\'s denseRows) at kv_b and the head gate, rows 1 to 16 and caps 1 to 8, '
                                                 'with red checks (GPU); the fault texts (CPU); servedCall and loaderWeight for '

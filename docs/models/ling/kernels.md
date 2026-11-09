@@ -1686,16 +1686,16 @@ its word comparison catches a change of a sum's order alone. Each runs on rows b
 - **Pinned by:** `src/models/ling/mla_rows_test.zig` "turboexl3 gpu ling mla rows: ..." (GPU:
   `TURBOEXL3_LING_MLA_ROWS_RED` fault=group_order_reversed, which must differ from the served words).
 
-### `turboexl3_test_ling_moe_tail_wide_sumsq_rev_fault`
+### `turboexl3_test_ling_moe_tail_wide_tgsum_rev_fault`
 
-<!-- kernel-facts: turboexl3_test_ling_moe_tail_wide_sumsq_rev_fault -->
+<!-- kernel-facts: turboexl3_test_ling_moe_tail_wide_tgsum_rev_fault -->
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/ling/tail_test.zig:697` (`test turboexl3 gpu ling tail wide: moeTailWide gives the served chain's words at prompt widths (the combine over the call's JOINLESS parts, the block's astype and shared add, MLX's add and fast rms_norm) at the standard request's spans 4096 x 4, 1965 and 31 over 24 merged sources, f16 and f32; a planted reordering of the norm shows, and its refusals (TURBOEXL3_GPU=1)`) |
+| made at | `src/models/ling/tail_test.zig:713` (`test turboexl3 gpu ling tail wide: moeTailWide gives the served chain's words at prompt widths (the combine over the call's JOINLESS parts, the block's astype and shared add, MLX's add and fast rms_norm) at the standard request's spans 4096 x 4, 1965 and 31 over 24 merged sources, f16 and f32; a planted reordering of the norm shows, and its refusals (TURBOEXL3_GPU=1)`) |
 | inputs | `H`, `s0`, `s1`, `s2`, `s3`, `s4`, `s5`, `s6`, `s7`, `s8`, `s9`, `s10`, `s11`, `s12`, `s13`, `s14`, `s15`, `s16`, `s17`, `s18`, `s19`, `s20`, `s21`, `s22`, `s23`, `loc`, `WT`, `XS`, `WE` |
 | outputs | `H_NEW`, `HN` |
-| source | `text_wide_sumsq_rev` = `ling:tail/tail_we` ++ `ling:tail/tail_1` ++ `ling:tail/tail_delta_wide_h` ++ `ling:test/fault/tail_2_sumsq_rev` (3226 B, `f241975d9cc6`) |
+| source | `text_wide_tgsum_rev` = `ling:tail/tail_we` ++ `ling:tail/tail_1` ++ `ling:tail/tail_delta_wide_h` ++ `ling:test/fault/tail_2_tgsum_rev` (3297 B, `2c3777a337b8`) |
 | header | `tail.header_wide_h` = `ling:combine/pick_h` (1444 B, `cbbf84fad66f`) |
 
 <!-- /kernel-facts -->
@@ -1704,10 +1704,12 @@ its word comparison catches a change of a sum's order alone. Each runs on rows b
 - **Shapes and dtypes:** `turboexl3_ling_moe_tail_wide_h`'s.
 - **Grid and threadgroup:** `turboexl3_ling_moe_tail_wide_h`'s.
 - **Template args:** `turboexl3_ling_moe_tail_wide_h`'s.
-- **Replaces:** nothing: a planted fault, `turboexl3_ling_moe_tail_wide_h` with each thread's four squares summed in
-  reverse column order after the loop (`ling:test/fault/tail_2_sumsq_rev` in `tail_2`'s place): the same sum of
-  squares in another order.
-- **Bits:** wrong on purpose: the residual keeps the chain's words, the normed rows must not (a reordered sum of
-  squares moves some rows' rsqrt).
+- **Replaces:** nothing: a planted fault, `turboexl3_ling_moe_tail_wide_h` with the threadgroup's 32 simdgroup sums
+  added one by one in reverse simdgroup order in place of the simd sum over them (`ling:test/fault/tail_2_tgsum_rev` in
+  `tail_2`'s place): the same sum of squares in another order.
+- **Bits:** wrong on purpose: the residual keeps the chain's words, the normed rows must not (the reordered sum moves
+  some rows' rsqrt by an ulp, which turns about one bf16 word in 65,536 of those rows, so the check runs the whole
+  call's 18,380 rows). A thread's own four squares in reverse order are no such fault: four squares of bf16 words round
+  at most once in practice, and that reversal changed none of 16,777,216 normed words.
 - **Pinned by:** `src/models/ling/tail_test.zig` "turboexl3 gpu ling tail wide: ..." (GPU: `TURBOEXL3_LING_PF_TAIL_RED`
-  fault=sumsq_rev, whose normed rows must differ from the chain's and whose residual must not).
+  fault=tgsum_rev, whose normed rows must differ from the chain's and whose residual must not).

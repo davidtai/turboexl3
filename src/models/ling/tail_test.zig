@@ -447,7 +447,10 @@ test "turboexl3 gpu ling tail parts: moeTailParts reads each pair's row in place
 // to f32; the routes' weights bf16 values read in f32; the served chain is the combine over the parts
 // (`combine.combineParts`), its astype to bf16, the span's slice, the block's add of the shared expert, MLX's add of
 // the residual and MLX's fast rms_norm (TURBOEXL3_LING_PF_TAIL). Red checks (TURBOEXL3_LING_PF_TAIL_RED): a planted
-// reordering of the norm's sum of squares must show in the normed rows, and the refusals.
+// reordering of the norm's threadgroup sum (its 32 simdgroup sums added one by one in reverse) must show in the normed
+// rows of the whole call, and the refusals. A thread's own four squares are no such check: four squares of bf16 words
+// (16-bit significands) round at most once in practice, so their order gives the same partial sum and the same words
+// (a reversal planted there changed none of 16,777,216 normed words on the box).
 
 const tail = @import("tail.zig");
 const combine = @import("combine.zig");
@@ -458,12 +461,22 @@ const decode = @import("../../core/decode.zig");
 
 /// The statements the wide texts' checks pin (kernels/test/pins/tail_wide.metal): 0 the f32 source pointer, 1 the f16
 /// one, 2 the combine's pick call, 3 its f16 pick's, 4 the decode parts delta's pick, 5 the wide delta's pick, 6 the
-/// delta's block pragma, 7 W from WE, 8 eps from WE, 9 the fold's first statement, 10 the norm's simd sum, 11 the
-/// fault's reversed sum of squares, 12 the add_norm's sum of squares
+/// delta's block pragma, 7 W from WE, 8 eps from WE, 9 the fold's first statement, 10 the norm's threadgroup sum (the
+/// simd sum over the simdgroups' sums), 11 the fault's reversed threadgroup sum, 12 the norm's rsqrt, 13 the fault's
+/// first statement
 const wide_pin = support.pins(@embedFile("kernels/test/pins/tail_wide.metal"));
-/// The planted fault (kernels/test/fault/): tail_2 with the thread's squares summed in reverse column order
-const fault_sumsq_rev = @embedFile("kernels/test/fault/tail_2_sumsq_rev.metal");
-const text_wide_sumsq_rev: [:0]const u8 = tail.tail_we ++ tail.tail_1 ++ tail.tail_delta_wide_h ++ fault_sumsq_rev;
+/// The planted fault (kernels/test/fault/): tail_2 with the threadgroup's simdgroup sums added one by one in reverse
+const fault_tgsum_rev = @embedFile("kernels/test/fault/tail_2_tgsum_rev.metal");
+const text_wide_tgsum_rev: [:0]const u8 = tail.tail_we ++ tail.tail_1 ++ tail.tail_delta_wide_h ++ fault_tgsum_rev;
+
+/// `s` up to its first `needle`
+fn upTo(comptime s: []const u8, comptime needle: []const u8) []const u8 {
+    comptime {
+        @setEvalBranchQuota(10_000_000);
+        const j = std.mem.indexOf(u8, s, needle) orelse @compileError("needle not in the text");
+        return s[0..j];
+    }
+}
 
 /// `s` with every `needle` replaced by `with`, at comptime (the checks compare pieces swapped this way; no kernel is
 /// built from it)
@@ -493,7 +506,7 @@ fn holds(hay: []const u8, needle: []const u8) bool {
     return std.mem.indexOf(u8, hay, needle) != null;
 }
 
-test "turboexl3 ling tail wide texts: the prompt-width launch is the parts launch's composition with W and eps read from WE and the combine's 24-source pick; the f16 text is the f32 one with the source pointer half and pick_h; the headers are the combine's picks with no file-scope pragma; the fault swaps tail_2's sum of squares alone" {
+test "turboexl3 ling tail wide texts: the prompt-width launch is the parts launch's composition with W and eps read from WE and the combine's 24-source pick; the f16 text is the f32 one with the source pointer half and pick_h; the headers are the combine's picks with no file-scope pragma; the fault swaps tail_2's threadgroup sum alone" {
     try testing.expect(std.mem.eql(u8, tail.text_wide, tail.tail_we ++ tail.tail_1 ++ tail.tail_delta_wide ++ tail.tail_2));
     try testing.expect(std.mem.eql(u8, tail.text_wide_h, tail.tail_we ++ tail.tail_1 ++ tail.tail_delta_wide_h ++ tail.tail_2));
     try testing.expectEqualStrings(combine.pick, tail.header_wide);
@@ -516,12 +529,14 @@ test "turboexl3 ling tail wide texts: the prompt-width launch is the parts launc
         for (tail.out_names) |n| try testing.expect(holds(txt, std.mem.span(n)));
         for ([_][]const u8{ "_shape", "_strides", "_ndim" }) |suf| try testing.expect(!holds(txt, suf));
     }
-    // the fault: tail_2 with its in-loop sum of squares moved after the loop in reverse column order; from the simd sum
-    // on (the threadgroup sums, rsqrt, the stores) it is tail_2's
-    try testing.expect(!std.mem.eql(u8, fault_sumsq_rev, tail.tail_2));
-    try testing.expect(holds(tail.tail_2, wide_pin[12]) and !holds(fault_sumsq_rev, wide_pin[12]) and holds(fault_sumsq_rev, wide_pin[11]));
-    try testing.expectEqualStrings(comptime fromFirst(tail.tail_2, wide_pin[10]), comptime fromFirst(fault_sumsq_rev, wide_pin[10]));
-    try testing.expect(std.mem.endsWith(u8, text_wide_sumsq_rev, fault_sumsq_rev) and std.mem.startsWith(u8, text_wide_sumsq_rev, tail.tail_we ++ tail.tail_1 ++ tail.tail_delta_wide_h));
+    // the fault: tail_2 with the simd sum over the simdgroups' sums swapped for their sum one by one in reverse; up to
+    // it (the squares, the simd sums, local_sums) and from rsqrt on (the stores) it is tail_2's
+    try testing.expect(!std.mem.eql(u8, fault_tgsum_rev, tail.tail_2));
+    try testing.expect(holds(tail.tail_2, wide_pin[10]) and !holds(fault_tgsum_rev, wide_pin[10]) and holds(fault_tgsum_rev, wide_pin[11]));
+    try testing.expect(!holds(tail.tail_2, wide_pin[11]) and !holds(tail.tail_2, wide_pin[13]));
+    try testing.expectEqualStrings(comptime upTo(tail.tail_2, wide_pin[10]), comptime upTo(fault_tgsum_rev, wide_pin[13]));
+    try testing.expectEqualStrings(comptime fromFirst(tail.tail_2, wide_pin[12]), comptime fromFirst(fault_tgsum_rev, wide_pin[12]));
+    try testing.expect(std.mem.endsWith(u8, text_wide_tgsum_rev, fault_tgsum_rev) and std.mem.startsWith(u8, text_wide_tgsum_rev, tail.tail_we ++ tail.tail_1 ++ tail.tail_delta_wide_h));
 }
 
 test "turboexl3 ling tail wide takes: any row count from 1, K 1 to 8, a width a multiple of 4 up to 4096, bf16 or f16" {
@@ -689,29 +704,27 @@ test "turboexl3 gpu ling tail wide: moeTailWide gives the served chain's words a
         }
         at += S;
     }
-    // red check 1: the planted reordering of the norm's sum of squares, at the first span over the f16 sources: the
-    // residual keeps the chain's words, the normed rows must not
+    // red check 1: the planted reordering of the norm's threadgroup sum over the whole call's rows (one launch of 18,380
+    // rows over the f16 sources): the residual keeps the chain's words, the normed rows must not. A reordered sum moves
+    // a row's rsqrt by an ulp at most, which turns about one bf16 word in 65,536, so the check reads every row.
     {
         const sm = g.mark();
         defer g.resetTo(sm);
-        const kern = ks.newKernel("turboexl3_test_ling_moe_tail_wide_sumsq_rev_fault", &tail.wide_in_names, &tail.out_names, text_wide_sumsq_rev, tail.header_wide_h, true) orelse return error.KernelCreateFailed;
+        const kern = ks.newKernel("turboexl3_test_ling_moe_tail_wide_tgsum_rev_fault", &tail.wide_in_names, &tail.out_names, text_wide_tgsum_rev, tail.header_wide_h, true) orelse return error.KernelCreateFailed;
         defer decode.freeKernel(kern);
-        const S: c_int = 4096;
-        const h_0 = try devRandom(&g, s, &.{ 1, S, hidden }, .bfloat16);
-        const sh_0 = try devRandom(&g, s, &.{ 1, S, hidden }, .bfloat16);
-        const loc_0 = try g.slice(loc_all, &.{ 0, 0, 0 }, &.{ S, 8, 2 }, &.{ 1, 1, 1 });
-        const w_0 = try g.slice(wa, &.{ 0, 0 }, &.{ S, 8 }, &.{ 1, 1 });
-        const part = try g.slice(y16, &.{ 0, 0, 0 }, &.{ 1, S, hidden }, &.{ 1, 1, 1 });
-        const hn = try g.add(h_0, try g.add(part, sh_0));
+        const S = ci(tokens);
+        const h_c = try devRandom(&g, s, &.{ 1, S, hidden }, .bfloat16);
+        const sh_c = try devRandom(&g, s, &.{ 1, S, hidden }, .bfloat16);
+        const hn = try g.add(h_c, try g.add(y16, sh_c));
         var nrm = mlx.mlx_array_new();
         nrm = try adopted(&g, mlx.mlx_fast_rms_norm(&nrm, hn, wn, eps, s), nrm);
-        const got = try tail.moeTailWideWith(s, kern, h_0, srcs16.items, loc_0, w_0, sh_0, we);
-        const n_words: usize = 4096 * 4096;
+        const got = try tail.moeTailWideWith(s, kern, h_c, srcs16.items, loc_all, wa, sh_c, we);
+        const n_words: usize = @as(usize, tokens) * 4096;
         const d = try wideDiffer(a, &g, got, hn, nrm, n_words);
         const ok = d[0] == 0 and d[1] > 0;
         checks += 1;
         failed += @intFromBool(!ok);
-        std.debug.print("TURBOEXL3_LING_PF_TAIL_RED fault=sumsq_rev rows=4096 normed_differing={d}/{d} (a fault must differ) residual_differing={d}/{d} (must not) {s}\n", .{ d[1], n_words, d[0], n_words, if (ok) "PASS" else "FAIL" });
+        std.debug.print("TURBOEXL3_LING_PF_TAIL_RED fault=tgsum_rev rows={d} normed_differing={d}/{d} (a fault must differ) residual_differing={d}/{d} (must not) {s}\n", .{ tokens, d[1], n_words, d[0], n_words, if (ok) "PASS" else "FAIL" });
     }
     // red check 2: the refusals, before any launch
     {

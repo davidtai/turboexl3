@@ -8,6 +8,7 @@ ling_combine_pick(loc[lk], s0, s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, s11, s12
 const device float* W = WE;
 const float eps = WE[D];
 float tk = 0.0f;
-acc = simd_sum(acc);
-for (int q = NC * 4 - 1; q >= 0; q--) acc += hv[q] * hv[q];
-acc += hv[p * 4 + i] * hv[p * 4 + i];
+const float total = simd_sum(local_sums[lane]);
+for (int q = 31; q >= 0; q--) total += local_sums[q];
+const float inv = metal::precise::rsqrt(total / float(D) + eps);
+float total = 0.0f;
