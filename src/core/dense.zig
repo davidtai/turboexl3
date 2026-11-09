@@ -118,10 +118,10 @@ pub const dec_gemv1 = @embedFile("kernels/dense/dec_gemv1.metal");
 
 /// text_dgemv's tile loop, quad fold and simdgroup sum (the z plane values), then the arrival: the loop's head, the
 /// tile's address (`dec_tile`: tile (tk, the block's column t) of the one trellis, which a joined launch reads at its
-/// member's base instead, ricursive.zig), and the rest
+/// member's base instead, ricursive.zig), and the rest (the tile's words, then the codewords on: DEC-ONE's variants)
 pub const dec_gemv_arrive_1 = @embedFile("kernels/dense/dec_gemv_arrive_1.metal");
 pub const dec_tile = @embedFile("kernels/dense/dec_tile.metal");
-pub const dec_gemv_arrive_2 = @embedFile("kernels/dense/dec_gemv_arrive_2.metal");
+pub const dec_gemv_arrive_2 = dec_gemv_arrive_2_1 ++ dec_gemv_arrive_2_2;
 pub const dec_gemv_arrive = dec_gemv_arrive_1 ++ dec_tile ++ dec_gemv_arrive_2;
 
 /// the finish's input sums: prep_sc's (text_dfinish's loop) ...
@@ -591,7 +591,7 @@ pub const Dense = struct {
         if (!self.decTakes(rows)) return error.Exl3EngineNotImplemented;
         const cfg = try self.dec0Cfg(rows);
         var o: [2]mlx.mlx_array = undefined;
-        try ks.applyConfig(self.dec0, cfg, &.{ xp, xs, trellis, svh, cnt }, &o, s);
+        try ks.applyConfig(try dec0For(self, rows), cfg, &.{ xp, xs, trellis, svh, cnt }, &o, s);
         _ = mlx.mlx_array_free(o[1]);
         return o[0];
     }
@@ -633,7 +633,7 @@ pub const Dense = struct {
             _ = mlx.mlx_array_free(a);
         };
         var o: [2]mlx.mlx_array = undefined;
-        try ks.applyConfig(self.dec0, c.gemv, &.{ po[0], po[1], trellis, svh, po[2] }, &o, s);
+        try ks.applyConfig(try dec0For(self, rows), c.gemv, &.{ po[0], po[1], trellis, svh, po[2] }, &o, s);
         _ = mlx.mlx_array_free(o[1]);
         return o[0];
     }
@@ -1600,6 +1600,103 @@ fn residentPlain(s: mlx.mlx_stream, x: mlx.mlx_array, trellis: mlx.mlx_array) !?
     return y;
 }
 
+// ---- DEC-ONE's GEMV variants (`Config.dec_variant`): other schedules of DEC-ONE's own reads, decodes and sums ----
+//
+// banked's grouped-GEMV ILP variants (`banked.group_variants`, hw2) carried to DEC-ONE's GEMV over prepared rows: the
+// dense dec0 launch (`Dense.decLinear` with the prepare in its own launch, and `Dense.decLinearPrepared`) and
+// Ling-3.1-flash's KDA projections' launch with b_proj (`models/ling/kdaproj.zig`). t4 runs the MUL1 codeword's t through
+// both pair sums as one half2 (a define before the header, kernels/dense/t4.metal: lane/helpers.metal's EXL3_T1V 4, the
+// route BANKED_T4 runs for the routed GEMVs), the same exact t. pf loads each input tile's words a pass ahead of their
+// decode (`dec_pf_decl`, `dec_pf_next`, `dec_pf_ww`), the same words. Each runs DEC-ONE's codeword, decode, FMA, fold,
+// store, arrival and finish statements on them in DEC-ONE's order, so every output word is DEC-ONE's. banked's other
+// variants do not carry over: sh's one-word-a-lane reader takes tiles of at most 32 words (K6's have 48), m2 splits a
+// group's members (DEC-ONE's rows each keep their own accumulators already), ku is pf's prefetch without the overlap,
+// and xh trades the rows' input registers for a convert at every FMA. The shared expert's, the pairs' and the merges'
+// DEC-ONE launches keep the served GEMV.
+
+/// `dec_gemv_arrive_2`'s pieces: the tile's words for lane L (`exl3_tile_load` at `dec_tile`'s address; pf takes them
+/// from its prefetch instead), then the codewords, the decodes and the FMAs, the fold, the plane store, the arrival and
+/// the finish's opening
+pub const dec_gemv_arrive_2_1 = @embedFile("kernels/dense/dec_gemv_arrive_2_1.metal");
+pub const dec_gemv_arrive_2_2 = @embedFile("kernels/dense/dec_gemv_arrive_2_2.metal");
+/// pf's pieces: the prefetched words' registers (before `dec_gemv0`), the next input tile's words loaded after the rows'
+/// inputs (in the loop, before `dec_gemv_arrive_1`), and the tile's words from the prefetch (in place of `dec_tile` ++
+/// `dec_gemv_arrive_2_1`)
+pub const dec_pf_decl = @embedFile("kernels/dense/dec_pf_decl.metal");
+pub const dec_pf_next = @embedFile("kernels/dense/dec_pf_next.metal");
+pub const dec_pf_ww = @embedFile("kernels/dense/dec_pf_ww.metal");
+/// DEC-ONE's body over prep_sc's rows (`text_dec0` after `dec_head`) with pf
+pub const dec_body0_pf: [:0]const u8 = dec_pf_decl ++ dec_gemv0 ++ dec_pf_next ++ dec_gemv_arrive_1 ++ dec_pf_ww ++ dec_gemv_arrive_2_2 ++ dec_xsum0 ++ dec_finish_v ++ dec_finish_store;
+/// `text_dec0` with pf: y, z as `text_dec0`'s
+pub const text_dec0_pf: [:0]const u8 = dec_head ++ dec_body0_pf;
+/// t4's define (kernels/dense/t4.metal), then `decode.header5`
+pub const header5_t4: [:0]const u8 = @embedFile("kernels/dense/t4.metal") ++ decode.header5;
+
+/// A variant of DEC-ONE's GEMV over prepared rows: its name, t4's define before the header, pf's text
+pub const DecVariant = struct { name: [:0]const u8, t4: bool, pf: bool };
+/// `Config.dec_variant`'s values (0: DEC-ONE as served)
+pub const dec_variants = [_]DecVariant{
+    .{ .name = "", .t4 = false, .pf = false },
+    .{ .name = "t4", .t4 = true, .pf = false },
+    .{ .name = "pf", .t4 = false, .pf = true },
+    .{ .name = "pft4", .t4 = true, .pf = true },
+};
+comptime {
+    if (dec_variants.len != config.dec_variants) @compileError("config.dec_variants is not dense.dec_variants.len");
+}
+
+/// `dec_variants`' index by name (null: none)
+pub fn decVariantOf(name: []const u8) ?u8 {
+    for (dec_variants, 0..) |v, i| if (std.mem.eql(u8, v.name, name)) return @intCast(i);
+    return null;
+}
+
+const dec0v_lock = Global(std.atomic.Value(u32), "dense_dec0v_lock", std.atomic.Value(u32).init(0));
+/// the dense dec0 kernel of each variant past 0, made at its first use (0's is each Dense's own `dec0`)
+const dec0v_kernels = Global([dec_variants.len]?mlx.mlx_fast_metal_kernel, "dense_dec0v_kernels", @splat(null));
+/// the variants whose engagement line has printed (bit v)
+const dec0v_said = Global(u8, "dense_dec0v_said", 0);
+/// the dense dec0 launches each variant has run (`dec0VariantRuns`: a test's check that its arm ran the variant)
+const dec0v_runs = Global([dec_variants.len]u64, "dense_dec0v_runs", @splat(0));
+
+/// The dense dec0 kernel of variant `v` (1 to 3), made at its first use: a name of its own each (MLX keys a custom
+/// kernel's library by its name), `turboexl3_dense_dec0`'s operands, template arguments and launches
+fn dec0Variant(v: u8) !mlx.mlx_fast_metal_kernel {
+    if (v == 0 or v >= dec_variants.len) return error.BadExl3Shape;
+    while (dec0v_lock.get().*.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
+    defer dec0v_lock.get().*.store(0, .release);
+    const slot = &dec0v_kernels.get().*[v];
+    if (slot.*) |made| return made;
+    const made = switch (v) {
+        1 => ks.newKernel("turboexl3_dense_dec0_t4", &dec0_in, &dec0_out, text_dec0, header5_t4, true),
+        2 => ks.newKernel("turboexl3_dense_dec0_pf", &dec0_in, &dec0_out, text_dec0_pf, decode.header5, true),
+        else => ks.newKernel("turboexl3_dense_dec0_pft4", &dec0_in, &dec0_out, text_dec0_pf, header5_t4, true),
+    } orelse return error.KernelCreateFailed;
+    slot.* = made;
+    return made;
+}
+
+/// The kernel a DEC-ONE GEMV over prepared rows launches for `d` (`Dense.decLinear` with the prepare in its own launch,
+/// `Dense.decLinearPrepared`): `Config.dec_variant`'s, else `d.dec0`, under `d`'s configs either way. A variant's first
+/// call prints `[turboexl3] DEC-ONE variant engaged: ...`; each call on one is counted (`dec0VariantRuns`).
+fn dec0For(d: *const Dense, rows: usize) !mlx.mlx_fast_metal_kernel {
+    const v = config.get().dec_variant;
+    if (v == 0 or v >= dec_variants.len) return d.dec0;
+    const k = try dec0Variant(v);
+    dec0v_runs.get().*[v] += 1;
+    const bit = @as(u8, 1) << @intCast(v);
+    if ((dec0v_said.get().* & bit) == 0) {
+        dec0v_said.get().* |= bit;
+        std.debug.print("[turboexl3] DEC-ONE variant engaged: {s} (the dense GEMV over prepared rows; first call in={d} out={d} n={d} rows={d})\n", .{ dec_variants[v].name, d.shape.in, d.shape.out, d.shape.rate.n, rows });
+    }
+    return k;
+}
+
+/// The dense dec0 launches variant `v` has run in this process (the tests' check that an arm ran it)
+pub fn dec0VariantRuns(v: u8) u64 {
+    return dec0v_runs.get().*[v];
+}
+
 // ---- The un-rotation's CPU checks: the kernels' arithmetic ported statement for statement against an f64 reference ----
 
 /// f32 to f16 and back (round to nearest even), as Metal's half() rounds.
@@ -2153,9 +2250,56 @@ test "turboexl3 dense lean GEMV text: text_dgemv but its input loads and codewor
     try t.expectEqual(@as(usize, 12), nl);
 }
 
+test "turboexl3 dense DEC-ONE variants: t4 is text_dec0 after t4's define, pf is text_dec0 with each tile's words loaded a pass ahead (dec_tile's address, arrive_2_1's load) and nothing else; the variant table is the config's" {
+    const pin = comptime @import("test_support.zig").pins(@embedFile("kernels/test/pins/dense_dec_variants.metal"));
+    const t = std.testing;
+    const count = struct {
+        fn f(hay: []const u8, needle: []const u8) usize {
+            return std.mem.count(u8, hay, needle);
+        }
+    }.f;
+    // the cut: text_dec0 is its pieces, dec_gemv_arrive_2 the load of the tile's words and the rest
+    try t.expectEqualStrings(dec_gemv_arrive_2, dec_gemv_arrive_2_1 ++ dec_gemv_arrive_2_2);
+    try t.expectEqualStrings(text_dec0, dec_head ++ dec_gemv0 ++ dec_gemv_arrive_1 ++ dec_tile ++ dec_gemv_arrive_2_1 ++ dec_gemv_arrive_2_2 ++ dec_xsum0 ++ dec_finish_v ++ dec_finish_store);
+    try t.expectEqual(@as(usize, 1), count(dec_gemv_arrive_2_1, pin[3]));
+    // t4: its define, then header5 verbatim
+    try t.expect(std.mem.endsWith(u8, header5_t4, decode.header5));
+    const t4_def = header5_t4[0 .. header5_t4.len - decode.header5.len];
+    try t.expectEqual(@as(usize, 1), count(t4_def, pin[0]));
+    try t.expectEqual(@as(usize, 1), count(t4_def, "#"));
+    // pf: text_dec0 with dec_tile ++ dec_gemv_arrive_2_1 replaced by dec_pf_ww, dec_pf_decl before dec_gemv0 and
+    // dec_pf_next after it
+    try t.expectEqualStrings(text_dec0_pf, dec_head ++ dec_pf_decl ++ dec_gemv0 ++ dec_pf_next ++ dec_gemv_arrive_1 ++ dec_pf_ww ++ dec_gemv_arrive_2_2 ++ dec_xsum0 ++ dec_finish_v ++ dec_finish_store);
+    // its loads: dec_tile's address at tk and at tk + 1, each by arrive_2_1's load; the tile is not read anywhere else
+    try t.expectEqual(@as(usize, 1), count(dec_tile, pin[1]));
+    try t.expectEqual(@as(usize, 1), count(dec_pf_next, pin[1]));
+    try t.expectEqual(@as(usize, 1), count(dec_pf_next, pin[2]));
+    try t.expectEqual(@as(usize, 2), count(dec_pf_next, pin[3]));
+    try t.expectEqual(@as(usize, 2), count(text_dec0_pf, pin[3]));
+    try t.expectEqual(@as(usize, 0), count(text_dec0_pf, dec_tile));
+    try t.expectEqual(@as(usize, 1), count(dec_pf_ww, pin[4]));
+    try t.expectEqual(@as(usize, 1), count(dec_pf_ww, pin[5]));
+    // the table: 0 the served GEMV, then t4, pf and both, each a pair of its own; the config's count
+    try t.expectEqual(@as(usize, config.dec_variants), dec_variants.len);
+    try t.expect(!dec_variants[0].t4 and !dec_variants[0].pf and dec_variants[0].name.len == 0);
+    for (dec_variants, 0..) |v, i| {
+        try t.expectEqual(@as(?u8, @as(u8, @intCast(i))), decVariantOf(v.name));
+        for (dec_variants[i + 1 ..]) |w| try t.expect(!(v.t4 == w.t4 and v.pf == w.pf));
+    }
+    // the operands' names bind no MLX shape buffers
+    for (dec0_in ++ dec0_out) |n| for ([_][]const u8{ "_shape", "_strides", "_ndim" }) |suf| {
+        var buf: [32]u8 = undefined;
+        try t.expectEqual(@as(usize, 0), count(text_dec0_pf, std.fmt.bufPrint(&buf, "{s}{s}", .{ std.mem.span(n), suf }) catch unreachable));
+    };
+}
+
 /// This file's module state (`Global`): what a host that shares its units' state registers.
 pub const shared_state = .{
     dec_said,
+    dec0v_lock,
+    dec0v_kernels,
+    dec0v_said,
+    dec0v_runs,
     resident_bypass,
     Resident.lock,
     Resident.armed,

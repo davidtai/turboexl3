@@ -1850,6 +1850,14 @@ SPLIT_ADDED_KERNELS['turboexl3_test_pf_dfinn_gemm_fault'] = ('test only: turboex
                                                              'unrounded (fault/fin_4_unrounded), the threshold\'s red checks')
 SPLIT_ADDED_KERNELS['turboexl3_test_pf_dfinn_fin_fault'] = ('test only: turboexl3_pf_dfinn with its finish half\'s products '
                                                             'unrounded (fault/fin_4_unrounded), a red check')
+# D35, DEC-ONE's GEMV variants (Config.dec_variant, dense.dec_variants; ling-d35-gemv). The kernels the served path runs keep
+# their texts: dec_gemv_arrive_2 is cut into dec_gemv_arrive_2_1 (the tile's words) and _2_2, of the same value
+SPLIT_ADDED_KERNELS['turboexl3_dense_dec0_t4'] = ('dec_variant t4: text_dec0 verbatim, header header5_t4 (dense/t4\'s '
+                                                  'EXL3_T1V 4 before decode.header5): banked\'s group variant t4')
+SPLIT_ADDED_KERNELS['turboexl3_dense_dec0_pf'] = ('dec_variant pf: text_dec0 with each tile\'s words loaded a pass ahead '
+                                                  '(dec_pf_decl, dec_pf_next; dec_pf_ww in dec_tile ++ dec_gemv_arrive_2_1\'s '
+                                                  'place)')
+SPLIT_ADDED_KERNELS['turboexl3_dense_dec0_pft4'] = 'dec_variant pft4: text_dec0_pf over header5_t4'
 
 def split_report(oprog, nprog, ounits, nunits, orig_dir, new_dir, problems, verbose):
     """--split (declarations moved between files, not only files): checks 1 to 4 over the whole tree instead of per file.

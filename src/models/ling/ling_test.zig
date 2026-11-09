@@ -1209,6 +1209,206 @@ test "turboexl3 gpu ling kda proj: q|k|v, f and g in one launch give each member
     try testing.expectEqual(@as(usize, 0), failed);
 }
 
+// ── DEC-ONE's GEMV variants (`Config.dec_variant`, `dense.dec_variants`: t4, pf, both) at Ling-3.1-flash's shapes ──
+
+/// The variants past DEC-ONE's own (`dense.dec_variants` 1 to 3: t4, pf, pft4), each a byte test's arm
+const dec_variant_arms = [_]u8{ 1, 2, 3 };
+
+/// A K split of a linear of `in` inputs other than `ks` (the smallest divisor of its input tiles over the four
+/// simdgroups that is not `ks`): the red checks' reordering of the same products
+fn otherKs(in: u32, ks: u32) u32 {
+    const q = (in / 16) / 4;
+    var dv: u32 = 1;
+    while (dv <= q) : (dv += 1) {
+        if (dv != ks and q % dv == 0) return dv;
+    }
+    return ks;
+}
+
+/// A trellis as the loader hands it (the pack's I16 words) from its U16 words
+fn i16Trellis(g: *G, s: mlx.mlx_stream, words: []const u16, in: u32, out: u32, n: u32) !mlx.mlx_array {
+    const u = try g.hostArray(std.mem.sliceAsBytes(words), &.{ ci(in / 16), ci(out / 16), ci(n) }, .uint16);
+    var v = mlx.mlx_array_new();
+    mlx.check(mlx.mlx_view(&v, u, .int16, s)) catch |e| {
+        _ = mlx.mlx_array_free(v);
+        return e;
+    };
+    return g.adopt(v);
+}
+
+// Every DEC-ONE GEMV variant against the served GEMV, word for word, where it runs: a Dense whose prepare runs in its own
+// launch at every row count (`dec_prep_rows` and `dec_prep_out` 0), so each call at rows 1 to 4 takes the GEMV over
+// prepared rows: through `linear` (prep_sc, then the GEMV) and over prep_sc's rows with zeroed counters
+// (`decLinearPrepared`, KDA_EPILOGUE's o_proj). Every Ling-3.1-flash trunk shape but the head (K6; the dense FFN at K4),
+// the trellis as I16 words, x bf16 and f32. Each arm also checks that it ran its variant (`dense.dec0VariantRuns`).
+// Red checks: one word flipped in the served output is exactly one differing word; at o_proj's and q|k|v's shapes each
+// variant on a Dense at another K split (the same products summed in another order) must differ from the served words.
+// Lines: TURBOEXL3_LING_DEC_VARIANT (_RED, _DONE).
+test "turboexl3 gpu ling dense variants: each DEC-ONE GEMV variant (t4, pf, pft4) gives the served GEMV's words at every Ling-3.1-flash trunk shape but the head, rows 1 to 4, x bf16 and f32, through linear and over prepared rows; red checks: a flipped word, each variant at another K split (TURBOEXL3_GPU=1)" {
+    _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    const s = mlx.mlx_default_gpu_stream_new();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    const a = std.heap.page_allocator;
+    const ks = sdk.kernel_launch;
+    var g = try G.init(a, s);
+    defer g.deinit();
+    const saved = config.get().*;
+    defer config.configure(saved) catch unreachable;
+    var cfg = saved;
+    cfg.dec_variant = 0;
+    var failed: usize = 0;
+    var checks: usize = 0;
+    var reds: usize = 0;
+    for (dense_cases) |c| {
+        if (c.head) continue;
+        var prng = std.Random.DefaultPrng.init(0xD35A ^ (@as(u64, c.in) << 24) ^ c.out);
+        const rnd = prng.random();
+        const rate = format.Rate.fromN(c.n).?;
+        var lin = try ref.synthLinear(a, rnd, 1, c.in, c.out, rate, .mul1);
+        defer lin.deinit(a);
+        const mark = g.mark();
+        defer g.resetTo(mark);
+        const trellis = try i16Trellis(&g, s, lin.trellis, c.in, c.out, c.n);
+        const suh = try g.hostArray(std.mem.sliceAsBytes(lin.suh), &.{ci(c.in)}, .float16);
+        const svh = try g.hostArray(std.mem.sliceAsBytes(lin.svh), &.{ci(c.out)}, .float16);
+        const xs = try a.alloc(f32, 4 * c.in);
+        defer a.free(xs);
+        for (xs) |*v| v.* = bfExact(rnd.floatNorm(f32));
+        const want = try a.alloc(f32, 4 * c.out);
+        defer a.free(want);
+        const got = try a.alloc(f32, 4 * c.out);
+        defer a.free(got);
+        // the red checks' shapes: o_proj (KDA o and the MLA output projection) and q|k|v
+        const red = std.mem.eql(u8, c.name, "kda.o/mla.dense") or std.mem.eql(u8, c.name, "kda.qkv");
+        for ([_]mlx.mlx_dtype{ .bfloat16, .float32 }) |dt| {
+            try config.configure(cfg);
+            const geo: dense.Shape = .{ .in = c.in, .out = c.out, .rate = rate, .dec = .mul1, .out_dtype = dt };
+            var d = try dense.Dense.init(geo);
+            defer d.deinit();
+            d.dec_prep_rows = 0;
+            d.dec_prep_out = 0;
+            for (1..5) |ru| {
+                const rows: u32 = @intCast(ru);
+                const rm = g.mark();
+                defer g.resetTo(rm);
+                const n = rows * c.out;
+                const x = try g.astype(try g.hostArray(std.mem.sliceAsBytes(xs[0 .. rows * c.in]), &.{ ci(rows), ci(c.in) }, .float32), dt);
+                // prep_sc's rows, once; each GEMV over them reads counters zeroed for it
+                const dc = try d.decCfgs(rows);
+                var po: [3]mlx.mlx_array = undefined;
+                try ks.applyConfig(d.prep_sc, dc.prep, &.{ x, suh }, &po, s);
+                const xp = try g.adopt(po[0]);
+                const xsum = try g.adopt(po[1]);
+                _ = mlx.mlx_array_free(po[2]);
+                const ncnt: c_int = @intCast(try d.decCounters(rows));
+                // the served GEMV through linear, and over the prepared rows
+                try config.configure(cfg);
+                _ = try g.hostF32(try g.astype(try g.adopt(try d.linear(s, x, trellis, suh, svh, rows)), .float32), want[0..n]);
+                _ = try g.hostF32(try g.astype(try g.adopt(try d.decLinearPrepared(s, xp, xsum, try g.zeros(&.{ncnt}, .uint32), trellis, svh, rows)), .float32), got[0..n]);
+                const d_served = bytesDifferF32(got[0..n], want[0..n]);
+                for (dec_variant_arms) |v| {
+                    var vc = cfg;
+                    vc.dec_variant = v;
+                    try config.configure(vc);
+                    const runs0 = dense.dec0VariantRuns(v);
+                    _ = try g.hostF32(try g.astype(try g.adopt(try d.linear(s, x, trellis, suh, svh, rows)), .float32), got[0..n]);
+                    const d_lin = bytesDifferF32(got[0..n], want[0..n]);
+                    _ = try g.hostF32(try g.astype(try g.adopt(try d.decLinearPrepared(s, xp, xsum, try g.zeros(&.{ncnt}, .uint32), trellis, svh, rows)), .float32), got[0..n]);
+                    const d_prep = bytesDifferF32(got[0..n], want[0..n]);
+                    const ran = dense.dec0VariantRuns(v) - runs0;
+                    try config.configure(cfg);
+                    const ok = d_served == 0 and d_lin == 0 and d_prep == 0 and ran == 2;
+                    checks += 1;
+                    std.debug.print("TURBOEXL3_LING_DEC_VARIANT shape={s} in={d} out={d} n={d} rows={d} x={s} ks={d} bt={d} variant={s} linear_differing={d}/{d} prepared_differing={d}/{d} served_prepared_differing={d}/{d} variant_calls={d}/2 {s}\n", .{ c.name, c.in, c.out, c.n, rows, @tagName(dt), d.ks_split, d.btDec(rows, dense.Dense.rbFor(rows)), dense.dec_variants[v].name, d_lin, n, d_prep, n, d_served, n, ran, if (ok) "PASS" else "FAIL" });
+                    if (!ok) failed += 1;
+                }
+                // red: one flipped word of the served output is one differing word
+                if (red and rows == 3 and dt == .bfloat16) {
+                    @memcpy(got[0..n], want[0..n]);
+                    got[n / 2] = @bitCast(@as(u32, @bitCast(got[n / 2])) ^ 1);
+                    const d_flip = bytesDifferF32(got[0..n], want[0..n]);
+                    const ok_flip = d_flip == 1;
+                    reds += 1;
+                    std.debug.print("TURBOEXL3_LING_DEC_VARIANT_RED check=flipped_word shape={s} rows={d} differing={d}/{d} expect=1 {s}\n", .{ c.name, rows, d_flip, n, if (ok_flip) "PASS" else "FAIL" });
+                    if (!ok_flip) failed += 1;
+                    // red: each variant at another K split must differ from the served words (a reordering is caught)
+                    var dk = try dense.Dense.init(geo);
+                    defer dk.deinit();
+                    dk.dec_prep_rows = 0;
+                    dk.dec_prep_out = 0;
+                    const ks_other = otherKs(c.in, d.ks_split);
+                    dk.ks_split = ks_other;
+                    for (dec_variant_arms) |v| {
+                        var vc = cfg;
+                        vc.dec_variant = v;
+                        try config.configure(vc);
+                        _ = try g.hostF32(try g.astype(try g.adopt(try dk.linear(s, x, trellis, suh, svh, rows)), .float32), got[0..n]);
+                        try config.configure(cfg);
+                        const d_ks = bytesDifferF32(got[0..n], want[0..n]);
+                        const ok_ks = ks_other != d.ks_split and d_ks > 0;
+                        reds += 1;
+                        std.debug.print("TURBOEXL3_LING_DEC_VARIANT_RED check=other_ks shape={s} rows={d} ks={d}->{d} variant={s} differing={d}/{d} expect=nonzero {s}\n", .{ c.name, rows, d.ks_split, ks_other, dense.dec_variants[v].name, d_ks, n, if (ok_ks) "PASS" else "FAIL" });
+                        if (!ok_ks) failed += 1;
+                    }
+                }
+            }
+        }
+    }
+    std.debug.print("TURBOEXL3_LING_DEC_VARIANT_DONE checks={d} red={d} {s}\n", .{ checks, reds, if (failed == 0) "PASS" else "FAIL" });
+    try testing.expectEqual(@as(usize, 0), failed);
+}
+
+/// TURBOEXL3_LING_TIME's arm for DEC-ONE's GEMV variants (`dense.dec_variants`), guidance only: each trunk shape at rows
+/// 1 to 4 on a Dense made under the outside plugin's launch shapes (`Config.dec_one_row_table`), the served GEMV and each
+/// variant (`linear`: prep_sc, then the GEMV): min and median us a call (8 calls an evaluation), the weights' GB/s, the
+/// variant's min over the served GEMV's, and the calls that ran the variant (0 where the call's prepare runs inside its
+/// launch: no variant acts there). Its own draw. Lines: TURBOEXL3_LING_TIME dec_variant.
+fn timeDecVariants(a: std.mem.Allocator, g: *G, s: mlx.mlx_stream, base: config.Config) !void {
+    defer config.configure(base) catch {};
+    var tc = base;
+    tc.dec_one_row_table = true;
+    tc.dec_variant = 0;
+    var prng = std.Random.DefaultPrng.init(0xD35_71AE);
+    const rnd = prng.random();
+    const Ctx = struct {
+        s: mlx.mlx_stream,
+        x: mlx.mlx_array,
+        p: root.Proj,
+        d: *dense.Dense,
+        rows: usize,
+        pub fn call(cx: @This()) !mlx.mlx_array {
+            return cx.d.linear(cx.s, cx.x, cx.p.trellis, cx.p.suh, cx.p.svh, cx.rows);
+        }
+    };
+    for (dense_cases) |c| {
+        const mark = g.mark();
+        defer g.resetTo(mark);
+        defer _ = mlx.mlx_clear_cache();
+        const p = try ds_test.randProj(a, g, rnd, null, c.in, c.out, c.n);
+        try config.configure(tc);
+        var d = try dense.Dense.init(.{ .in = c.in, .out = c.out, .rate = format.Rate.fromN(c.n).?, .dec = .mul1, .out_dtype = .bfloat16 });
+        defer d.deinit();
+        const wbytes = @as(f64, @floatFromInt(c.in)) * @as(f64, @floatFromInt(c.out)) * @as(f64, @floatFromInt(c.n)) / 128.0;
+        for ([_]u32{ 1, 2, 3, 4 }) |rows| {
+            const rm = g.mark();
+            defer g.resetTo(rm);
+            const ctx: Ctx = .{ .s = s, .x = try ds_test.randBf16(a, g, rnd, &.{ ci(rows), ci(c.in) }), .p = p, .d = &d, .rows = rows };
+            var served_min: f64 = 0;
+            for (0..dense.dec_variants.len) |vi| {
+                const v: u8 = @intCast(vi);
+                var vc = tc;
+                vc.dec_variant = v;
+                try config.configure(vc);
+                const runs0 = dense.dec0VariantRuns(v);
+                const st = try ds_test.timeIt(g, ctx, 8);
+                const calls = dense.dec0VariantRuns(v) - runs0;
+                if (v == 0) served_min = st.min;
+                std.debug.print("TURBOEXL3_LING_TIME dec_variant {s} {d}x{d} n={d} rows={d} variant={s} min_us={d:.1} med_us={d:.1} GBps={d:.0} of_served={d:.3} variant_calls={d}\n", .{ c.name, c.in, c.out, c.n, rows, if (v == 0) "served" else dense.dec_variants[v].name, st.min, st.med, wbytes / (st.min * 1e3), if (served_min > 0) st.min / served_min else 0, calls });
+            }
+        }
+    }
+}
+
 // ── a prompt call's rows at any call width (a layer-major prompt pass runs the trunk linears over the whole prompt) ──
 
 /// The MTP layer's input projection (the 2.60 pack's `eh_proj`, K4): with `dense_cases` but the head, every EXL3 linear
@@ -1535,6 +1735,7 @@ test "turboexl3 gpu ling timing: every trunk linear, moeLing and moeLingBanked a
             std.debug.print("TURBOEXL3_LING_TIME linear {s} {d}x{d} n={d} rows={d} min_us={d:.1} med_us={d:.1} GBps={d:.0} tflops={d:.2}\n", .{ c.name, c.in, c.out, c.n, rows, st.min, st.med, wbytes / (st.min * 1e3), flops / (st.min * 1e6) });
         }
     }
+    try timeDecVariants(a, &g, s, cfg);
     var nbuf: [8]u32 = undefined;
     const rates = envList("TURBOEXL3_LING_N", &.{ 40, 32 }, &nbuf);
     for (rates) |n| {

@@ -58,6 +58,12 @@ pub const Config = struct {
     /// Max: output tiles per GEMV threadgroup, and DEC-ONE's prepare inside the launch or in its own); a shape the table
     /// does not name keeps the rest of this configuration's. Launch shape only: the same bytes.
     dec_one_row_table: bool = false,
+    /// DEC-ONE's GEMV over prepared rows on a variant (`dense.dec_variants`, `dec_variants` of them; 0 the served GEMV):
+    /// the dense dec0 launch (a decode call whose prepare runs in its own launch, and `Dense.decLinearPrepared`) and
+    /// Ling-3.1-flash's KDA projections' launch with b_proj (`ling.kdaProjB`). 1 t4 (the MUL1 codeword's t as one half2,
+    /// banked's group variant t4), 2 pf (each input tile's words loaded a pass ahead of their decode), 3 both. Another
+    /// schedule of the same reads, decodes and sums: the same bytes.
+    dec_variant: u8 = 0,
     /// The row chunks of the dense decode GEMV chain: at most 8 rows, a chunk of 6 to 8 rows on the lean GEMV text (its
     /// codeword loop by input element); false keeps chunks of at most 5 rows, all on the plain GEMV text. The same bytes.
     dense_lean: bool = true,
@@ -102,7 +108,7 @@ pub const Config = struct {
             (c.pf_gu_ncb == 1 or c.pf_gu_ncb == 2 or c.pf_gu_ncb == 4) and (c.pf_dfr == 32 or c.pf_dfr == 64) and
             (c.pf_bm == 64 or c.pf_bm == 128 or c.pf_bm == 256) and
             (c.banked_group == 2 or c.banked_group == 4) and (!c.banked_m3 or c.banked_group == 4) and
-            c.banked_variant_gu < banked_variants and c.banked_variant_dn < banked_variants and
+            c.banked_variant_gu < banked_variants and c.banked_variant_dn < banked_variants and c.dec_variant < dec_variants and
             ((c.banked_variant_gu == 0 and c.banked_variant_dn == 0) or c.banked_group == 4) and
             (c.mla_latent_rows == 0 or c.mla_latent_rows == 2 or c.mla_latent_rows == 4) and
             !(c.mla_latent_stage and c.mla_latent_block);
@@ -111,6 +117,9 @@ pub const Config = struct {
 
 /// The grouped banked GEMVs' variant count (`decode.group_variants.len`, checked there).
 pub const banked_variants: u8 = 12;
+
+/// DEC-ONE's GEMV variants' count (`dense.dec_variants.len`, checked there).
+pub const dec_variants: u8 = 4;
 
 const current = Global(Config, "config_current", .{});
 
@@ -163,6 +172,9 @@ test "turboexl3 config: the defaults are valid and served; an unserved form, sli
     try t.expect(d.fused_fin_fold);
     try t.expect(!d.dec_one_row_table);
     try t.expect((Config{ .dec_one_row_table = true }).valid());
+    try t.expectEqual(@as(u8, 0), d.dec_variant);
+    for (1..dec_variants) |v| try t.expect((Config{ .dec_variant = @intCast(v) }).valid());
+    try t.expect(!(Config{ .dec_variant = dec_variants }).valid());
     try t.expect(d.mla_latent_rows == 0 and !d.mla_latent_stage and !d.mla_latent_block);
     for ([_]u8{ 2, 4 }) |r| try t.expect((Config{ .mla_latent_rows = r }).valid());
     for ([_]u8{ 1, 3, 8 }) |r| try t.expect(!(Config{ .mla_latent_rows = r }).valid());
