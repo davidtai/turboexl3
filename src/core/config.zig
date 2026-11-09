@@ -20,6 +20,27 @@ pub const Config = struct {
     pf_alay: u8 = 2,
     /// Each expert's full 128-row runs in 128-row prefill tiles. The same bytes.
     pf_t128: bool = true,
+    /// The 128-row tiles' launch over tiles of up to 256 rows on the bm-256 body (`prefill.Options.t256`; with
+    /// `pf_t128`): each expert's full 256-row runs and a remainder of more than `pf_cut` rows, its weights decoded once a
+    /// tile. The same bytes.
+    pf_t256: bool = false,
+    /// The big tiles' remainder rule (`prefill.Options.cut`): past an expert's full 128-row (or 256-row) tiles, a remainder
+    /// of more than min(pf_cut, 127) rows takes one part-full big tile, the rest the mixed launch. A launch shape: the same
+    /// bytes.
+    pf_cut: u8 = 64,
+    /// 64-wide output blocks per gate|up GEMM threadgroup (`prefill.Options.gu_ncb`): 1, 2 or 4. The same bytes.
+    pf_gu_ncb: u8 = 1,
+    /// The routed prefill's finish as the down GEMM's epilogue (`prefill.Options.dfin`): top-1 calls (an expert
+    /// streamer's prompt calls, `moeSwigluRows`), the down launch writing y. The same bytes.
+    pf_dfin: bool = false,
+    /// The fused finish's tile rows per staging round (`prefill.Options.dfr`): 32 or 64. The same bytes.
+    pf_dfr: u16 = 64,
+    /// The routed prefill's M tile rows (`prefill.Options.bm`): 64 (served), 128 or 256; anything but 64 runs without the
+    /// 128-row tiles (`pf_t128` needs bm 64). The same bytes.
+    pf_bm: u16 = 64,
+    /// The register path for each expert's <= 32-row remainder in the GEMMs' launch (small `.mixed`, served); false puts
+    /// every tile on the shared-decode body (small `.off`). The same bytes.
+    pf_mixed: bool = true,
     /// Routed prefill rows on the fused GEMM chain; false refuses them (`error.Exl3EngineNotImplemented`).
     prefill: bool = true,
     /// The device passes MLX's NAX gate (an M5-class GPU and macOS 26.2 or later), the consumer's to say. False keeps
@@ -64,6 +85,8 @@ pub const Config = struct {
         const spts = [_]u32{ 1, 2, 4, 5, 10, 20 };
         return std.mem.indexOfScalar(u8, &forms, c.decode_form) != null and
             std.mem.indexOfScalar(u32, &spts, c.shared_spt) != null and c.pf_alay <= 2 and
+            (c.pf_gu_ncb == 1 or c.pf_gu_ncb == 2 or c.pf_gu_ncb == 4) and (c.pf_dfr == 32 or c.pf_dfr == 64) and
+            (c.pf_bm == 64 or c.pf_bm == 128 or c.pf_bm == 256) and
             (c.banked_group == 2 or c.banked_group == 4) and (!c.banked_m3 or c.banked_group == 4) and
             c.banked_variant_gu < banked_variants and c.banked_variant_dn < banked_variants and
             ((c.banked_variant_gu == 0 and c.banked_variant_dn == 0) or c.banked_group == 4);
@@ -96,6 +119,14 @@ test "turboexl3 config: the defaults are valid and served; an unserved form, sli
     for ([_]u8{ 0, 4, 10 }) |f| try t.expect(!(Config{ .decode_form = f }).valid());
     try t.expect(!(Config{ .shared_spt = 3 }).valid());
     try t.expect(!(Config{ .pf_alay = 3 }).valid());
+    // the routed prefill's launch shapes: off, or the served shape, by default; each a value the chain serves
+    try t.expect(!d.pf_t256 and d.pf_cut == 64 and d.pf_gu_ncb == 1 and !d.pf_dfin and d.pf_dfr == 64 and d.pf_bm == 64 and d.pf_mixed);
+    for ([_]u8{ 2, 4 }) |n| try t.expect((Config{ .pf_gu_ncb = n }).valid());
+    for ([_]u8{ 0, 3, 8 }) |n| try t.expect(!(Config{ .pf_gu_ncb = n }).valid());
+    try t.expect((Config{ .pf_dfr = 32 }).valid() and !(Config{ .pf_dfr = 128 }).valid());
+    for ([_]u16{ 128, 256 }) |bm| try t.expect((Config{ .pf_bm = bm }).valid());
+    try t.expect(!(Config{ .pf_bm = 32 }).valid() and !(Config{ .pf_bm = 512 }).valid());
+    try t.expect((Config{ .pf_t256 = true, .pf_dfin = true, .pf_cut = 0, .pf_mixed = false }).valid());
     try t.expectEqual(@as(u32, 2), d.banked_group);
     try t.expect((Config{ .banked_group = 4 }).valid());
     for ([_]u32{ 0, 1, 3, 8 }) |g| try t.expect(!(Config{ .banked_group = g }).valid());

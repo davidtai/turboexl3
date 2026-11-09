@@ -1804,6 +1804,21 @@ RENAMED_TESTS[('router_test.zig', ("turboexl3 gpu ling router: routerLogits, sel
     "table, denseRows at 2 to 8), predictor scores (DeepSeek's and Ling's, gemv at one row and gemv_wide "
     'at 2 to 8) and ids and bf16 weights word for word at rows 1 to 8 (TURBOEXL3_GPU=1)')
 
+# Ling-3.1-flash's routed-chain variants (ling-v1-routed, each a prefill.Options field off by default; the kernels the
+# served chain runs keep their texts: gemm_3, gemm_op1_xsz and froute_t128_2 are cut into pieces of the same values)
+SPLIT_ADDED_KERNELS['turboexl3_pf_t256_route'] = ('Options.t256: text_froute_t128 with its two 128-row lines at 256 rows '
+                                                  '(froute_t128_2 cut at them; froute_t256_nq, froute_t256_store), the '
+                                                  '128-row tiles\' launch then over 256-row tiles on the bm-256 body')
+SPLIT_ADDED_KERNELS['turboexl3_pf_dfin'] = ('Options.dfin: gemm1_text with its tile read from one of two tables '
+                                            '(gemm_dfin_tile in gemm_3_2\'s place) and its store replaced by the '
+                                            'finish\'s own statements (gemm_dfin_epi_1 ++ finish_2 ++ gemm_dfin_load ++ '
+                                            'finish_4 ++ gemm_dfin_epi_2 in gemm_op1_xsz_2 ++ gemm_5\'s place), header '
+                                            'header_nax ++ h128')
+SPLIT_ADDED_KERNELS['turboexl3_test_pf_dfin_fault'] = ('test only: turboexl3_pf_dfin with a planted fault (tile 0\'s '
+                                                       'products unrounded, fault/dfin_4 in finish_4\'s place), a red check')
+SPLIT_ADDED_KERNELS['turboexl3_test_pf_t256_route_fault'] = ('test only: turboexl3_pf_t256_route with a planted fault (its '
+                                                             'first tile on the next expert, fault/t256_store), a red check')
+
 def split_report(oprog, nprog, ounits, nunits, orig_dir, new_dir, problems, verbose):
     """--split (declarations moved between files, not only files): checks 1 to 4 over the whole tree instead of per file.
     1. Every kernel name either tree can make (tools/kernel_docs.py's list: the computed-name families included) is in

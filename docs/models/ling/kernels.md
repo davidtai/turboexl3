@@ -905,3 +905,59 @@ GEMVs), the fused-GEMM option, pg2 and an un-rotated resident trellis keep the c
   (`ling:shared/sgu_swiglu_clamp_out`: MLX's sigmoid read from the table by the gate's pattern, Multiply, Minimum with L,
   clip to [-L, L], Multiply, back in T).
 - **Pinned by:** as `turboexl3_ling_finish_sgu`'s, at limit 10 (the shared expert's shape).
+
+## `src/models/ling/rows_test.zig`
+
+The red checks' planted faults: kernels made only by the routed chain's variant byte test, each a served variant's
+text with one piece swapped for a fault (`kernels/test/fault/`), so the test shows its byte comparison catches a
+kernel-level fault of each kind it guards.
+
+### `turboexl3_test_pf_dfin_fault`
+
+<!-- kernel-facts: turboexl3_test_pf_dfin_fault -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/ling/rows_test.zig:667` (`test turboexl3 gpu ling rows variants: the routed chain's variants (256-row tiles, the remainder cut, gate-up column blocks, the fused finish, the plain launches) are the served engine's words on synthetic calls at every row bucket, n 40 and 32, limits 0 and 10; planted faults are caught (TURBOEXL3_GPU=1)`) |
+| inputs | `tiles`, `tiles2`, `x0`, `w0`, `xs0`, `order`, `scores`, `svh_d` |
+| outputs | `y` |
+| source | `comptime prefill.dfinText(@embedFile("kernels/test/fault/dfin_4.metal"))` = `prefill/gemm_1` ++ `prefill/gemm_2` ++ `prefill/gemm_dfin_decl` ++ `prefill/gemm_3_1` ++ `prefill/gemm_dfin_tile` ++ `prefill/gemm_3_3` ++ `prefill/gemm_op1_wx` ++ `prefill/gemm_4` ++ `prefill/gemm_op1_xsz_1` ++ `prefill/gemm_dfin_epi_1` ++ `prefill/finish_2` ++ `prefill/gemm_dfin_load` ++ `ling:test/fault/dfin_4` ++ `prefill/gemm_dfin_epi_2` (9569 B, `3bfede420e85`) |
+| header | `prefill.header_nax_dfin` = `steel_nax` ++ `prefill/using_steel` ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `prefill/small_helpers` ++ `prefill/gemm_helpers` ++ `prefill/h128` (63060 B, `d36286083098`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** test only: the red check in `src/models/ling/rows_test.zig` "turboexl3 gpu ling rows variants: ...",
+  swapped into a `Prefill`'s `dfin_k` for one call.
+- **Shapes and dtypes:** `turboexl3_pf_dfin`'s.
+- **Grid and threadgroup:** `turboexl3_pf_dfin`'s (`Prefill.gemmDFin` launches it).
+- **Template args:** `turboexl3_pf_dfin`'s.
+- **Replaces:** nothing: a planted fault, `turboexl3_pf_dfin` with tile 0's products left unrounded before the score
+  (`ling:test/fault/dfin_4` in `finish_4`'s place).
+- **Bits:** wrong on purpose: tile 0's rows of y differ from the chain's.
+- **Pinned by:** `src/models/ling/rows_test.zig` "turboexl3 gpu ling rows variants: ..." (GPU: its y must differ from
+  the served engine's, `TURBOEXL3_LING_ROWS_RED` fault=dfin_tile0_unrounded).
+
+### `turboexl3_test_pf_t256_route_fault`
+
+<!-- kernel-facts: turboexl3_test_pf_t256_route_fault -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/ling/rows_test.zig:683` (`test turboexl3 gpu ling rows variants: the routed chain's variants (256-row tiles, the remainder cut, gate-up column blocks, the fused finish, the plain launches) are the served engine's words on synthetic calls at every row bucket, n 40 and 32, limits 0 and 10; planted faults are caught (TURBOEXL3_GPU=1)`) |
+| inputs | `inds` |
+| outputs | `order`, `tiles`, `tiles128`, `xbase` |
+| source | `comptime prefill.froute256With(@embedFile("kernels/test/fault/t256_store.metal"))` = `prefill/froute_t128_1` ++ `prefill/froute_count` ++ `prefill/froute_t128_2_1` ++ `prefill/froute_t256_nq` ++ `prefill/froute_t128_2_3` ++ `ling:test/fault/t256_store` ++ `prefill/froute_t128_2_5` (4674 B, `1fc222b2295b`) |
+| header | `prefill.header_small` = `prefill/h128` ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` (20306 B, `574dba73f3cd`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** test only: the red check in `src/models/ling/rows_test.zig` "turboexl3 gpu ling rows variants: ...",
+  swapped into a `Prefill`'s `t128_k.route` for one call.
+- **Shapes and dtypes:** `turboexl3_pf_t256_route`'s.
+- **Grid and threadgroup:** `turboexl3_pf_t256_route`'s.
+- **Template args:** `turboexl3_pf_t256_route`'s.
+- **Replaces:** nothing: a planted fault, `turboexl3_pf_t256_route` with its first 256-row tile on the next expert
+  (`ling:test/fault/t256_store` in `froute_t256_store`'s place).
+- **Bits:** wrong on purpose: that tile's rows are computed with another expert's weights.
+- **Pinned by:** `src/models/ling/rows_test.zig` "turboexl3 gpu ling rows variants: ..." (GPU: its y must differ from
+  the served engine's, `TURBOEXL3_LING_ROWS_RED` fault=t256_tile0_wrong_expert).

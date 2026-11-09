@@ -42,7 +42,11 @@ reaches the limit. The combine is Ling's own kernel, held to MLX's three ops wor
 prompt call's `linear` to the same row of a whole-prompt call wherever both calls run MLX's regular matmul (a
 layer-major prompt pass's trunk linears; `TURBOEXL3_LING_ROWINV` lines); `rows_test.zig` holds `moeLingRows` to the outside
 plugin's prompt chunk (its take, its casts and `moeLing` at top-1) byte for byte on the loader's views, every chunk of
-a prompt layer's call and a padded one (`TURBOEXL3_LING_ROWS` lines). The kernels:
+a prompt layer's call and a padded one (`TURBOEXL3_LING_ROWS` lines), and each variant of its routed chain (the 256-row
+tiles, the remainder rule's cut, gate|up's column blocks, the finish as the down GEMM's epilogue, the plain launches at
+bm 128 and 256; `prefill.Options`, off by default) to the served engine word for word on synthetic calls at every row
+bucket of an expert, with four planted faults that must be caught (`TURBOEXL3_LING_ROWS_VARIANT` and
+`TURBOEXL3_LING_ROWS_RED` lines). The kernels:
 [the core's catalog](../../core/kernels.md) (`turboexl3_fin7co`, `turboexl3_pf_midco`, `turboexl3_pf_mid_vco`,
 `turboexl3_pf_t128_midco`) and [DeepSeek-V4.1's](../deepseek_v41/kernels.md) (`turboexl3_fin7b`, `turboexl3_fin7cob`,
 `turboexl3_fin7bg`, `turboexl3_fin7cobg`).
@@ -59,7 +63,8 @@ prompt takes it; the standard test decides that switch.
 `TURBOEXL3_LING_TIME=1` (with `TURBOEXL3_GPU=1`) times the Ling kernels at the model's shapes for the serving plan: every
 trunk linear, `moeLing` and `moeLingBanked`, and the decode forward's linears chained over the 72 layers
 (`TURBOEXL3_LING_TIME` and `TURBOEXL3_LING_CHAIN` lines), and the prompt call over gathered rows against the plugin's
-chunk at its call shape (`TURBOEXL3_LING_ROWS_TIME` lines). It is a diagnostic: it asserts nothing, and its numbers steer
+chunk at its call shape (`TURBOEXL3_LING_ROWS_TIME` lines) with each routed-chain variant's arm against the served
+engine (`TURBOEXL3_LING_ROWS_TIME_ARM` lines). It is a diagnostic: it asserts nothing, and its numbers steer
 work; they never decide it.
 
 The shared expert (`src/models/ling/shared.zig`) takes the composed chain's four dependent levels at decode rows (the

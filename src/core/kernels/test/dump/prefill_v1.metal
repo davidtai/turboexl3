@@ -1,0 +1,4 @@
+ constant constexpr int BMR = 256; constant constexpr int SGT = 16;
+(const device int* tiles [[buffer(0)]], const constant int* tiles_shape [[buffer(1)]], const device int* tiles2 [[buffer(2)]], const device half* x0 [[buffer(3)]], const device uint16_t* w0 [[buffer(4)]], const device float* xs0 [[buffer(5)]], const device uint* order [[buffer(6)]], const device float* scores [[buffer(7)]], const device half* svh_d [[buffer(8)]], device float* y [[buffer(9)]]
+ constant constexpr int DFR = 64; constant constexpr int T2 = 1; typedef float OUT_T;
+ constant constexpr int DFR = 32; constant constexpr int T2 = 0; typedef float OUT_T;

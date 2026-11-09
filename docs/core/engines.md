@@ -291,6 +291,14 @@ With `froute` and without `t128`, the chain is 6 launches in 6 levels. `root.pfO
 constants, except `alay` and `t128`: the fields `pf_alay` and `pf_t128` of `Config` set those two. With `prefill` or
 `nax` false, `moe` refuses prefill rows. The third column below compares each kernel with the base chain.
 
+Five more options reshape the chain's launches, each off (or at the served shape) by default, each held to the served
+chain's bytes: `t256` (the 128-row tiles' launch over tiles of up to 256 rows on the bm-256 body, its route
+`turboexl3_pf_t256_route`), `cut` (the remainder rule's cutoff), `gu_ncb` (the gate and up GEMM's output blocks per
+threadgroup), `dfin` (the finish as the down GEMM's epilogue at top-1: `turboexl3_pf_dfin`, one launch over every row in
+place of the down GEMM's launches and `fin`, so 6 launches in 5 levels with `t128`) and the plain launches at bm 128 or
+256 with the register path on or off. `Config`'s `pf_t256`, `pf_cut`, `pf_gu_ncb`, `pf_dfin`, `pf_dfr`, `pf_bm` and
+`pf_mixed` set them.
+
 | kernel | what it computes | launches it replaces |
 |---|---|---|
 | `turboexl3_pf_table`, `turboexl3_pf_table_m` | after MLX's argsort: each expert's run by binary search, an exclusive scan, then the tile table (`_m`: remainders of at most 32 rows as register-path tiles) | — |
@@ -302,6 +310,8 @@ constants, except `alay` and `t128`: the fields `pf_alay` and `pf_t128` of `Conf
 | `turboexl3_pf_gemm2m`, `turboexl3_pf_gemm1m` | the mixed launch: the table's large tiles through the shared-decode body, and its tiles of at most 32 rows through the register path | `_gemm2` and `_gemm2s` (`_gemm1` and `_gemm1s`) as one launch |
 | `turboexl3_pf_t128_gum`, `turboexl3_pf_t128_dnm` | the mixed launch over the remainder table | `_gemm2m` (`_gemm1m`), with `_gut` (`_dnt`) beside it |
 | `turboexl3_pf_t128_gut`, `turboexl3_pf_t128_dnt` | the shared-decode body at 128 rows over the 128-row tiles, beside the mixed launch; each launch writes its own output | as above |
+| `turboexl3_pf_t256_route` | `t256`: `turboexl3_pf_t128_route` with its big tiles at 256 rows (the `_gut` and `_dnt` texts then run at bm 256) | `_t128_route` |
+| `turboexl3_pf_dfin` | `dfin`: the down GEMM (`_gemm1`'s body) with the finish's statements as its epilogue, over one table or both of the 128-row tiles' tables; y written, zd never | `_t128_dnm`, `_t128_dnt` and `_t128_fin` (or `_gemm1` and `_fin`) |
 | `turboexl3_pf_mid`, `turboexl3_pf_t128_mid` | the gate and up finishes, SwiGLU in `f32`, the down input prepared, and its block sums (`t128`: each row from the launch that computed it) | — |
 | `turboexl3_pf_fin`, `turboexl3_pf_t128_fin` | the down finish and the score-weighted sum of the slots, in slot order, through `inv` (`t128`: each row from the launch that computed it) | — |
 | `turboexl3_pf_prep_v`, `turboexl3_pf_mid_v`, `turboexl3_pf_fin_v` | `aux`: prep, mid and finish with four consecutive elements per lane and several simdgroups per threadgroup | `_prep`, `_mid`, `_fin` |
