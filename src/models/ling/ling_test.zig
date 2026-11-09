@@ -27,11 +27,14 @@
 //! - on operands as the plugin serves them (the pack's I16 trellis words; `[1, rows, in]` bf16 activations, whole or a
 //!   row view of a wider array), `root.lingSharedExpert` gives the composed shared expert's words (rows 1 to 4),
 //!   `root.ling.linearPair` each member's `linear` words (rows 1, 2, 4, 6), and the one-row table one row's own words
-//!   (every trunk shape), each also the words of the same call on U16 words and a contiguous `[rows, in]`.
+//!   (every trunk shape), each also the words of the same call on U16 words and a contiguous `[rows, in]`;
+//! - KDA_EPILOGUE's o_proj (the plugin's KDA step prepares o_proj's rows): `Dense.linearFromPrepared` over prep_sc's
+//!   rows gives `linear`'s words at every trunk shape, rows 1 to 4, x bf16 and f32, on a Dense built under the served
+//!   Config and the pack's I16 trellis words; one flipped input word must differ.
 //! TURBOEXL3_LING_N (rates in halfwords per tile; default 40,32) narrows the routed tests. Lines: TURBOEXL3_LING_BYTES,
 //! TURBOEXL3_LING_PARITY, TURBOEXL3_LING_TOP4, TURBOEXL3_LING_BANKED, TURBOEXL3_LING_CACHE, TURBOEXL3_LING_DENSE,
 //! TURBOEXL3_LING_ONE_ROW_TABLE, TURBOEXL3_LING_PAIR, TURBOEXL3_LING_KDA_PROJ, TURBOEXL3_LING_ROWINV,
-//! TURBOEXL3_LING_SERVED.
+//! TURBOEXL3_LING_SERVED, TURBOEXL3_LING_KDA_EPI_OPROJ (_RED, _DONE).
 //! Timing (TURBOEXL3_LING_TIME=1 with TURBOEXL3_GPU=1; asserts nothing, guidance only): every trunk linear, `moeLing`
 //! and `moeLingBanked` at Ling's shapes and rows, the decode forward's linears chained over the 72 layers, and the dense
 //! decode GEMV's launch shapes swept per trunk shape on that chain at rows 1 to 8 (asserting bytes only); D35's arm:
@@ -1074,6 +1077,145 @@ test "turboexl3 gpu ling served operands: the shared expert, the pairs and the o
     }
     std.debug.print("TURBOEXL3_LING_SERVED_DONE checks={d} failed={d} {s}\n", .{ checks, failed, if (failed == 0) "PASS" else "FAIL" });
     try testing.expectEqual(@as(usize, 0), failed);
+}
+
+/// A linear's operands as `ref.synthLinear` draws them (the trellis words, then suh, then svh, from the same generator in
+/// the same order), without the reference weights it reconstructs on the host, which a test against `linear` does not
+/// read (8192 x 4096 of them at o_proj)
+const Drawn = struct {
+    trellis: []u16,
+    suh: []u16,
+    svh: []u16,
+
+    fn deinit(self: Drawn, a: std.mem.Allocator) void {
+        a.free(self.trellis);
+        a.free(self.suh);
+        a.free(self.svh);
+    }
+};
+
+fn drawLinear(a: std.mem.Allocator, rnd: std.Random, in: u32, out: u32, n: u32) !Drawn {
+    const trellis = try a.alloc(u16, @as(usize, in / 16) * (out / 16) * n);
+    errdefer a.free(trellis);
+    const suh = try a.alloc(u16, in);
+    errdefer a.free(suh);
+    const svh = try a.alloc(u16, out);
+    for (trellis) |*v| v.* = rnd.int(u16);
+    const out_scale: f32 = 1.0 / @sqrt(@as(f32, @floatFromInt(in)));
+    for (suh) |*v| v.* = format.f32ToF16Bits(0.5 + rnd.float(f32));
+    for (svh) |*v| v.* = format.f32ToF16Bits((0.5 + rnd.float(f32)) * out_scale);
+    return .{ .trellis = trellis, .suh = suh, .svh = svh };
+}
+
+/// Rows of x prepared as the plugin's KDA step epilogue writes them for o_proj: prep_sc's statements in their own launch
+/// (xp half [rows, in] in lane order, xs f32 [rows, in / 128]), and the arrival counters the plugin binds (DEC-ONE's
+/// `decCounters`, at least 8; src/ling_kda_epi.zig `planFor`). `d`'s own choice of where `linear`'s prepare runs is
+/// restored after.
+fn preparedRows(g: *G, s: mlx.mlx_stream, d: *dense.Dense, x: mlx.mlx_array, suh: mlx.mlx_array, rows: u32) !struct { xp: mlx.mlx_array, xs: mlx.mlx_array, ncnt: c_int } {
+    const sv_rows = d.dec_prep_rows;
+    const sv_out = d.dec_prep_out;
+    const sv_one = d.one_prep_in;
+    d.dec_prep_rows = 0;
+    d.dec_prep_out = 0;
+    d.one_prep_in = false;
+    d.resetCfgs();
+    defer {
+        d.dec_prep_rows = sv_rows;
+        d.dec_prep_out = sv_out;
+        d.one_prep_in = sv_one;
+        d.resetCfgs();
+    }
+    const c = try d.decCfgs(rows);
+    if (c.prep_in) return error.Exl3EngineNotImplemented;
+    var po: [3]mlx.mlx_array = undefined;
+    try sdk.kernel_launch.applyConfig(d.prep_sc, c.prep, &.{ x, suh }, &po, s);
+    _ = mlx.mlx_array_free(po[2]);
+    const xp = try g.adopt(po[0]);
+    const xs = try g.adopt(po[1]);
+    return .{ .xp = xp, .xs = xs, .ncnt = @intCast(@max(try d.decCounters(rows), 8)) };
+}
+
+// KDA_EPILOGUE's o_proj (the outside plugin turboexl3_ling, src/ling_kda_epi.zig): the plugin's KDA step also writes
+// o_proj's DEC-ONE prepared rows, and o_proj runs `Dense.linearFromPrepared` over them (DEC-ONE's GEMV alone,
+// `decLinearPrepared`, at 1 to 4 rows), which must give `linear`'s words whichever prepare `linear` itself takes at that
+// row count. At every Ling-3.1-flash trunk shape (o_proj's among them: kda.o 8192 -> 4096), rows 1 to 4, x bf16 and f32:
+// a Dense built under the served Config (the plugin's `configure` sets dec_one_row_table; DEC-ONE and the lean GEMV are
+// turboexl3's defaults), the trellis as the pack's I16 words, the rows prepared by prep_sc in their own launch, the
+// counters zeroed. Red check: o_proj at 3 rows, x bf16, with one input word's sign flipped before the prepare must give
+// words that differ from the clean `linear`'s. Lines: TURBOEXL3_LING_KDA_EPI_OPROJ (80), _RED (1), _DONE.
+test "turboexl3 gpu ling kda epilogue o_proj: linearFromPrepared over prep_sc's rows gives linear's words at every Ling-3.1-flash trunk shape, rows 1 to 4, x bf16 and f32, on the pack's I16 trellis words under the served Config; a flipped input word differs (TURBOEXL3_GPU=1)" {
+    _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    const s = mlx.mlx_default_gpu_stream_new();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    const a = std.heap.page_allocator;
+    var g = try G.init(a, s);
+    defer g.deinit();
+    const saved = config.get().*;
+    defer config.configure(saved) catch unreachable;
+    var served = saved;
+    served.dec_one_row_table = true;
+    var failed: usize = 0;
+    var checks: usize = 0;
+    var red_failed: usize = 0;
+    for (dense_cases) |c| {
+        if (c.head) continue;
+        var prng = std.Random.DefaultPrng.init(0xE910 ^ (@as(u64, c.in) << 24) ^ c.out);
+        const rnd = prng.random();
+        const lin = try drawLinear(a, rnd, c.in, c.out, c.n);
+        defer lin.deinit(a);
+        const mark = g.mark();
+        defer g.resetTo(mark);
+        const p = try packTrellis(&g, .{
+            .trellis = try g.hostArray(std.mem.sliceAsBytes(lin.trellis), &.{ ci(c.in / 16), ci(c.out / 16), ci(c.n) }, .uint16),
+            .suh = try g.hostArray(std.mem.sliceAsBytes(lin.suh), &.{ci(c.in)}, .float16),
+            .svh = try g.hostArray(std.mem.sliceAsBytes(lin.svh), &.{ci(c.out)}, .float16),
+        });
+        const xs = try a.alloc(f32, 4 * c.in);
+        defer a.free(xs);
+        for (xs) |*v| v.* = bfExact(rnd.floatNorm(f32));
+        const want = try a.alloc(f32, 4 * c.out);
+        defer a.free(want);
+        const got = try a.alloc(f32, 4 * c.out);
+        defer a.free(got);
+        const red = std.mem.eql(u8, c.name, "kda.o/mla.dense");
+        for ([_]mlx.mlx_dtype{ .bfloat16, .float32 }) |dt| {
+            try config.configure(served);
+            var d = try dense.Dense.init(.{ .in = c.in, .out = c.out, .rate = format.Rate.fromN(c.n).?, .dec = .mul1, .out_dtype = dt });
+            defer d.deinit();
+            for (1..5) |ru| {
+                const rows: u32 = @intCast(ru);
+                const rm = g.mark();
+                defer g.resetTo(rm);
+                const n = rows * c.out;
+                const x = try g.astype(try g.hostArray(std.mem.sliceAsBytes(xs[0 .. rows * c.in]), &.{ ci(rows), ci(c.in) }, .float32), dt);
+                const inside = try d.decPrepInside(rows);
+                _ = try g.hostF32(try g.astype(try g.adopt(try d.linear(s, x, p.trellis, p.suh, p.svh, rows)), .float32), want[0..n]);
+                const pr = try preparedRows(&g, s, &d, x, p.suh, rows);
+                _ = try g.hostF32(try g.astype(try g.adopt(try d.linearFromPrepared(s, pr.xp, pr.xs, try g.zeros(&.{pr.ncnt}, .uint32), p.trellis, p.svh, rows)), .float32), got[0..n]);
+                const diff = wordsDiffer(got[0..n], want[0..n]);
+                const ok = diff == 0 and d.decTakes(rows);
+                checks += 1;
+                failed += @intFromBool(!ok);
+                std.debug.print("TURBOEXL3_LING_KDA_EPI_OPROJ shape={s} in={d} out={d} n={d} rows={d} x={s} linear_prepare={s} bt={d} differing={d}/{d} {s}\n", .{ c.name, c.in, c.out, c.n, rows, @tagName(dt), if (inside) "inside" else "own_launch", d.btDec(rows, dense.Dense.rbFor(rows)), diff, n, if (ok) "PASS" else "FAIL" });
+                // red: one input word's sign flipped before the prepare (row 1, column 17) must move o_proj's words
+                if (red and rows == 3 and dt == .bfloat16) {
+                    const bad = try a.dupe(f32, xs[0 .. rows * c.in]);
+                    defer a.free(bad);
+                    bad[c.in + 17] = -bad[c.in + 17];
+                    const xb = try g.astype(try g.hostArray(std.mem.sliceAsBytes(bad), &.{ ci(rows), ci(c.in) }, .float32), dt);
+                    const pb = try preparedRows(&g, s, &d, xb, p.suh, rows);
+                    _ = try g.hostF32(try g.astype(try g.adopt(try d.linearFromPrepared(s, pb.xp, pb.xs, try g.zeros(&.{pb.ncnt}, .uint32), p.trellis, p.svh, rows)), .float32), got[0..n]);
+                    const dr = wordsDiffer(got[0..n], want[0..n]);
+                    red_failed += @intFromBool(dr == 0);
+                    std.debug.print("TURBOEXL3_LING_KDA_EPI_OPROJ_RED shape={s} rows={d} x={s} fault=input_sign row=1 col=17: differing={d}/{d} (a flipped input word must differ) {s}\n", .{ c.name, rows, @tagName(dt), dr, n, if (dr > 0) "PASS" else "FAIL" });
+                }
+            }
+        }
+    }
+    std.debug.print("TURBOEXL3_LING_KDA_EPI_OPROJ_DONE {d} lines, {d} failed; red checks failed {d}\n", .{ checks, failed, red_failed });
+    try testing.expectEqual(@as(usize, 80), checks);
+    try testing.expectEqual(@as(usize, 0), failed);
+    try testing.expectEqual(@as(usize, 0), red_failed);
 }
 
 /// A KDA layer's three projections of one input (`root.ling.kdaProj`): q|k|v, f and g at Ling's widths, K6
