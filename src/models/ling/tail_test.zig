@@ -436,3 +436,330 @@ test "turboexl3 gpu ling tail parts: moeTailParts reads each pair's row in place
     std.debug.print("TURBOEXL3_LING_TAIL_PARTS_DONE checks={d} failed={d} {s}\n", .{ checks, failed, if (failed == 0) "PASS" else "FAIL" });
     try testing.expectEqual(@as(usize, 0), failed);
 }
+
+// ── L3: the MoE tail at prompt widths (`moeTailWide`, turboexl3_ling's MLX_SERVE_LING_PF_MOE_TAIL) ──
+//
+// CPU: the wide texts' compositions (kernels/test/pins/tail_wide.metal). GPU (TURBOEXL3_GPU=1): `moeTailWide` against
+// the served chain at prompt widths, word for word, at the standard request's spans (4,096 x 4, 1,965 and 31 rows of
+// one routed call of 18,380 tokens at top-8 over 512 slots, lognormal popularity sigma 1.5): the call's outputs in the
+// plugin's chunks of whole experts (at most 4,096 pairs), the streamer's JOINLESS plan (above 24 outputs the smallest
+// merged into the last source), each output's rows random f16 words (PF_F16_PAIRS's rows) and the same words widened
+// to f32; the routes' weights bf16 values read in f32; the served chain is the combine over the parts
+// (`combine.combineParts`), its astype to bf16, the span's slice, the block's add of the shared expert, MLX's add of
+// the residual and MLX's fast rms_norm (TURBOEXL3_LING_PF_TAIL). Red checks (TURBOEXL3_LING_PF_TAIL_RED): a planted
+// reordering of the norm's threadgroup sum (its 32 simdgroup sums added one by one in reverse) must show in the normed
+// rows of the whole call, and the refusals. A thread's own four squares are no such check: four squares of bf16 words
+// (16-bit significands) round at most once in practice, so their order gives the same partial sum and the same words
+// (a reversal planted there changed none of 16,777,216 normed words on the box).
+
+const tail = @import("tail.zig");
+const combine = @import("combine.zig");
+const rt = @import("rows_test.zig");
+const ct = @import("combine_test.zig");
+const ks = sdk.kernel_launch;
+const decode = @import("../../core/decode.zig");
+
+/// The statements the wide texts' checks pin (kernels/test/pins/tail_wide.metal): 0 the f32 source pointer, 1 the f16
+/// one, 2 the combine's pick call, 3 its f16 pick's, 4 the decode parts delta's pick, 5 the wide delta's pick, 6 the
+/// delta's block pragma, 7 W from WE, 8 eps from WE, 9 the fold's first statement, 10 the norm's threadgroup sum (the
+/// simd sum over the simdgroups' sums), 11 the fault's reversed threadgroup sum, 12 the norm's rsqrt, 13 the fault's
+/// first statement
+const wide_pin = support.pins(@embedFile("kernels/test/pins/tail_wide.metal"));
+/// The planted fault (kernels/test/fault/): tail_2 with the threadgroup's simdgroup sums added one by one in reverse
+const fault_tgsum_rev = @embedFile("kernels/test/fault/tail_2_tgsum_rev.metal");
+const text_wide_tgsum_rev: [:0]const u8 = tail.tail_we ++ tail.tail_1 ++ tail.tail_delta_wide_h ++ fault_tgsum_rev;
+
+/// `s` up to its first `needle`
+fn upTo(comptime s: []const u8, comptime needle: []const u8) []const u8 {
+    comptime {
+        @setEvalBranchQuota(10_000_000);
+        const j = std.mem.indexOf(u8, s, needle) orelse @compileError("needle not in the text");
+        return s[0..j];
+    }
+}
+
+/// `s` with every `needle` replaced by `with`, at comptime (the checks compare pieces swapped this way; no kernel is
+/// built from it)
+fn swapAll(comptime s: []const u8, comptime needle: []const u8, comptime with: []const u8) []const u8 {
+    comptime {
+        @setEvalBranchQuota(10_000_000);
+        var out: []const u8 = "";
+        var i: usize = 0;
+        while (std.mem.indexOfPos(u8, s, i, needle)) |j| {
+            out = out ++ s[i..j] ++ with;
+            i = j + needle.len;
+        }
+        return out ++ s[i..];
+    }
+}
+
+/// `s` from the first `needle` on
+fn fromFirst(comptime s: []const u8, comptime needle: []const u8) []const u8 {
+    comptime {
+        @setEvalBranchQuota(10_000_000);
+        const j = std.mem.indexOf(u8, s, needle) orelse @compileError("needle not in the text");
+        return s[j..];
+    }
+}
+
+fn holds(hay: []const u8, needle: []const u8) bool {
+    return std.mem.indexOf(u8, hay, needle) != null;
+}
+
+test "turboexl3 ling tail wide texts: the prompt-width launch is the parts launch's composition with W and eps read from WE and the combine's 24-source pick; the f16 text is the f32 one with the source pointer half and pick_h; the headers are the combine's picks with no file-scope pragma; the fault swaps tail_2's threadgroup sum alone" {
+    try testing.expect(std.mem.eql(u8, tail.text_wide, tail.tail_we ++ tail.tail_1 ++ tail.tail_delta_wide ++ tail.tail_2));
+    try testing.expect(std.mem.eql(u8, tail.text_wide_h, tail.tail_we ++ tail.tail_1 ++ tail.tail_delta_wide_h ++ tail.tail_2));
+    try testing.expectEqualStrings(combine.pick, tail.header_wide);
+    try testing.expectEqualStrings(combine.pick_h, tail.header_wide_h);
+    // the f16 delta is the f32 one with the source pointer half and the pick renamed, nothing else
+    try testing.expectEqualStrings(tail.tail_delta_wide_h, comptime swapAll(swapAll(tail.tail_delta_wide, wide_pin[0], wide_pin[1]), wide_pin[2], wide_pin[3]));
+    try testing.expect(!holds(tail.tail_delta_wide_h, wide_pin[0]) and !holds(tail.tail_delta_wide, wide_pin[1]));
+    // the wide delta's statements are the decode parts delta's with the 24-source pick for the 8-source one
+    try testing.expectEqualStrings(comptime fromFirst(tail.tail_delta_parts, wide_pin[9]), comptime swapAll(fromFirst(tail.tail_delta_wide, wide_pin[9]), wide_pin[5], wide_pin[4]));
+    // the combine's rounding points by the delta's own block pragma; the norm compiles as the add_norm's (no pragma in
+    // the headers, none in tail_we, tail_1 or tail_2)
+    try testing.expect(holds(tail.tail_delta_wide, wide_pin[6]) and holds(tail.tail_delta_wide_h, wide_pin[6]));
+    for ([_][]const u8{ tail.header_wide, tail.header_wide_h, tail.tail_we, tail.tail_1, tail.tail_2 }) |piece| try testing.expect(!holds(piece, wide_pin[6]));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, tail.text_wide, wide_pin[6]));
+    // W and eps from the one buffer WE
+    try testing.expect(holds(tail.tail_we, wide_pin[7]) and holds(tail.tail_we, wide_pin[8]));
+    // every operand a wide launch binds is a name its text or header reads; no name takes MLX's shape / strides suffixes
+    for ([_][:0]const u8{ tail.text_wide, tail.text_wide_h }, [_][:0]const u8{ tail.header_wide, tail.header_wide_h }) |txt, hdr| {
+        for (tail.wide_in_names) |n| try testing.expect(holds(txt, std.mem.span(n)) or holds(hdr, std.mem.span(n)));
+        for (tail.out_names) |n| try testing.expect(holds(txt, std.mem.span(n)));
+        for ([_][]const u8{ "_shape", "_strides", "_ndim" }) |suf| try testing.expect(!holds(txt, suf));
+    }
+    // the fault: tail_2 with the simd sum over the simdgroups' sums swapped for their sum one by one in reverse; up to
+    // it (the squares, the simd sums, local_sums) and from rsqrt on (the stores) it is tail_2's
+    try testing.expect(!std.mem.eql(u8, fault_tgsum_rev, tail.tail_2));
+    try testing.expect(holds(tail.tail_2, wide_pin[10]) and !holds(fault_tgsum_rev, wide_pin[10]) and holds(fault_tgsum_rev, wide_pin[11]));
+    try testing.expect(!holds(tail.tail_2, wide_pin[11]) and !holds(tail.tail_2, wide_pin[13]));
+    try testing.expectEqualStrings(comptime upTo(tail.tail_2, wide_pin[10]), comptime upTo(fault_tgsum_rev, wide_pin[13]));
+    try testing.expectEqualStrings(comptime fromFirst(tail.tail_2, wide_pin[12]), comptime fromFirst(fault_tgsum_rev, wide_pin[12]));
+    try testing.expect(std.mem.endsWith(u8, text_wide_tgsum_rev, fault_tgsum_rev) and std.mem.startsWith(u8, text_wide_tgsum_rev, tail.tail_we ++ tail.tail_1 ++ tail.tail_delta_wide_h));
+}
+
+test "turboexl3 ling tail wide takes: any row count from 1, K 1 to 8, a width a multiple of 4 up to 4096, bf16 or f16" {
+    try testing.expect(tail.wideTakes(1, 4096, 8, .bfloat16) and tail.wideTakes(18_380, 4096, 8, .bfloat16) and tail.wideTakes(4607, 4096, 8, .float16));
+    try testing.expect(!tail.wideTakes(0, 4096, 8, .bfloat16));
+    try testing.expect(!tail.wideTakes(31, 4096, 9, .bfloat16) and !tail.wideTakes(31, 4096, 0, .bfloat16));
+    try testing.expect(!tail.wideTakes(31, 4100, 8, .bfloat16) and !tail.wideTakes(31, 8192, 8, .bfloat16) and !tail.wideTakes(31, 4094, 8, .bfloat16));
+    try testing.expect(!tail.wideTakes(31, 4096, 8, .float32));
+    try testing.expectEqual(@as(usize, 24), tail.wide_max_sources);
+    try testing.expectEqual(@as(usize, 31), tail.wide_in_names.len + tail.out_names.len);
+}
+
+/// The plugin's sort of a call's pairs by slot (ling_math.zig `chunks()`: a counting sort, stable): each sorted pair's
+/// position and slot
+fn slotOrder(a: std.mem.Allocator, slot: []const u32, order: []u32, s_slot: []u32) !void {
+    var max_slot: u32 = 0;
+    for (slot) |sv| max_slot = @max(max_slot, sv);
+    const starts = try a.alloc(u32, @as(usize, max_slot) + 2);
+    defer a.free(starts);
+    @memset(starts, 0);
+    for (slot) |sv| starts[sv + 1] += 1;
+    for (1..starts.len) |i| starts[i] += starts[i - 1];
+    for (slot, 0..) |sv, i| {
+        order[starts[sv]] = @intCast(i);
+        s_slot[starts[sv]] = sv;
+        starts[sv] += 1;
+    }
+}
+
+/// A random array on the device (normal, scale 1) of `shape` in `dt`
+fn devRandom(g: *G, s: mlx.mlx_stream, shape: []const c_int, dt: mlx.mlx_dtype) !mlx.mlx_array {
+    const nokey = mlx.mlx_array_new();
+    defer _ = mlx.mlx_array_free(nokey);
+    var r = mlx.mlx_array_new();
+    return adopted(g, mlx.mlx_random_normal(&r, shape.ptr, shape.len, dt, 0, 1, nokey, s), r);
+}
+
+/// The residual's and the normed rows' differing words of a wide launch's output against the chain's (n words each)
+fn wideDiffer(a: std.mem.Allocator, g: *G, got: tail.Out, want_h: mlx.mlx_array, want_n: mlx.mlx_array, n: usize) ![2]usize {
+    const gh = try g.adopt(got.h);
+    const gn = try g.adopt(got.normed);
+    const buf = try a.alloc(f32, 4 * n);
+    defer a.free(buf);
+    _ = try g.hostF32(try g.astype(try g.reshape(want_h, &.{ci(n)}), .float32), buf[0..n]);
+    _ = try g.hostF32(try g.astype(try g.reshape(gh, &.{ci(n)}), .float32), buf[n .. 2 * n]);
+    _ = try g.hostF32(try g.astype(try g.reshape(want_n, &.{ci(n)}), .float32), buf[2 * n .. 3 * n]);
+    _ = try g.hostF32(try g.astype(try g.reshape(gn, &.{ci(n)}), .float32), buf[3 * n ..]);
+    return .{ wordsDiffer(buf[0..n], buf[n .. 2 * n]), wordsDiffer(buf[2 * n .. 3 * n], buf[3 * n ..]) };
+}
+
+/// One refusal: the call must return `want` before any launch
+fn refuses(r: anyerror!tail.Out, want: anyerror) bool {
+    if (r) |o| {
+        _ = mlx.mlx_array_free(o.h);
+        _ = mlx.mlx_array_free(o.normed);
+        return false;
+    } else |e| return e == want;
+}
+
+test "turboexl3 gpu ling tail wide: moeTailWide gives the served chain's words at prompt widths (the combine over the call's JOINLESS parts, the block's astype and shared add, MLX's add and fast rms_norm) at the standard request's spans 4096 x 4, 1965 and 31 over 24 merged sources, f16 and f32; a planted reordering of the norm shows, and its refusals (TURBOEXL3_GPU=1)" {
+    _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    const s = mlx.mlx_default_gpu_stream_new();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    const a = std.heap.page_allocator;
+    var g = try G.init(a, s);
+    defer g.deinit();
+    defer _ = mlx.mlx_clear_cache();
+    var prng = std.Random.DefaultPrng.init(0x13_7A11_E0);
+    const rnd = prng.random();
+    const spans = [_]u32{ 4096, 4096, 4096, 4096, 1965, 31 };
+    var tokens: u32 = 0;
+    for (spans) |r| tokens += r;
+    const np: usize = @as(usize, tokens) * 8;
+    // the call's pairs (each token's top-8 of 512 slots), the plugin's stable sort by slot and its chunks
+    const act = try a.alloc(u32, np);
+    defer a.free(act);
+    const slot = try a.alloc(u32, np);
+    defer a.free(slot);
+    try rt.drawPairsAt(a, rnd, tokens, 512, 1.5, act, slot);
+    const order = try a.alloc(u32, np);
+    defer a.free(order);
+    const s_slot = try a.alloc(u32, np);
+    defer a.free(s_slot);
+    try slotOrder(a, slot, order, s_slot);
+    var out_rows: std.ArrayList(u32) = .empty;
+    defer out_rows.deinit(a);
+    var c0: usize = 0;
+    while (c0 < np) {
+        const c1 = rt.chunkEnd(s_slot, c0);
+        try out_rows.append(a, @intCast(c1 - c0));
+        c0 = c1;
+    }
+    const n_out = out_rows.items.len;
+    // the streamer's JOINLESS plan and each pair's (source, row)
+    const jorder = try a.alloc(u32, n_out);
+    defer a.free(jorder);
+    const src_of = try a.alloc(u8, n_out);
+    defer a.free(src_of);
+    const off = try a.alloc(u32, n_out);
+    defer a.free(off);
+    const n_src = ct.planJoinless(out_rows.items, jorder, src_of, off);
+    const loc_h = try a.alloc(i32, 2 * np);
+    defer a.free(loc_h);
+    ct.fillJoinlessLoc(out_rows.items, src_of, off, order, loc_h);
+    // each output's rows random f16 words; the merged outputs concatenated in join order into the last source
+    var srcs16: std.ArrayList(mlx.mlx_array) = .empty;
+    defer srcs16.deinit(a);
+    var merge_in: std.ArrayList(mlx.mlx_array) = .empty;
+    defer merge_in.deinit(a);
+    for (out_rows.items, src_of) |r, sv| {
+        const y = try devRandom(&g, s, &.{ ci(r), hidden }, .float16);
+        if (n_src < n_out and sv == n_src - 1) try merge_in.append(a, y) else try srcs16.append(a, y);
+    }
+    if (merge_in.items.len > 0) try srcs16.append(a, try g.concat(merge_in.items, 0));
+    try testing.expectEqual(n_src, srcs16.items.len);
+    const srcs32 = try a.alloc(mlx.mlx_array, srcs16.items.len);
+    defer a.free(srcs32);
+    for (srcs16.items, srcs32) |x, *y| y.* = try g.astype(x, .float32);
+    // the routes' weights: bf16 values (a router's after its scale) read in f32, as the combine reads them
+    const w_h = try a.alloc(f32, np);
+    defer a.free(w_h);
+    for (w_h) |*v| v.* = @bitCast(@as(u32, support.bf16Bits(0.01 + 2.49 * rnd.float(f32))) << 16);
+    const wa = try g.hostArray(std.mem.sliceAsBytes(w_h), &.{ ci(tokens), 8 }, .float32);
+    const loc_all = try g.hostArray(std.mem.sliceAsBytes(loc_h), &.{ ci(tokens), 8, 2 }, .int32);
+    // the next norm's weight (bf16 near 1), eps, and WE f32 [D + 1]
+    const wn_h = try a.alloc(f32, 4096);
+    defer a.free(wn_h);
+    randFill(rnd, wn_h, 0.05, 1.0);
+    const wn = try bf16Host(a, &g, wn_h, &.{4096});
+    const eps_a = try g.scalar(eps, .float32);
+    const we = try g.concat(&.{ try g.astype(wn, .float32), try g.reshape(eps_a, &.{1}) }, 0);
+    // the served chain's routed sum over the whole call (the combine over the parts, its astype), per source dtype
+    const y16 = try g.reshape(try g.astype(try g.adopt(try combine.combineParts(s, srcs16.items, loc_all, wa)), .bfloat16), &.{ 1, ci(tokens), hidden });
+    const y32 = try g.reshape(try g.astype(try g.adopt(try combine.combineParts(s, srcs32, loc_all, wa)), .bfloat16), &.{ 1, ci(tokens), hidden });
+    var checks: usize = 0;
+    var failed: usize = 0;
+    var at: c_int = 0;
+    for (spans, 0..) |r, j| {
+        const S = ci(r);
+        const sm = g.mark();
+        defer g.resetTo(sm);
+        const h_j = try devRandom(&g, s, &.{ 1, S, hidden }, .bfloat16);
+        const sh_j = try devRandom(&g, s, &.{ 1, S, hidden }, .bfloat16);
+        const loc_j = try g.slice(loc_all, &.{ at, 0, 0 }, &.{ at + S, 8, 2 }, &.{ 1, 1, 1 });
+        const w_j = try g.slice(wa, &.{ at, 0 }, &.{ at + S, 8 }, &.{ 1, 1 });
+        // f16 sources at every span; f32 at the first, the 1,965-row and the 31-row spans
+        for ([_]bool{ true, false }) |half| {
+            if (!half and !(j == 0 or r == 1965 or r == 31)) continue;
+            const part = try g.slice(if (half) y16 else y32, &.{ 0, at, 0 }, &.{ 1, at + S, hidden }, &.{ 1, 1, 1 });
+            const hn = try g.add(h_j, try g.add(part, sh_j));
+            var nrm = mlx.mlx_array_new();
+            nrm = try adopted(&g, mlx.mlx_fast_rms_norm(&nrm, hn, wn, eps, s), nrm);
+            const n_words = @as(usize, r) * 4096;
+            const got = root.ling.moeTailWide(s, h_j, if (half) srcs16.items else srcs32, loc_j, w_j, sh_j, we) catch |e| {
+                std.debug.print("TURBOEXL3_LING_PF_TAIL sources={s} span={d} rows={d} at={d}: {s} FAIL\n", .{ if (half) "f16" else "f32", j, r, at, @errorName(e) });
+                checks += 1;
+                failed += 1;
+                continue;
+            };
+            const d = try wideDiffer(a, &g, got, hn, nrm, n_words);
+            const ok = d[0] == 0 and d[1] == 0;
+            checks += 1;
+            failed += @intFromBool(!ok);
+            std.debug.print("TURBOEXL3_LING_PF_TAIL sources={s} n_src={d} outputs={d} merged={d} span={d} rows={d} at={d} residual_differing={d}/{d} normed_differing={d}/{d} {s}\n", .{ if (half) "f16" else "f32", srcs16.items.len, n_out, merge_in.items.len, j, r, at, d[0], n_words, d[1], n_words, if (ok) "PASS" else "FAIL" });
+        }
+        at += S;
+    }
+    // red check 1: the planted reordering of the norm's threadgroup sum over the whole call's rows (one launch of 18,380
+    // rows over the f16 sources): the residual keeps the chain's words, the normed rows must not. A reordered sum moves
+    // a row's rsqrt by an ulp at most, which turns about one bf16 word in 65,536, so the check reads every row.
+    {
+        const sm = g.mark();
+        defer g.resetTo(sm);
+        const kern = ks.newKernel("turboexl3_test_ling_moe_tail_wide_tgsum_rev_fault", &tail.wide_in_names, &tail.out_names, text_wide_tgsum_rev, tail.header_wide_h, true) orelse return error.KernelCreateFailed;
+        defer decode.freeKernel(kern);
+        const S = ci(tokens);
+        const h_c = try devRandom(&g, s, &.{ 1, S, hidden }, .bfloat16);
+        const sh_c = try devRandom(&g, s, &.{ 1, S, hidden }, .bfloat16);
+        const hn = try g.add(h_c, try g.add(y16, sh_c));
+        var nrm = mlx.mlx_array_new();
+        nrm = try adopted(&g, mlx.mlx_fast_rms_norm(&nrm, hn, wn, eps, s), nrm);
+        const got = try tail.moeTailWideWith(s, kern, h_c, srcs16.items, loc_all, wa, sh_c, we);
+        const n_words: usize = @as(usize, tokens) * 4096;
+        const d = try wideDiffer(a, &g, got, hn, nrm, n_words);
+        const ok = d[0] == 0 and d[1] > 0;
+        checks += 1;
+        failed += @intFromBool(!ok);
+        std.debug.print("TURBOEXL3_LING_PF_TAIL_RED fault=tgsum_rev rows={d} normed_differing={d}/{d} (a fault must differ) residual_differing={d}/{d} (must not) {s}\n", .{ tokens, d[1], n_words, d[0], n_words, if (ok) "PASS" else "FAIL" });
+    }
+    // red check 2: the refusals, before any launch
+    {
+        const sm = g.mark();
+        defer g.resetTo(sm);
+        const R: c_int = 2;
+        const h2 = try devRandom(&g, s, &.{ 1, R, hidden }, .bfloat16);
+        const sh2 = try devRandom(&g, s, &.{ 1, R, hidden }, .bfloat16);
+        const src16 = try devRandom(&g, s, &.{ 16, hidden }, .float16);
+        var lh: [32]i32 = undefined;
+        for (0..16) |p| {
+            lh[2 * p] = 0;
+            lh[2 * p + 1] = @intCast(p);
+        }
+        const loc2 = try g.hostArray(std.mem.sliceAsBytes(&lh), &.{ R, 8, 2 }, .int32);
+        const w2 = try g.slice(wa, &.{ 0, 0 }, &.{ R, 8 }, &.{ 1, 1 });
+        const wide = tail.moeTailWide;
+        const many: [25]mlx.mlx_array = @splat(src16);
+        var refused: usize = 0;
+        refused += @intFromBool(refuses(wide(s, try g.astype(h2, .float32), &.{src16}, loc2, w2, try g.astype(sh2, .float32), we), error.BadExl3Shape));
+        refused += @intFromBool(refuses(wide(s, try devRandom(&g, s, &.{ 1, R, 4100 }, .bfloat16), &.{try devRandom(&g, s, &.{ 16, 4100 }, .float16)}, loc2, w2, try devRandom(&g, s, &.{ 1, R, 4100 }, .bfloat16), try g.zeros(&.{4101}, .float32)), error.BadExl3Shape));
+        refused += @intFromBool(refuses(wide(s, h2, &.{src16}, try g.zeros(&.{ R, 9, 2 }, .int32), try g.zeros(&.{ R, 9 }, .float32), sh2, we), error.BadExl3Shape));
+        refused += @intFromBool(refuses(wide(s, h2, &many, loc2, w2, sh2, we), error.BadExl3Shape));
+        refused += @intFromBool(refuses(wide(s, h2, &.{ src16, try g.astype(src16, .float32) }, loc2, w2, sh2, we), error.BadExl3Dtype));
+        refused += @intFromBool(refuses(wide(s, h2, &.{try g.astype(src16, .bfloat16)}, loc2, w2, sh2, we), error.BadExl3Dtype));
+        refused += @intFromBool(refuses(wide(s, h2, &.{src16}, try g.zeros(&.{ R, 8, 3 }, .int32), w2, sh2, we), error.BadExl3Shape));
+        refused += @intFromBool(refuses(wide(s, h2, &.{src16}, try g.astype(loc2, .uint32), w2, sh2, we), error.BadExl3Dtype));
+        refused += @intFromBool(refuses(wide(s, h2, &.{src16}, loc2, w2, sh2, try g.zeros(&.{4096}, .float32)), error.BadExl3Shape));
+        refused += @intFromBool(refuses(wide(s, h2, &.{src16}, loc2, w2, sh2, try g.astype(we, .bfloat16)), error.BadExl3Dtype));
+        refused += @intFromBool(refuses(wide(s, h2, &.{src16}, loc2, w2, try g.astype(sh2, .float32), we), error.BadExl3Dtype));
+        const ok = refused == 11;
+        checks += 1;
+        failed += @intFromBool(!ok);
+        std.debug.print("TURBOEXL3_LING_PF_TAIL_RED refusals={d}/11 (an f32 residual, width 4100, top-9, 25 sources, mixed f16 and f32 sources, a bf16 source, loc of shape [R, 8, 3], loc as u32, WE of D words, a bf16 WE, an f32 shared) {s}\n", .{ refused, if (ok) "PASS" else "FAIL" });
+    }
+    std.debug.print("TURBOEXL3_LING_PF_TAIL_DONE checks={d} failed={d} {s}\n", .{ checks, failed, if (failed == 0) "PASS" else "FAIL" });
+    try testing.expectEqual(@as(usize, 0), failed);
+}

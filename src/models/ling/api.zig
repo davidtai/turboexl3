@@ -198,6 +198,10 @@ pub const moeTail = tail.moeTail;
 /// `moeTail` over the routed call's unjoined outputs (`tail.zig`): each pair's row read in place at its (source, row),
 /// the decode join folded in; the words of `moeTail` over the join.
 pub const moeTailParts = tail.moeTailParts;
+/// A MoE layer's tail at prompt widths in one launch over its wide routed call's unjoined outputs (`tail.zig`, L3): the
+/// combine over the call's JOINLESS parts (f32 sources, or f16 under PF_F16_PAIRS), the block's astype and shared add,
+/// MLX's add and its fast rms_norm, the served chain's words at any row count
+pub const moeTailWide = tail.moeTailWide;
 
 /// This file's module state (`Global`): what a host that shares its units' state registers.
 pub const shared_state = .{ shared.shared_state, pair.shared_state, kdaproj.shared_state, router.shared_state, tail.shared_state, mla_latent.shared_state, mla_flash.shared_state, kdaproj_pf.shared_state, swiglu.shared_state };
