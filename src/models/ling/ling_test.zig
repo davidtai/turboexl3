@@ -1398,6 +1398,8 @@ test "turboexl3 gpu ling prompt linears: a prompt call's rows of root.linear hav
 const ds_test = @import("../deepseek_v41/deepseek_test.zig");
 const mla_latent = @import("mla_latent.zig");
 const mla_latent_test = @import("mla_latent_test.zig");
+const mla_rows = @import("mla_rows.zig");
+const mla_rows_test = @import("mla_rows_test.zig");
 
 /// A serial decode step and the verify widths of 2 to 4 rows, the engine's prompt chunk and a layer-major call
 const time_rows = [_]u32{ 1, 2, 3, 4, 4096, 16384 };
@@ -1444,7 +1446,13 @@ fn drawDecodePairs(rnd: std.Random, rows: u32, k: u32, pool: []const u32, ids: [
 //   (19,404 keys of bf16 latents and rope keys, the first rows of a wider buffer; kv_b bf16 [16384, 512]; the query halves
 //   as views of the transposed heads, as the plugin passes them) at rows 1 to 4, on launch 2 as it is and on each
 //   variant (`mla_latent.Attn`: rows2, rows4, stage, block, each launch 2's words): us a row, the variant's min over
-//   launch 2's, the attention's TFLOPS (64 heads x (576 + 512) multiply-adds a key and row).
+//   launch 2's, the attention's TFLOPS (64 heads x (576 + 512) multiply-adds a key and row);
+// - second, the MLA chain's kv_b (bf16 512 -> 16384) and head gate (bf16 4096 -> 64) at rows 1 to 4, 8 and 16, each
+//   weight as the outside plugin's loader keeps it: the served launches (`mla_rows_test.servedCall`: MLX's matmul at one
+//   row, the plugin's denseRows from two) against `mlaRows` at 1, 2, 4 and 8 rows a threadgroup (each the served
+//   words): the min over the served one's, and one read of the weight's GB/s (the 8 calls of an evaluation read one
+//   weight, so part of it can come from the GPU's cache); then a verify's 9 MLA layers, the served sum against the
+//   fastest cap's.
 // Each line: min and median us per call (deepseek_test's timeIt). TURBOEXL3_LING_N (default 40,32) narrows the rates.
 test "turboexl3 gpu ling timing: every trunk linear, moeLing and moeLingBanked at Ling-3.1-flash's shapes (TURBOEXL3_LING_TIME=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
@@ -1507,6 +1515,80 @@ test "turboexl3 gpu ling timing: every trunk linear, moeLing and moeLingBanked a
                 const r: f64 = @floatFromInt(rows);
                 std.debug.print("TURBOEXL3_LING_TIME mla_latent keys={d} rows={d} arm={s} min_us={d:.1} med_us={d:.1} us_per_row={d:.1} of_base={d:.3} tflops={d:.2}\n", .{ keys, rows, @tagName(v), st.min, st.med, st.min / r, if (base_min > 0) st.min / base_min else 0, r * flops_row / (st.min * 1e6) });
             }
+        }
+    }
+    {
+        const mark = g.mark();
+        defer g.resetTo(mark);
+        defer _ = mlx.mlx_clear_cache();
+        mla_latent_test.reportMlxErrors(true);
+        defer mla_latent_test.reportMlxErrors(false);
+        // its own draw, so the arms after it draw as before
+        var rows_prng = std.Random.DefaultPrng.init(0x4D1A_7105);
+        const rr = rows_prng.random();
+        const mla_time_rows = [_]u32{ 1, 2, 3, 4, 8, 16 };
+        const mla_caps = [_]u32{ 1, 2, 4, 8 };
+        // the served and the fastest cap's min per shape and row count, for the 9 MLA layers' total
+        var served_us: [mla_rows_test.shapes.len][mla_time_rows.len]f64 = @splat(@splat(0));
+        var best_us: [mla_rows_test.shapes.len][mla_time_rows.len]f64 = @splat(@splat(0));
+        for (mla_rows_test.shapes, 0..) |sh, si| {
+            const sm = g.mark();
+            defer g.resetTo(sm);
+            const raw = try a.alloc(f16, @as(usize, sh.in) * sh.out);
+            defer a.free(raw);
+            const wscale: f32 = 1.0 / @sqrt(@as(f32, @floatFromInt(sh.in)));
+            for (raw) |*v| v.* = @floatCast(rr.floatNorm(f32) * wscale);
+            const w = try mla_rows_test.loaderWeight(&g, raw, sh.in, sh.out);
+            // one read of the weight's bf16 words
+            const wbytes = 2.0 * @as(f64, @floatFromInt(sh.in)) * @as(f64, @floatFromInt(sh.out));
+            for (mla_time_rows, 0..) |rows, ri| {
+                const rm = g.mark();
+                defer g.resetTo(rm);
+                const x3 = try ds_test.randBf16(a, &g, rr, &.{ 1, ci(rows), ci(sh.in) });
+                const x2 = try g.reshape(x3, &.{ ci(rows), ci(sh.in) });
+                try g.evalAll(&.{x3});
+                const ServedCtx = struct {
+                    s: mlx.mlx_stream,
+                    x3: mlx.mlx_array,
+                    w: mlx.mlx_array,
+                    pub fn call(cx: @This()) !mlx.mlx_array {
+                        return mla_rows_test.servedCall(cx.s, cx.x3, cx.w);
+                    }
+                };
+                const RowsCtx = struct {
+                    s: mlx.mlx_stream,
+                    x2: mlx.mlx_array,
+                    w: mlx.mlx_array,
+                    cap: u32,
+                    pub fn call(cx: @This()) !mlx.mlx_array {
+                        return mla_rows.mlaRowsWith(cx.s, cx.x2, cx.w, cx.cap);
+                    }
+                };
+                const served = ds_test.timeIt(&g, ServedCtx{ .s = s, .x3 = x3, .w = w.served }, 8) catch |e| {
+                    std.debug.print("TURBOEXL3_LING_TIME mla_rows shape={s} rows={d} arm=served: {s}\n", .{ sh.name, rows, @errorName(e) });
+                    continue;
+                };
+                served_us[si][ri] = served.min;
+                std.debug.print("TURBOEXL3_LING_TIME mla_rows shape={s} rows={d} arm=served({s}) min_us={d:.1} med_us={d:.1} weight_gbps={d:.0}\n", .{ sh.name, rows, if (rows == 1) "matmul" else "denseRows", served.min, served.med, wbytes / (served.min * 1e3) });
+                for (mla_caps) |cap| {
+                    const st = ds_test.timeIt(&g, RowsCtx{ .s = s, .x2 = x2, .w = w.rows, .cap = cap }, 8) catch |e| {
+                        std.debug.print("TURBOEXL3_LING_TIME mla_rows shape={s} rows={d} arm=cap{d}: {s}\n", .{ sh.name, rows, cap, @errorName(e) });
+                        continue;
+                    };
+                    if (best_us[si][ri] == 0 or st.min < best_us[si][ri]) best_us[si][ri] = st.min;
+                    std.debug.print("TURBOEXL3_LING_TIME mla_rows shape={s} rows={d} arm=cap{d} min_us={d:.1} med_us={d:.1} of_served={d:.3} weight_gbps={d:.0}\n", .{ sh.name, rows, cap, st.min, st.med, st.min / served.min, wbytes / (st.min * 1e3) });
+                }
+            }
+        }
+        // a verify's 9 MLA layers: kv_b and the head gate each, the served launches against the fastest cap's
+        for (mla_time_rows, 0..) |rows, ri| {
+            var served_sum: f64 = 0;
+            var best_sum: f64 = 0;
+            for (0..mla_rows_test.shapes.len) |si| {
+                served_sum += 9 * served_us[si][ri];
+                best_sum += 9 * best_us[si][ri];
+            }
+            std.debug.print("TURBOEXL3_LING_TIME mla_rows verify rows={d} nine_layers served_us={d:.1} best_cap_us={d:.1} saved_us={d:.1}\n", .{ rows, served_sum, best_sum, served_sum - best_sum });
         }
     }
     var prng = std.Random.DefaultPrng.init(0x11A671);

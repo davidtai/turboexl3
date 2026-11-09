@@ -87,6 +87,10 @@ pub const Config = struct {
     /// The same launch with 2 x 2 score tiles and 4 x 4 output tiles a simdgroup (`mla_latent.Attn.block`), at the calls
     /// `mla_latent_rows` does not take; not with `mla_latent_stage`. The same bytes.
     mla_latent_block: bool = false,
+    /// Ling-3.1-flash's MLA kv_b and head gate (plain bf16 weights) at decode and verify rows in one GEMV launch
+    /// (`ling.mlaRows`): each weight tile read once for up to this many rows of a call (1 to 8), each row MLX's one-row
+    /// gemv words; 0 refuses the calls (the host runs its own matmuls). The same bytes.
+    mla_rows: u8 = 0,
     /// A diagnostic: each routed decode call's routing read back (a sync per call), its expert multiplicities printed
     /// every 480 calls.
     slot_stats: bool = false,
@@ -105,7 +109,7 @@ pub const Config = struct {
             c.banked_variant_gu < banked_variants and c.banked_variant_dn < banked_variants and
             ((c.banked_variant_gu == 0 and c.banked_variant_dn == 0) or c.banked_group == 4) and
             (c.mla_latent_rows == 0 or c.mla_latent_rows == 2 or c.mla_latent_rows == 4) and
-            !(c.mla_latent_stage and c.mla_latent_block);
+            !(c.mla_latent_stage and c.mla_latent_block) and c.mla_rows <= 8;
     }
 };
 
@@ -168,6 +172,9 @@ test "turboexl3 config: the defaults are valid and served; an unserved form, sli
     for ([_]u8{ 1, 3, 8 }) |r| try t.expect(!(Config{ .mla_latent_rows = r }).valid());
     try t.expect((Config{ .mla_latent_rows = 4, .mla_latent_block = true }).valid());
     try t.expect(!(Config{ .mla_latent_stage = true, .mla_latent_block = true }).valid());
+    try t.expectEqual(@as(u8, 0), d.mla_rows);
+    for (1..9) |r| try t.expect((Config{ .mla_rows = @intCast(r) }).valid());
+    for ([_]u8{ 9, 16, 255 }) |r| try t.expect(!(Config{ .mla_rows = r }).valid());
     const saved = current.get().*;
     defer current.get().* = saved;
     try t.expectError(error.InvalidTurboexl3Config, configure(.{ .decode_form = 4 }));

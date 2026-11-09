@@ -1850,6 +1850,19 @@ SPLIT_ADDED_KERNELS['turboexl3_test_pf_dfinn_gemm_fault'] = ('test only: turboex
                                                              'unrounded (fault/fin_4_unrounded), the threshold\'s red checks')
 SPLIT_ADDED_KERNELS['turboexl3_test_pf_dfinn_fin_fault'] = ('test only: turboexl3_pf_dfinn with its finish half\'s products '
                                                             'unrounded (fault/fin_4_unrounded), a red check')
+# D4: the MLA chain's plain kv_b and head gate at decode and verify rows in one GEMV launch (ling-d4-mla,
+# Config.mla_rows, off by default; turboexl3_ling's MLX_SERVE_LING_MLA_ROWS)
+SPLIT_ADDED_KERNELS['turboexl3_ling_mla_rows'] = ('D4: MLX\'s gemv statements (BM 8, BN 1 or BM 1, BN 8; SM 1, SN 32, TM 4, '
+                                                  'TN 4) for up to RB rows a threadgroup, each weight tile read once a K '
+                                                  'block, each row its own accumulators (models/ling/mla_rows.zig '
+                                                  'text_rows: mla_rows/head ++ acc ++ simd ++ tgsum ++ store), each row '
+                                                  'MLX\'s one-row gemv words')
+SPLIT_ADDED_KERNELS['turboexl3_test_ling_mla_rows_krev_fault'] = ('test only: turboexl3_ling_mla_rows with a lane\'s four '
+                                                                  'products of a K block added in reverse '
+                                                                  '(fault/mla_rows_acc_krev in acc\'s place), a red check')
+SPLIT_ADDED_KERNELS['turboexl3_test_ling_mla_rows_sgrev_fault'] = ('test only: turboexl3_ling_mla_rows with the simdgroups\' '
+                                                                   'sums added in reverse simdgroup order '
+                                                                   '(fault/mla_rows_tgsum_rev in tgsum\'s place), a red check')
 
 def split_report(oprog, nprog, ounits, nunits, orig_dir, new_dir, problems, verbose):
     """--split (declarations moved between files, not only files): checks 1 to 4 over the whole tree instead of per file.

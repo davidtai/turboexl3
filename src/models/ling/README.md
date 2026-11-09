@@ -29,13 +29,16 @@ The code only Ling-3.1-flash uses, on the core's routed chain, DeepSeek-V4.1's b
 | `mla_latent_test.zig` | the host's f64 reference, absorbed against expanded (CPU); `decodeLatent` against it within tolerance, a call's rows against one-row calls and strided cache views against contiguous ones, byte for byte; launch 2's variants against launch 2, the output and the partials word for word on the plugin's operands, with red checks (GPU) |
 | `kernels/mla_latent/` | the three launches' texts and their header, launch 2 in four pieces (`attn_1` to `attn_4`: its scores, the online softmax update the variants share, the weights times the latents, the outputs) and its variants' pieces (`rows_*`, `stage_*`, `block_*`); `kernels/test/pins/` what the CPU tests pin |
 | `mla_flash.zig` | `mlaFlashPrefill` (`api.zig` exports it): the MLA prompt attention as one causal flash launch, MLX's NAX attention kernel at Ling's head dims (qk 192, v 128) |
+| `mla_rows.zig` | `mlaRows` (`mlaRowsTakes`; `mlaRowsWith` at a chosen cap, `mlaRowsOn` on a test's kernel): the MLA chain's plain kv_b and head gate at decode and verify rows 1 to 16 in one GEMV launch, MLX's one-row gemv statements at MLX's tile for each row, each weight tile read once for up to `Config.mla_rows` rows (`tileFor`, `planFor`); its texts and plan (CPU tests) |
+| `mla_rows_test.zig` | `mlaRows` against the served launches (the one-row matmul, the plugin's denseRows) word for word at kv_b's and the head gate's shapes, rows 1 to 8, 12 and 16, caps 1 to 8, on random rows and on built rows an order change moves, weights as the loader keeps them; four red checks (two planted reorderings, a changed weight word, swapped rows); the configuration's path and the refusals (GPU); `servedCall` and `loaderWeight` for the timing |
+| `kernels/mla_rows/` | the launch's pieces: MLX's gemv statements up to the accumulate (`head`), the accumulate (`acc`), the K loop's close and the sums (`simd`), the threadgroup sum (`tgsum`) and the store; `kernels/test/fault/mla_rows_*` the red checks' reorderings |
 | `mla_flash_test.zig` | the flash kernel's text (CPU) and its standalone translation units (TURBOEXL3_METAL_DUMP=1); against MLX's fused SDPA word for word where MLX instantiates one, and within tolerance of an f64 reference at Ling's heads (GPU) |
 | `kernels/mla_flash/` | the flash kernel's pieces: MLX's attention_nax body less its unused arms, its row ops, the kernel attribute's define and undefine; `kernels/test/` its pin file and dump data |
 
 Ling's own Metal is the pairs', the shared expert's, the routed combine's and the router's pieces (`kernels/pair/`,
 `kernels/shared/`, `kernels/combine/`, `kernels/router/`),
-the MLA attention in the latent's three launches (`kernels/mla_latent/`) and the MLA prompt attention's flash kernel
-(`kernels/mla_flash/`;
+the MLA attention in the latent's three launches (`kernels/mla_latent/`), the MLA chain's rows GEMV (`kernels/mla_rows/`)
+and the MLA prompt attention's flash kernel (`kernels/mla_flash/`;
 `kernels/test/pins/` what the CPU tests pin); the routed experts' clamp pieces are the core's
 (`kernels/decode/fin7_swiglu_clamp_out.metal`, `kernels/prefill/mid_swiglu_clamp_out.metal`). docs/models/ling/
 describes the model's needs and its kernels.
