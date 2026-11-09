@@ -92,7 +92,8 @@ pub fn plan(p: shared_gu.Pair, dec: format.Decode, rows: usize) ?Plan {
 
 /// m0 and m1 of x [..., in] in one launch: [m0's y [..., out0], m1's y [..., out1]] in x's dtype (bf16, f16 or f32),
 /// each row-contiguous and `root.linear`'s bytes of its member; `svh` is `shared_gu.joinSvh(m0.svh, m1.svh)`. DEC-ONE's
-/// counters (`dec_zero`, member 0's shape's kernel: a launch that waits on nothing) then `text_ks`.
+/// counters (`dec_zero`, member 0's shape's kernel: a launch that waits on nothing; with `dense.dec_host_zero` a host-made
+/// array of zeros, no launch) then `text_ks`.
 /// error.Exl3EngineNotImplemented where `plan` declines, before any launch.
 pub fn linear2(s: mlx.mlx_stream, x: mlx.mlx_array, m0: root.Proj, m1: root.Proj, svh: mlx.mlx_array, dec: format.Decode) ![2]mlx.mlx_array {
     const xd = mlx.mlx_array_dtype(x);
@@ -112,11 +113,14 @@ pub fn linear2(s: mlx.mlx_stream, x: mlx.mlx_array, m0: root.Proj, m1: root.Proj
     defer _ = mlx.mlx_array_free(x2);
     try mlx.check(mlx.mlx_reshape(&x2, x, &[_]c_int{ rows, @intCast(p.in) }, 2, s));
     const out: u32 = p.out0 + p.out1;
-    const ncnt_shape = [_]c_int{@intCast(pl.ncnt)};
-    const zcfg = try ks.buildConfig(.{ .grid = .{ ((pl.ncnt + 127) / 128) * 128, 1, 1 }, .threadgroup = .{ 128, 1, 1 }, .out_shapes = &.{&ncnt_shape}, .out_dtypes = &.{.uint32}, .template = &.{.{ .name = "NCNT", .value = .{ .int = @intCast(pl.ncnt) } }} });
-    defer _ = mlx.mlx_fast_metal_kernel_config_free(zcfg);
+    // the counters made on the host (`dense.dec_host_zero`), else zeroed by dec_zero's launch
     var cnt: [1]mlx.mlx_array = undefined;
-    try ks.applyConfig(d.dec_zero, zcfg, &.{svh}, &cnt, s);
+    if (try dense.hostCounters(pl.ncnt)) |h| cnt[0] = h else {
+        const ncnt_shape = [_]c_int{@intCast(pl.ncnt)};
+        const zcfg = try ks.buildConfig(.{ .grid = .{ ((pl.ncnt + 127) / 128) * 128, 1, 1 }, .threadgroup = .{ 128, 1, 1 }, .out_shapes = &.{&ncnt_shape}, .out_dtypes = &.{.uint32}, .template = &.{.{ .name = "NCNT", .value = .{ .int = @intCast(pl.ncnt) } }} });
+        defer _ = mlx.mlx_fast_metal_kernel_config_free(zcfg);
+        try ks.applyConfig(d.dec_zero, zcfg, &.{svh}, &cnt, s);
+    }
     defer _ = mlx.mlx_array_free(cnt[0]);
     const ks_max = @max(pl.ks0, pl.ks1);
     const cfg = try ks.buildConfig(.{
