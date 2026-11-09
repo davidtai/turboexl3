@@ -6,6 +6,10 @@
 //!   call), 512, 4096 and 16384 (the plugin's chunk and layer-major calls), each member's output against `root.linear`'s
 //!   (the served chain: prepare, W_hat, MLX's matmul, finish), every word, both finite; and the refusal at 32 rows.
 //!   Lines: TURBOEXL3_LING_KDA_PROMPT.
+//! - GPU, over given W_hats (`kdaProjPromptW`): each member's W_hat decoded once by `Dense.dequantize` and read by every
+//!   call, at rows 33, 1965 and 4096 each member's y against `kdaProjPrompt`'s word for word; the declines at 16, 17 and
+//!   32 rows, a W_hat of another width refused, and a red check (g's call over f's W_hat gives other words). Lines:
+//!   TURBOEXL3_LING_KDA_PROMPT_W (then TURBOEXL3_LING_KDA_PROMPT_W_DONE, 10 lines).
 //! - Timing (TURBOEXL3_LING_TIME=1 with TURBOEXL3_GPU=1; asserts nothing, guidance only): the served chain's three
 //!   `linear` calls against `kdaProjPrompt` at each tile of a short sweep, interleaved round by round, at rows 64 to
 //!   16384 (`time_rows`); min and median ms over 8 rounds. Lines: TURBOEXL3_LING_TIME kdaproj_prompt.
@@ -116,6 +120,84 @@ test "turboexl3 gpu ling kdaproj prompt: kdaProjPrompt's q|k|v, f and g are each
         std.debug.print("TURBOEXL3_LING_KDA_PROMPT rows=32 refused (the register path's rows) PASS\n", .{});
     }
     std.debug.print("TURBOEXL3_LING_KDA_PROMPT_DONE failed={d} {s}\n", .{ failed, if (failed == 0) "PASS" else "FAIL" });
+    try testing.expectEqual(@as(usize, 0), failed);
+}
+
+test "turboexl3 gpu ling kdaproj prompt over given W_hats: kdaProjPromptW over each member's W_hat, decoded once by Dense.dequantize and read by every call, gives kdaProjPrompt's words at prompt rows 33, 1965 and 4096, operands as the loader keeps them; its declines at 16, 17 and 32 rows, its refusal, and a swapped W_hat caught (TURBOEXL3_GPU=1)" {
+    _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    const s = mlx.mlx_default_gpu_stream_new();
+    if (!mlx.streamIsGpu(s) or !config.get().nax) return error.SkipZigTest;
+    const a = std.heap.page_allocator;
+    var g = try G.init(a, s);
+    defer g.deinit();
+    var prng = std.Random.DefaultPrng.init(0x9F4A13);
+    const rnd = prng.random();
+    var ms: [3]Served = undefined;
+    var made: usize = 0;
+    defer for (ms[0..made]) |*m| m.lin.deinit(a);
+    for (&ms, outs) |*m, o| {
+        m.* = try servedProj(a, &g, s, rnd, o);
+        made += 1;
+    }
+    const p = [3]root.Proj{ ms[0].p, ms[1].p, ms[2].p };
+    // each member's W_hat by its `linear`'s decode launch, evaluated once: every call below reads it
+    var w_hat: [3]T = undefined;
+    for (&w_hat, p, outs) |*wm, m, o| {
+        const dn = try root.denseCached(.{ .in = in, .out = o, .rate = format.Rate.fromN(96).?, .dec = .mul1, .out_dtype = .bfloat16 });
+        wm.* = try g.adopt(try dn.dequantize(s, m.trellis));
+    }
+    try g.evalAll(&w_hat);
+    var lines: usize = 0;
+    var failed: usize = 0;
+    for ([_]u32{ 33, 1965, 4096 }) |rows| {
+        const mark = g.mark();
+        defer g.resetTo(mark);
+        const x = try ds_test.randBf16(a, &g, rnd, &.{ 1, ci(rows), ci(in) });
+        const want = try kdaproj_pf.kdaProjPrompt(s, x, p, .mul1);
+        var wys: [3]T = undefined;
+        for (&wys, want) |*dst, y| dst.* = try g.adopt(y);
+        const got = try kdaproj_pf.kdaProjPromptW(s, x, p, w_hat, .mul1);
+        var gys: [3]T = undefined;
+        for (&gys, got) |*dst, y| dst.* = try g.adopt(y);
+        for (gys, wys, outs, 0..) |gy, wy, o, i| {
+            const c = try compare(a, &g, gy, wy);
+            const ok = c.differ == 0 and c.nonfinite == 0 and sameShape(gy, wy);
+            lines += 1;
+            failed += @intFromBool(!ok);
+            std.debug.print("TURBOEXL3_LING_KDA_PROMPT_W rows={d} member={d} out={d} differing={d}/{d} nonfinite={d} {s}\n", .{ rows, i, o, c.differ, mlx.mlx_array_size(wy), c.nonfinite, if (ok) "PASS" else "FAIL" });
+        }
+    }
+    {
+        const mark = g.mark();
+        defer g.resetTo(mark);
+        // the declines, before any launch: the GEMV's and the register path's rows, where kdaProjPrompt declines too
+        for ([_]u32{ 16, 17, 32 }) |rows| {
+            const x = try ds_test.randBf16(a, &g, rnd, &.{ 1, ci(rows), ci(in) });
+            try testing.expectError(error.Exl3EngineNotImplemented, kdaproj_pf.kdaProjPromptW(s, x, p, w_hat, .mul1));
+        }
+        // the refusal, before any launch: a W_hat of another member's width (q|k|v's in f's place)
+        const x33 = try ds_test.randBf16(a, &g, rnd, &.{ 1, 33, ci(in) });
+        var wide = w_hat;
+        wide[1] = w_hat[0];
+        try testing.expectError(error.BadExl3Shape, kdaproj_pf.kdaProjPromptW(s, x33, p, wide, .mul1));
+        // red: g's call over f's W_hat (the same width) does not give g's words, so a wrong W_hat would be caught
+        const want = try kdaproj_pf.kdaProjPrompt(s, x33, p, .mul1);
+        var wys: [3]T = undefined;
+        for (&wys, want) |*dst, y| dst.* = try g.adopt(y);
+        var swapped = w_hat;
+        swapped[2] = w_hat[1];
+        const got = try kdaproj_pf.kdaProjPromptW(s, x33, p, swapped, .mul1);
+        var gys: [3]T = undefined;
+        for (&gys, got) |*dst, y| dst.* = try g.adopt(y);
+        const c = try compare(a, &g, gys[2], wys[2]);
+        const caught = c.differ > 0;
+        lines += 1;
+        failed += @intFromBool(!caught);
+        std.debug.print("TURBOEXL3_LING_KDA_PROMPT_W red: g over f's W_hat at 33 rows differing={d}/{d} (want > 0) {s}\n", .{ c.differ, mlx.mlx_array_size(wys[2]), if (caught) "PASS" else "FAIL" });
+        std.debug.print("TURBOEXL3_LING_KDA_PROMPT_W rows=16,17,32 declined, a W_hat of another width refused PASS\n", .{});
+    }
+    std.debug.print("TURBOEXL3_LING_KDA_PROMPT_W_DONE lines={d} failed={d} {s}\n", .{ lines, failed, if (failed == 0) "BYTES_OK" else "BYTES_DIFFER" });
+    try testing.expectEqual(@as(usize, 10), lines);
     try testing.expectEqual(@as(usize, 0), failed);
 }
 

@@ -143,6 +143,74 @@ pub fn kdaProjPrompt(s: mlx.mlx_stream, x: A, p: [3]root.Proj, dec: format.Decod
     return res;
 }
 
+/// Whether member `dm`'s `prefillOperands` hands out its operands at `rows` rows for `trellis` (no launch): past the
+/// GEMV's and the register path's rows, no fused-GEMM option, no un-rotated resident W_std for the trellis
+fn operandsTaken(dm: *const root.dense.Dense, trellis: A, rows: usize) bool {
+    if (rows <= root.decode.Kernels.max_rows or rows <= dm.small_rows or dm.fused_prefill) return false;
+    return !(rows > root.dense.unrot_min_rows and root.dense.residentUnrot(trellis));
+}
+
+/// `kdaProjPrompt` over W_hats the caller decoded: `w[m]` half [in, out_m], what `Dense.dequantize` makes of member m's
+/// trellis, so a caller that decodes them once can run several calls over them (the outside plugin turboexl3_ling's
+/// MLX_SERVE_LING_LAYER_WHAT: a layer-major layer's wide spans over its first wide span's W_hats). Each member's
+/// prepared rows by its `linear`'s prepare at these rows (`Dense.prepare`: `prefillOperands`' first launch, its config),
+/// then the grouped launch at `kdaProjPrompt`'s tile over the given W_hats: with each trellis's own W_hat, every
+/// member's y is `kdaProjPrompt`'s word for word. Owned results. error.Exl3EngineNotImplemented where `kdaProjPrompt`
+/// does not take the call (`takes`, or a member's `prefillOperands` declining at these rows), error.BadExl3Shape for a
+/// W_hat that is not half [in, out_m], both before any launch. `kdaProjPrompt` itself is unchanged.
+pub fn kdaProjPromptW(s: mlx.mlx_stream, x: A, p: [3]root.Proj, w: [3]A, dec: format.Decode) ![3]A {
+    const xsh = mlx.getShape(x);
+    if (xsh.len < 1 or xsh.len > 8) return error.BadExl3Shape;
+    var rows: usize = 1;
+    for (xsh[0 .. xsh.len - 1]) |d| rows *= @as(usize, @intCast(d));
+    const xd = mlx.mlx_array_dtype(x);
+    const tsh0 = mlx.getShape(p[0].trellis);
+    if (tsh0.len != 3) return error.BadExl3Shape;
+    const in_dim: u32 = @intCast(tsh0[0] * 16);
+    if (xsh[xsh.len - 1] != @as(c_int, @intCast(in_dim))) return error.BadExl3Shape;
+    const t = tileFor(in_dim) orelse return error.Exl3EngineNotImplemented;
+    if (!takes(p, rows, xd, t)) return error.Exl3EngineNotImplemented;
+    const rate = format.Rate.fromN(@intCast(tsh0[2])) orelse return error.BadExl3Shape;
+    // every member's `linear` Dense (the one `kdaProjPrompt` takes), its operands' declines and its W_hat's shape, before
+    // any launch
+    var dms: [3]*root.dense.Dense = undefined;
+    var outs: [3]u32 = undefined;
+    for (p, w, &dms, &outs) |m, wm, *dm, *o| {
+        o.* = @intCast(mlx.getShape(m.trellis)[1] * 16);
+        dm.* = try root.denseCached(.{ .in = in_dim, .out = o.*, .rate = rate, .dec = dec, .out_dtype = xd });
+        if (!operandsTaken(dm.*, m.trellis, rows)) return error.Exl3EngineNotImplemented;
+        if (mlx.mlx_array_dtype(wm) != .float16 or !std.mem.eql(c_int, mlx.getShape(wm), &[_]c_int{ @intCast(in_dim), @intCast(o.*) })) return error.BadExl3Shape;
+    }
+    var x2 = mlx.mlx_array_new();
+    defer _ = mlx.mlx_array_free(x2);
+    try mlx.check(mlx.mlx_reshape(&x2, x, &[_]c_int{ @intCast(rows), @intCast(in_dim) }, 2, s));
+    // each member's prepared rows by its `linear`'s prepare launch; its W_hat the caller's
+    var xp: [3]A = undefined;
+    var made: usize = 0;
+    defer for (xp[0..made]) |a| {
+        _ = mlx.mlx_array_free(a);
+    };
+    for (dms, p) |dm, m| {
+        xp[made] = try dm.prepare(s, x2, m.suh, rows);
+        made += 1;
+    }
+    const ys = try launch(s, xp, w, .{ p[0].svh, p[1].svh, p[2].svh }, outs, @intCast(rows), @intCast(in_dim), xd, t);
+    defer for (ys) |y| {
+        _ = mlx.mlx_array_free(y);
+    };
+    var shape: [8]c_int = undefined;
+    for (xsh, 0..) |dd, i| shape[i] = dd;
+    var res: [3]A = .{ mlx.mlx_array_new(), mlx.mlx_array_new(), mlx.mlx_array_new() };
+    errdefer for (res) |r| {
+        _ = mlx.mlx_array_free(r);
+    };
+    for (&res, ys, outs) |*r, y, o| {
+        shape[xsh.len - 1] = @intCast(o);
+        try mlx.check(mlx.mlx_reshape(r, y, &shape, xsh.len, s));
+    }
+    return res;
+}
+
 /// The grouped launch: y_m [M, out_m] of `out_dtype` = finish(xp_m [M, K] w_m [K, out_m]) at tile `t`, pg2's grid over
 /// the members' N tiles end to end (tiles_n << swz by ceil(tiles_m >> swz) threadgroups) in MLX's threadgroup shape
 /// (32, WN, WM); the caller owns the three y
