@@ -48,6 +48,11 @@
 //! down launch writes every row: over `small = .off`'s one table, or with `t128` over both of the route's tables (the
 //! 128-row tiles', then each mixed-table tile as a part-full tile on the same body). The same f16 words in, the same
 //! finish statements: the finish's y.
+//!
+//! A call may decline the fused finish (`Call`, `endOf`; `moeWithCall`, `moeT128WithCall`): on an engine built with
+//! `Options.dfin`, a call with `Call.dfin` false runs the served route, down launches and finish, kernels such an engine
+//! builds as the served engine does (`T128Kernels`; `Prefill.init`'s `gemm1` and `fin`), at the served launch shapes: the
+//! served engine's launches and bytes. `Prefill.steps` counts the steps an engine ran (its route and its ending).
 const std = @import("std");
 const mlx = @import("sdk").mlx;
 const ks = @import("sdk").kernel_launch;
@@ -688,6 +693,35 @@ pub const Options = struct {
     }
 };
 
+/// A call's own choices on its engine (`Prefill.moeWithCall`, `moeT128WithCall`; root's `moeSwigluWith`,
+/// `moeSwigluRowsWith`): the options an engine is built with say what it can run, a call which of it runs. `.{}` runs
+/// what the engine was built for (`moeWith`, `moeT128With`).
+pub const Call = struct {
+    /// the fused finish (`Options.dfin`; with `Options.dfin_min`, its threshold's chain) where the engine was built with
+    /// it; false runs the served route, down launches and finish: the served engine's launches and bytes (an engine
+    /// without the fused finish runs those either way)
+    dfin: bool = true,
+};
+
+/// A call's ending, its down projection and finish (`endOf`): the served down launches and finish (`gemmD` + `finish`,
+/// or `gemmDT128` + `finishT128` after the served route), the fused finish (`gemmDFin`), or the fused finish over the
+/// experts of at least `Options.dfin_min` rows (`gemmDT128Min` + `gemmDFinMin`, after the route that counts each
+/// expert's rows)
+pub const End = enum { served, dfin, dfinn };
+
+/// The ending a call `c` runs on an engine built with `o`: the fused finish only where both have it
+pub fn endOf(o: Options, c: Call) End {
+    if (!o.dfin or !c.dfin) return .served;
+    return if (o.dfin_min != 0) .dfinn else .dfin;
+}
+
+/// The chain's steps an engine ran, a count each (`Prefill.steps`; the GPU tests' engagement check reads them around a
+/// call): the served route (`route`, `routeT128For`'s) or the threshold's (`routen`: the route that counts each expert's
+/// rows), the served down step (`gemmD`, or `gemmDT128`'s two launches) and finish (`finish`, `finishT128`), the fused
+/// finish (`gemmDFin`), and the threshold's down step (`gemmDT128Min`) and launch writing y (`gemmDFinMin`). Plain
+/// wrapping counts.
+pub const Steps = struct { route: u32 = 0, routen: u32 = 0, down: u32 = 0, fin: u32 = 0, dfin: u32 = 0, downn: u32 = 0, dfinn: u32 = 0 };
+
 /// The routing of one call: sorted position -> slot (`order`), the M tiles (`tiles` int32 [tmax, 4]).
 pub const Route = struct {
     order: mlx.mlx_array,
@@ -906,6 +940,8 @@ pub const Prefill = struct {
     dfin_k: ?mlx.mlx_fast_metal_kernel = null,
     /// the fused finish over the experts of `opts.dfin_min` rows or more (`DfinMinKernels`); made only with a threshold
     dfn_k: ?DfinMinKernels = null,
+    /// the chain's steps this engine ran (`Steps`): nothing reads them but the GPU tests' engagement check
+    steps: Steps = .{},
 
     pub fn init(geo: Geometry, opts: Options) !Prefill {
         // gate|up's column blocks divide the expert width's; the fused finish writes a row's one slot (top-1)
@@ -980,6 +1016,7 @@ pub const Prefill = struct {
     /// argsort of the flat expert ids, then the M tile table (one threadgroup); `froute`: the one-launch route kernel.
     pub fn route(self: *Prefill, s: mlx.mlx_stream, inds: mlx.mlx_array, S: u32) !Route {
         const g = self.geo;
+        self.steps.route +%= 1;
         const tr = self.opts.tileRows();
         const tmax: u32 = (S + tr - 1) / tr + g.experts;
         const mixed = self.opts.small == .mixed;
@@ -1158,6 +1195,7 @@ pub const Prefill = struct {
     /// the down inner product, half [S, hidden] (sorted order); `Options.bk128` / `ncb` shape its shared-decode body
     pub fn gemmD(self: *Prefill, s: mlx.mlx_stream, r: Route, xd: mlx.mlx_array, xsd: mlx.mlx_array, b: Operands, S: u32) !mlx.mlx_array {
         const g = self.geo;
+        self.steps.down +%= 1;
         var tmpl: [23]ks.TemplateArg = undefined;
         var l = self.gemmCfg(&tmpl, r.tmax, g.inter, g.hidden, 1, self.opts.downStage(), self.opts.ncb);
         const shape = [_]c_int{ @intCast(S), @intCast(g.hidden) };
@@ -1171,6 +1209,7 @@ pub const Prefill = struct {
     /// the down finish and the slot reduce: y [rows, hidden] in `out_dtype`
     pub fn finish(self: *Prefill, s: mlx.mlx_stream, zd: mlx.mlx_array, inds: mlx.mlx_array, inv: mlx.mlx_array, scores: mlx.mlx_array, b: Operands, rows: usize, out_dtype: mlx.mlx_dtype) !mlx.mlx_array {
         const g = self.geo;
+        self.steps.fin +%= 1;
         const H: c_int = @intCast(g.hidden);
         const bpt = bptFor(g.hidden / 128);
         var y: [1]mlx.mlx_array = undefined;
@@ -1203,6 +1242,12 @@ pub const Prefill = struct {
     /// `moe` with each slot's x row from `rmap` (`prepWith`): y [rows, hidden] for x [n, hidden] (any n), inds / scores /
     /// rmap [rows * topk]; row r's bytes are `moe`'s over x's rows gathered by `rmap`. rmap null: `moe` itself.
     pub fn moeWith(self: *Prefill, s: mlx.mlx_stream, x: mlx.mlx_array, inds: mlx.mlx_array, scores: mlx.mlx_array, b: Operands, rows: usize, out_dtype: mlx.mlx_dtype, rmap: ?mlx.mlx_array) !mlx.mlx_array {
+        return self.moeWithCall(s, x, inds, scores, b, rows, out_dtype, rmap, .{});
+    }
+
+    /// `moeWith` with the call's own choices (`Call`): the ending `endOf` gives, the fused finish (`Options.dfin`, small
+    /// `.off`) or the served down launch and finish. `.{}`: `moeWith` itself.
+    pub fn moeWithCall(self: *Prefill, s: mlx.mlx_stream, x: mlx.mlx_array, inds: mlx.mlx_array, scores: mlx.mlx_array, b: Operands, rows: usize, out_dtype: mlx.mlx_dtype, rmap: ?mlx.mlx_array, call: Call) !mlx.mlx_array {
         const S: u32 = @intCast(rows * self.geo.topk);
         const r = try self.route(s, inds, S);
         defer r.deinit();
@@ -1218,8 +1263,9 @@ pub const Prefill = struct {
         defer for (xd) |a| {
             _ = mlx.mlx_array_free(a);
         };
-        // the fused finish (`Options.dfin`, small `.off`): the down launch over the route's one table writes y
-        if (self.opts.dfin) return self.gemmDFin(s, r.tiles, null, xd[0], xd[1], r.order, scores, b, S, out_dtype);
+        // the fused finish (`Options.dfin`, small `.off`) where the call takes it: the down launch over the route's one
+        // table writes y
+        if (endOf(self.opts, call) != .served) return self.gemmDFin(s, r.tiles, null, xd[0], xd[1], r.order, scores, b, S, out_dtype);
         const zd = try self.gemmD(s, r, xd[0], xd[1], b, S);
         defer _ = mlx.mlx_array_free(zd);
         return self.finish(s, zd, inds, po[2], scores, b, rows, out_dtype);
@@ -1233,6 +1279,7 @@ pub const Prefill = struct {
     pub fn gemmDFin(self: *Prefill, s: mlx.mlx_stream, ta: mlx.mlx_array, tb: ?mlx.mlx_array, xd: mlx.mlx_array, xsd: mlx.mlx_array, order: mlx.mlx_array, scores: mlx.mlx_array, b: Operands, S: u32, out_dtype: mlx.mlx_dtype) !mlx.mlx_array {
         const k = self.dfin_k orelse return error.Exl3EngineNotImplemented;
         const g = self.geo;
+        self.steps.dfin +%= 1;
         const na: u32 = @intCast(mlx.getShape(ta)[0]);
         const nb: u32 = if (tb) |t| @intCast(mlx.getShape(t)[0]) else 0;
         var p = self.*;
@@ -1257,8 +1304,16 @@ pub const Prefill = struct {
     }
 
     /// The 128-row tiles' route: `froute`'s count and scatter (the same `order`), then the 128-row tiles, the mixed table over
-    /// the remainders and each expert's first remainder position (`text_froute_t128`), one launch.
+    /// the remainders and each expert's first remainder position (`text_froute_t128`), one launch. On an engine with a
+    /// threshold (`Options.dfin_min`) the route that also counts each expert's rows (`routeT128For`).
     pub fn routeT128(self: *Prefill, s: mlx.mlx_stream, inds: mlx.mlx_array, S: u32) !RouteT128 {
+        return self.routeT128For(s, inds, S, self.dfn_k != null);
+    }
+
+    /// `routeT128` with the threshold's route (`with_ecnt`: `text_froute_t128n`, each expert's rows in the call as
+    /// `RouteT128.ecnt`, the same order and tables; error.Exl3EngineNotImplemented on an engine without it) or the served
+    /// one
+    pub fn routeT128For(self: *Prefill, s: mlx.mlx_stream, inds: mlx.mlx_array, S: u32, with_ecnt: bool) !RouteT128 {
         const k = self.t128_k orelse return error.Exl3EngineNotImplemented;
         const g = self.geo;
         const tr = self.opts.tileRows();
@@ -1273,11 +1328,14 @@ pub const Prefill = struct {
             .{ .name = "T128", .value = .{ .int = 1 } },
         };
         // the fused finish's threshold (`Options.dfin_min`): the route that also writes each expert's rows in the call
-        if (self.dfn_k) |dn| {
+        if (with_ecnt) {
+            const dn = self.dfn_k orelse return error.Exl3EngineNotImplemented;
+            self.steps.routen +%= 1;
             var outn: [5]mlx.mlx_array = undefined;
             try run(dn.route, .{ .grid = .{ 1024, 1, 1 }, .threadgroup = .{ 1024, 1, 1 }, .out_shapes = &.{ &[_]c_int{@intCast(S)}, &[_]c_int{ @intCast(rows_t), 4 }, &[_]c_int{ @intCast(tq), 4 }, &[_]c_int{@intCast(g.experts)}, &[_]c_int{@intCast(g.experts)} }, .out_dtypes = &.{ .uint32, .int32, .int32, .int32, .int32 }, .template = &tmpl }, &.{inds}, &outn, s);
             return .{ .order = outn[0], .tiles = outn[1], .tiles128 = outn[2], .xbase = outn[3], .tmax = tmax, .tq = tq, .ecnt = outn[4] };
         }
+        self.steps.route +%= 1;
         var outs: [4]mlx.mlx_array = undefined;
         try run(k.route, .{ .grid = .{ 1024, 1, 1 }, .threadgroup = .{ 1024, 1, 1 }, .out_shapes = &.{ &[_]c_int{@intCast(S)}, &[_]c_int{ @intCast(rows_t), 4 }, &[_]c_int{ @intCast(tq), 4 }, &[_]c_int{@intCast(g.experts)} }, .out_dtypes = &.{ .uint32, .int32, .int32, .int32 }, .template = &tmpl }, &.{inds}, &outs, s);
         return .{ .order = outs[0], .tiles = outs[1], .tiles128 = outs[2], .xbase = outs[3], .tmax = tmax, .tq = tq };
@@ -1345,6 +1403,7 @@ pub const Prefill = struct {
     pub fn gemmDT128(self: *Prefill, s: mlx.mlx_stream, rt: RouteT128, xd: mlx.mlx_array, xsd: mlx.mlx_array, b: Operands, S: u32) !ZT128 {
         const k = self.t128_k orelse return error.Exl3EngineNotImplemented;
         const g = self.geo;
+        self.steps.down +%= 1;
         return self.t128Gemm(s, rt, k.dn_mixed, k.dn_t128, 1, g.inter, g.hidden, self.opts.downStage(), self.opts.ncb, &.{ rt.tiles, xd, b.down_t, xsd }, &.{ rt.tiles128, xd, b.down_t, xsd }, S);
     }
 
@@ -1354,6 +1413,7 @@ pub const Prefill = struct {
     pub fn gemmDT128Min(self: *Prefill, s: mlx.mlx_stream, rt: RouteT128, xd: mlx.mlx_array, xsd: mlx.mlx_array, b: Operands, S: u32) !ZT128 {
         const dn = self.dfn_k orelse return error.Exl3EngineNotImplemented;
         const g = self.geo;
+        self.steps.downn +%= 1;
         const shape = [_]c_int{ @intCast(S), @intCast(g.hidden) };
         const shapes = [_][]const c_int{&shape};
         const dtypes = [_]mlx.mlx_dtype{.float16};
@@ -1388,6 +1448,7 @@ pub const Prefill = struct {
     pub fn gemmDFinMin(self: *Prefill, s: mlx.mlx_stream, rt: RouteT128, zd: ZT128, xd: mlx.mlx_array, xsd: mlx.mlx_array, inds: mlx.mlx_array, inv: mlx.mlx_array, scores: mlx.mlx_array, b: Operands, S: u32, out_dtype: mlx.mlx_dtype) !mlx.mlx_array {
         const dn = self.dfn_k orelse return error.Exl3EngineNotImplemented;
         const g = self.geo;
+        self.steps.dfinn +%= 1;
         const na: u32 = @intCast(mlx.getShape(rt.tiles128)[0]);
         const nb: u32 = @intCast(mlx.getShape(rt.tiles)[0]);
         var p = self.*;
@@ -1423,6 +1484,7 @@ pub const Prefill = struct {
     pub fn finishT128(self: *Prefill, s: mlx.mlx_stream, zt: ZT128, xbase: mlx.mlx_array, inds: mlx.mlx_array, inv: mlx.mlx_array, scores: mlx.mlx_array, b: Operands, rows: usize, out_dtype: mlx.mlx_dtype) !mlx.mlx_array {
         const k = self.t128_k orelse return error.Exl3EngineNotImplemented;
         const g = self.geo;
+        self.steps.fin +%= 1;
         const H: c_int = @intCast(g.hidden);
         const bpt = bptFor(g.hidden / 128);
         var y: [1]mlx.mlx_array = undefined;
@@ -1443,9 +1505,18 @@ pub const Prefill = struct {
 
     /// `moeT128` with each slot's x row from `rmap` (`prepWith`), as `moeWith` is `moe`'s. rmap null: `moeT128` itself.
     pub fn moeT128With(self: *Prefill, s: mlx.mlx_stream, x: mlx.mlx_array, inds: mlx.mlx_array, scores: mlx.mlx_array, b: Operands, rows: usize, out_dtype: mlx.mlx_dtype, rmap: ?mlx.mlx_array) !mlx.mlx_array {
+        return self.moeT128WithCall(s, x, inds, scores, b, rows, out_dtype, rmap, .{});
+    }
+
+    /// `moeT128With` with the call's own choices (`Call`): the ending `endOf` gives, after the route it reads (the
+    /// threshold's counts each expert's rows; every other ending takes the served route). A call that declines the fused
+    /// finish runs `routeT128For`'s served route, `gemmDT128` and `finishT128`: the served engine's launches. `.{}`:
+    /// `moeT128With` itself.
+    pub fn moeT128WithCall(self: *Prefill, s: mlx.mlx_stream, x: mlx.mlx_array, inds: mlx.mlx_array, scores: mlx.mlx_array, b: Operands, rows: usize, out_dtype: mlx.mlx_dtype, rmap: ?mlx.mlx_array, call: Call) !mlx.mlx_array {
         if (self.t128_k == null) return error.Exl3EngineNotImplemented;
+        const ending = endOf(self.opts, call);
         const S: u32 = @intCast(rows * self.geo.topk);
-        const rt = try self.routeT128(s, inds, S);
+        const rt = try self.routeT128For(s, inds, S, ending == .dfinn);
         defer rt.deinit();
         const po = try self.prepWith(s, x, inds, rt.order, b, S, rmap);
         defer for (po) |a| {
@@ -1457,17 +1528,22 @@ pub const Prefill = struct {
         defer for (xd) |a| {
             _ = mlx.mlx_array_free(a);
         };
-        // the fused finish (`Options.dfin`): one down launch over both tables writes y; with a threshold (`dfin_min`) the
-        // served down launches first, over the experts under it, then the one launch writing y
-        if (self.opts.dfin and self.opts.dfin_min != 0) {
-            const zdn = try self.gemmDT128Min(s, rt, xd[0], xd[1], b, S);
-            defer zdn.deinit();
-            return self.gemmDFinMin(s, rt, zdn, xd[0], xd[1], inds, po[2], scores, b, S, out_dtype);
+        // the ending: the fused finish (`Options.dfin`), one down launch over both tables writing y; with a threshold
+        // (`dfin_min`) the served down launches first, over the experts under it, then the one launch writing y; else the
+        // served down launches and finish
+        switch (ending) {
+            .dfinn => {
+                const zdn = try self.gemmDT128Min(s, rt, xd[0], xd[1], b, S);
+                defer zdn.deinit();
+                return self.gemmDFinMin(s, rt, zdn, xd[0], xd[1], inds, po[2], scores, b, S, out_dtype);
+            },
+            .dfin => return self.gemmDFin(s, rt.tiles128, rt.tiles, xd[0], xd[1], rt.order, scores, b, S, out_dtype),
+            .served => {
+                const zd = try self.gemmDT128(s, rt, xd[0], xd[1], b, S);
+                defer zd.deinit();
+                return self.finishT128(s, zd, rt.xbase, inds, po[2], scores, b, rows, out_dtype);
+            },
         }
-        if (self.opts.dfin) return self.gemmDFin(s, rt.tiles128, rt.tiles, xd[0], xd[1], rt.order, scores, b, S, out_dtype);
-        const zd = try self.gemmDT128(s, rt, xd[0], xd[1], b, S);
-        defer zd.deinit();
-        return self.finishT128(s, zd, rt.xbase, inds, po[2], scores, b, rows, out_dtype);
     }
 };
 
@@ -2189,4 +2265,31 @@ test "turboexl3 prefill dfin_min texts: the route also writes each expert's rows
         for (dfinn_in) |have| found = found or std.mem.eql(u8, std.mem.span(name), std.mem.span(have));
         try t.expect(found);
     }
+}
+
+test "turboexl3 prefill call: a call runs the fused finish only where its engine was built with it and the call keeps it (its threshold's chain with dfin_min); .{} is the engine's own ending, .{ .dfin = false } the served one" {
+    const t = std.testing;
+    const base: Options = .{ .bm = 64, .small = .mixed, .dbuf = true, .unroll = true, .fragb = true, .intr = true, .defer_affine = true, .ncb = 4, .sintr = true, .froute = true, .alay = 2, .t128 = true };
+    // the 128-row tiles' engine with the plain fused finish, and with its threshold; small .off's over its one table
+    var fused = base;
+    fused.dfin = true;
+    var thresh = fused;
+    thresh.dfin_min = 80;
+    var one = fused;
+    one.t128 = false;
+    one.small = .off;
+    one.sintr = false;
+    one.bm = 256;
+    const engines = [_]Options{ base, fused, thresh, one };
+    for (engines) |o| try t.expect(o.valid());
+    // the default call runs what its engine was built for
+    try t.expect((Call{}).dfin);
+    try t.expectEqual(End.served, endOf(base, .{}));
+    try t.expectEqual(End.dfin, endOf(fused, .{}));
+    try t.expectEqual(End.dfinn, endOf(thresh, .{}));
+    try t.expectEqual(End.dfin, endOf(one, .{}));
+    // a call that declines the fused finish runs the served ending on every engine; one that keeps it changes nothing on
+    // an engine built without it
+    for (engines) |o| try t.expectEqual(End.served, endOf(o, .{ .dfin = false }));
+    try t.expectEqual(End.served, endOf(base, .{ .dfin = true }));
 }

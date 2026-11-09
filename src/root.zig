@@ -768,6 +768,14 @@ pub fn moe(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array,
 /// prefill geometries, so a clamped call builds and caches its own kernels (fin7's and the mids' clamped variants) beside
 /// the unclamped ones, and every other kernel is the unclamped chain's.
 pub fn moeSwiglu(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array, scores: mlx.mlx_array, dec: format.Decode, limit: u32, clamp: format.ClampAt) !mlx.mlx_array {
+    return moeSwigluWith(s, x, bank, inds, scores, dec, limit, clamp, .{});
+}
+
+/// `moeSwiglu` with the call's own choices (`prefill.Call`): its prefill rows take the fused finish (`Config.pf_dfin`)
+/// only where the call keeps it and its geometry's engine was built with it; `.{ .dfin = false }` runs the served route,
+/// down launches and finish on that engine, the same bytes. Decode rows have no such choice. `moeSwiglu` is this at
+/// `.{}`.
+pub fn moeSwigluWith(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array, scores: mlx.mlx_array, dec: format.Decode, limit: u32, clamp: format.ClampAt, call: prefill.Call) !mlx.mlx_array {
     const geo = try validateCall(x, bank, inds, scores);
     if (geo.gate_up.n != geo.down.n) return error.Exl3EngineNotImplemented;
     const xsh = mlx.getShape(x);
@@ -780,7 +788,7 @@ pub fn moeSwiglu(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx.mlx_
     }
     if (rows > kernels.DECODE_ROWS_MAX) {
         if (!config.get().prefill or !config.get().nax) return error.Exl3EngineNotImplemented;
-        return moePrefill(s, x, bank, inds, scores, dec, geo, rows, K, limit, clamp);
+        return moePrefill(s, x, bank, inds, scores, dec, geo, rows, K, limit, clamp, call);
     }
     if (SlotStats.enabled()) SlotStats.record(inds, rows, @intCast(K)) catch {};
     const dgeo: decode.Geometry = .{ .hidden = @intCast(geo.hidden), .inter = @intCast(geo.width), .topk = @intCast(K), .rate = geo.gate_up, .dec = dec, .limit = limit, .clamp = clamp };
@@ -870,7 +878,7 @@ const PfCapture = struct {
     }
 };
 
-fn moePrefill(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array, scores: mlx.mlx_array, dec: format.Decode, geo: Geometry, rows: usize, K: c_int, limit: u32, clamp: format.ClampAt) !mlx.mlx_array {
+fn moePrefill(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array, scores: mlx.mlx_array, dec: format.Decode, geo: Geometry, rows: usize, K: c_int, limit: u32, clamp: format.ClampAt, call: prefill.Call) !mlx.mlx_array {
     const xsh = mlx.getShape(x);
     const rows_c: c_int = @intCast(rows);
     const pf = try prefillFor(.{ .hidden = @intCast(geo.hidden), .inter = @intCast(geo.width), .topk = @intCast(K), .experts = @intCast(geo.experts), .rate = geo.gate_up, .dec = dec, .limit = limit, .clamp = clamp });
@@ -895,7 +903,7 @@ fn moePrefill(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx.mlx_arr
         .down_suh = bank.down.suh,
         .down_svh = bank.down.svh,
     };
-    const y0 = if (pf.opts.t128) try pf.moeT128(s, x2, inds1, s1, ops, rows, mlx.mlx_array_dtype(x)) else try pf.moe(s, x2, inds1, s1, ops, rows, mlx.mlx_array_dtype(x));
+    const y0 = if (pf.opts.t128) try pf.moeT128WithCall(s, x2, inds1, s1, ops, rows, mlx.mlx_array_dtype(x), null, call) else try pf.moeWithCall(s, x2, inds1, s1, ops, rows, mlx.mlx_array_dtype(x), null, call);
     defer freeArr(y0);
     var y = mlx.mlx_array_new();
     errdefer freeArr(y);
@@ -949,6 +957,13 @@ const clamp_logged = Global(bool, "root_clamp_logged", false);
 /// `Config.prefill` and `Config.nax` as `moe`'s prefill rows; gate, up and down at one rate. GLM-5.3-Flash's
 /// `moeClampedRows` (glm53f-fused) is this chain at `limit` 1 to 128 and `gate_in`.
 pub fn moeSwigluRows(s: mlx.mlx_stream, x: mlx.mlx_array, rows: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array, scores: mlx.mlx_array, dec: format.Decode, limit: u32, clamp: format.ClampAt, out_dtype: mlx.mlx_dtype) !mlx.mlx_array {
+    return moeSwigluRowsWith(s, x, rows, bank, inds, scores, dec, limit, clamp, out_dtype, .{});
+}
+
+/// `moeSwigluRows` with the call's own choices (`prefill.Call`): the call takes the fused finish (`Config.pf_dfin`) only
+/// where it keeps it and its geometry's engine was built with it; `.{ .dfin = false }` runs the served route, down
+/// launches and finish on that engine (`Prefill.moeT128WithCall`), the same bytes. `moeSwigluRows` is this at `.{}`.
+pub fn moeSwigluRowsWith(s: mlx.mlx_stream, x: mlx.mlx_array, rows: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array, scores: mlx.mlx_array, dec: format.Decode, limit: u32, clamp: format.ClampAt, out_dtype: mlx.mlx_dtype, call: prefill.Call) !mlx.mlx_array {
     if (limit > 128) return error.InvalidExl3Clamp;
     if (!config.get().prefill or !config.get().nax) return error.Exl3EngineNotImplemented;
     const xsh = mlx.getShape(x);
@@ -981,8 +996,8 @@ pub fn moeSwigluRows(s: mlx.mlx_stream, x: mlx.mlx_array, rows: mlx.mlx_array, b
         .down_suh = bank.down.suh,
         .down_svh = bank.down.svh,
     };
-    if (pf.opts.t128) return pf.moeT128With(s, x, inds, scores, ops, S, out_dtype, rows);
-    return pf.moeWith(s, x, inds, scores, ops, S, out_dtype, rows);
+    if (pf.opts.t128) return pf.moeT128WithCall(s, x, inds, scores, ops, S, out_dtype, rows, call);
+    return pf.moeWithCall(s, x, inds, scores, ops, S, out_dtype, rows, call);
 }
 
 /// DeepSeek-V4.1's clamped routed experts over an expert streamer's slot banks (models/deepseek_v41/api.zig)
@@ -1009,6 +1024,10 @@ pub const moeClampedBankedDownSelV = deepseek_v41.moeClampedBankedDownSelV;
 /// over gathered rows (models/ling/api.zig)
 pub const moeLing = ling.moeLing;
 pub const moeLingRows = ling.moeLingRows;
+/// `moeLing` and `moeLingRows` with the call's own choices (`prefill.Call`: the fused finish or the served ending, a call at
+/// a time; the outside plugin's PF_DFIN whole-call switch)
+pub const moeLingWith = ling.moeLingWith;
+pub const moeLingRowsWith = ling.moeLingRowsWith;
 pub const moeLingBanked = ling.moeLingBanked;
 pub const moeLingBankedSel = ling.moeLingBankedSel;
 pub const moeLingBankedGateUp = ling.moeLingBankedGateUp;
@@ -1074,6 +1093,9 @@ test "turboexl3 root: the served prefill options follow the config, and the deco
         try t.expect(q.valid() and q.t128 and q.t256 and q.cut == 32 and q.gu_ncb == 2 and q.dfin and q.dfr == 64 and q.bm == 64);
         const q8 = pfOptionsFor(g8);
         try t.expect(q8.valid() and q8.t256 and !q8.dfin);
+        // a call's ending on those engines (`prefill.Call`): the top-1 engine's own is the fused finish, a call that
+        // declines it the served ending; the top-8 engine has the served ending whatever the call keeps
+        try t.expect(prefill.endOf(q, .{}) == .dfin and prefill.endOf(q, .{ .dfin = false }) == .served and prefill.endOf(q8, .{}) == .served);
         try config.configure(.{ .pf_t128 = false, .pf_bm = 256, .pf_mixed = false, .pf_dfin = true });
         const r = pfOptionsFor(g1);
         try t.expect(r.valid() and !r.t128 and r.bm == 256 and r.small == .off and !r.sintr and r.dfin and r.dfr == 32);
@@ -1090,6 +1112,7 @@ test "turboexl3 root: the served prefill options follow the config, and the deco
         try config.configure(.{ .pf_dfin = true, .pf_dfin_min = 80 });
         const h = pfOptionsFor(g1);
         try t.expect(h.valid() and h.t128 and h.dfin and h.dfin_min == 80);
+        try t.expect(prefill.endOf(h, .{}) == .dfinn and prefill.endOf(h, .{ .dfin = false }) == .served);
         const h8 = pfOptionsFor(g8);
         try t.expect(h8.valid() and !h8.dfin and h8.dfin_min == 0);
         try config.configure(.{ .pf_dfin = true, .pf_dfin_min = 80, .pf_t128 = false, .pf_mixed = false });
