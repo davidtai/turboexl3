@@ -1463,6 +1463,20 @@ EDITED_TESTS[('dense_dec_test.zig', 'turboexl3 glm53f dense decode texts: each v
     'g1 and g2: their compositions (their own head, loop and tile words, then text_dec0\'s pieces from the codewords on), '
     'g1\'s widening statement today\'s, and their reach (every served shape at its K; not K5, MCG or another model\'s shape)')
 
+# DEC-ONE's arrival counters made on the host (dense.zig's dec_host_zero, the plugin's TURBOEXL3_GLM53F_HOST_ZERO): a call
+# whose prepare runs inside its launch, and glm53f's joined launches (pair_ks.linear2, shared_gu.gateUp), take a new array
+# of zeros copied from the host where they launch dec_zero over their counters: the same zeros, so the same bytes
+ADDED[('dense.zig', 'const dec_host_zero')] = 'host-made arrival counters in place of dec_zero\'s launch (the plugin sets it)'
+ADDED[('dense.zig', 'const dec_host_zeroed')] = 'the calls that took host-made counters'
+ADDED[('dense.zig', 'const host_counters_max')] = 'the most counters hostCounters makes (a call past it launches dec_zero)'
+ADDED[('dense.zig', 'const host_zero_words')] = 'the zeros hostCounters copies'
+ADDED[('dense.zig', 'fn hostCounters')] = 'n zeroed counters copied from the host, with dec_host_zero set'
+CHANGED[('dense.zig', 'const Dense')] += ('; DecCfg.ncnt (the counters\' length, decCfgs stores it) and decLinear\'s counters '
+                                        'from hostCounters where it launched dec_zero')
+CHANGED[('dense.zig', 'const shared_state')] += ', dec_host_zero and dec_host_zeroed'
+CHANGED[('pair_ks.zig', 'fn linear2')] = 'its counters from dense.hostCounters where it launched dec_zero'
+CHANGED[('shared_gu.zig', 'fn gateUp')] = 'its counters from dense.hostCounters where it launched dec_zero'
+
 
 def metal_strings(fn, toks, corpus):
     """(line, kind, value) of every literal in a .zig file that holds Metal"""
