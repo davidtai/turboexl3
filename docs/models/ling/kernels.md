@@ -427,13 +427,13 @@ kernel (`turboexl3_pgemm_fused`) with its N tiles running member 0's, then 1's, 
 
 <!-- /kernel-facts -->
 
-- **Used by:** `kdaProjPrompt` (`ling.kdaProjPrompt`), the outside plugin turboexl3_ling's MLX_SERVE_LING_KDA_PROJ_PROMPT: a KDA layer's three EXL3 projections of its normed input at prompt rows (past `linear`'s register path, 32 rows on NAX).
+- **Used by:** `kdaProjPrompt` (`ling.kdaProjPrompt`), the outside plugin turboexl3_ling's MLX_SERVE_LING_KDA_PROJ_PROMPT: a KDA layer's three EXL3 projections of its normed input at prompt rows (past `linear`'s register path, 32 rows on NAX). `kdaProjPromptW` (`ling.kdaProjPromptW`) runs it over W_hats the caller decoded once, the plugin's MLX_SERVE_LING_LAYER_WHAT: a layer-major layer's wide spans over the W_hats of its first.
 - **Shapes and dtypes:** x0, x1, x2 half [M, K] (each member's prepared rows, natural order), w0, w1, w2 half [K, N_m] (each member's W_hat), svh0, svh1, svh2 half [N_m]. Out: y0, y1, y2 OUT_T [M, N_m] (x's dtype).
 - **Grid and threadgroup:** pg2's: `((N0 + N1 + N2) / BN · 2^SWZ · 32, ceil(ceil(M / BM) / 2^SWZ) · WN, WM)` / `(32, WN, WM)`; a threadgroup's N tile lies in one member (each N_m a multiple of BN).
 - **Template args:** pg2's: T (half), BM, BN, BK, WM, WN, SWZ, AM, AK (M and K aligned to the tile), AN (1) and OUT_T; the tile `kdaproj_pf.tileFor` (K 4096: `ling_tile`).
 - **Replaces:** per member, MLX's matmul and the finish: six launches, and z's write and read, for one.
 - **Bits:** each member's are its `linear` chain's: pg2's statements (MLX's NAX gemm_loop verbatim, each column's k in MLX's order whatever the tile; the accumulators rounded to half as MLX's store rounds them; the finish's statements per 128-column block), on that member's operands. A call is taken only where `linear` runs that chain at these rows and MLX runs its regular kernel (`pgemm.mlxRegular`: no split K) on the NAX path.
-- **Pinned by:** `src/models/ling/kdaproj_pf.zig` "turboexl3 ling kdaproj prompt texts: ..." (CPU: the composition of pg2's pieces) and `src/models/ling/kdaproj_pf_test.zig` "turboexl3 gpu ling kdaproj prompt: ..." (GPU: each member against `root.linear` word for word at rows 33 to 16384, the refusal at 32).
+- **Pinned by:** `src/models/ling/kdaproj_pf.zig` "turboexl3 ling kdaproj prompt texts: ..." (CPU: the composition of pg2's pieces) and `src/models/ling/kdaproj_pf_test.zig` "turboexl3 gpu ling kdaproj prompt: ..." (GPU: each member against `root.linear` word for word at rows 33 to 16384, the refusal at 32) and "turboexl3 gpu ling kdaproj prompt over given W_hats: ..." (GPU: `kdaProjPromptW` over each member's W_hat, decoded once, against `kdaProjPrompt` word for word at rows 33, 1965 and 4096).
 
 ## `src/models/ling/combine.zig`
 
