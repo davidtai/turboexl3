@@ -1695,6 +1695,19 @@ SPLIT_REMOVED_KERNELS = {}
 SPLIT_REMOVED_FILES = {}
 SPLIT_REMOVED_TESTS = {}
 
+# strip2 (2026-11-09, main): the Ling dead-code strip after the final tree (rejected and closed candidates), against ling-combo2 908b167
+_S2_MLAROWS = "R13 MLA_ROWS (D4, rejected): the MLA chain's plain kv_b and head gate at decode and verify rows in one GEMV launch (models/ling/mla_rows.zig, ling.mlaRows, Config.mla_rows)"
+SPLIT_REMOVED_KERNELS['turboexl3_ling_mla_rows'] = _S2_MLAROWS
+SPLIT_REMOVED_KERNELS['turboexl3_test_ling_mla_rows_krev_fault'] = _S2_MLAROWS
+SPLIT_REMOVED_KERNELS['turboexl3_test_ling_mla_rows_sgrev_fault'] = _S2_MLAROWS
+SPLIT_REMOVED_FILES['models/ling/mla_rows.zig'] = _S2_MLAROWS
+SPLIT_REMOVED_FILES['models/ling/mla_rows_test.zig'] = _S2_MLAROWS
+SPLIT_REMOVED_TESTS["turboexl3 ling mla rows texts: the launch is its five pieces in order; MLX's gemv statements (each row's tile read, products, shuffle-down sum, threadgroup sum and store) once each, the accumulate and the threadgroup sum each a piece of their own, no contraction pragma; the operands and template arguments it names, and no shape buffer"] = _S2_MLAROWS
+SPLIT_REMOVED_TESTS["turboexl3 ling mla rows plan: MLX's gemv tile for kv_b (BM 8) and the head gate (BN 8), and the router's (BM 4) its text names; the rows a threadgroup takes and their chunks at rows 1 to 16 and caps 1 to 8; a verify's 2 to 4 rows in one chunk from cap 4; the declines"] = _S2_MLAROWS
+SPLIT_REMOVED_TESTS["turboexl3 ling mla rows faults: each planted fault is the launch's text with one piece swapped, the accumulate for its reverse K order, the threadgroup sum for its reverse simdgroup order"] = _S2_MLAROWS
+SPLIT_REMOVED_TESTS["turboexl3 gpu ling mla rows: kv_b and the head gate in one GEMV launch give the served words (the one-row matmul, the exact verify's denseRows) at rows 1 to 8, 12 and 16 and caps 1 to 8, on random rows and on built rows an order change moves, weights as the loader keeps them; red checks (two planted reorderings, a changed weight word, swapped rows) differ; the configuration's path and the refusals (TURBOEXL3_GPU=1)"] = _S2_MLAROWS
+# --strip2 end--
+
 _R10 = ("R10 ROUTER_ADDNORM (M6, rejected): the post-attention add_norm folded into the router's launch 1 "
         '(models/ling/anroute.zig, ling.addNormLogits)')
 SPLIT_REMOVED_KERNELS['turboexl3_ling_router_an_logits'] = _R10
@@ -1850,11 +1863,6 @@ SPLIT_ADDED_KERNELS['turboexl3_test_pf_dfinn_gemm_fault'] = ('test only: turboex
                                                              'unrounded (fault/fin_4_unrounded), the threshold\'s red checks')
 SPLIT_ADDED_KERNELS['turboexl3_test_pf_dfinn_fin_fault'] = ('test only: turboexl3_pf_dfinn with its finish half\'s products '
                                                             'unrounded (fault/fin_4_unrounded), a red check')
-# D4: the MLA chain's plain kv_b and head gate at decode and verify rows in one GEMV launch (ling-d4-mla,
-# Config.mla_rows, off by default; turboexl3_ling's MLX_SERVE_LING_MLA_ROWS)
-ADDED_FILES['models/ling/mla_rows.zig'] = ('Ling-3.1\'s MLA kv_b and head gate at decode and verify rows in one GEMV launch '
-                                           '(mlaRows, turboexl3_ling_mla_rows: MLX\'s one-row gemv words for each row, each '
-                                           'weight tile read once for the call\'s rows), and its texts\' and plan\'s CPU tests')
 # L1 (turboexl3_ling's MLX_SERVE_LING_PF_F16_PAIRS): a prompt call's routed pairs stored as f16 (moeLingRowsPairsF16)
 # and the JOINLESS combine over f16 sources (turboexl3_ling_combine_parts_h)
 ADDED_FILES['models/ling/f16pairs_test.zig'] = ('moeLingRowsPairsF16 and the combine over f16 sources held word for '
@@ -1864,21 +1872,6 @@ ADDED_FILES['models/ling/f16pairs_test.zig'] = ('moeLingRowsPairsF16 and the com
 SPLIT_ADDED_KERNELS['turboexl3_ling_combine_parts_h'] = ('turboexl3_ling_combine_parts over f16 sources (PF_F16_PAIRS): '
                                                          'src_parts_h and pick_h, the source pointers half, the same '
                                                          'statements; the product widens each word exactly')
-ADDED_FILES['models/ling/mla_rows_test.zig'] = ('mlaRows held to the served launches word for word (the one-row matmul, the '
-                                                'plugin\'s denseRows) at kv_b and the head gate, rows 1 to 16 and caps 1 to 8, '
-                                                'with red checks (GPU); the fault texts (CPU); servedCall and loaderWeight for '
-                                                'the timing')
-SPLIT_ADDED_KERNELS['turboexl3_ling_mla_rows'] =('D4: MLX\'s gemv statements (BM 8, BN 1 or BM 1, BN 8; SM 1, SN 32, TM 4, '
-                                                  'TN 4) for up to RB rows a threadgroup, each weight tile read once a K '
-                                                  'block, each row its own accumulators (models/ling/mla_rows.zig '
-                                                  'text_rows: mla_rows/head ++ acc ++ simd ++ tgsum ++ store), each row '
-                                                  'MLX\'s one-row gemv words')
-SPLIT_ADDED_KERNELS['turboexl3_test_ling_mla_rows_krev_fault'] = ('test only: turboexl3_ling_mla_rows with a lane\'s four '
-                                                                  'products of a K block added in reverse '
-                                                                  '(fault/mla_rows_acc_krev in acc\'s place), a red check')
-SPLIT_ADDED_KERNELS['turboexl3_test_ling_mla_rows_sgrev_fault'] = ('test only: turboexl3_ling_mla_rows with the simdgroups\' '
-                                                                   'sums added in reverse simdgroup order '
-                                                                   '(fault/mla_rows_tgsum_rev in tgsum\'s place), a red check')
 SPLIT_ADDED_KERNELS['turboexl3_ling_mla_flash_r1'] = ('rope-once: the MLA prompt attention over the rope-once cache '
                                                       '(models/ling/mla_flash.zig text_body_r1: the base body\'s pieces '
                                                       'with r1_setup and r1_kstep added, body_kofs and body_kload swapped '

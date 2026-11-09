@@ -716,7 +716,7 @@ test "turboexl3 ling mla latent nax plan: each shape's grid and threads, the con
 test "turboexl3 ling mla latent nax: only the latent decode reads Config.mla_latent_nax, and no other Ling module reaches the latent decode (the trunk's MLA never takes it)" {
     // the trunk's MLA prompt attention, its decode GEMVs, the routed, shared and dense paths: none reads the field or
     // calls the latent decode
-    const others = .{ @embedFile("mla_flash.zig"), @embedFile("mla_rows.zig"), @embedFile("kdaproj.zig"), @embedFile("kdaproj_pf.zig"), @embedFile("router.zig"), @embedFile("shared.zig"), @embedFile("tail.zig"), @embedFile("combine.zig"), @embedFile("swiglu.zig"), @embedFile("pair.zig") };
+    const others = .{ @embedFile("mla_flash.zig"), @embedFile("kdaproj.zig"), @embedFile("kdaproj_pf.zig"), @embedFile("router.zig"), @embedFile("shared.zig"), @embedFile("tail.zig"), @embedFile("combine.zig"), @embedFile("swiglu.zig"), @embedFile("pair.zig") };
     inline for (others) |src| {
         try testing.expect(!has(src, "mla_latent_nax"));
         try testing.expect(!has(src, "decodeLatent"));

@@ -118,10 +118,6 @@ pub const Config = struct {
     /// checks). Ahead of `mla_latent_stage` at every call it takes (a bf16 or f16 cache), which keeps the rest; not with
     /// `mla_latent_rows` or `mla_latent_block`.
     mla_latent_nax: bool = false,
-    /// Ling-3.1-flash's MLA kv_b and head gate (plain bf16 weights) at decode and verify rows in one GEMV launch
-    /// (`ling.mlaRows`): each weight tile read once for up to this many rows of a call (1 to 8), each row MLX's one-row
-    /// gemv words; 0 refuses the calls (the host runs its own matmuls). The same bytes.
-    mla_rows: u8 = 0,
     /// Ling-3.1-flash's MLA prompt attention over the rope-once cache (`ling.mlaFlashPrefillRope1`: each head's nope keys
     /// and the token's one roped key read in place, the expanded key never built); off refuses the calls. The same bytes
     /// as `ling.mlaFlashPrefill` over the expanded key.
@@ -146,7 +142,7 @@ pub const Config = struct {
             ((c.banked_variant_gu == 0 and c.banked_variant_dn == 0) or c.banked_group == 4) and
             (c.mla_latent_rows == 0 or c.mla_latent_rows == 2 or c.mla_latent_rows == 4) and
             !(c.mla_latent_stage and c.mla_latent_block) and
-            !(c.mla_latent_nax and (c.mla_latent_rows != 0 or c.mla_latent_block)) and c.mla_rows <= 8;
+            !(c.mla_latent_nax and (c.mla_latent_rows != 0 or c.mla_latent_block));
     }
 };
 
@@ -234,9 +230,6 @@ test "turboexl3 config: the defaults are valid and served; an unserved form, sli
     try t.expect((Config{ .mla_latent_nax = true, .mla_latent_stage = true }).valid());
     for ([_]u8{ 2, 4 }) |r| try t.expect(!(Config{ .mla_latent_nax = true, .mla_latent_rows = r }).valid());
     try t.expect(!(Config{ .mla_latent_nax = true, .mla_latent_block = true }).valid());
-    try t.expectEqual(@as(u8, 0), d.mla_rows);
-    for (1..9) |r| try t.expect((Config{ .mla_rows = @intCast(r) }).valid());
-    for ([_]u8{ 9, 16, 255 }) |r| try t.expect(!(Config{ .mla_rows = r }).valid());
     try t.expect(!d.mla_rope_once);
     try t.expect((Config{ .mla_rope_once = true }).valid());
     const saved = current.get().*;

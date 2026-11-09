@@ -10,9 +10,7 @@
 //! scores in two launches (`router.route`, router.zig): each a host's opt-in. Its MLA attention
 //! at decode rows in the latent is `mlaLatentDecode` (`mla_latent.zig`, three launches of its own), its MLA prompt
 //! attention runs as one causal flash launch (`mlaFlashPrefill`, `mla_flash.zig`: MLX's NAX attention at qk 192, v 128;
-//! over the rope-once cache, `mlaFlashPrefillRope1`, the same words), and its MLA chain's plain kv_b and head gate at
-//! decode and verify rows run as one GEMV launch for the call's rows
-//! (`mlaRows`, `mla_rows.zig`: MLX's one-row gemv words for each row).
+//! over the rope-once cache, `mlaFlashPrefillRope1`, the same words).
 const std = @import("std");
 const mlx = @import("sdk").mlx;
 const root = @import("../../root.zig");
@@ -68,13 +66,6 @@ pub const router = @import("router.zig");
 pub const mla_latent = @import("mla_latent.zig");
 pub const mlaLatentDecode = mla_latent.decodeLatent;
 pub const mlaLatentTakes = mla_latent.takes;
-
-/// The MLA chain's plain bf16 projections (kv_b, the head gate) at decode and verify rows in one GEMV launch
-/// (`mla_rows.zig`): each row the host's one-row matmul words (MLX's gemv at its tile), each weight tile read once for
-/// up to `Config.mla_rows` rows of the call; `mlaRowsTakes` says where it serves.
-pub const mla_rows = @import("mla_rows.zig");
-pub const mlaRows = mla_rows.mlaRows;
-pub const mlaRowsTakes = mla_rows.takes;
 
 /// `root.moe` with Ling-3.1's SwiGLU: `limit` 0 none (`moe`'s bytes), 1..128 the clamp after the SiLU (each row-slot's
 /// gate SiLU clamped from above at `limit` and its up to [-limit, limit], in f32 on the projections' f16-rounded outputs);
@@ -209,7 +200,7 @@ pub const moeTail = tail.moeTail;
 pub const moeTailParts = tail.moeTailParts;
 
 /// This file's module state (`Global`): what a host that shares its units' state registers.
-pub const shared_state = .{ shared.shared_state, pair.shared_state, kdaproj.shared_state, router.shared_state, tail.shared_state, mla_latent.shared_state, mla_flash.shared_state, kdaproj_pf.shared_state, swiglu.shared_state, mla_rows.shared_state };
+pub const shared_state = .{ shared.shared_state, pair.shared_state, kdaproj.shared_state, router.shared_state, tail.shared_state, mla_latent.shared_state, mla_flash.shared_state, kdaproj_pf.shared_state, swiglu.shared_state };
 
 /// The MLA prompt attention as one causal flash launch (`mla_flash.zig`): o [B, H, qL, v] = softmax(scale q k^T) v, query
 /// row i over keys 0 .. kL - qL + i, at Ling's heads (qk 192, v 128) or any pair `mla_flash.admits` takes; within
