@@ -45,8 +45,8 @@ prompt call's `linear` to the same row of a whole-prompt call wherever both call
 layer-major prompt pass's trunk linears; `TURBOEXL3_LING_ROWINV` lines); `rows_test.zig` holds `moeLingRows` to the outside
 plugin's prompt chunk (its take, its casts and `moeLing` at top-1) byte for byte on the loader's views, every chunk of
 a prompt layer's call and a padded one (`TURBOEXL3_LING_ROWS` lines), and each variant of its routed chain (the
-remainder rule's cut, gate|up's column blocks, the finish as the down GEMM's epilogue, the plain launches
-at bm 128 and 256; `prefill.Options`, off by default) to the served engine word for word on synthetic calls at every
+finish as the down GEMM's epilogue, over both tables and over the plain chain's one; `prefill.Options`, off by
+default) to the served engine word for word on synthetic calls at every
 row bucket of an expert, experts on both sides of 64, 80 and 96 rows and a lognormal-popularity call (the fused finish
 at its other stage shapes to that stage shape without it), with five red checks that must each be caught: a flipped
 word, three planted kernel faults (a value, two pure reorderings) and a rounding change

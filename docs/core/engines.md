@@ -291,12 +291,11 @@ With `froute` and without `t128`, the chain is 6 launches in 6 levels. `root.pfO
 constants, except `alay` and `t128`: the fields `pf_alay` and `pf_t128` of `Config` set those two. With `prefill` or
 `nax` false, `moe` refuses prefill rows. The third column below compares each kernel with the base chain.
 
-Four more options reshape the chain's launches, each off (or at the served shape) by default, each held to the served
-chain's bytes: `cut` (the remainder rule's cutoff), `gu_ncb` (the gate and up GEMM's output blocks per
-threadgroup), `dfin` (the finish as the down GEMM's epilogue at top-1: `turboexl3_pf_dfin`, one launch over every row in
-place of the down GEMM's launches and `fin`, so 6 launches in 5 levels with `t128`) and the plain launches at bm 128 or
-256 with the register path on or off. `Config`'s `pf_cut`, `pf_gu_ncb`, `pf_dfin`, `pf_dfr`, `pf_bm` and
-`pf_mixed` set them.
+One more option reshapes the chain's launches, off by default and held to the served chain's bytes: `dfin` (the finish
+as the down GEMM's epilogue at top-1: `turboexl3_pf_dfin`, one launch over every row in place of the down GEMM's
+launches and `fin`, so 6 launches in 5 levels with `t128`), which `Config.pf_dfin` sets. The remainder rule's cutoff
+(`prefill.t128_cut`, 64), the gate and up GEMM's output blocks per threadgroup (`prefill.gu_ncb`, 1) and the fused
+finish's tile rows per staging round (`prefill.dfr`, 32) are constants.
 
 A call can decline the fused finish (`prefill.Call`; `Prefill.moeT128WithCall` and `moeWithCall`, root's `moeSwigluWith`
 and `moeSwigluRowsWith`): on an engine built with `dfin`, a call with `.dfin = false` runs the served route

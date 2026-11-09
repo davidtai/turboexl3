@@ -682,13 +682,8 @@ fn pfOptions() prefill.Options {
     var o: prefill.Options = .{ .bm = 64, .small = .mixed, .dbuf = true, .unroll = true, .fragb = true, .intr = true, .defer_affine = true, .ncb = 4, .sintr = true, .froute = true };
     o.alay = config.get().pf_alay;
     o.t128 = config.get().pf_t128;
-    // the routed prefill's launch-shape variants (off, or the served shape, by default; every one the same bytes)
-    o.cut = config.get().pf_cut;
-    o.gu_ncb = config.get().pf_gu_ncb;
+    // the fused finish (off by default; the same bytes)
     o.dfin = config.get().pf_dfin;
-    o.dfr = config.get().pf_dfr;
-    o.bm = config.get().pf_bm;
-    if (!config.get().pf_mixed) o.small = .off;
     return o;
 }
 
@@ -711,8 +706,6 @@ fn pfOptionsFor(geo: prefill.Geometry) prefill.Options {
     // the 128-row tiles: their remainder tiles ride the mixed launch (froute's route at split 1, the strided mid and finish),
     // the 128-row tiles the bm-128 body beside bm 64's
     if (o.small != .mixed or o.split != 1 or !o.froute or o.aux != 0 or o.bm != 64) o.t128 = false;
-    // gate|up's column blocks: the shared-decode body's, whole blocks of the expert width
-    if (o.small == .all or (geo.inter / prefill.BN) % o.gu_ncb != 0) o.gu_ncb = 1;
     // the fused finish: a row's one slot (top-1), whole 128-column blocks a threadgroup, one down launch over every row
     // (small .off, or the 128-row tiles' two tables), its staging within 32 KB
     if (geo.topk != 1 or (o.ncb != 2 and o.ncb != 4) or o.wsp != 0 or (o.small != .off and !o.t128) or o.dfinBytes() > 32768) o.dfin = false;
@@ -737,10 +730,11 @@ fn prefillFor(geo: prefill.Geometry) !*prefill.Prefill {
         pf_logged.get().* = true;
         std.debug.print("[turboexl3] prefill engaged: fused EXL3 GEMM chain (bm={d} dbuf={} unroll={} fragb={} intr={} sintr={} defer={} split={d} small={s} down_bk={d} down_ncb={d} froute={} aux={d} alay={d} t128={})\n", .{ o.bm, o.dbuf, o.unroll, o.fragb, o.intr, o.sintr, o.defer_affine, o.split, @tagName(o.small), o.downStage(), o.ncb, o.froute, o.aux, o.alay, o.t128 });
     }
-    // a variant's own line, at each geometry built with one on (a handful a process; the served shape prints none), so
-    // the line names what the geometry runs: the top-1 rows path's dfin, say, beside a top-8 geometry's
-    if (o.cut != prefill.t128_cut or o.gu_ncb != 1 or o.dfin or o.bm != 64 or o.small != .mixed)
-        std.debug.print("[turboexl3] prefill variant engaged: bm={d} small={s} t128={} cut={d} gu_ncb={d} dfin={} dfr={d} (topk {d}, experts {d})\n", .{ o.bm, @tagName(o.small), o.t128, o.cut, o.gu_ncb, o.dfin, o.dfr, geo.topk, geo.experts });
+    // the fused finish's own line, at each geometry built with it (a handful a process; the served shape prints none), so
+    // the line names what the geometry runs: the top-1 rows path's dfin beside a top-8 geometry's; the launch shapes it
+    // names are the served constants
+    if (o.dfin)
+        std.debug.print("[turboexl3] prefill variant engaged: bm={d} small={s} t128={} cut={d} gu_ncb={d} dfin={} dfr={d} (topk {d}, experts {d})\n", .{ o.bm, @tagName(o.small), o.t128, prefill.t128_cut, prefill.gu_ncb, o.dfin, prefill.dfr, geo.topk, geo.experts });
     return &pf_cache.get().*[i].?;
 }
 
@@ -1073,34 +1067,30 @@ test "turboexl3 root: the served prefill options follow the config, and the deco
     decode_form_override.get().* = 3;
     defer decode_form_override.get().* = null;
     try t.expectEqual(@as(u8, 3), decodeForm());
-    // the routed prefill's variants: none by default (the served shape), each from its field; at Ling's routed geometries
-    // (n 40 and 32) each set is a valid one, and a top-8 geometry drops the fused finish (a row's slots in other tiles)
-    try t.expect(o.cut == prefill.t128_cut and o.gu_ncb == 1 and !o.dfin and o.small == .mixed);
+    // the routed prefill's launch shapes are constants at the served values (V1's knobs: the remainder cut 64, gate|up's
+    // column blocks 1, the fused finish's staging rows 32, bm 64, the mixed launch); the fused finish is off by default,
+    // from its field; at Ling's routed geometries (n 40 and 32) it is valid, and a top-8 geometry drops it (a row's slots
+    // in other tiles)
+    try t.expect(prefill.t128_cut == 64 and prefill.gu_ncb == 1 and prefill.dfr == 32 and o.bm == 64 and o.small == .mixed and !o.dfin);
     for ([_]u32{ 40, 32 }) |n| {
         const g1: prefill.Geometry = .{ .hidden = 4096, .inter = 1280, .topk = 1, .experts = 512, .rate = format.Rate.fromN(n).?, .dec = .mul1, .limit = 10, .clamp = .silu_out };
         var g8 = g1;
         g8.topk = 8;
         try config.configure(.{});
         try t.expect(pfOptionsFor(g1).valid() and pfOptionsFor(g1).t128 and !pfOptionsFor(g1).dfin);
-        try config.configure(.{ .pf_cut = 32, .pf_gu_ncb = 2, .pf_dfin = true, .pf_dfr = 64 });
+        try config.configure(.{ .pf_dfin = true });
         const q = pfOptionsFor(g1);
-        try t.expect(q.valid() and q.t128 and q.cut == 32 and q.gu_ncb == 2 and q.dfin and q.dfr == 64 and q.bm == 64);
+        try t.expect(q.valid() and q.t128 and q.dfin and q.bm == 64);
         const q8 = pfOptionsFor(g8);
         try t.expect(q8.valid() and !q8.dfin);
         // a call's ending on those engines (`prefill.Call`): the top-1 engine's own is the fused finish, a call that
         // declines it the served ending; the top-8 engine has the served ending whatever the call keeps
         try t.expect(prefill.endOf(q, .{}) == .dfin and prefill.endOf(q, .{ .dfin = false }) == .served and prefill.endOf(q8, .{}) == .served);
-        try config.configure(.{ .pf_t128 = false, .pf_bm = 256, .pf_mixed = false, .pf_dfin = true });
-        const r = pfOptionsFor(g1);
-        try t.expect(r.valid() and !r.t128 and r.bm == 256 and r.small == .off and !r.sintr and r.dfin and r.dfr == 32);
-        // the fused finish needs one down launch over every row: the mixed launch at bm 256 has two bodies, so it drops it
-        try config.configure(.{ .pf_t128 = false, .pf_bm = 256, .pf_dfin = true });
+        // the fused finish needs one down launch over every row: without the 128-row tiles the mixed launch has two
+        // bodies, so it drops it
+        try config.configure(.{ .pf_t128 = false, .pf_dfin = true });
         const m = pfOptionsFor(g1);
         try t.expect(m.valid() and m.small == .mixed and !m.dfin);
-        // bm 128 or 256 runs without the 128-row tiles (they need bm 64)
-        try config.configure(.{ .pf_bm = 128 });
-        const w = pfOptionsFor(g1);
-        try t.expect(w.valid() and !w.t128 and w.bm == 128);
     }
 }
 

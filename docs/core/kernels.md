@@ -1342,7 +1342,7 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/prefill.zig:804` (`const Prefill`) |
+| made at | `src/core/prefill.zig:795` (`const Prefill`) |
 | inputs | `zd`, `inds`, `inv`, `scores`, `svh_d` |
 | outputs | `y` |
 | source | `text_finish` = `prefill/finish_1_1` ++ `prefill/finish_1_2` ++ `prefill/finish_1_3` ++ `prefill/finish_2` ++ `prefill/finish_3` ++ `prefill/finish_4` (1033 B, `e68b2ddd88ba`) |
@@ -1386,7 +1386,7 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/prefill.zig:819` (`const Prefill`) |
+| made at | `src/core/prefill.zig:810` (`const Prefill`) |
 | inputs | `zd`, `inds`, `inv`, `scores`, `svh_d` |
 | outputs | `y` |
 | source | `text_finish_v` = `prefill/finish_v` (1182 B, `72667b6b538d`) |
@@ -1418,7 +1418,7 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/prefill.zig:810` (`const Prefill`) |
+| made at | `src/core/prefill.zig:801` (`const Prefill`) |
 | inputs | `inds` |
 | outputs | `order`, `tiles` |
 | source | `text_froute` = `prefill/table_1` ++ `prefill/froute_count` ++ `prefill/table_2` (2416 B, `84e4298e16ea`) |
@@ -1453,7 +1453,7 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/prefill.zig:811` (`const Prefill`) |
+| made at | `src/core/prefill.zig:802` (`const Prefill`) |
 | inputs | `inds` |
 | outputs | `order`, `tiles` |
 | source | `text_froute_m` = `prefill/table_mixed_1` ++ `prefill/froute_count` ++ `prefill/table_mixed_2` (3328 B, `0ed55b2ce032`) |
@@ -1490,7 +1490,7 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/prefill.zig:796` (`const Prefill`) |
+| made at | `src/core/prefill.zig:787` (`const Prefill`) |
 | inputs | `tiles`, `x0`, `w0`, `xs0` |
 | outputs | `z0` |
 | source | `gemm1_text` = `prefill/gemm_1` ++ `prefill/gemm_2` ++ `prefill/gemm_3_1` ++ `prefill/gemm_3_2` ++ `prefill/gemm_3_3` ++ `prefill/gemm_op1_wx` ++ `prefill/gemm_4` ++ `prefill/gemm_op1_xsz_1` ++ `prefill/gemm_op1_xsz_2` ++ `prefill/gemm_5` (6517 B, `dd6225a4d3f1`) |
@@ -1544,7 +1544,7 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/prefill.zig:809` (`const Prefill`) |
+| made at | `src/core/prefill.zig:800` (`const Prefill`) |
 | inputs | `tiles`, `x0`, `w0`, `xs0` |
 | outputs | `z0` |
 | source | `gemm1m_text` = `prefill/gemm_mixed_1` ++ `prefill/gemm_1` ++ `prefill/gemm_mixed_bs` ++ `prefill/gemm_3_1` ++ `prefill/gemm_3_2` ++ `prefill/gemm_3_3` ++ `prefill/gemm_op1_wx` ++ `prefill/gemm_4` ++ `prefill/gemm_op1_xsz_1` ++ `prefill/gemm_op1_xsz_2` ++ `prefill/gemm_5` ++ `prefill/gemm_mixed_2` ++ `prefill/gemm_small_1` ++ `prefill/gemm_mixed_index` ++ `prefill/gemm_small_3_1` ++ `prefill/gemm_small_3_2` ++ `prefill/gemm_small_op1_wx` ++ `prefill/gemm_small_4` ++ `prefill/gemm_small_op1_xsz` ++ `prefill/gemm_small_5` ++ `prefill/gemm_mixed_3` (10642 B, `b717e7a11df7`) |
@@ -1599,7 +1599,7 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/prefill.zig:806` (`const Prefill`) |
+| made at | `src/core/prefill.zig:797` (`const Prefill`) |
 | inputs | `tiles`, `x0`, `w0`, `xs0` |
 | outputs | `z0` |
 | source | `gemm1s_text` = `prefill/gemm_small_1` ++ `prefill/gemm_small_2` ++ `prefill/gemm_small_3_1` ++ `prefill/gemm_small_3_2` ++ `prefill/gemm_small_op1_wx` ++ `prefill/gemm_small_4` ++ `prefill/gemm_small_op1_xsz` ++ `prefill/gemm_small_5` (3747 B, `34fd7442f5b6`) |
@@ -1642,7 +1642,7 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/prefill.zig:795` (`const Prefill`) |
+| made at | `src/core/prefill.zig:786` (`const Prefill`) |
 | inputs | `tiles`, `x0`, `x1`, `w0`, `w1`, `xs0`, `xs1` |
 | outputs | `z0`, `z1` |
 | source | `gemm2_text` = `prefill/gemm_1` ++ `prefill/gemm_2` ++ `prefill/gemm_3_1` ++ `prefill/gemm_3_2` ++ `prefill/gemm_3_3` ++ `prefill/gemm_op2_wx` ++ `prefill/gemm_4` ++ `prefill/gemm_op2_xsz` ++ `prefill/gemm_5` (6517 B, `f34c9fcb0bd3`) |
@@ -1691,7 +1691,7 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/prefill.zig:808` (`const Prefill`) |
+| made at | `src/core/prefill.zig:799` (`const Prefill`) |
 | inputs | `tiles`, `x0`, `x1`, `w0`, `w1`, `xs0`, `xs1` |
 | outputs | `z0`, `z1` |
 | source | `gemm2m_text` = `prefill/gemm_mixed_1` ++ `prefill/gemm_1` ++ `prefill/gemm_mixed_bs` ++ `prefill/gemm_3_1` ++ `prefill/gemm_3_2` ++ `prefill/gemm_3_3` ++ `prefill/gemm_op2_wx` ++ `prefill/gemm_4` ++ `prefill/gemm_op2_xsz` ++ `prefill/gemm_5` ++ `prefill/gemm_mixed_2` ++ `prefill/gemm_small_1` ++ `prefill/gemm_mixed_index` ++ `prefill/gemm_small_3_1` ++ `prefill/gemm_small_3_2` ++ `prefill/gemm_small_op2_wx` ++ `prefill/gemm_small_4` ++ `prefill/gemm_small_op2_xsz` ++ `prefill/gemm_small_5` ++ `prefill/gemm_mixed_3` (10642 B, `e19ee178960e`) |
@@ -1745,7 +1745,7 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/prefill.zig:805` (`const Prefill`) |
+| made at | `src/core/prefill.zig:796` (`const Prefill`) |
 | inputs | `tiles`, `x0`, `x1`, `w0`, `w1`, `xs0`, `xs1` |
 | outputs | `z0`, `z1` |
 | source | `gemm2s_text` = `prefill/gemm_small_1` ++ `prefill/gemm_small_2` ++ `prefill/gemm_small_3_1` ++ `prefill/gemm_small_3_2` ++ `prefill/gemm_small_op2_wx` ++ `prefill/gemm_small_4` ++ `prefill/gemm_small_op2_xsz` ++ `prefill/gemm_small_5` (3747 B, `430611958a11`) |
@@ -1788,7 +1788,7 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/prefill.zig:799` (`const Prefill`) |
+| made at | `src/core/prefill.zig:790` (`const Prefill`) |
 | inputs | `zg`, `zu`, `inds`, `order`, `svh_g`, `svh_u`, `suh_d` |
 | outputs | `xd`, `xsd` |
 | source | `text_mid` = `prefill/mid_1` ++ `prefill/mid_2` ++ `prefill/mid_3` ++ `prefill/mid_4` ++ `prefill/mid_swiglu` ++ `prefill/mid_5` (1402 B, `c03088145060`) |
@@ -1833,7 +1833,7 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/prefill.zig:814` (`const Prefill`) |
+| made at | `src/core/prefill.zig:805` (`const Prefill`) |
 | inputs | `zg`, `zu`, `inds`, `order`, `svh_g`, `svh_u`, `suh_d` |
 | outputs | `xd`, `xsd` |
 | source | `text_mid_v` = `prefill/mid_v_1` ++ `prefill/mid_swiglu` ++ `prefill/mid_v_2` (1759 B, `3e3c9dbef907`) |
@@ -1867,7 +1867,7 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/prefill.zig:816` (`const Prefill`) |
+| made at | `src/core/prefill.zig:807` (`const Prefill`) |
 | inputs | `zg`, `zu`, `inds`, `order`, `svh_g`, `svh_u`, `suh_d` |
 | outputs | `xd`, `xsd` |
 | source | `text_mid_vc` = `prefill/mid_v_1` ++ `prefill/mid_swiglu_clamp` ++ `prefill/mid_v_2` (2112 B, `31fe60881aaf`) |
@@ -1904,7 +1904,7 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/prefill.zig:801` (`const Prefill`) |
+| made at | `src/core/prefill.zig:792` (`const Prefill`) |
 | inputs | `zg`, `zu`, `inds`, `order`, `svh_g`, `svh_u`, `suh_d` |
 | outputs | `xd`, `xsd` |
 | source | `text_midc` = `prefill/mid_1` ++ `prefill/mid_2` ++ `prefill/mid_3` ++ `prefill/mid_4` ++ `prefill/mid_swiglu_clamp` ++ `prefill/mid_5` (1755 B, `d4c84b548820`) |
@@ -1942,7 +1942,7 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/prefill.zig:794` (`const Prefill`) |
+| made at | `src/core/prefill.zig:785` (`const Prefill`) |
 | inputs | `x`, `inds`, `order`, `suh_g`, `suh_u` |
 | outputs | `xg`, `xu`, `inv`, `xsg`, `xsu` |
 | source | `text_prep` = `prefill/prep_1` ++ `prefill/prep_row` ++ `prefill/prep_2` (1420 B, `cabcf76552d4`) |
@@ -1983,7 +1983,7 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/prefill.zig:812` (`const Prefill`) |
+| made at | `src/core/prefill.zig:803` (`const Prefill`) |
 | inputs | `x`, `inds`, `order`, `suh_g`, `suh_u` |
 | outputs | `xg`, `xu`, `inv`, `xsg`, `xsu` |
 | source | `text_prep_v` = `prefill/prep_v` (1808 B, `31abdef09b06`) |
@@ -2014,7 +2014,7 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/prefill.zig:738` (`const T128Kernels`) |
+| made at | `src/core/prefill.zig:729` (`const T128Kernels`) |
 | inputs | `tiles`, `x0`, `w0`, `xs0` |
 | outputs | `z0` |
 | source | `gemm1m_text` = `prefill/gemm_mixed_1` ++ `prefill/gemm_1` ++ `prefill/gemm_mixed_bs` ++ `prefill/gemm_3_1` ++ `prefill/gemm_3_2` ++ `prefill/gemm_3_3` ++ `prefill/gemm_op1_wx` ++ `prefill/gemm_4` ++ `prefill/gemm_op1_xsz_1` ++ `prefill/gemm_op1_xsz_2` ++ `prefill/gemm_5` ++ `prefill/gemm_mixed_2` ++ `prefill/gemm_small_1` ++ `prefill/gemm_mixed_index` ++ `prefill/gemm_small_3_1` ++ `prefill/gemm_small_3_2` ++ `prefill/gemm_small_op1_wx` ++ `prefill/gemm_small_4` ++ `prefill/gemm_small_op1_xsz` ++ `prefill/gemm_small_5` ++ `prefill/gemm_mixed_3` (10642 B, `b717e7a11df7`) |
@@ -2066,7 +2066,7 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/prefill.zig:739` (`const T128Kernels`) |
+| made at | `src/core/prefill.zig:730` (`const T128Kernels`) |
 | inputs | `tiles`, `x0`, `w0`, `xs0` |
 | outputs | `z0` |
 | source | `gemm1_text` = `prefill/gemm_1` ++ `prefill/gemm_2` ++ `prefill/gemm_3_1` ++ `prefill/gemm_3_2` ++ `prefill/gemm_3_3` ++ `prefill/gemm_op1_wx` ++ `prefill/gemm_4` ++ `prefill/gemm_op1_xsz_1` ++ `prefill/gemm_op1_xsz_2` ++ `prefill/gemm_5` (6517 B, `dd6225a4d3f1`) |
@@ -2116,7 +2116,7 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/prefill.zig:746` (`const T128Kernels`) |
+| made at | `src/core/prefill.zig:737` (`const T128Kernels`) |
 | inputs | `zd`, `inds`, `inv`, `scores`, `svh_d`, `zdt`, `xbase` |
 | outputs | `y` |
 | source | `text_finish_t128` = `prefill/finish_1_1` ++ `prefill/finish_1_2` ++ `prefill/finish_1_3` ++ `prefill/finish_t128_pick` ++ `prefill/finish_2` ++ `prefill/finish_t128_load` ++ `prefill/finish_4` (1099 B, `1aa1ff185322`) |
@@ -2155,7 +2155,7 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/prefill.zig:736` (`const T128Kernels`) |
+| made at | `src/core/prefill.zig:727` (`const T128Kernels`) |
 | inputs | `tiles`, `x0`, `x1`, `w0`, `w1`, `xs0`, `xs1` |
 | outputs | `z0`, `z1` |
 | source | `gemm2m_text` = `prefill/gemm_mixed_1` ++ `prefill/gemm_1` ++ `prefill/gemm_mixed_bs` ++ `prefill/gemm_3_1` ++ `prefill/gemm_3_2` ++ `prefill/gemm_3_3` ++ `prefill/gemm_op2_wx` ++ `prefill/gemm_4` ++ `prefill/gemm_op2_xsz` ++ `prefill/gemm_5` ++ `prefill/gemm_mixed_2` ++ `prefill/gemm_small_1` ++ `prefill/gemm_mixed_index` ++ `prefill/gemm_small_3_1` ++ `prefill/gemm_small_3_2` ++ `prefill/gemm_small_op2_wx` ++ `prefill/gemm_small_4` ++ `prefill/gemm_small_op2_xsz` ++ `prefill/gemm_small_5` ++ `prefill/gemm_mixed_3` (10642 B, `e19ee178960e`) |
@@ -2207,7 +2207,7 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/prefill.zig:737` (`const T128Kernels`) |
+| made at | `src/core/prefill.zig:728` (`const T128Kernels`) |
 | inputs | `tiles`, `x0`, `x1`, `w0`, `w1`, `xs0`, `xs1` |
 | outputs | `z0`, `z1` |
 | source | `gemm2_text` = `prefill/gemm_1` ++ `prefill/gemm_2` ++ `prefill/gemm_3_1` ++ `prefill/gemm_3_2` ++ `prefill/gemm_3_3` ++ `prefill/gemm_op2_wx` ++ `prefill/gemm_4` ++ `prefill/gemm_op2_xsz` ++ `prefill/gemm_5` (6517 B, `f34c9fcb0bd3`) |
@@ -2254,7 +2254,7 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/prefill.zig:741` (`const T128Kernels`) |
+| made at | `src/core/prefill.zig:732` (`const T128Kernels`) |
 | inputs | `zg`, `zu`, `inds`, `order`, `svh_g`, `svh_u`, `suh_d`, `zgt`, `zut`, `xbase` |
 | outputs | `xd`, `xsd` |
 | source | `text_mid_t128` = `prefill/mid_1` ++ `prefill/mid_t128_pick` ++ `prefill/mid_2` ++ `prefill/mid_t128_loads` ++ `prefill/mid_4` ++ `prefill/mid_swiglu` ++ `prefill/mid_5` (1531 B, `9fa53afb15db`) |
@@ -2293,7 +2293,7 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/prefill.zig:743` (`const T128Kernels`) |
+| made at | `src/core/prefill.zig:734` (`const T128Kernels`) |
 | inputs | `zg`, `zu`, `inds`, `order`, `svh_g`, `svh_u`, `suh_d`, `zgt`, `zut`, `xbase` |
 | outputs | `xd`, `xsd` |
 | source | `text_mid_t128c` = `prefill/mid_1` ++ `prefill/mid_t128_pick` ++ `prefill/mid_2` ++ `prefill/mid_t128_loads` ++ `prefill/mid_4` ++ `prefill/mid_swiglu_clamp` ++ `prefill/mid_5` (1884 B, `84c6b6a3cdb5`) |
@@ -2335,7 +2335,7 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/prefill.zig:735` (`const T128Kernels`) |
+| made at | `src/core/prefill.zig:726` (`const T128Kernels`) |
 | inputs | `inds` |
 | outputs | `order`, `tiles`, `tiles128`, `xbase` |
 | source | `text_froute_t128` = `prefill/froute_t128_1` ++ `prefill/froute_count` ++ `prefill/froute_t128_2_1` ++ `prefill/froute_t128_2_2` ++ `prefill/froute_t128_2_3` ++ `prefill/froute_t128_2_4` ++ `prefill/froute_t128_2_5` (4646 B, `107b10c53c14`) |
@@ -2376,7 +2376,7 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/prefill.zig:821` (`const Prefill`) |
+| made at | `src/core/prefill.zig:812` (`const Prefill`) |
 | inputs | `tiles`, `tiles2`, `x0`, `w0`, `xs0`, `order`, `scores`, `svh_d` |
 | outputs | `y` |
 | source | `text_dfin` = `prefill/gemm_1` ++ `prefill/gemm_dfin_bs` ++ `prefill/gemm_dfin_decl` ++ `prefill/gemm_3_1` ++ `prefill/gemm_dfin_tile` ++ `prefill/gemm_3_3` ++ `prefill/gemm_op1_wx` ++ `prefill/gemm_4` ++ `prefill/gemm_op1_xsz_1` ++ `prefill/gemm_dfin_epi_1` ++ `prefill/finish_2` ++ `prefill/gemm_dfin_load` ++ `prefill/finish_4` ++ `prefill/gemm_dfin_epi_2` (10462 B, `2ca1518d734b`) |
@@ -2403,11 +2403,12 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
   Out: y OUT_T [S, hidden] (f32 served), row = slot (top-1).
 - **Grid and threadgroup:** `((ta + tb) · (hidden/64/NCB) · 2·BMR, 1, 1)` / `(2·BMR, 1, 1)` (`gemmCfg` at
   `Options.dfinRows`: 128 or 256 with t128, else `bm`; small `.off`). Threadgroup memory: the weight stage (16 KB served);
-  DFR 32 stages each round (32 · 128 halves, 8 KB) in the stage buffer the pair's last stage was read from, so the
-  launch holds what the served down GEMM holds; DFR 64 adds 16 KB of its own past the stage, within 32 KB.
+  DFR 32 (`prefill.dfr`) stages each round (32 · 128 halves, 8 KB) in the stage buffer the pair's last stage was read
+  from, so the launch holds what the served down GEMM holds (the text also takes DFR 64, 16 KB of its own past the
+  stage, which no engine launches).
 - **Template args:** the 23 of `gemmCfg` (as `turboexl3_pf_gemm1`) at BMR `dfinRows`, NOPS 1, KD = inter, ND = hidden,
-  BKS 64 (128 with bk128), NCB 2 or 4 (a threadgroup owns whole 128-column blocks); DFR (tile rows a staging round: 32
-  or 64), T2 (1: the
+  BKS 64 (128 with bk128), NCB 2 or 4 (a threadgroup owns whole 128-column blocks); DFR (tile rows a staging round: `prefill.dfr`,
+  32), T2 (1: the
   second table: tiles2 bound and read), OUT_T (y's dtype).
 - **Replaces:** the down GEMM's launches and the finish: with t128, `turboexl3_pf_t128_dnm` + `turboexl3_pf_t128_dnt` +
   `turboexl3_pf_t128_fin` (3 launches, 2 dependent levels) with 1; zd ([S, hidden] f16) is never written or read.
@@ -2416,9 +2417,8 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
   static_cast (the zd store's), the odd block's stored through NAXTile::store (the same), and each (row, 128-block) runs
   the finish's own statements (`finish_2`, `finish_4`) on those f16 words at the element the finish reads zd (L + 32 j),
   the one slot of a top-1 row (the finish's sum over one slot, from 0).
-- **Pinned by:** `src/models/ling/rows_test.zig` "turboexl3 gpu ling rows variants: the routed chain's variants
-  (256-row tiles, the remainder cut, ..." (GPU: dfin, dfin.r64, p256.dfin,
-  p256.dfin.r64, p128.dfin word for word against the served engine at Ling's shapes, n 40 and 32, limits 0 and 10, and
+- **Pinned by:** `src/models/ling/rows_test.zig` "turboexl3 gpu ling rows variants: the routed chain's fused
+  finish (over both tables, ..." (GPU: dfin, p256.dfin, p128.dfin word for word against the served engine at Ling's shapes, n 40 and 32, limits 0 and 10, and
   dfin.k128, dfin.n2, dfin.mf, p128.dfin.sb, p128.dfin.pad against their own stage shapes with the fused finish off; a
   planted epilogue fault and two planted order faults (the finish's H128, the K loop) caught, the order faults within
   tolerance; then each call at both choices of `prefill.Call` on the dfin engine, the served words and the ending each
@@ -2426,7 +2426,7 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
   by one caught); `src/core/prefill.zig` "turboexl3 prefill call: a call runs the fused finish only where its engine was
   built with it ..." (CPU: `endOf`); `src/core/prefill.zig` "turboexl3 prefill variant texts: the fused down GEMM is
   gemm1_text with ..." (CPU: swapped back, `gemm1_text`; the load is the finish's; the store's rounding);
-  `src/core/prefill.zig` "turboexl3 prefill variant options: gate|up takes 1, 2 or 4 column blocks; ..." (CPU: whole 128-column blocks, one
+  `src/core/prefill.zig` "turboexl3 prefill variant options: the fused finish needs whole 128-column blocks, ..." (CPU: whole 128-column blocks, one
   down launch, 32 KB); `src/root.zig` "turboexl3 root: the served prefill options follow the config, and the decode
   form is the config's" (CPU: dropped at top-8 and over the mixed launch alone); `src/core/prefill.zig` "turboexl3
   prefill variant metal sources: the fused down GEMM over two tables and one, ..." (CPU print: over two tables, one table, and
@@ -2438,7 +2438,7 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/prefill.zig:793` (`const Prefill`) |
+| made at | `src/core/prefill.zig:784` (`const Prefill`) |
 | inputs | `inds`, `order` |
 | outputs | `tiles` |
 | source | `text_table` = `prefill/table_1` ++ `prefill/table_bsearch` ++ `prefill/table_2` (1606 B, `ca3c8b5cc5f5`) |
@@ -2471,7 +2471,7 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/prefill.zig:807` (`const Prefill`) |
+| made at | `src/core/prefill.zig:798` (`const Prefill`) |
 | inputs | `inds`, `order` |
 | outputs | `tiles` |
 | source | `text_table_mixed` = `prefill/table_mixed_1` ++ `prefill/table_bsearch` ++ `prefill/table_mixed_2` (2518 B, `1a7088e45088`) |
@@ -2503,7 +2503,7 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/prefill.zig:818` (`const Prefill`) |
+| made at | `src/core/prefill.zig:809` (`const Prefill`) |
 | inputs | `zg`, `zu`, `inds`, `order`, `svh_g`, `svh_u`, `suh_d` |
 | outputs | `xd`, `xsd` |
 | source | `text_mid_vco` = `prefill/mid_v_1` ++ `prefill/mid_swiglu_clamp_out` ++ `prefill/mid_v_2` (2168 B, `a085e4763004`) |
@@ -2531,7 +2531,7 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/prefill.zig:803` (`const Prefill`) |
+| made at | `src/core/prefill.zig:794` (`const Prefill`) |
 | inputs | `zg`, `zu`, `inds`, `order`, `svh_g`, `svh_u`, `suh_d` |
 | outputs | `xd`, `xsd` |
 | source | `text_midco` = `prefill/mid_1` ++ `prefill/mid_2` ++ `prefill/mid_3` ++ `prefill/mid_4` ++ `prefill/mid_swiglu_clamp_out` ++ `prefill/mid_5` (1811 B, `31aaa1a3940b`) |
@@ -2560,7 +2560,7 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/prefill.zig:745` (`const T128Kernels`) |
+| made at | `src/core/prefill.zig:736` (`const T128Kernels`) |
 | inputs | `zg`, `zu`, `inds`, `order`, `svh_g`, `svh_u`, `suh_d`, `zgt`, `zut`, `xbase` |
 | outputs | `xd`, `xsd` |
 | source | `text_mid_t128co` = `prefill/mid_1` ++ `prefill/mid_t128_pick` ++ `prefill/mid_2` ++ `prefill/mid_t128_loads` ++ `prefill/mid_4` ++ `prefill/mid_swiglu_clamp_out` ++ `prefill/mid_5` (1940 B, `c288bc44ac1b`) |
@@ -2736,7 +2736,7 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 
 | fact | from the code |
 |---|---|
-| made at | `src/core/prefill.zig:835` (`const Prefill`) |
+| made at | `src/core/prefill.zig:826` (`const Prefill`) |
 | inputs | `x`, `inds`, `order`, `suh_g`, `suh_u`, `rmap` |
 | outputs | `xg`, `xu`, `inv`, `xsg`, `xsu` |
 | source | `text_prep_rows` = `prefill/prep_1` ++ `prefill/prep_rmap` ++ `prefill/prep_2` (1424 B, `f43d3631bc54`) |

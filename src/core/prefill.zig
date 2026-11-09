@@ -34,14 +34,11 @@
 //! computed it. bm 128 and bm 64 run the same per-simdgroup K loop, so every output sums the same 16-deep MMAs in the same
 //! order: `moe`'s bytes.
 //!
-//! `Options.cut` is the remainder rule's cutoff (`t128_cut`, 64, served), `Options.gu_ncb` the gate|up GEMM's column
-//! blocks per threadgroup (the down GEMM's `ncb`): launch shapes, the same bytes.
-//!
 //! `Options.dfin` runs the finish as the down GEMM's epilogue (top-1 calls: a row's one slot): the down launch writes y
 //! itself, so zd is never written or read and the finish launch is gone. A threadgroup owns `ncb` 64-column blocks, so
 //! whole 128-column blocks: it keeps an even block's outputs rounded to f16 as the store rounds them, then after the odd
-//! block stages both in threadgroup memory, `dfr` tile rows a round (32 in the weight stage's buffer the pair's last stage
-//! freed, 64 in 16 KB of its own), and runs the finish's own statements on them. One
+//! block stages both in threadgroup memory, `dfr` (32) tile rows a round in the weight stage's buffer the pair's last
+//! stage freed, and runs the finish's own statements on them. One
 //! down launch writes every row: over `small = .off`'s one table, or with `t128` over both of the route's tables (the
 //! 128-row tiles', then each mixed-table tile as a part-full tile on the same body). The same f16 words in, the same
 //! finish statements: the finish's y.
@@ -440,6 +437,14 @@ pub const Operands = struct {
     down_svh: mlx.mlx_array,
 };
 
+/// 64-wide output blocks per gate|up GEMM threadgroup: 1 (the down GEMM's are `Options.ncb`)
+pub const gu_ncb: u8 = 1;
+
+/// The fused finish's tile rows per staging round (`Options.dfin`, its DFR): 32, staged in the weight stage's buffer the
+/// round's block pair freed, so the launch holds no threadgroup memory of its own (`text_dfin` also takes 64, 16 KB of
+/// its own past the stage, which no engine launches)
+pub const dfr: u16 = 32;
+
 /// Build-time variants of the GEMM (the benchmark's arms): M tile rows (64, 128 or 256: 2, 4 or 8 simdgroup rows of 32, two
 /// simdgroups per row covering the 64-wide output tile) and a double-buffered weight stage (one barrier per K stage, the next
 /// stage decoded while this one multiplies).
@@ -507,22 +512,11 @@ pub const Options = struct {
     /// launch of their own beside the mixed launch over the rest (`Prefill.moeT128`, the notes above `t128_cut`): `moe`'s
     /// bytes. Needs bm 64, the mixed table at split 1, froute's route and the strided mid and finish (aux 0)
     t128: bool = false,
-    /// the remainder rule of the 128-row tiles: past an expert's full 128-row tiles, a remainder of more than
-    /// min(cut, 127) rows takes one part-full 128-row tile, the rest the mixed launch (`t128_cut` served). Any cut gives every
-    /// row the same bytes (its tile's body runs the same K loop); a launch shape, swept over row counts and synthetic
-    /// routing
-    cut: u8 = t128_cut,
-    /// 64-wide output blocks per gate|up threadgroup (1, 2 or 4; the expert width's blocks must divide by it): `ncb` for the
-    /// gate|up GEMM, each block's accumulator started clear and fed its sub-stages in K order, so the same bytes
-    gu_ncb: u8 = 1,
     /// the finish as the down GEMM's epilogue (`text_dfin`, `Prefill.gemmDFin`, the module notes): the down launch writes
     /// y, zd and the finish launch are gone. Top-1 only (`Prefill.init` refuses another top-k); needs whole 128-column
     /// blocks a threadgroup (ncb 2 or 4), every simdgroup a consumer (wsp 0), one down launch over every row (`small`
     /// `.off`, or `t128`: both tables in one launch) and its staging within 32 KB with the weight stage
     dfin: bool = false,
-    /// the fused finish's tile rows per staging round (`dfin`): 32, staged in the weight stage's buffer the pair's last
-    /// stage was read from (8 KB, no threadgroup memory of its own), or 64, in 16 KB of its own beside the stage
-    dfr: u16 = 32,
 
     pub const Small = enum { off, all, mixed };
 
@@ -545,12 +539,9 @@ pub const Options = struct {
         // the bm-128 shared-decode body beside bm 64's
         if (o.t128 and (o.small != .mixed or o.split != 1 or !o.froute or o.aux != 0 or o.bm != 64)) return false;
         if (o.stageBytes(o.downStage()) > 32768) return false;
-        // gate|up's column blocks reshape the shared-decode body, as ncb does the down GEMM's
-        if (o.gu_ncb != 1 and (o.small == .all or (o.gu_ncb != 2 and o.gu_ncb != 4))) return false;
         // the fused finish: whole 128-column blocks a threadgroup, every simdgroup a consumer, one down launch over every
         // row, its staging within 32 KB beside the weight stage
-        if (o.dfin and ((o.ncb != 2 and o.ncb != 4) or o.wsp != 0 or (o.small != .off and !o.t128) or (o.dfr != 32 and o.dfr != 64) or
-            o.dfinBytes() > 32768)) return false;
+        if (o.dfin and ((o.ncb != 2 and o.ncb != 4) or o.wsp != 0 or (o.small != .off and !o.t128) or o.dfinBytes() > 32768)) return false;
         return (o.bm == 64 or o.bm == 128 or o.bm == 256) and (o.sgt == 1 or o.sgt == 2 or o.sgt == 4 or o.sgt == 8);
     }
 
@@ -564,10 +555,10 @@ pub const Options = struct {
         return if (o.t128) 128 else o.bm;
     }
 
-    /// threadgroup memory of the fused down GEMM (`dfin`): its weight stage, and with dfr 64 a round's f16 staging of its
-    /// own (64 x 128 halves; dfr 32 stages in the weight stage's buffers)
+    /// threadgroup memory of the fused down GEMM (`dfin`): its weight stage (`dfr` 32 stages each round in the weight
+    /// stage's buffers)
     pub fn dfinBytes(o: Options) u32 {
-        return o.stageBytes(o.downStage()) + (if (o.dfr == 64) @as(u32, 64 * 128 * 2) else 0);
+        return o.stageBytes(o.downStage());
     }
 
     /// the down GEMM's K stage depth (gate|up's is BK)
@@ -784,9 +775,9 @@ pub const Prefill = struct {
     steps: Steps = .{},
 
     pub fn init(geo: Geometry, opts: Options) !Prefill {
-        // gate|up's column blocks divide the expert width's; the fused finish writes a row's one slot (top-1)
+        // the fused finish writes a row's one slot (top-1)
         if (!geo.admitted() or !opts.valid() or (opts.intr and geo.rate.n % 16 != 0) or (opts.defer_affine and geo.dec.codebook != .mul1) or
-            (geo.hidden / BN) % opts.ncb != 0 or (geo.inter / BN) % opts.gu_ncb != 0 or (opts.dfin and geo.topk != 1)) return error.BadExl3Shape;
+            (geo.hidden / BN) % opts.ncb != 0 or (opts.dfin and geo.topk != 1)) return error.BadExl3Shape;
         return .{
             .geo = geo,
             .opts = opts,
@@ -986,7 +977,7 @@ pub const Prefill = struct {
     pub fn gemmGU(self: *Prefill, s: mlx.mlx_stream, r: Route, xg: mlx.mlx_array, xu: mlx.mlx_array, xsg: mlx.mlx_array, xsu: mlx.mlx_array, b: Operands, S: u32) ![2]mlx.mlx_array {
         const g = self.geo;
         var tmpl: [23]ks.TemplateArg = undefined;
-        var l = self.gemmCfg(&tmpl, r.tmax, g.hidden, g.inter, 2, BK, self.opts.gu_ncb);
+        var l = self.gemmCfg(&tmpl, r.tmax, g.hidden, g.inter, 2, BK, gu_ncb);
         const I: c_int = @intCast(g.inter);
         const shape = [_]c_int{ @intCast(S), I };
         l.out_shapes = &.{ &shape, &shape };
@@ -1127,7 +1118,7 @@ pub const Prefill = struct {
         var l = p.gemmCfg(&tg, na + nb, g.inter, g.hidden, 1, self.opts.downStage(), self.opts.ncb);
         var tmpl: [26]ks.TemplateArg = undefined;
         @memcpy(tmpl[0..23], &tg);
-        tmpl[23] = .{ .name = "DFR", .value = .{ .int = self.opts.dfr } };
+        tmpl[23] = .{ .name = "DFR", .value = .{ .int = dfr } };
         tmpl[24] = .{ .name = "T2", .value = .{ .int = @intFromBool(tb != null) } };
         tmpl[25] = .{ .name = "OUT_T", .value = .{ .dtype = out_dtype } };
         l.template = &tmpl;
@@ -1147,14 +1138,14 @@ pub const Prefill = struct {
         const k = self.t128_k orelse return error.Exl3EngineNotImplemented;
         const g = self.geo;
         const tr = self.opts.tileRows();
-        const tmax = t128MixedRows(S, g.experts, tr, self.opts.split, self.opts.cut, true);
+        const tmax = t128MixedRows(S, g.experts, tr, self.opts.split, t128_cut, true);
         const rows_t: u32 = tmax + self.opts.split * g.experts;
-        const tq = t128TileRows(S, g.experts, self.opts.cut, true);
+        const tq = t128TileRows(S, g.experts, t128_cut, true);
         const tmpl = [_]ks.TemplateArg{
             .{ .name = "EXP", .value = .{ .int = @intCast(g.experts) } },
             .{ .name = "BMT", .value = .{ .int = @intCast(tr) } },
             .{ .name = "SPL", .value = .{ .int = self.opts.split } },
-            .{ .name = "CUT", .value = .{ .int = self.opts.cut } },
+            .{ .name = "CUT", .value = .{ .int = t128_cut } },
             .{ .name = "T128", .value = .{ .int = 1 } },
         };
         self.steps.route +%= 1;
@@ -1202,7 +1193,7 @@ pub const Prefill = struct {
     pub fn gemmGUT128(self: *Prefill, s: mlx.mlx_stream, rt: RouteT128, xg: mlx.mlx_array, xu: mlx.mlx_array, xsg: mlx.mlx_array, xsu: mlx.mlx_array, b: Operands, S: u32) !ZT128 {
         const k = self.t128_k orelse return error.Exl3EngineNotImplemented;
         const g = self.geo;
-        return self.t128Gemm(s, rt, k.gu_mixed, k.gu_t128, 2, g.hidden, g.inter, BK, self.opts.gu_ncb, &.{ rt.tiles, xg, xu, b.gate_t, b.up_t, xsg, xsu }, &.{ rt.tiles128, xg, xu, b.gate_t, b.up_t, xsg, xsu }, S);
+        return self.t128Gemm(s, rt, k.gu_mixed, k.gu_t128, 2, g.hidden, g.inter, BK, gu_ncb, &.{ rt.tiles, xg, xu, b.gate_t, b.up_t, xsg, xsu }, &.{ rt.tiles128, xg, xu, b.gate_t, b.up_t, xsg, xsu }, S);
     }
 
     /// `mid`'s strided launch with `text_mid_t128` (each position's rows from the launch that computed them)
@@ -1808,34 +1799,15 @@ test "turboexl3 prefill variant texts: the fused down GEMM is gemm1_text with it
     try t.expect(dfin_in.len == 8 and dfin_out.len == 1);
 }
 
-test "turboexl3 prefill variant options: gate|up takes 1, 2 or 4 column blocks; the fused finish needs whole 128-column blocks, one down launch over every row and its staging within 32 KB" {
+test "turboexl3 prefill variant options: the fused finish needs whole 128-column blocks, one down launch over every row and its staging within 32 KB" {
     const t = std.testing;
     const served: Options = .{ .bm = 64, .small = .mixed, .dbuf = true, .unroll = true, .fragb = true, .intr = true, .defer_affine = true, .ncb = 4, .sintr = true, .froute = true, .alay = 2, .t128 = true };
-    try t.expect(served.valid() and served.cut == t128_cut and served.dfinRows() == 128);
-    var o = served;
-    for ([_]u8{ 0, 32, 127, 255 }) |cut| {
-        o = served;
-        o.cut = cut;
-        try t.expect(o.valid());
-    }
-    for ([_]u8{ 2, 4 }) |n| {
-        o = served;
-        o.gu_ncb = n;
-        try t.expect(o.valid());
-    }
-    o = served;
-    o.gu_ncb = 3;
-    try t.expect(!o.valid());
-    try t.expect(!(Options{ .small = .all, .gu_ncb = 2 }).valid());
+    try t.expect(served.valid() and served.dfinRows() == 128);
     // the fused finish: over both tables with t128, over the one table with small .off, never over the mixed launch alone;
-    // 32-row rounds in the weight stage's buffers, 64-row ones in 16 KB of their own
-    o = served;
+    // its 32-row rounds (`dfr`) in the weight stage's buffers
+    var o = served;
     o.dfin = true;
-    try t.expect(o.valid() and o.dfr == 32 and o.dfinBytes() == 16384);
-    o.dfr = 64;
-    try t.expect(o.valid() and o.dfinBytes() == 32768);
-    o.dfr = 128;
-    try t.expect(!o.valid());
+    try t.expect(o.valid() and o.dfinBytes() == 16384);
     o = served;
     o.dfin = true;
     o.ncb = 1;
@@ -1849,9 +1821,8 @@ test "turboexl3 prefill variant options: gate|up takes 1, 2 or 4 column blocks; 
     try t.expect(o.valid() and o.dfinRows() == 64);
     o.bm = 256;
     try t.expect(o.valid() and o.dfinRows() == 256);
-    // the padded stage (18 KB double-buffered) leaves no room for a 64-row staging of its own; 32-row rounds stage in it,
-    // and so does the 32 KB stage of 128-deep fragment-order stages
-    try t.expect(!(Options{ .small = .off, .dbuf = true, .ncb = 4, .dfin = true, .dfr = 64 }).valid());
+    // 32-row rounds stage in the padded stage (18 KB double-buffered), and so do they in the 32 KB stage of 128-deep
+    // fragment-order stages
     try t.expect((Options{ .small = .off, .dbuf = true, .ncb = 4, .dfin = true }).valid());
     try t.expect((Options{ .small = .off, .dbuf = true, .fragb = true, .bk128 = true, .ncb = 4, .dfin = true }).valid());
 }

@@ -1191,7 +1191,7 @@ the GEMM's K loop).
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/ling/rows_test.zig:853` (`test turboexl3 gpu ling rows variants: the routed chain's variants (256-row tiles, the remainder cut, gate-up column blocks, the fused finish, the plain launches) are the served engine's words on synthetic calls at every row bucket, n 40 and 32, limits 0 and 10; planted faults are caught (TURBOEXL3_GPU=1)`) |
+| made at | `src/models/ling/rows_test.zig:837` (`test turboexl3 gpu ling rows variants: the routed chain's fused finish (over both tables, over one, and at each stage shape it takes) is the served engine's words on synthetic calls at every row bucket, n 40 and 32, limits 0 and 10; planted faults are caught (TURBOEXL3_GPU=1)`) |
 | inputs | `tiles`, `tiles2`, `x0`, `w0`, `xs0`, `order`, `scores`, `svh_d` |
 | outputs | `y` |
 | source | `comptime prefill.dfinText(prefill.dfin_gemm_4,@embedFile("kernels/test/fault/dfin_4.metal"))` = `prefill/gemm_1` ++ `prefill/gemm_dfin_bs` ++ `prefill/gemm_dfin_decl` ++ `prefill/gemm_3_1` ++ `prefill/gemm_dfin_tile` ++ `prefill/gemm_3_3` ++ `prefill/gemm_op1_wx` ++ `prefill/gemm_4` ++ `prefill/gemm_op1_xsz_1` ++ `prefill/gemm_dfin_epi_1` ++ `prefill/finish_2` ++ `prefill/gemm_dfin_load` ++ `ling:test/fault/dfin_4` ++ `prefill/gemm_dfin_epi_2` (10650 B, `874011a6a65a`) |
@@ -1216,7 +1216,7 @@ the GEMM's K loop).
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/ling/rows_test.zig:884` (`test turboexl3 gpu ling rows variants: the routed chain's variants (256-row tiles, the remainder cut, gate-up column blocks, the fused finish, the plain launches) are the served engine's words on synthetic calls at every row bucket, n 40 and 32, limits 0 and 10; planted faults are caught (TURBOEXL3_GPU=1)`) |
+| made at | `src/models/ling/rows_test.zig:868` (`test turboexl3 gpu ling rows variants: the routed chain's fused finish (over both tables, over one, and at each stage shape it takes) is the served engine's words on synthetic calls at every row bucket, n 40 and 32, limits 0 and 10; planted faults are caught (TURBOEXL3_GPU=1)`) |
 | inputs | `tiles`, `tiles2`, `x0`, `w0`, `xs0`, `order`, `scores`, `svh_d` |
 | outputs | `y` |
 | source | `comptime prefill.dfinText(prefill.dfin_gemm_4,@embedFile("kernels/test/fault/dfin_4_order.metal"))` = `prefill/gemm_1` ++ `prefill/gemm_dfin_bs` ++ `prefill/gemm_dfin_decl` ++ `prefill/gemm_3_1` ++ `prefill/gemm_dfin_tile` ++ `prefill/gemm_3_3` ++ `prefill/gemm_op1_wx` ++ `prefill/gemm_4` ++ `prefill/gemm_op1_xsz_1` ++ `prefill/gemm_dfin_epi_1` ++ `prefill/finish_2` ++ `prefill/gemm_dfin_load` ++ `ling:test/fault/dfin_4_order` ++ `prefill/gemm_dfin_epi_2` (11082 B, `1719a4c95583`) |
@@ -1243,7 +1243,7 @@ the GEMM's K loop).
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/ling/rows_test.zig:901` (`test turboexl3 gpu ling rows variants: the routed chain's variants (256-row tiles, the remainder cut, gate-up column blocks, the fused finish, the plain launches) are the served engine's words on synthetic calls at every row bucket, n 40 and 32, limits 0 and 10; planted faults are caught (TURBOEXL3_GPU=1)`) |
+| made at | `src/models/ling/rows_test.zig:885` (`test turboexl3 gpu ling rows variants: the routed chain's fused finish (over both tables, over one, and at each stage shape it takes) is the served engine's words on synthetic calls at every row bucket, n 40 and 32, limits 0 and 10; planted faults are caught (TURBOEXL3_GPU=1)`) |
 | inputs | `tiles`, `tiles2`, `x0`, `w0`, `xs0`, `order`, `scores`, `svh_d` |
 | outputs | `y` |
 | source | `comptime prefill.dfinText(@embedFile("kernels/test/fault/gemm_4_krev.metal"),prefill.dfin_finish_4)` = `prefill/gemm_1` ++ `prefill/gemm_dfin_bs` ++ `prefill/gemm_dfin_decl` ++ `prefill/gemm_3_1` ++ `prefill/gemm_dfin_tile` ++ `prefill/gemm_3_3` ++ `prefill/gemm_op1_wx` ++ `ling:test/fault/gemm_4_krev` ++ `prefill/gemm_op1_xsz_1` ++ `prefill/gemm_dfin_epi_1` ++ `prefill/finish_2` ++ `prefill/gemm_dfin_load` ++ `prefill/finish_4` ++ `prefill/gemm_dfin_epi_2` (10899 B, `0b54f06dbfac`) |
