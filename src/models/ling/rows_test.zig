@@ -37,6 +37,16 @@
 //!   half of the launch writing y, marked with a planted fault, must show in exactly its rows (the experts of 80 rows or
 //!   more for the GEMM half, the others for the finish half), and a threshold ignored (1) or off by one (81) must show in
 //!   the rows the test holds to the other path. Lines: TURBOEXL3_LING_ROWS_VARIANT, TURBOEXL3_LING_ROWS_RED.
+//! - GPU, PF_DFIN's whole-call switch (`prefill.Call`; the outside plugin's MLX_SERVE_LING_PF_DFIN_CALL_MIN): a call
+//!   that declines the fused finish runs the served ending on an engine built with it. Both endings give the served
+//!   words, so each call's line also names the ending it ran, from the engine's counts (`prefill.Steps`, `endRan`). On
+//!   the plain fused finish's engine (every synthetic call and every rung of the ladder) and on the threshold's (80 rows;
+//!   every synthetic call), both choices, each the served engine's words and its ending the choice's; then the plugin's
+//!   rule (`callTakes`: a wide call of R rows at top-8 over 512 experts takes the fused finish at R * 8 >= 80 * 512, at
+//!   every R with call_min 0) at R 1,120, 5,119, 5,120 and 16,384, each on a chunk at its call's mean rows an expert, its
+//!   ending held to the side the case states. Three red checks the engagement check alone can see: the choice ignored
+//!   (the 5,119-row call run on the engine's own ending) and the rule off by one (5,119 rows a row early; 5,120 rows
+//!   under `>`). Lines: TURBOEXL3_LING_DFIN_CALL, TURBOEXL3_LING_ROWS_RED.
 //! - Timing (TURBOEXL3_LING_TIME=1 with TURBOEXL3_GPU=1; asserts nothing, guidance only): the rows path against the
 //!   plugin's chain at the plugin's call shape (the first chunk of a 4096- and a 16384-token layer's call over 512
 //!   experts at top-8, x bf16), min and median us per call over 8 rounds after 2 warm, each round's graph built and
@@ -612,6 +622,92 @@ fn flipOne(a: std.mem.Allocator, g: *G, got: mlx.mlx_array, at: usize) !mlx.mlx_
     return g.hostArray(std.mem.sliceAsBytes(buf), mlx.getShape(got), .float32);
 }
 
+/// PF_DFIN's whole-call switch: one rows-path call on engine `pf` through the row map at the call's own choice
+/// (`prefill.Call`: `moeT128WithCall` with the 128-row tiles, else `moeWithCall`), y f32 [o.n_call, hidden]
+fn engineCall(pf: *prefill.Prefill, s: mlx.mlx_stream, x: mlx.mlx_array, o: RowsOps, ops: prefill.Operands, choice: prefill.Call) !mlx.mlx_array {
+    if (pf.opts.t128) return pf.moeT128WithCall(s, x, o.ids, o.sc, ops, o.n_call, .float32, o.rm, choice);
+    return pf.moeWithCall(s, x, o.ids, o.sc, ops, o.n_call, .float32, o.rm, choice);
+}
+
+/// The ending a call ran on its engine, from the engine's step counts before and after it (`prefill.Steps`): the served
+/// route, down step and finish once each; the served route and the fused finish once each; or the threshold's route,
+/// down step and launch once each; nothing else. Null for any other mix (no ending, two, the threshold's route before the
+/// served ending, a step without its pair).
+fn endRan(before: prefill.Steps, after: prefill.Steps) ?prefill.End {
+    const d: prefill.Steps = .{
+        .route = after.route -% before.route,
+        .routen = after.routen -% before.routen,
+        .down = after.down -% before.down,
+        .fin = after.fin -% before.fin,
+        .dfin = after.dfin -% before.dfin,
+        .downn = after.downn -% before.downn,
+        .dfinn = after.dfinn -% before.dfinn,
+    };
+    if (std.meta.eql(d, prefill.Steps{ .route = 1, .down = 1, .fin = 1 })) return .served;
+    if (std.meta.eql(d, prefill.Steps{ .route = 1, .dfin = 1 })) return .dfin;
+    if (std.meta.eql(d, prefill.Steps{ .routen = 1, .downn = 1, .dfinn = 1 })) return .dfinn;
+    return null;
+}
+
+/// An ending's name on a line (`mixed`: `endRan`'s null)
+fn endName(e: ?prefill.End) []const u8 {
+    return if (e) |v| @tagName(v) else "mixed";
+}
+
+/// Whether `ran` is the ending `want`
+fn endIs(ran: ?prefill.End, want: prefill.End) bool {
+    return if (ran) |v| v == want else false;
+}
+
+/// Ling-3.1-flash's routed experts and PF_DFIN's whole-call threshold in rows an expert (the outside plugin's
+/// MLX_SERVE_LING_PF_DFIN_CALL_MIN, 80 by default: the TIME ladder's step where the plain fused finish breaks even)
+const route_experts: u64 = 512;
+const dfin_call_min: u64 = 80;
+
+/// A rule off by one (a red check's plant): `early` a row early, (rows + 1) * top_k; `strict` `>` for `>=`
+const RuleSlip = enum { none, early, strict };
+
+/// The plugin's whole-call rule (turboexl3_ling's src/ling_switches.zig `dfinCallTakes`, decided once a wide call from
+/// its rows alone): a wide routed call of `rows` rows takes the fused finish when rows * top_k >= call_min * 512 (its mean
+/// rows an expert at least call_min), at every call with call_min 0; `slip` plants a rule off by one
+fn callTakes(rows: u64, call_min: u64, slip: RuleSlip) bool {
+    if (call_min == 0) return true;
+    const need = call_min * route_experts;
+    return switch (slip) {
+        .none => rows * top_k >= need,
+        .early => (rows + 1) * top_k >= need,
+        .strict => rows * top_k > need,
+    };
+}
+
+/// A wide call's mean rows an expert at top-8 over 512 experts (rows * 8 / 512), for its line
+fn rowsAnExpert(rows: u64) f64 {
+    return @as(f64, @floatFromInt(rows * top_k)) / @as(f64, @floatFromInt(route_experts));
+}
+
+/// A chunk of a wide call of `rows` rows at its mean rows an expert: every expert at rows * 8 / 512 rows (at least 1), as
+/// many experts as one chunk holds (`prefill_rows` pairs) and `buf` (the bank's slots); the counts in `buf`
+fn chunkAtMean(rows: u64, buf: []u32) []const u32 {
+    const rpe: u32 = @intCast(@max(1, rows * top_k / route_experts));
+    const ne: usize = @min(buf.len, prefill_rows / rpe);
+    @memset(buf[0..ne], rpe);
+    return buf[0..ne];
+}
+
+/// The rule's cases: a wide call's rows, its call_min, and the ending the case states on the plain fused finish's engine:
+/// either side of 80 rows an expert (5,119 rows: 79.98; 5,120: 80.00), a layer-major call of 16,384 rows (256.00), a short
+/// call of 1,120 (17.50), and call_min 0, which takes the fused finish at every call
+const RuleCase = struct { rows: u64, call_min: u64, want: prefill.End };
+const rule_cases = [_]RuleCase{
+    .{ .rows = 1120, .call_min = dfin_call_min, .want = .served },
+    .{ .rows = 5119, .call_min = dfin_call_min, .want = .served },
+    .{ .rows = 5120, .call_min = dfin_call_min, .want = .dfin },
+    .{ .rows = 16384, .call_min = dfin_call_min, .want = .dfin },
+    .{ .rows = 1120, .call_min = 0, .want = .dfin },
+    .{ .rows = 5119, .call_min = 0, .want = .dfin },
+    .{ .rows = 16384, .call_min = 0, .want = .dfin },
+};
+
 test "turboexl3 gpu ling rows: moeLingRows is the plugin's prompt chunk (take, bf16, f32, moeLing at top-1) byte for byte on every chunk of a prompt layer's call and a padded call, at n 40 and 32, limits 0 and 10, x bf16 and f32, on the loader's views (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
     const s = mlx.mlx_default_gpu_stream_new();
@@ -964,6 +1060,120 @@ test "turboexl3 gpu ling rows variants: the routed chain's variants (256-row til
                     std.debug.print("TURBOEXL3_LING_ROWS_RED n={d} fault={s} dfin_min={d} held_to=80 small_rows_differing={d}/{d} big_rows_differing={d}/{d} caught={}\n", .{ n, cs.name, cs.min, sd.small_differing, sd.small, sd.big_differing, sd.big, caught });
                     if (!caught) failed = true;
                 }
+            }
+        }
+        // PF_DFIN's whole-call switch (`prefill.Call`; the outside plugin's MLX_SERVE_LING_PF_DFIN_CALL_MIN): a call keeps
+        // or declines the fused finish on an engine built with it. Both endings give the served words, so each line also
+        // names the ending the call ran, from the engine's counts (`endRan`), and holds it to the call's choice.
+        for ([_]c_int{ 0, 10 }) |lim| {
+            const geo = rowsGeo(n, prompt_slots, lim);
+            var served = try prefill.Prefill.init(geo, servedOptions(n, true));
+            defer served.deinit();
+            // the plugin's engines: PF_DFIN (the plain fused finish, PF_DFIN_MIN unset) and PF_DFIN with PF_DFIN_MIN=80
+            // (the threshold's chain); a call that keeps the fused finish runs the engine's own ending, one that declines
+            // it the served one
+            var plain = try prefill.Prefill.init(geo, vT(n, false, 64, 1, true, 32));
+            defer plain.deinit();
+            var thresh = try prefill.Prefill.init(geo, vM(n, false, 80));
+            defer thresh.deinit();
+            const DfinArm = struct { name: []const u8, pf: *prefill.Prefill, own: prefill.End, ladder: bool };
+            const dfin_arms = [_]DfinArm{
+                .{ .name = "dfin", .pf = &plain, .own = .dfin, .ladder = true },
+                .{ .name = "dfin.min80", .pf = &thresh, .own = .dfinn, .ladder = false },
+            };
+            var cbuf: [160]u32 = undefined;
+            // every synthetic call, then every rung of the ladder (the plain engine's): both choices on each engine, each
+            // the served engine's words, each ending the choice's
+            const kinds = std.enums.values(SynthKind);
+            for (0..kinds.len + ladder_rows.len) |at| {
+                const m2 = g.mark();
+                defer g.resetTo(m2);
+                const rung = at >= kinds.len;
+                const counts: []const u32 = if (rung) blk: {
+                    const rpe = ladder_rows[at - kinds.len];
+                    const ne: usize = @min(cbuf.len, 4096 / rpe);
+                    @memset(cbuf[0..ne], rpe);
+                    break :blk cbuf[0..ne];
+                } else synthCounts(kinds[at], rnd, &cbuf);
+                var name_buf: [16]u8 = undefined;
+                const call_name: []const u8 = if (rung) try std.fmt.bufPrint(&name_buf, "ladder{d}", .{ladder_rows[at - kinds.len]}) else @tagName(kinds[at]);
+                const call = try synthCall(a, rnd, counts, prompt_slots, prompt_tokens);
+                defer a.free(call.act);
+                defer a.free(call.slot);
+                const o = try rowsOps(&g, call.act, call.slot);
+                _ = mlx.mlx_clear_cache();
+                const want = try g.adopt(try engineRows(&served, s, xb, o, ops));
+                for (dfin_arms) |arm| {
+                    if (rung and !arm.ladder) continue;
+                    for ([_]bool{ false, true }) |keep| {
+                        // fresh buffers for the call's arrays: no word it fails to write can hold a served value
+                        _ = mlx.mlx_clear_cache();
+                        const m3 = g.mark();
+                        defer g.resetTo(m3);
+                        const before = arm.pf.steps;
+                        const got = try g.adopt(try engineCall(arm.pf, s, xb, o, ops, .{ .dfin = keep }));
+                        const ran = endRan(before, arm.pf.steps);
+                        const want_end: prefill.End = if (keep) arm.own else .served;
+                        const c = try compare(a, &g, got, want);
+                        const ok = endIs(ran, want_end) and c.differing == 0 and c.nonfinite == 0;
+                        std.debug.print("TURBOEXL3_LING_DFIN_CALL n={d} limit={d} call={s} pairs={d} experts={d} arm={s} take={s} engine={s} want={s} differing={d}/{d} nonfinite={d} {s}\n", .{ n, lim, call_name, call.act.len, counts.len, arm.name, if (keep) "dfin" else "served", endName(ran), @tagName(want_end), c.differing, c.of, c.nonfinite, if (ok) "PASS" else "FAIL" });
+                        if (!ok) failed = true;
+                    }
+                }
+            }
+            // the plugin's rule (`callTakes`) on either side of 80 rows an expert and at call_min 0, on the plain engine:
+            // each case's call decided by the rule and run on a chunk at its call's mean rows an expert (`chunkAtMean`),
+            // the served engine's words, its ending the side the case states
+            for (rule_cases) |rc| {
+                const m2 = g.mark();
+                defer g.resetTo(m2);
+                const counts = chunkAtMean(rc.rows, &cbuf);
+                const call = try synthCall(a, rnd, counts, prompt_slots, prompt_tokens);
+                defer a.free(call.act);
+                defer a.free(call.slot);
+                const o = try rowsOps(&g, call.act, call.slot);
+                _ = mlx.mlx_clear_cache();
+                const want = try g.adopt(try engineRows(&served, s, xb, o, ops));
+                const keep = callTakes(rc.rows, rc.call_min, .none);
+                _ = mlx.mlx_clear_cache();
+                const before = plain.steps;
+                const got = try g.adopt(try engineCall(&plain, s, xb, o, ops, .{ .dfin = keep }));
+                const ran = endRan(before, plain.steps);
+                const c = try compare(a, &g, got, want);
+                const ok = endIs(ran, rc.want) and c.differing == 0 and c.nonfinite == 0;
+                std.debug.print("TURBOEXL3_LING_DFIN_CALL n={d} limit={d} call=rule rows={d} call_min={d} rows_an_expert={d:.2} pairs={d} experts={d} arm=dfin take={s} engine={s} want={s} differing={d}/{d} nonfinite={d} {s}\n", .{ n, lim, rc.rows, rc.call_min, rowsAnExpert(rc.rows), call.act.len, counts.len, if (keep) "dfin" else "served", endName(ran), @tagName(rc.want), c.differing, c.of, c.nonfinite, if (ok) "PASS" else "FAIL" });
+                if (!ok) failed = true;
+            }
+            // the red checks (limit 0): a call on the wrong side leaves the bytes alone, both endings giving the served
+            // words, so each must show in the engagement check alone: the choice ignored (the 5,119-row call, which keeps
+            // the served chain, run on the engine's own ending: `engineRows`), the rule a row early (5,119 rows taking the
+            // fused finish) and the rule under `>` (5,120 rows keeping the served chain)
+            if (lim != 0) continue;
+            const Red = struct { name: []const u8, rows: u64, slip: RuleSlip, ignored: bool, want: prefill.End };
+            const reds = [_]Red{
+                .{ .name = "dfin_call_choice_ignored", .rows = 5119, .slip = .none, .ignored = true, .want = .served },
+                .{ .name = "dfin_call_rule_early", .rows = 5119, .slip = .early, .ignored = false, .want = .served },
+                .{ .name = "dfin_call_rule_strict", .rows = 5120, .slip = .strict, .ignored = false, .want = .dfin },
+            };
+            for (reds) |rd| {
+                const m2 = g.mark();
+                defer g.resetTo(m2);
+                const counts = chunkAtMean(rd.rows, &cbuf);
+                const call = try synthCall(a, rnd, counts, prompt_slots, prompt_tokens);
+                defer a.free(call.act);
+                defer a.free(call.slot);
+                const o = try rowsOps(&g, call.act, call.slot);
+                _ = mlx.mlx_clear_cache();
+                const want = try g.adopt(try engineRows(&served, s, xb, o, ops));
+                const keep = callTakes(rd.rows, dfin_call_min, rd.slip);
+                _ = mlx.mlx_clear_cache();
+                const before = plain.steps;
+                const got = try g.adopt(if (rd.ignored) try engineRows(&plain, s, xb, o, ops) else try engineCall(&plain, s, xb, o, ops, .{ .dfin = keep }));
+                const ran = endRan(before, plain.steps);
+                const c = try compare(a, &g, got, want);
+                const caught = !endIs(ran, rd.want);
+                std.debug.print("TURBOEXL3_LING_ROWS_RED n={d} fault={s} rows={d} call_min={d} take={s} engine={s} held_to={s} differing={d}/{d} caught={}\n", .{ n, rd.name, rd.rows, dfin_call_min, if (keep) "dfin" else "served", endName(ran), @tagName(rd.want), c.differing, c.of, caught });
+                if (!caught) failed = true;
             }
         }
     }

@@ -302,6 +302,14 @@ served down launches skip those experts (`turboexl3_pf_t128_dnmn`, `_dntn`), and
 the rest's zd rows), 8 launches as served) and the plain launches at bm 128 or 256 with the register path on or off.
 `Config`'s `pf_t256`, `pf_cut`, `pf_gu_ncb`, `pf_dfin`, `pf_dfr`, `pf_dfin_min`, `pf_bm` and `pf_mixed` set them.
 
+A call can decline the fused finish (`prefill.Call`; `Prefill.moeT128WithCall` and `moeWithCall`, root's `moeSwigluWith`
+and `moeSwigluRowsWith`): on an engine built with `dfin`, a call with `.dfin = false` runs the served route
+(`turboexl3_pf_t128_route`, or `_t256_route` with `t256`), `turboexl3_pf_t128_dnm`, `_t128_dnt` and `_t128_fin` (over
+the one table: `_gemm1` and `_fin`), which every such engine builds as the served engine does, at the served launch
+shapes, so the call's launches and bytes are the served engine's. `prefill.endOf` gives a call's ending, and
+`Prefill.steps` counts the steps an engine ran (its route and its ending). One engine a geometry runs both endings.
+turboexl3_ling's PF_DFIN decides it once a wide prompt call, from the call's rows alone.
+
 | kernel | what it computes | launches it replaces |
 |---|---|---|
 | `turboexl3_pf_table`, `turboexl3_pf_table_m` | after MLX's argsort: each expert's run by binary search, an exclusive scan, then the tile table (`_m`: remainders of at most 32 rows as register-path tiles) | — |
