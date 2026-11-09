@@ -248,6 +248,8 @@ const finishp_in = [_][*:0]const u8{ "zp0", "zp1", "zp2", "zp3", "svh", "R1", "R
 pub const Shape = struct { in: u32, out: u32, rate: format.Rate, dec: format.Decode, out_dtype: mlx.mlx_dtype };
 
 const dec_said = Global(bool, "dense_dec_said", false);
+/// a glm variant's engage line (`DecVariant.glm`), once a process
+const dec_g_said = Global(bool, "dense_dec_g_said", false);
 
 /// The kernels of one dense linear shape; configs per row count (decode) plus the prefill set.
 pub const Dense = struct {
@@ -482,6 +484,10 @@ pub const Dense = struct {
     pub fn init(shape: Shape) !Dense {
         if (shape.in % 128 != 0 or shape.out % 128 != 0 or (shape.in / 16) % 4 != 0 or shape.in == 0 or shape.out == 0) return error.BadExl3Shape;
         const dv = variantFor(shape, config.get().dense_variant);
+        if (dv.glm and !dec_g_said.get().*) {
+            dec_g_said.get().* = true;
+            std.debug.print("[turboexl3] DEC-ONE's GLM-5.3-Flash GEMV engaged ({s}): its own text at the trunk shapes, the first {d} x {d} at K{d}\n", .{ dv.name, shape.in, shape.out, shape.rate.n / 16 });
+        }
         // DEC-ONE's output tiles per threadgroup at decode rows 1 to 4 as configured (0: btFor's)
         var bt_set: [decode.Kernels.max_rows + 1]u8 = @splat(0);
         for (config.get().dec_bt, 0..) |b, r| bt_set[r] = b;
@@ -2122,6 +2128,7 @@ test "turboexl3 dense lean GEMV text: text_dgemv but its input loads and codewor
 /// This file's module state (`Global`): what a host that shares its units' state registers.
 pub const shared_state = .{
     dec_said,
+    dec_g_said,
     resident_bypass,
     Resident.lock,
     Resident.armed,

@@ -1427,8 +1427,11 @@ CHANGED[('dense.zig', 'const dec_variants')] = ('g1 and g2: text_dec0_g1 / text_
 CHANGED[('dense.zig', 'const Dense')] += ('; xf / prep_scf: a variant\'s f32 prepared rows (init makes prep_scf, decCfgs stores '
                                         'xp as f32, decLinear launches it in prep_sc\'s place, deinit frees it through '
                                         'freeKernel); glm_shapes / glmShape / variantFor: a glm variant at GLM-5.3-Flash\'s trunk '
-                                        'shapes only, today\'s texts at any other (init takes variantFor\'s)')
+                                        'shapes only, today\'s texts at any other (init takes variantFor\'s and prints the '
+                                        'engage line once a process)')
 CHANGED[('config.zig', 'const dense_variants')] = '8: g1, g2'
+ADDED[('dense.zig', 'const dec_g_said')] = 'a glm variant\'s engage line, once a process'
+CHANGED[('dense.zig', 'const shared_state')] = 'registers dec_g_said'
 EDITED_TESTS[('dense_dec_test.zig', 'turboexl3 glm53f dense decode texts: each variant is today\'s texts with ku\'s tile loop '
               'in place of today\'s and its own kernel names; today\'s texts are today\'s pieces')] = (
     'g1 and g2: their compositions (their own head, loop and tile words, then text_dec0\'s pieces from the codewords on), '
