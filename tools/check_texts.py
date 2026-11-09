@@ -1410,6 +1410,26 @@ ADDED[('dense.zig', 'const dec_prep1_3')] = 'dec_prep1 after its store'
 ADDED[('models/glm53f/api.zig', 'const pair_ks')] = 'pair_ks.zig, two linears at their own K splits in one launch (root\'s glm53f.pair_ks)'
 CHANGED[('root.zig', 'const shared_state')] = 'registers glm53f.shared_gu.shared_state and glm53f.pair_ks.shared_state'
 
+# The routed prefill's size classes (Config.pf_size_class, prefill.Options.size_class; the plugin's
+# TURBOEXL3_GLM53F_PF_REUSE): moeT128With's row-slot-sized arrays at classRows of the call's row-slots, every launch over
+# the call's own rows, y handed back as its first rows' view: the same bytes
+ADDED[('prefill.zig', 'const size_class_rows')] = 'the size classes\' step (256 row-slots)'
+ADDED[('prefill.zig', 'fn classRows')] = 'a call\'s rows rounded up to a multiple of size_class_rows'
+ADDED_FILES['size_class_test.zig'] = ('classRows and the size classes\' rule (CPU), and prompt calls whose row-slot counts are '
+                                      'not multiples of 256 with the size classes against the bytes without them, on both '
+                                      'paths, over a drawn routing and 455-row runs, at every SC rate (GPU)')
+CHANGED[('config.zig', 'const Config')] += ('; pf_size_class: the routed prefill\'s row-slot arrays at size classes (the same '
+                                            'bytes)')
+CHANGED[('prefill.zig', 'const Options')] += ('; size_class: moeT128With\'s row-slot arrays at classRows (with t128, without '
+                                              't128_zfit)')
+CHANGED[('prefill.zig', 'const Prefill')] += ('; prepCap, gemmGUT128Cap, midT128Cap, gemmDT128Cap and finishT128Cap: their '
+                                              'outputs at a cap of rows, each launch over the call\'s; moeT128With at classRows '
+                                              'with size_class, y its first rows\' view')
+CHANGED[('root.zig', 'fn pfOptions')] += '; size_class from Config.pf_size_class'
+CHANGED[('root.zig', 'fn prefillFor')] += '; size_class off without the 128-row tiles or with t128_zfit, its engage line once'
+CHANGED[('root.zig', 'const shared_state')] += ', and pf_class_logged'
+ADDED[('root.zig', 'const pf_class_logged')] = 'the size classes\' engage line, once a process'
+
 
 def metal_strings(fn, toks, corpus):
     """(line, kind, value) of every literal in a .zig file that holds Metal"""
