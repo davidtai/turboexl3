@@ -19,12 +19,13 @@
 //!   query halves as views of the transposed heads) and on two strided caches (the latent and the rope key interleaved
 //!   in one buffer; each transposed, a key's words a column apart); a planted fault (a key row zeroed, one flipped bit)
 //!   must differ.
-//! - launch 2 on the matrix units (`mla_latent.Attn.nax_*`, `Config.mla_latent_nax`; not launch 2's words): every NAX
-//!   shape within a bound of the host's f64 absorbed attention on the plugin's operands at rows 1 to 5 and keys 1 to
-//!   19,404 (the bound: `naxBound`), the served stage form's error beside it; the strided caches on the served shape; a
-//!   planted fault (a key block's latents or rope keys set to 8) must break the bound; a call the NAX shape refuses (an
-//!   f32 cache, too few heads for its threadgroup) runs the served text with its words under the configuration and is
-//!   refused when a test names the shape; a wider call than the plan takes is refused with the NAX shape on as off.
+//! - launch 2 on the matrix units (`mla_latent.Attn.nax_sd_m2_k32`, `Config.mla_latent_nax`; not launch 2's words): the
+//!   NAX shape, and the m2_k64 fixture (a second NAX shape, test only: `kernels/test/fault/`), within a bound of the
+//!   host's f64 absorbed attention on the plugin's operands at rows 1 to 5 and keys 1 to 19,404 (the bound:
+//!   `naxBound`), the served stage form's error beside it; the strided caches on the served shape; a planted fault (a
+//!   key block's latents or rope keys set to 8) must break the bound; a call the NAX shape refuses (an f32 cache) runs
+//!   the served text with its words under the configuration and is refused when a test names the shape; 32 heads run
+//!   the shape; a wider call than the plan takes is refused with the NAX shape on as off.
 //! Lines: TURBOEXL3_LING_MLA_LATENT, TURBOEXL3_LING_MLA_LATENT_ROWS, TURBOEXL3_LING_MLA_LATENT_SERVED,
 //! TURBOEXL3_LING_MLA_LATENT_LOADER_KVB, TURBOEXL3_LING_MLA_LATENT_LOADER, TURBOEXL3_LING_MLA_LATENT_VARIANT (_RED,
 //! _DONE), TURBOEXL3_LING_MLA_LATENT_NAX (_RED, _FALLBACK, _DONE). The variants' and the NAX test print an MLX error (a
@@ -38,6 +39,8 @@ const ref = @import("../../core/ref.zig");
 const ml = @import("mla_latent.zig");
 const config = @import("../../core/config.zig");
 const prefill = @import("../../core/prefill.zig");
+const decode = @import("../../core/decode.zig");
+const ks = sdk.kernel_launch;
 
 const testing = std.testing;
 
@@ -574,7 +577,7 @@ test "turboexl3 gpu ling mla latent: the outside plugin's served operand, kv_b a
 
 // ── launch 2's variants: each launch 2's words ──
 
-/// The variant of launch 2 the byte test holds to it (`mla_latent.Attn` but `base` and the NAX shapes)
+/// The variant of launch 2 the byte test holds to it (`mla_latent.Attn` but `base` and the NAX shape)
 const variants = [_]ml.Attn{.stage};
 
 /// mlx-c's `mlx_set_error_handler`: the consumer's binding where its `sdk.mlx` declares one, else a declaration of the
@@ -795,14 +798,45 @@ test "turboexl3 gpu ling mla latent variants: stage gives launch 2's words, the 
     try testing.expectEqual(@as(usize, 0), red_failed);
 }
 
-// ── launch 2 on the matrix units (`Attn.nax_*`): a bound of the f64 reference, not launch 2's words ──
+// ── launch 2 on the matrix units (`Attn.nax_sd_m2_k32`): a bound of the f64 reference, not launch 2's words ──
 
-test "turboexl3 ling mla latent nax metal source: the kernel as standalone translation units, bf16 split at 1 M tile and whole at 4, f16 split at 2 (TURBOEXL3_METAL_DUMP=1)" {
+test "turboexl3 ling mla latent nax metal source: the kernel at its shape as standalone translation units, bf16 and f16 (TURBOEXL3_METAL_DUMP=1)" {
     _ = std.c.getenv("TURBOEXL3_METAL_DUMP") orelse return error.SkipZigTest;
     const d = comptime support.pins(@embedFile("kernels/test/dump/mla_latent_nax.metal"));
-    prefill.printMetal("turboexl3_ling_mla_attn_nax_bf16_m1_k32_sd", ml.header_nax, d[0], d[3], ml.text_attn_nax);
-    prefill.printMetal("turboexl3_ling_mla_attn_nax_bf16_m4_k64", ml.header_nax, d[1], d[3], ml.text_attn_nax);
-    prefill.printMetal("turboexl3_ling_mla_attn_nax_f16_m2_k32_sd", ml.header_nax, d[2], d[4], ml.text_attn_nax);
+    prefill.printMetal("turboexl3_ling_mla_attn_nax_bf16_m2_k32_sd", ml.header_nax, d[0], d[2], ml.text_attn_nax);
+    prefill.printMetal("turboexl3_ling_mla_attn_nax_f16_m2_k32_sd", ml.header_nax, d[1], d[3], ml.text_attn_nax);
+}
+
+/// The m2_k64 fixture (`kernels/test/fault/mla_latent_nax_m2_k64.metal`, test only): the NAX text after two definitions
+/// that set its keys a step to 64 and its scores whole (each simdgroup every slice), on the served shape's launch
+/// (`ml.decodeLatentPartsOn`: MT 2, its grid and threads). It is the shape `nax_m2_k64` was before strip2: a real NAX
+/// shape the served one is not, held to the same bound, for a red check that plants a row-count-dependent split (a
+/// call's rows on it, each row alone on the served shape).
+const fixture_m2_k64 = @embedFile("kernels/test/fault/mla_latent_nax_m2_k64.metal");
+const text_nax_m2_k64: [:0]const u8 = fixture_m2_k64 ++ ml.nax_body ++ ml.nax_close;
+
+/// The fixture's kernel (the caller frees it: `decode.freeKernel`)
+fn fixtureM2K64() !mlx.mlx_fast_metal_kernel {
+    const k = ks.newKernel("turboexl3_test_ling_mla_attn_nax_m2_k64", &ml.attn_nax_in, &ml.attn_out, text_nax_m2_k64, ml.header_nax, false) orelse return error.KernelCreateFailed;
+    return k;
+}
+
+test "turboexl3 ling mla latent nax fixture: the m2_k64 fixture is the NAX text after two definitions, its keys a step 64 and its scores whole, and nothing else" {
+    const pin = comptime support.pins(@embedFile("kernels/test/pins/mla_latent_nax_m2_k64.metal"));
+    try testing.expectEqualStrings(ml.text_attn_nax, text_nax_m2_k64[fixture_m2_k64.len..]);
+    // its lines: comments, then the two definitions (the pin file's, BKN 64 and SD 0) and nothing else
+    var defs: usize = 0;
+    var it = std.mem.splitScalar(u8, fixture_m2_k64, '\n');
+    while (it.next()) |line| {
+        if (line.len == 0 or std.mem.startsWith(u8, line, "//")) continue;
+        try testing.expect(defs < pin.len);
+        try testing.expectEqualStrings(pin[defs], line);
+        defs += 1;
+    }
+    try testing.expectEqual(@as(usize, 2), pin.len);
+    try testing.expectEqual(pin.len, defs);
+    // it runs on the served shape's launch (2 M tiles), whose keys a step and split scores the two definitions replace
+    try testing.expectEqual(ml.Nax{ .mt = 2, .bk = 32, .sd = true }, ml.naxOf(ml.nax_served).?);
 }
 
 /// The bound a NAX call's output holds against the f64 reference, as a ratio to the reference's RMS (the RMS error at
@@ -886,6 +920,16 @@ fn naxOut(g: *G, s: mlx.mlx_stream, qn: mlx.mlx_array, qr: mlx.mlx_array, lat: m
     _ = try g.hostF32(try g.astype(y, .float32), out);
 }
 
+/// `naxOut` on a test's kernel of the NAX launch (`ml.decodeLatentPartsOn`: the served shape's launch on `kern`)
+fn naxOutOn(g: *G, s: mlx.mlx_stream, kern: mlx.mlx_fast_metal_kernel, qn: mlx.mlx_array, qr: mlx.mlx_array, lat: mlx.mlx_array, rot: mlx.mlx_array, w: mlx.mlx_array, scale: f64, out: []f32) !void {
+    const r = try ml.decodeLatentPartsOn(s, kern, qn, qr, lat, rot, w, @floatCast(scale));
+    const y = try g.adopt(r.out);
+    _ = mlx.mlx_array_free(r.pm);
+    _ = mlx.mlx_array_free(r.pl);
+    _ = mlx.mlx_array_free(r.po);
+    _ = try g.hostF32(try g.astype(y, .float32), out);
+}
+
 /// The RMS and worst-element error of `got` against `want` (ratios to the reference's RMS, beyond the bf16 store)
 const NaxErr = struct { rms: f64, max: f64 };
 
@@ -898,7 +942,7 @@ fn naxWithin(e: NaxErr, bound: f64) bool {
     return std.math.isFinite(e.rms) and std.math.isFinite(e.max) and e.rms <= bound and e.max <= 4.0 * bound;
 }
 
-test "turboexl3 gpu ling mla latent nax: every NAX shape within naxBound of the host's f64 absorbed attention on the plugin's operands at rows 1 to 5 and keys 1 to 19,404, beside the served stage form's error; the strided caches; a planted fault breaks the bound; a refused call falls back to the served text (TURBOEXL3_GPU=1)" {
+test "turboexl3 gpu ling mla latent nax: the NAX shape and the m2_k64 fixture within naxBound of the host's f64 absorbed attention on the plugin's operands at rows 1 to 5 and keys 1 to 19,404, beside the served stage form's error; the strided caches; a planted fault breaks the bound; a refused call falls back to the served text (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
@@ -908,6 +952,9 @@ test "turboexl3 gpu ling mla latent nax: every NAX shape within naxBound of the 
     reportMlxErrors(true);
     defer reportMlxErrors(false);
     const h: usize = 64;
+    // the m2_k64 fixture (`fixtureM2K64`): a real NAX shape the served one is not, held to the same bound
+    const fixture = try fixtureM2K64();
+    defer decode.freeKernel(fixture);
     var prng = std.Random.DefaultPrng.init(0x0D1A_7E55);
     const rnd = prng.random();
     const kvb = try loaderKvB(&g, a, rnd, h);
@@ -966,22 +1013,24 @@ test "turboexl3 gpu ling mla latent nax: every NAX shape within naxBound of the 
             },
             .{ try transposedView(&g, s, cache[0]), try transposedView(&g, s, cache[1]) },
         };
-        for (ml.nax_shapes) |shape| for (views, 0..) |view, vi| {
-            // the strided caches on the served shape, and on every shape where the keys are few
-            if (vi != 0 and shape != ml.nax_served and c.t > 300) continue;
+        for ([_]?mlx.mlx_fast_metal_kernel{ null, fixture }) |plant| for (views, 0..) |view, vi| {
+            // the strided caches on the served shape, and on the fixture where the keys are few
+            if (vi != 0 and plant != null and c.t > 300) continue;
             const vm = g.mark();
             defer g.resetTo(vm);
             const kind: CacheView = @enumFromInt(vi);
+            const shape: []const u8 = if (plant == null) @tagName(ml.nax_served) else "m2_k64_fixture";
             lines += 1;
-            naxOut(&g, s, nc.qn, nc.qr, view[0], view[1], kvb.rows, c.scale, shape, got) catch |e| {
-                std.debug.print("TURBOEXL3_LING_MLA_LATENT_NAX keys={d} rows={d} scale={d:.4} shape={s} cache={s}: {s} FAIL\n", .{ c.t, c.rows, c.scale, @tagName(shape), @tagName(kind), @errorName(e) });
+            const ran: anyerror!void = if (plant) |k| naxOutOn(&g, s, k, nc.qn, nc.qr, view[0], view[1], kvb.rows, c.scale, got) else naxOut(&g, s, nc.qn, nc.qr, view[0], view[1], kvb.rows, c.scale, ml.nax_served, got);
+            ran catch |e| {
+                std.debug.print("TURBOEXL3_LING_MLA_LATENT_NAX keys={d} rows={d} scale={d:.4} shape={s} cache={s}: {s} FAIL\n", .{ c.t, c.rows, c.scale, shape, @tagName(kind), @errorName(e) });
                 failed += 1;
                 continue;
             };
             const e = naxErr(got, want);
             const d = relErr(got, served);
             const ok = naxWithin(e, bound);
-            std.debug.print("TURBOEXL3_LING_MLA_LATENT_NAX keys={d} rows={d} scale={d:.4} shape={s} cache={s} rms={e:.3} max={e:.3} bound={e:.3} (x4 max); served stage rms={e:.3} max={e:.3}; against the stage rel_l2={e:.3} rel_max={e:.3} {s}\n", .{ c.t, c.rows, c.scale, @tagName(shape), @tagName(kind), e.rms, e.max, bound, es.rms, es.max, d[0], d[1], if (ok) "PASS" else "FAIL" });
+            std.debug.print("TURBOEXL3_LING_MLA_LATENT_NAX keys={d} rows={d} scale={d:.4} shape={s} cache={s} rms={e:.3} max={e:.3} bound={e:.3} (x4 max); served stage rms={e:.3} max={e:.3}; against the stage rel_l2={e:.3} rel_max={e:.3} {s}\n", .{ c.t, c.rows, c.scale, shape, @tagName(kind), e.rms, e.max, bound, es.rms, es.max, d[0], d[1], if (ok) "PASS" else "FAIL" });
             failed += @intFromBool(!ok);
         };
     }
@@ -1078,7 +1127,8 @@ test "turboexl3 gpu ling mla latent nax: every NAX shape within naxBound of the 
         const ok2 = took == .stage and d2 == 0 and refused2;
         std.debug.print("TURBOEXL3_LING_MLA_LATENT_NAX_FALLBACK f32 cache: the configuration ran {s} (want stage); words differing from the stage form's {d}/{d}; naming {s} refused: {s} {s}\n", .{ @tagName(took), d2, n_out, @tagName(ml.nax_served), yes(refused2), if (ok2) "PASS" else "FAIL" });
         fb_failed += @intFromBool(!ok2);
-        // 3. 32 heads: a shape of 64 heads a threadgroup is refused by name; one of 16 heads a threadgroup takes them
+        // 3. 32 heads, one of the NAX shape's threadgroups a row: the configuration runs the shape, its words those of
+        // the shape named (a head count not a multiple of 32 never reaches it: `planOf` refuses it first)
         const h32: usize = 32;
         const kvb32 = try loaderKvB(&g, a, rnd, h32);
         const q32 = try g.transposeAxes(try devRandn(&g, a, rnd, &.{ 1, 1, ci(h32), ci(DN + DR) }, .bfloat16), &.{ 0, 2, 1, 3 });
@@ -1086,16 +1136,19 @@ test "turboexl3 gpu ling mla latent nax: every NAX shape within naxBound of the 
         const qr32 = try g.slice(q32, &.{ 0, 0, 0, ci(DN) }, &.{ 1, ci(h32), 1, ci(DN + DR) }, &.{ 1, 1, 1, 1 });
         const out32 = try a.alloc(f32, h32 * DV);
         defer a.free(out32);
-        var refused3 = false;
-        naxOut(&g, s, qn32, qr32, cache[0], cache[1], kvb32.rows, ling_scale, .nax_m4_k32, out32) catch |e| {
-            refused3 = e == error.Exl3EngineNotImplemented;
-        };
+        const want32 = try a.alloc(f32, h32 * DV);
+        defer a.free(want32);
         var ran3 = true;
-        naxOut(&g, s, qn32, qr32, cache[0], cache[1], kvb32.rows, ling_scale, .nax_m1_k32, out32) catch {
+        naxOut(&g, s, qn32, qr32, cache[0], cache[1], kvb32.rows, ling_scale, null, out32) catch {
             ran3 = false;
         };
-        const ok3 = refused3 and ran3;
-        std.debug.print("TURBOEXL3_LING_MLA_LATENT_NAX_FALLBACK 32 heads: nax_m4_k32 refused: {s}; nax_m1_k32 ran: {s} {s}\n", .{ yes(refused3), yes(ran3), if (ok3) "PASS" else "FAIL" });
+        const took3 = ml.lastAttn();
+        naxOut(&g, s, qn32, qr32, cache[0], cache[1], kvb32.rows, ling_scale, ml.nax_served, want32) catch {
+            ran3 = false;
+        };
+        const d3 = diffWords(out32, want32);
+        const ok3 = ran3 and took3 == ml.nax_served and d3 == 0;
+        std.debug.print("TURBOEXL3_LING_MLA_LATENT_NAX_FALLBACK 32 heads: the configuration ran {s} (want {s}); words differing from the named shape's {d}/{d}; both ran: {s} {s}\n", .{ @tagName(took3), @tagName(ml.nax_served), d3, h32 * DV, yes(ran3), if (ok3) "PASS" else "FAIL" });
         fb_failed += @intFromBool(!ok3);
         // 4. 17 rows (past max_rows): refused before any launch, the NAX shape on (the configuration) as off
         const q17 = try g.transposeAxes(try devRandn(&g, a, rnd, &.{ 1, 17, ci(h), ci(DN + DR) }, .bfloat16), &.{ 0, 2, 1, 3 });

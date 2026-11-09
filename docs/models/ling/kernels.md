@@ -896,7 +896,7 @@ Launch 2 has one variant with its words, a host's opt-in in `Config` (`mla_laten
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/ling/mla_latent.zig:142` (`fn kernelOf`) |
+| made at | `src/models/ling/mla_latent.zig:143` (`fn kernelOf`) |
 | inputs | `ql`, `qr`, `lat`, `rot`, `scale`, `dims` |
 | outputs | `pm`, `pl`, `po` |
 | source | `text_attn` = `ling:mla_latent/attn_1` ++ `ling:mla_latent/attn_2` ++ `ling:mla_latent/attn_3` ++ `ling:mla_latent/attn_4` (8673 B, `7d50732448a0`) |
@@ -936,7 +936,7 @@ Launch 2 has one variant with its words, a host's opt-in in `Config` (`mla_laten
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/ling/mla_latent.zig:141` (`fn kernelOf`) |
+| made at | `src/models/ling/mla_latent.zig:142` (`fn kernelOf`) |
 | inputs | `qn`, `w` |
 | outputs | `ql` |
 | source | `text_qabs` = `ling:mla_latent/qabs` (1347 B, `184aa655ae1b`) |
@@ -965,7 +965,7 @@ Launch 2 has one variant with its words, a host's opt-in in `Config` (`mla_laten
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/ling/mla_latent.zig:143` (`fn kernelOf`) |
+| made at | `src/models/ling/mla_latent.zig:144` (`fn kernelOf`) |
 | inputs | `pm`, `pl`, `po`, `w`, `dims` |
 | outputs | `out` |
 | source | `text_vabs` = `ling:mla_latent/vabs` (2335 B, `d1d2a8e2e320`) |
@@ -994,7 +994,7 @@ Launch 2 has one variant with its words, a host's opt-in in `Config` (`mla_laten
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/ling/mla_latent.zig:200` (`fn variantKernel`) |
+| made at | `src/models/ling/mla_latent.zig:193` (`fn variantKernel`) |
 | inputs | `ql`, `qr`, `lat`, `rot`, `scale`, `dims` |
 | outputs | `pm`, `pl`, `po` |
 | source | `text_attn_stage` = `ling:mla_latent/stage_1` ++ `ling:mla_latent/attn_2` ++ `ling:mla_latent/stage_2` ++ `ling:mla_latent/attn_4` (9347 B, `8bed636fe06a`) |
@@ -1028,7 +1028,7 @@ Launch 2 has one variant with its words, a host's opt-in in `Config` (`mla_laten
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/ling/mla_latent.zig:201` (`fn variantKernel`) |
+| made at | `src/models/ling/mla_latent.zig:194` (`fn variantKernel`) |
 | inputs | `qlb`, `qrb`, `lat`, `rot`, `scale`, `dims` |
 | outputs | `pm`, `pl`, `po` |
 | source | `text_attn_nax` = `ling:mla_latent/nax` ++ `ling:mla_latent/nax_close` (10326 B, `973fcfb5fb1c`) |
@@ -1043,12 +1043,15 @@ Launch 2 has one variant with its words, a host's opt-in in `Config` (`mla_laten
 - **Shapes and dtypes:** launch 2's outputs (`pm`, `pl` f32 [S·H·NJ], `po` f32 [S·H·NJ, DL]); `qlb` [S, H, DL] and `qrb`
   [1, H, S, DR] contiguous in the cache's dtype (launch 1's f32 `ql` and the rope half cast once on the host); `lat`,
   `rot` bf16 or f16 views read through their strides (a key's dims as one run where both views hold them contiguous, else
-  word by word). Refused (`mla_latent.naxTakes`): an f32 cache, heads not a multiple of 16·MT.
-- **Grid and threadgroup:** `(128·MT, NJ, S·H/(16·MT))` / `(128·MT, 1, 1)`: a threadgroup for each (key group of 256,
-  16·MT heads of a row), 4 simdgroups an M tile of 16 heads, each simdgroup 128 of the latent's 512 columns. With SD 1,
-  4·16·(BKN + 4) floats an M tile of threadgroup memory for the partial score tiles (9 to 18 KiB), 2 barriers a step.
-- **Template args:** H, S, DL, DR, KPT (launch 2's); MT (M tiles: 1, 2, 4), BKN (keys a step: 32, 64), SD (0: each
-  simdgroup scores the 36 dim slices; 1: 9 each, the M tile's partials summed in simdgroup order), CT (the cache's dtype,
+  word by word). Refused (`mla_latent.naxTakes`): an f32 cache; heads not a multiple of 16·MT (32), which `planOf`
+  refuses first.
+- **Grid and threadgroup:** `(128·MT, NJ, S·H/(16·MT))` / `(128·MT, 1, 1)`, at MT 2 `(256, NJ, S·H/32)` / `(256, 1, 1)`:
+  a threadgroup for each (key group of 256, 32 heads of a row), 4 simdgroups an M tile of 16 heads, each simdgroup 128
+  of the latent's 512 columns; 2·4·16·(32 + 4) floats (18 KiB) of threadgroup memory for the partial score tiles, 2
+  barriers a step.
+- **Template args:** H, S, DL, DR, KPT (launch 2's); MT 2 (M tiles), BKN 32 (keys a step), SD 1 (each simdgroup scores 9
+  of the 36 dim slices, the M tile's partials summed in simdgroup order): `mla_latent.nax_shape`, the one shape (D1's
+  TIME: the fastest at every row count of the MTP head's calls; the other eight left in strip2); CT (the cache's dtype,
   the matrix units' operand type).
 - **Replaces:** `turboexl3_ling_mla_attn_stage` (or launch 2) at those calls: the scores and the weighted sums on f32
   simdgroup matrices at 8 × 8 × 8 (about 1.35 TFLOPS at the head's calls, A1) become MLX steel's NAX tiles at
@@ -1060,7 +1063,45 @@ Launch 2 has one variant with its words, a host's opt-in in `Config` (`mla_laten
   and a row's values depend on its own operands and position only.
 - **Pinned by:** the CPU test's pin file (`kernels/test/pins/mla_latent_nax.metal`: the bound, the step's keys, the mask,
   the split's sum, the partials, the header's row op, finite minimum and attribute); the GPU test's
-  `TURBOEXL3_LING_MLA_LATENT_NAX` lines (every shape within the bound, the strided caches, the red checks, the fallbacks).
+  `TURBOEXL3_LING_MLA_LATENT_NAX` lines (the shape and the m2_k64 fixture within the bound, the strided caches, the red
+  checks, the fallbacks).
+
+## `src/models/ling/mla_latent_test.zig`
+
+The NAX launch's second shape, kept as a test fixture: a kernel made only by the latent tests,
+`turboexl3_ling_mla_attn_nax` at 64 keys a step with the whole scores (`kernels/test/fault/`), for a red check that
+plants a row-count-dependent split.
+
+### `turboexl3_test_ling_mla_attn_nax_m2_k64`
+
+<!-- kernel-facts: turboexl3_test_ling_mla_attn_nax_m2_k64 -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/ling/mla_latent_test.zig:820` (`fn fixtureM2K64`) |
+| inputs | `qlb`, `qrb`, `lat`, `rot`, `scale`, `dims` |
+| outputs | `pm`, `pl`, `po` |
+| source | `text_nax_m2_k64` = `ling:test/fault/mla_latent_nax_m2_k64` ++ `ling:mla_latent/nax` ++ `ling:mla_latent/nax_close` (10707 B, `1ce96d46b8df`) |
+| header | `ml.header_nax` = `steel_nax` ++ `ling:mla_latent/nax_head` (32072 B, `59af53abaaa3`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** test only: `src/models/ling/mla_latent_test.zig` `fixtureM2K64`, launched through
+  `mla_latent.decodeLatentPartsOn` (the NAX launch's plan, checks and refusals on a test's kernel). The NAX GPU test
+  holds it to `naxBound` beside the served shape; a red check runs a call's rows on it and each row alone on the served
+  shape.
+- **Shapes and dtypes:** `turboexl3_ling_mla_attn_nax`'s.
+- **Grid and threadgroup:** `turboexl3_ling_mla_attn_nax`'s at MT 2 (the served shape's launch), one float of
+  threadgroup memory for the partial score tiles (SD 0 sums none).
+- **Template args:** `turboexl3_ling_mla_attn_nax`'s at the served shape's values; the fixture's two definitions
+  (`#define BKN 64`, `#define SD 0`, `ling:test/fault/mla_latent_nax_m2_k64` ahead of the body) stand in for BKN and SD.
+- **Replaces:** nothing: the shape `nax_m2_k64` was before strip2 (64 keys a step, each simdgroup scoring every slice),
+  a real NAX shape that is not the served one.
+- **Bits:** not the served shape's words: its scores and weighted sums group the keys 64 a step and sum every slice in
+  one simdgroup; within `naxBound` of the f64 reference as the served shape is.
+- **Pinned by:** `src/models/ling/mla_latent_test.zig` "turboexl3 ling mla latent nax fixture: ..." (CPU: the NAX text
+  after the two definitions and nothing else); "turboexl3 gpu ling mla latent nax: ..." (GPU: the
+  `TURBOEXL3_LING_MLA_LATENT_NAX` lines with shape=m2_k64_fixture, within the bound).
 
 ## `src/models/ling/mla_flash.zig`
 

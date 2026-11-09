@@ -2129,12 +2129,11 @@ fn bytesDifferF32(p: []const f32, q: []const f32) usize {
     return n;
 }
 
-// D1: launch 2 of the MTP head's latent attention on the matrix units (`mla_latent.Attn.nax_*`), TIME's arms only: each
-// NAX shape (16, 32 or 64 heads a threadgroup; 32 or 64 keys a step; the scores whole a simdgroup or split over an M
-// tile's 4) against the served stage form (S40, `Attn.stage`) and launch 2 as it is, at rows 1 to 5 over the standard
-// request's 18,380 keys, the operands as the plugin passes them (the cache the first rows of a wider bf16 buffer, kv_b
-// bf16 [16384, 512], the query halves as views of the transposed heads). Guidance that ranks the shapes; the standard
-// test decides the switch.
+// D1: launch 2 of the MTP head's latent attention on the matrix units (`mla_latent.nax_served`, its one shape), TIME's
+// arms only: the NAX launch against the served stage form (S40, `Attn.stage`) and launch 2 as it is, at rows 1 to 5
+// over the standard request's 18,380 keys, the operands as the plugin passes them (the cache the first rows of a wider
+// bf16 buffer, kv_b bf16 [16384, 512], the query halves as views of the transposed heads). D1 timed nine shapes here;
+// the one kept was the fastest at every row count (strip2). Guidance; the standard test decides the switch.
 test "turboexl3 gpu ling timing: D1, the MTP head's latent attention on the matrix units at rows 1 to 5 over 18,380 keys (TURBOEXL3_LING_TIME=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
     _ = std.c.getenv("TURBOEXL3_LING_TIME") orelse return error.SkipZigTest;
@@ -2170,7 +2169,7 @@ test "turboexl3 gpu ling timing: D1, the MTP head's latent attention on the matr
     };
     // the attention's multiply-adds a key and row: 64 heads x (576 + 512)
     const flops_row = 2.0 * @as(f64, @floatFromInt(keys)) * @as(f64, @floatFromInt(heads)) * @as(f64, @floatFromInt(mla_latent.dl + mla_latent.dr + mla_latent.dl));
-    const arms = [_]mla_latent.Attn{ .stage, .base } ++ mla_latent.nax_shapes;
+    const arms = [_]mla_latent.Attn{ .stage, .base, mla_latent.nax_served };
     for ([_]u32{ 1, 2, 3, 4, 5 }) |rows| {
         const rm = g.mark();
         defer g.resetTo(rm);

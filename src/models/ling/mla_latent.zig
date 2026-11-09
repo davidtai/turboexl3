@@ -20,12 +20,13 @@
 //! `turboexl3_ling_mla_attn_stage`: each sub-chunk's latents and rope keys converted to f32 once a threadgroup, in
 //! threadgroup memory, and every simdgroup's tiles read there.
 //! One more host opt-in (`Config.mla_latent_nax`) runs launch 2 on the matrix units, not with launch 2's words
-//! (`turboexl3_ling_mla_attn_nax`, `Attn.nax_*`): MLX steel's NAX tiles (16 x 32 x 16 multiply-accumulates into f32)
-//! over the query rounded to the cache's dtype and the cache's bf16 or f16 words, 16 heads of a row an M tile, each M
-//! tile's 4 simdgroups a quarter of the latent's columns, the online softmax in f32. Its partials are launch 2's
-//! (pm, pl, po, the same key groups from position 0), so launch 3 merges them unchanged. A tolerance against the f64
-//! reference, not launch 2's words (`mla_latent_test.zig`): the plugin serves it only to the MTP head, whose words
-//! move the drafts and never the verified text.
+//! (`turboexl3_ling_mla_attn_nax`, `Attn.nax_sd_m2_k32` at its one launch shape, `nax_shape`): MLX steel's NAX tiles
+//! (16 x 32 x 16 multiply-accumulates into f32) over the query rounded to the cache's dtype and the cache's bf16 or f16
+//! words, 16 heads of a row an M tile and 2 M tiles a threadgroup, each M tile's 4 simdgroups a quarter of the latent's
+//! columns, the online softmax in f32. Its partials are launch 2's (pm, pl, po, the same key groups from position 0),
+//! so launch 3 merges them unchanged. A tolerance against the f64 reference, not launch 2's words
+//! (`mla_latent_test.zig`): the plugin serves it only to the MTP head, whose words move the drafts and never the
+//! verified text.
 const std = @import("std");
 const mlx = @import("sdk").mlx;
 const ks = @import("sdk").kernel_launch;
@@ -148,39 +149,31 @@ fn kernelOf(k: Kind) !mlx.mlx_fast_metal_kernel {
 
 /// Launch 2's text a call runs (`attnFor`, or a test's choice): launch 2 as it is, or its variant with its words, its
 /// latents and rope keys staged in f32 (`text_attn_stage`); or launch 2 on the matrix units, not with its words
-/// (`text_attn_nax`, each `nax_*` a launch shape: `naxOf`)
-pub const Attn = enum(u8) { base, stage, nax_m1_k32, nax_m1_k64, nax_m2_k32, nax_m2_k64, nax_m4_k32, nax_m4_k64, nax_sd_m1_k32, nax_sd_m1_k64, nax_sd_m2_k32 };
+/// (`text_attn_nax` at its one launch shape, `nax_shape`)
+pub const Attn = enum(u8) { base, stage, nax_sd_m2_k32 };
 
 /// A NAX launch shape: M tiles of 16 heads a threadgroup (`mt`, each M tile's 4 simdgroups a quarter of the latent's
 /// columns), the keys a step (`bk`), and whether an M tile's 4 simdgroups split the scores' 36 slices and sum their
 /// partial tiles in threadgroup memory (`sd`) or each score every slice
 pub const Nax = struct { mt: u32, bk: u32, sd: bool };
 
-/// `a`'s NAX launch shape (null for launch 2 and its variants with its words). A split shape's partial tiles take
-/// 4 x 16 x (bk + 4) floats an M tile of threadgroup memory, so the split shapes stay under the 32 KiB a threadgroup
-/// holds (at most 18 KiB).
+/// The NAX launch's one shape: 2 M tiles (32 heads a threadgroup), 32 keys a step, the scores' slices split over an M
+/// tile's 4 simdgroups, whose partial tiles take 2 x 4 x 16 x (32 + 4) floats (18 KiB) of the 32 KiB a threadgroup
+/// holds. TIME's fastest at every row count of the MTP head's calls (fork D1, 2026-11-09,
+/// ~/lingc/logs/t3time-d1time.log: 18,380 keys, rows 1 to 5, 229 to 938 us, 0.161 to 0.189 of the stage form's 1,209 to
+/// 5,825; T1's TIME, rows 1 to 5 over three key counts: all 15 cells), so the other eight shapes D1 timed left
+/// (strip2).
+pub const nax_shape: Nax = .{ .mt = 2, .bk = 32, .sd = true };
+
+/// `a`'s NAX launch shape (null for launch 2 and its variant with its words)
 pub fn naxOf(a: Attn) ?Nax {
     return switch (a) {
         .base, .stage => null,
-        .nax_m1_k32 => .{ .mt = 1, .bk = 32, .sd = false },
-        .nax_m1_k64 => .{ .mt = 1, .bk = 64, .sd = false },
-        .nax_m2_k32 => .{ .mt = 2, .bk = 32, .sd = false },
-        .nax_m2_k64 => .{ .mt = 2, .bk = 64, .sd = false },
-        .nax_m4_k32 => .{ .mt = 4, .bk = 32, .sd = false },
-        .nax_m4_k64 => .{ .mt = 4, .bk = 64, .sd = false },
-        .nax_sd_m1_k32 => .{ .mt = 1, .bk = 32, .sd = true },
-        .nax_sd_m1_k64 => .{ .mt = 1, .bk = 64, .sd = true },
-        .nax_sd_m2_k32 => .{ .mt = 2, .bk = 32, .sd = true },
+        .nax_sd_m2_k32 => nax_shape,
     };
 }
 
-/// Every NAX launch shape (TIME's arms)
-pub const nax_shapes = [_]Attn{ .nax_m1_k32, .nax_m1_k64, .nax_m2_k32, .nax_m2_k64, .nax_m4_k32, .nax_m4_k64, .nax_sd_m1_k32, .nax_sd_m1_k64, .nax_sd_m2_k32 };
-
-/// The shape `Config.mla_latent_nax` runs: TIME's fastest at every row count of the MTP head's calls (fork D1,
-/// 2026-11-09, ~/lingc/logs/t3time-d1time.log: 18,380 keys, rows 1 to 5, 229 to 938 us, 0.161 to 0.189 of the stage
-/// form's 1,209 to 5,825; the split scores at 1 M tile next, 0.170 to 0.192; the whole scores 0.23 to 0.27; 64 keys a
-/// step 0.39 to 0.43)
+/// The text `Config.mla_latent_nax` runs: the NAX launch at `nax_shape`
 pub const nax_served: Attn = .nax_sd_m2_k32;
 
 const Variant = enum(u8) { stage, nax };
@@ -209,7 +202,7 @@ fn attnKernel(a: Attn) !mlx.mlx_fast_metal_kernel {
     return switch (a) {
         .base => kernelOf(.attn),
         .stage => variantKernel(.stage),
-        .nax_m1_k32, .nax_m1_k64, .nax_m2_k32, .nax_m2_k64, .nax_m4_k32, .nax_m4_k64, .nax_sd_m1_k32, .nax_sd_m1_k64, .nax_sd_m2_k32 => variantKernel(.nax),
+        .nax_sd_m2_k32 => variantKernel(.nax),
     };
 }
 
@@ -384,6 +377,18 @@ pub const Parts = struct { out: mlx.mlx_array, pm: mlx.mlx_array, pl: mlx.mlx_ar
 
 /// `decodeLatentWith`, launch 2's partials kept (`Parts`)
 pub fn decodeLatentParts(s: mlx.mlx_stream, q_nope: mlx.mlx_array, q_rot: mlx.mlx_array, lat: mlx.mlx_array, rot: mlx.mlx_array, kv_b: mlx.mlx_array, scale: f32, attn: ?Attn) !Parts {
+    return partsOn(s, null, q_nope, q_rot, lat, rot, kv_b, scale, attn);
+}
+
+/// `decodeLatentParts` on the NAX launch (`nax_served`: its shape, checks and refusals) with launch 2 on `kern`, a
+/// test's text of `turboexl3_ling_mla_attn_nax` made from its operand names (`attn_nax_in`, `attn_out`;
+/// `kernels/test/fault/`). It prints no engagement line and leaves `lastAttn` as it was.
+pub fn decodeLatentPartsOn(s: mlx.mlx_stream, kern: mlx.mlx_fast_metal_kernel, q_nope: mlx.mlx_array, q_rot: mlx.mlx_array, lat: mlx.mlx_array, rot: mlx.mlx_array, kv_b: mlx.mlx_array, scale: f32) !Parts {
+    return partsOn(s, kern, q_nope, q_rot, lat, rot, kv_b, scale, nax_served);
+}
+
+/// `decodeLatentParts` with launch 2 on `kern` where a test passes one (`decodeLatentPartsOn`), else on `attnKernel`'s
+fn partsOn(s: mlx.mlx_stream, kern: ?mlx.mlx_fast_metal_kernel, q_nope: mlx.mlx_array, q_rot: mlx.mlx_array, lat: mlx.mlx_array, rot: mlx.mlx_array, kv_b: mlx.mlx_array, scale: f32, attn: ?Attn) !Parts {
     const p = try planOf(mlx.getShape(q_nope), mlx.getShape(q_rot), mlx.getShape(lat), mlx.getShape(rot), mlx.getShape(kv_b), .{ mlx.mlx_array_dtype(q_nope), mlx.mlx_array_dtype(q_rot) }, .{ mlx.mlx_array_dtype(lat), mlx.mlx_array_dtype(rot) }, mlx.mlx_array_dtype(kv_b));
     // a NAX shape the call's operands do not take: a test's choice is refused, the configuration's runs its text without
     // it (`attnServedFor`)
@@ -446,7 +451,7 @@ pub fn decodeLatentParts(s: mlx.mlx_stream, q_nope: mlx.mlx_array, q_rot: mlx.ml
         var qrb = mlx.mlx_array_new();
         defer freeArr(qrb);
         try mlx.check(mlx.mlx_astype(&qrb, qr, p.c, s));
-        try launchKernel(s, try attnKernel(a), .{
+        try launchKernel(s, kern orelse try attnKernel(a), .{
             .grid = attnGridOf(p, a),
             .threadgroup = .{ attnThreadsOf(a), 1, 1 },
             .out_shapes = &.{ &[_]c_int{slots}, &[_]c_int{slots}, &[_]c_int{ slots, ci(dl) } },
@@ -473,8 +478,10 @@ pub fn decodeLatentParts(s: mlx.mlx_stream, q_nope: mlx.mlx_array, q_rot: mlx.ml
         }, &.{ ql[0], qr, lat, rot, scale_arr, dims }, &parts);
     }
     errdefer for (parts) |x| freeArr(x);
-    sayEngaged(a, p);
-    last_attn.get().* = @intFromEnum(a);
+    if (kern == null) {
+        sayEngaged(a, p);
+        last_attn.get().* = @intFromEnum(a);
+    }
     var out: [1]mlx.mlx_array = undefined;
     try launch(s, .vabs, .{
         .grid = p.vabsGrid(),
@@ -610,33 +617,26 @@ test "turboexl3 ling mla latent nax text: it reads every operand it binds and th
     try testing.expect(!has(text_attn_nax, "exp2") and !has(header_nax[steel_nax.len..], "exp2"));
 }
 
-test "turboexl3 ling mla latent nax plan: each shape's grid and threads, the configuration's text and its fallback, the calls a shape takes, the split shapes' threadgroup memory" {
+test "turboexl3 ling mla latent nax plan: the shape's grid and threads, the configuration's text and its fallback, the calls the shape takes, its threadgroup memory" {
     const bf: mlx.mlx_dtype = .bfloat16;
     const p = try planOf(&.{ 1, 64, 3, 128 }, &.{ 1, 64, 3, 64 }, &.{ 1, 1, 18380, 512 }, &.{ 1, 1, 18380, 64 }, &.{ 16384, 512 }, .{ bf, bf }, .{ bf, bf }, bf);
     try testing.expect(p.nj == 72);
-    try testing.expectEqual([3]u32{ 128, 72, 12 }, attnGridOf(p, .nax_m1_k32));
-    try testing.expectEqual([3]u32{ 256, 72, 6 }, attnGridOf(p, .nax_m2_k64));
-    try testing.expectEqual([3]u32{ 512, 72, 3 }, attnGridOf(p, .nax_m4_k32));
-    try testing.expectEqual([3]u32{ 128, 72, 12 }, attnGridOf(p, .nax_sd_m1_k64));
+    try testing.expectEqual([3]u32{ 256, 72, 6 }, attnGridOf(p, nax_served));
     try testing.expectEqual(@as(u32, 512), attnThreadsOf(.stage));
     try testing.expectEqual(@as(u32, 256), attnThreadsOf(.nax_sd_m2_k32));
-    // every NAX enum value is a shape, every shape is listed once, launch 2 and its word-for-word variants are none
+    // the one NAX enum value is the shape; launch 2 and its word-for-word variant are none
     var n_nax: usize = 0;
     for (std.enums.values(Attn)) |a| {
         if (naxOf(a)) |n| {
             n_nax += 1;
-            var listed: usize = 0;
-            for (nax_shapes) |b| listed += @intFromBool(b == a);
-            try testing.expectEqual(@as(usize, 1), listed);
-            try testing.expect(n.bk == 32 or n.bk == 64);
-            try testing.expect(n.mt == 1 or n.mt == 2 or n.mt == 4);
-            // a split shape's partial tiles: MT x 4 x 16 x (bk + 4) floats, under the 32 KiB a threadgroup holds
-            if (n.sd) try testing.expect(n.mt * 4 * 16 * (n.bk + 4) * 4 < 32 * 1024);
+            try testing.expectEqual(nax_shape, n);
         }
     }
-    try testing.expectEqual(nax_shapes.len, n_nax);
+    try testing.expectEqual(@as(usize, 1), n_nax);
     for ([_]Attn{ .base, .stage }) |a| try testing.expect(naxOf(a) == null);
     try testing.expect(naxOf(nax_served) != null);
+    // its partial tiles: MT x 4 x 16 x (bk + 4) floats, under the 32 KiB a threadgroup holds
+    try testing.expect(nax_shape.sd and nax_shape.mt * 4 * 16 * (nax_shape.bk + 4) * 4 < 32 * 1024);
     // the configuration: the NAX shape ahead of the stage; without it the stage as before
     const nax_st: config.Config = .{ .mla_latent_nax = true, .mla_latent_stage = true };
     try testing.expectEqual(nax_served, attnFor(nax_st));
@@ -650,15 +650,16 @@ test "turboexl3 ling mla latent nax plan: each shape's grid and threads, the con
         try testing.expect(naxTakes(pr, naxOf(attnFor(nax_st)).?));
         try testing.expectEqual([3]u32{ 256, 72, 2 * @as(u32, @intCast(rows)) }, attnGridOf(pr, attnFor(nax_st)));
     }
-    // the calls a shape takes: a bf16 or f16 cache, the heads a whole number of its threadgroups
-    for (nax_shapes) |a| try testing.expect(naxTakes(p, naxOf(a).?));
+    // the calls the shape takes: a bf16 or f16 cache, the heads a whole number of its threadgroups (32 heads: one)
+    try testing.expect(naxTakes(p, nax_shape));
     const f16p = try planOf(&.{ 1, 64, 1, 128 }, &.{ 1, 64, 1, 64 }, &.{ 1, 1, 300, 512 }, &.{ 1, 1, 300, 64 }, &.{ 16384, 512 }, .{ .float16, .float16 }, .{ .float16, .float16 }, .float16);
     try testing.expect(naxTakes(f16p, naxOf(nax_served).?));
     const f32p = try planOf(&.{ 1, 64, 1, 128 }, &.{ 1, 64, 1, 64 }, &.{ 1, 1, 300, 512 }, &.{ 1, 1, 300, 64 }, &.{ 16384, 512 }, .{ bf, bf }, .{ .float32, .float32 }, bf);
-    for (nax_shapes) |a| try testing.expect(!naxTakes(f32p, naxOf(a).?));
+    try testing.expect(!naxTakes(f32p, nax_shape));
     const h32 = try planOf(&.{ 1, 32, 1, 128 }, &.{ 1, 32, 1, 64 }, &.{ 1, 1, 300, 512 }, &.{ 1, 1, 300, 64 }, &.{ 8192, 512 }, .{ bf, bf }, .{ bf, bf }, bf);
-    try testing.expect(naxTakes(h32, naxOf(.nax_m2_k32).?));
-    try testing.expect(!naxTakes(h32, naxOf(.nax_m4_k32).?));
+    try testing.expect(naxTakes(h32, nax_shape));
+    // the heads rule itself: a launch of 4 M tiles (64 heads a threadgroup) would not take 32 heads
+    try testing.expect(!naxTakes(h32, .{ .mt = 4, .bk = 32, .sd = true }));
 }
 
 test "turboexl3 ling mla latent nax: only the latent decode reads Config.mla_latent_nax, and no other Ling module reaches the latent decode (the trunk's MLA never takes it)" {
