@@ -1825,6 +1825,21 @@ SPLIT_ADDED_KERNELS['turboexl3_test_pf_dfin_order_fault'] = ('test only: turboex
 SPLIT_ADDED_KERNELS['turboexl3_test_pf_dfin_korder_fault'] = ('test only: turboexl3_pf_dfin with a planted K-order fault '
                                                               '(tile 0\'s K stages in reverse order, fault/gemm_4_krev in '
                                                               'gemm_4\'s place), a red check')
+# the fused finish's threshold (Options.dfin_min; finish_1 and gemm_small_3 cut into pieces of the same values)
+SPLIT_ADDED_KERNELS['turboexl3_pf_t128n_route'] = ('Options.dfin_min: text_froute_t128 with each expert\'s rows stored '
+                                                   '(froute_ecnt after froute_t128_2_2), one output more (ecnt)')
+SPLIT_ADDED_KERNELS['turboexl3_pf_t256n_route'] = 'Options.dfin_min with t256: text_froute_t256 with froute_ecnt, the same'
+SPLIT_ADDED_KERNELS['turboexl3_pf_t128_dnmn'] = ('Options.dfin_min: gemm1m_text with a tile of an expert of DFMIN rows or '
+                                                 'more returning (gemm_dn_skip after each body\'s tile read)')
+SPLIT_ADDED_KERNELS['turboexl3_pf_t128_dntn'] = 'Options.dfin_min: gemm1_text with gemm_dn_skip after its tile read'
+SPLIT_ADDED_KERNELS['turboexl3_pf_dfinn'] = ('Options.dfin_min: one launch writing y: text_dfin (stage at kernel scope, '
+                                             'gemm_dfinn_bs; gemm_dfinn_skip after its tile read) over the experts of '
+                                             'DFMIN rows or more, then text_finish_t128 (gemm_dfinn_item in finish_1_2\'s '
+                                             'place) over the rest, a (row, 128-block) item a simdgroup')
+SPLIT_ADDED_KERNELS['turboexl3_test_pf_dfinn_gemm_fault'] = ('test only: turboexl3_pf_dfinn with its GEMM half\'s products '
+                                                             'unrounded (fault/fin_4_unrounded), the threshold\'s red checks')
+SPLIT_ADDED_KERNELS['turboexl3_test_pf_dfinn_fin_fault'] = ('test only: turboexl3_pf_dfinn with its finish half\'s products '
+                                                            'unrounded (fault/fin_4_unrounded), a red check')
 
 def split_report(oprog, nprog, ounits, nunits, orig_dir, new_dir, problems, verbose):
     """--split (declarations moved between files, not only files): checks 1 to 4 over the whole tree instead of per file.

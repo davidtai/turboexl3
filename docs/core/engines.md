@@ -295,9 +295,12 @@ Five more options reshape the chain's launches, each off (or at the served shape
 chain's bytes: `t256` (the 128-row tiles' launch over tiles of up to 256 rows on the bm-256 body, its route
 `turboexl3_pf_t256_route`), `cut` (the remainder rule's cutoff), `gu_ncb` (the gate and up GEMM's output blocks per
 threadgroup), `dfin` (the finish as the down GEMM's epilogue at top-1: `turboexl3_pf_dfin`, one launch over every row in
-place of the down GEMM's launches and `fin`, so 6 launches in 5 levels with `t128`) and the plain launches at bm 128 or
-256 with the register path on or off. `Config`'s `pf_t256`, `pf_cut`, `pf_gu_ncb`, `pf_dfin`, `pf_dfr`, `pf_bm` and
-`pf_mixed` set them.
+place of the down GEMM's launches and `fin`, so 6 launches in 5 levels with `t128`; with `dfin_min` N only for the
+experts of at least N rows in the call: the route also writes each expert's rows (`turboexl3_pf_t128n_route`), the
+served down launches skip those experts (`turboexl3_pf_t128_dnmn`, `_dntn`), and one launch writes y
+(`turboexl3_pf_dfinn`: the fused finish's GEMM over the experts of N rows or more, the served finish's statements over
+the rest's zd rows), 8 launches as served) and the plain launches at bm 128 or 256 with the register path on or off.
+`Config`'s `pf_t256`, `pf_cut`, `pf_gu_ncb`, `pf_dfin`, `pf_dfr`, `pf_dfin_min`, `pf_bm` and `pf_mixed` set them.
 
 | kernel | what it computes | launches it replaces |
 |---|---|---|
@@ -312,6 +315,9 @@ place of the down GEMM's launches and `fin`, so 6 launches in 5 levels with `t12
 | `turboexl3_pf_t128_gut`, `turboexl3_pf_t128_dnt` | the shared-decode body at 128 rows over the 128-row tiles, beside the mixed launch; each launch writes its own output | as above |
 | `turboexl3_pf_t256_route` | `t256`: `turboexl3_pf_t128_route` with its big tiles at 256 rows (the `_gut` and `_dnt` texts then run at bm 256) | `_t128_route` |
 | `turboexl3_pf_dfin` | `dfin`: the down GEMM (`_gemm1`'s body) with the finish's statements as its epilogue, over one table or both of the 128-row tiles' tables; y written, zd never | `_t128_dnm`, `_t128_dnt` and `_t128_fin` (or `_gemm1` and `_fin`) |
+| `turboexl3_pf_t128n_route`, `turboexl3_pf_t256n_route` | `dfin_min`: the route (`t256`: the 256-row tiles' route) with each expert's rows in the call (ecnt) | `_t128_route` (`_t256_route`) |
+| `turboexl3_pf_t128_dnmn`, `turboexl3_pf_t128_dntn` | `dfin_min`: the served down launches, a tile of an expert of N rows or more returning at once (zd written only for the rest) | `_t128_dnm`, `_t128_dnt` |
+| `turboexl3_pf_dfinn` | `dfin_min`: one launch writing y: `_dfin`'s GEMM and epilogue over the experts of N rows or more, then the served finish's statements, a (row, 128-block) item a simdgroup, over the rest's zd and zdt rows | `_t128_fin` and `_dfin` |
 | `turboexl3_pf_mid`, `turboexl3_pf_t128_mid` | the gate and up finishes, SwiGLU in `f32`, the down input prepared, and its block sums (`t128`: each row from the launch that computed it) | — |
 | `turboexl3_pf_fin`, `turboexl3_pf_t128_fin` | the down finish and the score-weighted sum of the slots, in slot order, through `inv` (`t128`: each row from the launch that computed it) | — |
 | `turboexl3_pf_prep_v`, `turboexl3_pf_mid_v`, `turboexl3_pf_fin_v` | `aux`: prep, mid and finish with four consecutive elements per lane and several simdgroups per threadgroup | `_prep`, `_mid`, `_fin` |

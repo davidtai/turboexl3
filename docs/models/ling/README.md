@@ -43,11 +43,14 @@ prompt call's `linear` to the same row of a whole-prompt call wherever both call
 layer-major prompt pass's trunk linears; `TURBOEXL3_LING_ROWINV` lines); `rows_test.zig` holds `moeLingRows` to the outside
 plugin's prompt chunk (its take, its casts and `moeLing` at top-1) byte for byte on the loader's views, every chunk of
 a prompt layer's call and a padded one (`TURBOEXL3_LING_ROWS` lines), and each variant of its routed chain (the 256-row
-tiles, the remainder rule's cut, gate|up's column blocks, the finish as the down GEMM's epilogue, the plain launches at
-bm 128 and 256; `prefill.Options`, off by default) to the served engine word for word on synthetic calls at every row
-bucket of an expert (the fused finish at its other stage shapes to that stage shape without it), with six red checks
-that must each be caught: a flipped word, four planted kernel faults (a value, a route, two pure reorderings) and a
-rounding change (`TURBOEXL3_LING_ROWS_VARIANT` and `TURBOEXL3_LING_ROWS_RED` lines). The kernels:
+tiles, the remainder rule's cut, gate|up's column blocks, the finish as the down GEMM's epilogue, also only for the
+experts of at least 64, 80 or 96 rows in the call, the plain launches at bm 128 and 256; `prefill.Options`, off by
+default) to the served engine word for word on synthetic calls at every row bucket of an expert, experts on both sides
+of each threshold and a lognormal-popularity call (the threshold arms also over a ladder of rows per expert; the fused
+finish at its other stage shapes to that stage shape without it), with ten red checks that must each be caught: a
+flipped word, four planted kernel faults (a value, a route, two pure reorderings), a rounding change, and for the
+threshold each half of the launch writing y marked (exactly its rows differ) and a threshold ignored or off by one
+(`TURBOEXL3_LING_ROWS_VARIANT` and `TURBOEXL3_LING_ROWS_RED` lines). The kernels:
 [the core's catalog](../../core/kernels.md) (`turboexl3_fin7co`, `turboexl3_pf_midco`, `turboexl3_pf_mid_vco`,
 `turboexl3_pf_t128_midco`) and [DeepSeek-V4.1's](../deepseek_v41/kernels.md) (`turboexl3_fin7b`, `turboexl3_fin7cob`,
 `turboexl3_fin7bg`, `turboexl3_fin7cobg`).
