@@ -2395,7 +2395,7 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
   (1). No rate arguments.
 - **Replaces:** `turboexl3_pf_t128_route` (the same launch): its tables at 256 rows, so the big tiles' launch
   (`turboexl3_pf_t128_gut` / `_dnt`'s texts at bm 256, 16 simdgroups) decodes an expert's weights once per 256 rows. At a
-  cut of at most 64 an expert of r rows takes ceil(r / 256) tiles (the 128-row route: up to ceil(r / 128) + 1).
+  cut of at most 64 an expert of r rows takes ceil(r / 256) tiles (the 128-row route at that cut: ceil(r / 128)).
 - **Bits:** its text is `turboexl3_pf_t128_route`'s with the two 128-row lines at 256 rows; its tables equal the CPU rule
   `prefill.tileTables(..., 256)`. bm 256 runs bm 128's per-simdgroup K loop, so the chain on its tables gives the
   128-row tiles' bytes.
@@ -2417,19 +2417,21 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 | made at | `src/core/prefill.zig:824` (`const Prefill`) |
 | inputs | `tiles`, `tiles2`, `x0`, `w0`, `xs0`, `order`, `scores`, `svh_d` |
 | outputs | `y` |
-| source | `text_dfin` = `prefill/gemm_1` ++ `prefill/gemm_2` ++ `prefill/gemm_dfin_decl` ++ `prefill/gemm_3_1` ++ `prefill/gemm_dfin_tile` ++ `prefill/gemm_3_3` ++ `prefill/gemm_op1_wx` ++ `prefill/gemm_4` ++ `prefill/gemm_op1_xsz_1` ++ `prefill/gemm_dfin_epi_1` ++ `prefill/finish_2` ++ `prefill/gemm_dfin_load` ++ `prefill/finish_4` ++ `prefill/gemm_dfin_epi_2` (9381 B, `ad5eb2df4ff3`) |
+| source | `text_dfin` = `prefill/gemm_1` ++ `prefill/gemm_2` ++ `prefill/gemm_dfin_decl` ++ `prefill/gemm_3_1` ++ `prefill/gemm_dfin_tile` ++ `prefill/gemm_3_3` ++ `prefill/gemm_op1_wx` ++ `prefill/gemm_4` ++ `prefill/gemm_op1_xsz_1` ++ `prefill/gemm_dfin_epi_1` ++ `prefill/finish_2` ++ `prefill/gemm_dfin_load` ++ `prefill/finish_4` ++ `prefill/gemm_dfin_epi_2` (9667 B, `6d01a236d926`) |
 | header | `header_nax_dfin` = `steel_nax` ++ `prefill/using_steel` ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `prefill/small_helpers` ++ `prefill/gemm_helpers` ++ `prefill/h128` (63060 B, `d36286083098`) |
 
 <!-- /kernel-facts -->
 
 - **Used by:** not served: `Prefill.gemmDFin` with `Options.dfin` (`Config.pf_dfin`, off by default; the outside plugin
-  turboexl3_ling's candidate `MLX_SERVE_LING_PF_DFIN`), at top-1 only (`root.prefillFor` drops it at another top-k):
-  Ling-3.1-flash's prompt calls over gathered rows (`moeLingRows`). With the 128-row tiles (`moeT128With`) it runs over
+  turboexl3_ling's candidate `MLX_SERVE_LING_PF_DFIN`), on every top-1 routed prefill call (`root.prefillFor` drops it at
+  another top-k): Ling-3.1-flash's prompt calls over gathered rows (`moeLingRows`) and its top-1 `moeLing` chunks. With
+  the 128-row tiles (`moeT128With`) it runs over
   both of the route's tables in one launch in place of `turboexl3_pf_t128_dnm`, `turboexl3_pf_t128_dnt` and
   `turboexl3_pf_t128_fin`; with small `.off` (`moeWith`) over the one table in place of `turboexl3_pf_gemm1` and
   `turboexl3_pf_fin`.
-- **Shapes and dtypes:** tiles int32 [ta, 4] (tiles128, or small `.off`'s table) and, with T2, tiles2 int32 [tb, 4] (the
-  mixed table, each of its tiles run as a part-full tile; with T2 0 it is bound and never read); x0 = xd f16 [S, inter]
+- **Shapes and dtypes:** tiles int32 [ta, 4] (tiles128, or small `.off`'s table; one row binds it in the constant address
+  space, so each tile word is read from its own table) and, with T2, tiles2 int32 [tb, 4] (the mixed table, each of its
+  tiles run as a part-full tile; with T2 0 it is bound and never read); x0 = xd f16 [S, inter]
   (mid's down input, sorted, in ALAY's layout); w0 the down trellis u16 [experts, inter/16, hidden/16, NHW]; xs0 = xsd
   f32 [S, inter/128]; order u32 [S] (sorted position to slot); scores f32, bf16 or f16 [S]; svh_d f16 [experts, hidden].
   Out: y OUT_T [S, hidden] (f32 served), row = slot (top-1).
@@ -2449,12 +2451,13 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 - **Pinned by:** `src/models/ling/rows_test.zig` "turboexl3 gpu ling rows variants: the routed chain's variants
   (256-row tiles, the remainder cut, ..." (GPU: dfin, dfin.r32, t256.dfin, t256.dfin.r32, t256.gu2.dfin, p256.dfin,
   p256.dfin.r32, p128.dfin word for word against the served engine at Ling's shapes, n 40 and 32, limits 0 and 10; a
-  planted epilogue fault caught); `src/core/prefill.zig` "turboexl3 prefill variant texts: the 256-row route is the
+  planted epilogue fault and a planted reduction-order fault caught); `src/core/prefill.zig` "turboexl3 prefill variant texts: the 256-row route is the
   128-row route at 256 rows; ..." (CPU: swapped back, `gemm1_text`; the load is the finish's; the store's rounding);
   `src/core/prefill.zig` "turboexl3 prefill variant options: t256 needs t128; ..." (CPU: whole 128-column blocks, one
   down launch, 32 KB); `src/root.zig` "turboexl3 root: the served prefill options follow the config, and the decode
   form is the config's" (CPU: dropped at top-8 and over the mixed launch alone); `src/core/prefill.zig` "turboexl3
-  prefill variant metal sources: the 256-row tiles' route and launches, ..." (CPU print).
+  prefill variant metal sources: the 256-row tiles' route and launches, ..." (CPU print: over two tables, one table, and
+  a first table in the constant address space).
 
 ### `turboexl3_pf_table`
 

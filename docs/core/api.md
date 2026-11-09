@@ -114,7 +114,7 @@ calls build.
 | `pf_t256` | false | prefill, with `pf_t128`: the 128-row tiles' launch over tiles of up to 256 rows on the bm-256 body, so an expert's weights are decoded once per 256 rows | unchanged, tested |
 | `pf_cut` | 64 | prefill, with `pf_t128`: past an expert's full big tiles, a remainder of more than min(`pf_cut`, 127) rows takes one part-full big tile, the rest the mixed launch | unchanged, tested |
 | `pf_gu_ncb` | 1 | prefill: 64-wide output blocks per gate and up GEMM threadgroup: 1, 2 or 4 | unchanged, tested |
-| `pf_dfin` | false | prefill, top-1 calls (`moeSwigluRows`): the finish as the down GEMM's epilogue, one down launch writing y (over the 128-row tiles' two tables, or with `pf_mixed` false over the one table). A geometry built with any `pf_t256`, `pf_cut`, `pf_gu_ncb`, `pf_dfin`, `pf_bm` or `pf_mixed` change prints `[turboexl3] prefill variant engaged: …` | unchanged, tested |
+| `pf_dfin` | false | prefill, every top-1 routed call (an expert streamer's prompt calls): the finish as the down GEMM's epilogue, one down launch writing y (over the 128-row tiles' two tables, or with `pf_mixed` false over the one table). A geometry built with any `pf_t256`, `pf_cut`, `pf_gu_ncb`, `pf_dfin`, `pf_bm` or `pf_mixed` change prints `[turboexl3] prefill variant engaged: …` | unchanged, tested |
 | `pf_dfr` | 64 | prefill, with `pf_dfin`: tile rows per staging round of the fused finish: 32 or 64 | unchanged, tested |
 | `pf_bm` | 64 | prefill: M tile rows, 64, 128 or 256; any but 64 runs without the 128-row tiles | unchanged, tested |
 | `pf_mixed` | true | prefill: the register path for each expert's remainder of at most 32 rows in the GEMMs' launch; false: every tile on the shared-decode body | unchanged, tested |

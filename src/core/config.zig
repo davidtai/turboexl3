@@ -30,8 +30,8 @@ pub const Config = struct {
     pf_cut: u8 = 64,
     /// 64-wide output blocks per gate|up GEMM threadgroup (`prefill.Options.gu_ncb`): 1, 2 or 4. The same bytes.
     pf_gu_ncb: u8 = 1,
-    /// The routed prefill's finish as the down GEMM's epilogue (`prefill.Options.dfin`): top-1 calls (an expert
-    /// streamer's prompt calls, `moeSwigluRows`), the down launch writing y. The same bytes.
+    /// The routed prefill's finish as the down GEMM's epilogue (`prefill.Options.dfin`): every top-1 routed prefill call
+    /// (an expert streamer's prompt calls, `moeSwigluRows`, or `moe` at top-1), the down launch writing y. The same bytes.
     pf_dfin: bool = false,
     /// The fused finish's tile rows per staging round (`prefill.Options.dfr`): 32 or 64. The same bytes.
     pf_dfr: u16 = 64,

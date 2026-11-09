@@ -64,7 +64,7 @@ prompt takes it; the standard test decides that switch.
 trunk linear, `moeLing` and `moeLingBanked`, and the decode forward's linears chained over the 72 layers
 (`TURBOEXL3_LING_TIME` and `TURBOEXL3_LING_CHAIN` lines), and the prompt call over gathered rows against the plugin's
 chunk at its call shape (`TURBOEXL3_LING_ROWS_TIME` lines) with each routed-chain variant's arm against the served
-engine (`TURBOEXL3_LING_ROWS_TIME_ARM` lines). It is a diagnostic: it asserts nothing, and its numbers steer
+engine, there, at uniform popularity and over a ladder of rows per expert (`TURBOEXL3_LING_ROWS_TIME_ARM` lines). It is a diagnostic: it asserts nothing, and its numbers steer
 work; they never decide it.
 
 The shared expert (`src/models/ling/shared.zig`) takes the composed chain's four dependent levels at decode rows (the

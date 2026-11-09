@@ -1818,6 +1818,9 @@ SPLIT_ADDED_KERNELS['turboexl3_test_pf_dfin_fault'] = ('test only: turboexl3_pf_
                                                        'products unrounded, fault/dfin_4 in finish_4\'s place), a red check')
 SPLIT_ADDED_KERNELS['turboexl3_test_pf_t256_route_fault'] = ('test only: turboexl3_pf_t256_route with a planted fault (its '
                                                              'first tile on the next expert, fault/t256_store), a red check')
+SPLIT_ADDED_KERNELS['turboexl3_test_pf_dfin_order_fault'] = ('test only: turboexl3_pf_dfin with a planted reduction-order '
+                                                             'fault (tile 0\'s H128 stages reordered, fault/dfin_4_order in '
+                                                             'finish_4\'s place), a red check')
 
 def split_report(oprog, nprog, ounits, nunits, orig_dir, new_dir, problems, verbose):
     """--split (declarations moved between files, not only files): checks 1 to 4 over the whole tree instead of per file.

@@ -1906,7 +1906,10 @@ test "turboexl3 prefill variant metal sources: the 256-row tiles' route and laun
     // the 256-row tiles' launches: the served gate|up and down texts at bm 256 (16 simdgroups)
     printMetal("turboexl3_pf_t256_gut", header_nax, pin[2] ++ v1[0], pin[6], gemm2_text);
     printMetal("turboexl3_pf_t256_dnt", header_nax, pin[3] ++ v1[0], pin[7], gemm1_text);
-    // the fused down GEMM: the 128-row tiles' two tables at bm 128 (64-row rounds), one table at bm 256 (32-row rounds)
+    // the fused down GEMM: the 128-row tiles' two tables at bm 128 (64-row rounds), one table at bm 256 (32-row rounds),
+    // and the two tables with the first in the constant address space (MLX binds an input of fewer than 8 words there: a
+    // call whose 128-row table has one row)
     printMetal("turboexl3_pf_dfin_t2", header_nax_dfin, pin[3] ++ pin[5] ++ v1[2], v1[1], text_dfin);
     printMetal("turboexl3_pf_dfin_t1", header_nax_dfin, pin[3] ++ v1[0] ++ v1[3], v1[1], text_dfin);
+    printMetal("turboexl3_pf_dfin_t2c", header_nax_dfin, pin[3] ++ pin[5] ++ v1[2], v1[4], text_dfin);
 }

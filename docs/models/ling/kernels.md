@@ -908,9 +908,10 @@ GEMVs), the fused-GEMM option, pg2 and an un-rotated resident trellis keep the c
 
 ## `src/models/ling/rows_test.zig`
 
-The red checks' planted faults: kernels made only by the routed chain's variant byte test, each a served variant's
-text with one piece swapped for a fault (`kernels/test/fault/`), so the test shows its byte comparison catches a
-kernel-level fault of each kind it guards.
+The red checks' planted faults: kernels made only by the routed chain's variant byte test, each a variant's text with
+one piece swapped for a fault (`kernels/test/fault/`), so the test shows its byte comparison catches a kernel-level fault
+of each kind it guards: a value one tile computes wrong, a tile on the wrong expert, and a reduction whose order alone
+changed.
 
 ### `turboexl3_test_pf_dfin_fault`
 
@@ -921,7 +922,7 @@ kernel-level fault of each kind it guards.
 | made at | `src/models/ling/rows_test.zig:667` (`test turboexl3 gpu ling rows variants: the routed chain's variants (256-row tiles, the remainder cut, gate-up column blocks, the fused finish, the plain launches) are the served engine's words on synthetic calls at every row bucket, n 40 and 32, limits 0 and 10; planted faults are caught (TURBOEXL3_GPU=1)`) |
 | inputs | `tiles`, `tiles2`, `x0`, `w0`, `xs0`, `order`, `scores`, `svh_d` |
 | outputs | `y` |
-| source | `comptime prefill.dfinText(@embedFile("kernels/test/fault/dfin_4.metal"))` = `prefill/gemm_1` ++ `prefill/gemm_2` ++ `prefill/gemm_dfin_decl` ++ `prefill/gemm_3_1` ++ `prefill/gemm_dfin_tile` ++ `prefill/gemm_3_3` ++ `prefill/gemm_op1_wx` ++ `prefill/gemm_4` ++ `prefill/gemm_op1_xsz_1` ++ `prefill/gemm_dfin_epi_1` ++ `prefill/finish_2` ++ `prefill/gemm_dfin_load` ++ `ling:test/fault/dfin_4` ++ `prefill/gemm_dfin_epi_2` (9569 B, `3bfede420e85`) |
+| source | `comptime prefill.dfinText(@embedFile("kernels/test/fault/dfin_4.metal"))` = `prefill/gemm_1` ++ `prefill/gemm_2` ++ `prefill/gemm_dfin_decl` ++ `prefill/gemm_3_1` ++ `prefill/gemm_dfin_tile` ++ `prefill/gemm_3_3` ++ `prefill/gemm_op1_wx` ++ `prefill/gemm_4` ++ `prefill/gemm_op1_xsz_1` ++ `prefill/gemm_dfin_epi_1` ++ `prefill/finish_2` ++ `prefill/gemm_dfin_load` ++ `ling:test/fault/dfin_4` ++ `prefill/gemm_dfin_epi_2` (9855 B, `c6a29c20d2a7`) |
 | header | `prefill.header_nax_dfin` = `steel_nax` ++ `prefill/using_steel` ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `prefill/small_helpers` ++ `prefill/gemm_helpers` ++ `prefill/h128` (63060 B, `d36286083098`) |
 
 <!-- /kernel-facts -->
@@ -961,3 +962,30 @@ kernel-level fault of each kind it guards.
 - **Bits:** wrong on purpose: that tile's rows are computed with another expert's weights.
 - **Pinned by:** `src/models/ling/rows_test.zig` "turboexl3 gpu ling rows variants: ..." (GPU: its y must differ from
   the served engine's, `TURBOEXL3_LING_ROWS_RED` fault=t256_tile0_wrong_expert).
+
+### `turboexl3_test_pf_dfin_order_fault`
+
+<!-- kernel-facts: turboexl3_test_pf_dfin_order_fault -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/ling/rows_test.zig:714` (`test turboexl3 gpu ling rows variants: the routed chain's variants (256-row tiles, the remainder cut, gate-up column blocks, the fused finish, the plain launches) are the served engine's words on synthetic calls at every row bucket, n 40 and 32, limits 0 and 10; planted faults are caught (TURBOEXL3_GPU=1)`) |
+| inputs | `tiles`, `tiles2`, `x0`, `w0`, `xs0`, `order`, `scores`, `svh_d` |
+| outputs | `y` |
+| source | `comptime prefill.dfinText(@embedFile("kernels/test/fault/dfin_4_order.metal"))` = `prefill/gemm_1` ++ `prefill/gemm_2` ++ `prefill/gemm_dfin_decl` ++ `prefill/gemm_3_1` ++ `prefill/gemm_dfin_tile` ++ `prefill/gemm_3_3` ++ `prefill/gemm_op1_wx` ++ `prefill/gemm_4` ++ `prefill/gemm_op1_xsz_1` ++ `prefill/gemm_dfin_epi_1` ++ `prefill/finish_2` ++ `prefill/gemm_dfin_load` ++ `ling:test/fault/dfin_4_order` ++ `prefill/gemm_dfin_epi_2` (10287 B, `68a1c6fbdf9d`) |
+| header | `prefill.header_nax_dfin` = `steel_nax` ++ `prefill/using_steel` ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `prefill/small_helpers` ++ `prefill/gemm_helpers` ++ `prefill/h128` (63060 B, `d36286083098`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** test only: the red check in `src/models/ling/rows_test.zig` "turboexl3 gpu ling rows variants: ...",
+  swapped into a `Prefill`'s `dfin_k` for one call.
+- **Shapes and dtypes:** `turboexl3_pf_dfin`'s.
+- **Grid and threadgroup:** `turboexl3_pf_dfin`'s (`Prefill.gemmDFin` launches it).
+- **Template args:** `turboexl3_pf_dfin`'s.
+- **Replaces:** nothing: a planted fault, `turboexl3_pf_dfin` with tile 0's H128 run with its two in-lane stages before
+  its five shuffle stages (`ling:test/fault/dfin_4_order` in `finish_4`'s place): the same transform in exact
+  arithmetic, its f32 sums in another order.
+- **Bits:** wrong on purpose: tile 0's rows of y differ from the chain's wherever the reassociated sums round to another
+  f16 word.
+- **Pinned by:** `src/models/ling/rows_test.zig` "turboexl3 gpu ling rows variants: ..." (GPU: its y must differ from
+  the served engine's, `TURBOEXL3_LING_ROWS_RED` fault=dfin_tile0_h128_reordered).

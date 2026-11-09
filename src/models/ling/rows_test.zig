@@ -27,15 +27,17 @@
 //!   map, at n 40 and 32, limits 0 and 10, over synthetic calls (never a prompt's routing): every bucket edge of an
 //!   expert's rows (1-32, 33-64, 65-128, 129-256, 257-288, 289-512), the 4096-pair maximum call, many small experts,
 //!   lognormal-skewed counts, one hot expert, a padded 5-pair call. Red checks: a flipped output word, a planted
-//!   epilogue fault (one tile's f16 rounding dropped), a planted route fault (one 256-row tile on the wrong expert) and
-//!   the GEMM's weight rounding changed (the deferred MUL1 map off) must each show differing words. Lines:
+//!   epilogue fault (one tile's f16 rounding dropped), a planted route fault (one 256-row tile on the wrong expert), the
+//!   GEMM's weight rounding changed (the deferred MUL1 map off) and a planted reduction-order fault (one tile's H128
+//!   stages reordered: the same values in exact arithmetic) must each show differing words. Lines:
 //!   TURBOEXL3_LING_ROWS_VARIANT, TURBOEXL3_LING_ROWS_RED.
 //! - Timing (TURBOEXL3_LING_TIME=1 with TURBOEXL3_GPU=1; asserts nothing, guidance only): the rows path against the
 //!   plugin's chain at the plugin's call shape (the first chunk of a 4096- and a 16384-token layer's call over 512
 //!   experts at top-8, x bf16), min and median us per call over 8 rounds after 2 warm, each round's graph built and
 //!   evaluated alone, and the two outputs' differing words. Lines: TURBOEXL3_LING_ROWS_TIME. Then each variant's arm on
-//!   the same call through the row map against the served engine's, and a 16384-token layer at uniform popularity
-//!   (about 256 rows an expert): TURBOEXL3_LING_ROWS_TIME_ARM.
+//!   the same call through the row map against the served engine's, a 16384-token layer at uniform popularity (about
+//!   256 rows an expert) and a ladder of rows per expert (8 to 512, every expert of a call at one count, about 4096
+//!   pairs a call: the sweep the remainder cut and the 256-row tiles are chosen from): TURBOEXL3_LING_ROWS_TIME_ARM.
 const std = @import("std");
 const sdk = @import("sdk");
 const mlx = sdk.mlx;
@@ -650,12 +652,10 @@ test "turboexl3 gpu ling rows variants: the routed chain's variants (256-row til
             var served = try prefill.Prefill.init(geo, servedOptions(n, true));
             defer served.deinit();
             const want = try g.adopt(try engineRows(&served, s, xb, o, ops));
-            // 1. one output word flipped (the comparison counts exactly it)
+            // 1. one output word flipped: the served engine's own y with one word's lowest bit flipped (the comparison counts
+            // exactly it)
             {
-                var pf = try prefill.Prefill.init(geo, vT(n, true, 64, 1, true, 64));
-                defer pf.deinit();
-                const got = try g.adopt(try engineRows(&pf, s, xb, o, ops));
-                const c = try compare(a, &g, try flipOne(a, &g, got, (mlx.mlx_array_size(got) / 2) | 1), want);
+                const c = try compare(a, &g, try flipOne(a, &g, want, (mlx.mlx_array_size(want) / 2) | 1), want);
                 const caught = c.differing == 1;
                 std.debug.print("TURBOEXL3_LING_ROWS_RED n={d} fault=flipped_word differing={d}/{d} caught={}\n", .{ n, c.differing, c.of, caught });
                 if (!caught) failed = true;
@@ -704,6 +704,23 @@ test "turboexl3 gpu ling rows variants: the routed chain's variants (256-row til
                 const c = try compare(a, &g, got, want);
                 const caught = c.differing > 0;
                 std.debug.print("TURBOEXL3_LING_ROWS_RED n={d} fault=weights_rounded_first differing={d}/{d} caught={}\n", .{ n, c.differing, c.of, caught });
+                if (!caught) failed = true;
+            }
+            // 5. a reduction's order changed and nothing else: the fused finish with tile 0's H128 stages in another order
+            // (the same transform in exact arithmetic, its f32 sums reassociated; a planted fault in the kernel)
+            {
+                var pf = try prefill.Prefill.init(geo, vT(n, false, 64, 1, true, 64));
+                defer pf.deinit();
+                const fault = ks.newKernel("turboexl3_test_pf_dfin_order_fault", &prefill.dfin_in, &prefill.dfin_out, comptime prefill.dfinText(@embedFile("kernels/test/fault/dfin_4_order.metal")), prefill.header_nax_dfin, true) orelse return error.KernelCreateFailed;
+                defer root.decode.freeKernel(fault);
+                const kept = pf.dfin_k;
+                pf.dfin_k = fault;
+                defer pf.dfin_k = kept;
+                _ = mlx.mlx_clear_cache();
+                const got = try g.adopt(try engineRows(&pf, s, xb, o, ops));
+                const c = try compare(a, &g, got, want);
+                const caught = c.differing > 0;
+                std.debug.print("TURBOEXL3_LING_ROWS_RED n={d} fault=dfin_tile0_h128_reordered differing={d}/{d} caught={}\n", .{ n, c.differing, c.of, caught });
                 if (!caught) failed = true;
             }
         }
@@ -835,6 +852,7 @@ test "turboexl3 gpu ling timing: the prompt call over gathered rows (moeLingRows
             const c1 = chunkEnd(s_slot, 0);
             const xb = try ds_test.randBf16(a, &g, urnd, &.{ ci(tokens), ci(hidden) });
             try timeVariants(a, &g, s, n, experts, "uniform", tokens, xb, s_act[0..c1], s_slot[0..c1], bank);
+            try timeLadder(a, &g, s, n, experts, urnd, tokens, xb, bank);
         }
     }
 }
@@ -862,5 +880,26 @@ fn timeVariants(a: std.mem.Allocator, g: *G, s: mlx.mlx_stream, n: u32, experts:
         const t = try timeArm(g, .{ .s = s, .pf = &pf, .x = xb, .o = o, .ops = ops });
         const c = try compare(a, g, try g.adopt(try engineRows(&pf, s, xb, o, ops)), want);
         std.debug.print("TURBOEXL3_LING_ROWS_TIME_ARM n={d} routing={s} of_tokens={d} pairs={d} experts={d} arm={s} min_us={d:.1} med_us={d:.1} tflops={d:.2} vs_served_min={d:.3} differing={d}/{d}\n", .{ n, routing, tokens, act.len, runsOf(slot), v.name, t[0], t[1], flops / (t[0] * 1e6), t[0] / base[0], c.differing, c.of });
+    }
+}
+
+/// The variants' arms over a ladder of rows per expert (guidance only: the sweep the remainder rule's cut and the 256-row
+/// tiles are chosen from, over row counts, never a prompt's routing): for each count r, a call of min(4096 / r, 512)
+/// experts of r rows each (about 4096 pairs), act rows drawn at random, through `timeVariants`. Lines:
+/// TURBOEXL3_LING_ROWS_TIME_ARM with routing=ladder<r>.
+fn timeLadder(a: std.mem.Allocator, g: *G, s: mlx.mlx_stream, n: u32, experts: u32, rnd: std.Random, tokens: u32, xb: mlx.mlx_array, bank: root.Bank) !void {
+    const ladder = [_]u32{ 8, 16, 24, 32, 48, 64, 80, 96, 112, 128, 160, 192, 224, 256, 272, 288, 320, 384, 448, 512 };
+    var counts: [512]u32 = undefined;
+    for (ladder) |rpe| {
+        const lm = g.mark();
+        defer g.resetTo(lm);
+        const ne: usize = @min(@min(counts.len, experts), 4096 / rpe);
+        @memset(counts[0..ne], rpe);
+        const call = try synthCall(a, rnd, counts[0..ne], experts, tokens);
+        defer a.free(call.act);
+        defer a.free(call.slot);
+        var name_buf: [16]u8 = undefined;
+        const name = try std.fmt.bufPrint(&name_buf, "ladder{d}", .{rpe});
+        try timeVariants(a, g, s, n, experts, name, tokens, xb, call.act, call.slot, bank);
     }
 }
