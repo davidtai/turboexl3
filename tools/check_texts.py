@@ -1864,6 +1864,18 @@ ADDED_FILES['models/ling/f16pairs_test.zig'] = ('moeLingRowsPairsF16 and the com
 SPLIT_ADDED_KERNELS['turboexl3_ling_combine_parts_h'] = ('turboexl3_ling_combine_parts over f16 sources (PF_F16_PAIRS): '
                                                          'src_parts_h and pick_h, the source pointers half, the same '
                                                          'statements; the product widens each word exactly')
+# L3 (turboexl3_ling's MLX_SERVE_LING_PF_MOE_TAIL): a layer-major MoE layer's tail at a prompt span's rows in one launch
+# over its wide routed call's JOINLESS parts (moeTailWide), f32 and f16 sources, and the red check's planted fault
+SPLIT_ADDED_KERNELS['turboexl3_ling_moe_tail_wide'] = ('the MoE tail at prompt widths (models/ling/tail.zig): tail_we ++ '
+                                                        'tail_1 ++ tail_delta_wide ++ tail_2, the parts delta with the '
+                                                        'combine\'s 24-source pick, W and eps from WE; header the '
+                                                        'combine\'s pick')
+SPLIT_ADDED_KERNELS['turboexl3_ling_moe_tail_wide_h'] = ('turboexl3_ling_moe_tail_wide over f16 sources (PF_F16_PAIRS): '
+                                                          'tail_delta_wide_h, the source pointer half and the combine\'s '
+                                                          'pick_h, the same statements')
+SPLIT_ADDED_KERNELS['turboexl3_test_ling_moe_tail_wide_sumsq_rev_fault'] = ('test only: turboexl3_ling_moe_tail_wide_h '
+                                                                             'with the sum of squares reversed '
+                                                                             '(fault/tail_2_sumsq_rev), a red check')
 ADDED_FILES['models/ling/mla_rows_test.zig'] = ('mlaRows held to the served launches word for word (the one-row matmul, the '
                                                 'plugin\'s denseRows) at kv_b and the head gate, rows 1 to 16 and caps 1 to 8, '
                                                 'with red checks (GPU); the fault texts (CPU); servedCall and loaderWeight for '

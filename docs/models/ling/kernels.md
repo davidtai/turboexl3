@@ -553,7 +553,7 @@ rounded to T again: the MoE block's astype and add.
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/ling/tail.zig:68` (`fn kernelOf`) |
+| made at | `src/models/ling/tail.zig:97` (`fn kernelOf`) |
 | inputs | `H`, `Y`, `WT`, `XS`, `W`, `eps` |
 | outputs | `H_NEW`, `HN` |
 | source | `text` = `ling:tail/tail_1` ++ `ling:tail/tail_delta` ++ `ling:tail/tail_2` (2241 B, `ebc2e07ccb65`) |
@@ -587,7 +587,7 @@ rounded to T again: the MoE block's astype and add.
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/ling/tail.zig:77` (`fn partsKernelOf`) |
+| made at | `src/models/ling/tail.zig:106` (`fn partsKernelOf`) |
 | inputs | `H`, `s0`, `s1`, `s2`, `s3`, `s4`, `s5`, `s6`, `s7`, `loc`, `WT`, `XS`, `W`, `eps` |
 | outputs | `H_NEW`, `HN` |
 | source | `text_parts` = `ling:tail/tail_1` ++ `ling:tail/tail_delta_parts` ++ `ling:tail/tail_2` (2471 B, `2a1a6a50ab95`) |
@@ -615,6 +615,75 @@ rounded to T again: the MoE block's astype and add.
   place ..." (GPU, words: the residual and the normed rows against the served chain and against `moeTail` over the
   streamer's join, at rows 1 to 8, limits 0 and 10, one to three sources and all eight, the later miss part's row last
   where two carry a pair; the refusals).
+
+### `turboexl3_ling_moe_tail_wide`
+
+<!-- kernel-facts: turboexl3_ling_moe_tail_wide -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/ling/tail.zig:116` (`fn wideKernelsOf`) |
+| inputs | `H`, `s0`, `s1`, `s2`, `s3`, `s4`, `s5`, `s6`, `s7`, `s8`, `s9`, `s10`, `s11`, `s12`, `s13`, `s14`, `s15`, `s16`, `s17`, `s18`, `s19`, `s20`, `s21`, `s22`, `s23`, `loc`, `WT`, `XS`, `WE` |
+| outputs | `H_NEW`, `HN` |
+| source | `text_wide` = `ling:tail/tail_we` ++ `ling:tail/tail_1` ++ `ling:tail/tail_delta_wide` ++ `ling:tail/tail_2` (3036 B, `aac99e729776`) |
+| header | `header_wide` = `ling:combine/pick` (1467 B, `7dc35360395d`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** Ling-3.1-flash: `root.ling.moeTailWide`, a layer-major MoE layer's end at a prompt span's rows, read
+  straight from its wide routed call's JOINLESS parts; the outside plugin's opt-in (turboexl3_ling's
+  `MLX_SERVE_LING_PF_MOE_TAIL=1`, L3), on f32 sources (PF_F16_PAIRS off).
+- **Shapes and dtypes:** H [rows, D] in T (bf16 or f16; any rows, D a multiple of 4 up to 4096), s0..s23 f32
+  [r_i, D] (1 to 24 sources: the call's outputs as the streamer plans them, above 24 the smallest merged into the
+  last; an unused slot aliases s0), loc int32 [rows, K, 2] (each of the span's pairs' (source, row); unchecked), WT
+  [rows, K] (bf16, f16 or f32), XS [rows, D] in T (the span's shared expert output), WE f32 [D + 1] (the next norm's
+  weight widened, then eps); H_NEW and HN in H's shape and T. K 1 to 8.
+- **Grid and threadgroup:** `turboexl3_ling_moe_tail`'s: `(D / 4 · rows, 1, 1)` / `(D / 4, 1, 1)`, one threadgroup a
+  row at any row count (MLX's fast rms_norm runs its single-row kernel the same way at every row count).
+- **Template args:** T, D, TN, K, as `turboexl3_ling_moe_tail`'s.
+- **Replaces:** a prompt span's end after its call's combine (`turboexl3_ling_combine_parts`'s f32 sum, written and
+  read again), the streamed source's astype to T, the span's slice, the block's add of the shared expert, MLX's add of
+  the residual and MLX's fast rms_norm at the next layer's start (or the final norm): 5 launches a span and the call's
+  combine with one launch a span; about 1.35 GB of passes a MoE layer at the standard request.
+- **Bits:** the served chain's words: the delta is `tail_delta_parts`' statements with the combine's 24-source pick
+  (each product rounded to f32 alone, `col_reduce_small`'s fold in k order, rounded to T, plus the shared expert,
+  rounded to T, as `turboexl3_ling_combine_parts` and the block's astype and add give them), then the add_norm's
+  statements, whose residual is MLX's add's words and whose normed rows are MLX's fast rms_norm's (its single-row
+  kernel: four columns a thread, the per-simdgroup sums folded through 32 slots, precise rsqrt, `w * T(x * inv)`),
+  the same statements at every row count. W and eps come from WE: each f32 word there is the T word widened.
+- **Pinned by:** `src/models/ling/tail_test.zig` "turboexl3 gpu ling tail wide: moeTailWide gives the served chain's
+  words at prompt widths ..." (GPU, words: the residual and the normed rows against the served chain at the
+  standard request's spans 4,096 x 4, 1,965 and 31 of one 18,380-token call over 24 merged sources, f32 at the
+  first, 1,965- and 31-row spans; the refusals) and "turboexl3 ling tail wide texts: ..." (CPU).
+
+### `turboexl3_ling_moe_tail_wide_h`
+
+<!-- kernel-facts: turboexl3_ling_moe_tail_wide_h -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/ling/tail.zig:118` (`fn wideKernelsOf`) |
+| inputs | `H`, `s0`, `s1`, `s2`, `s3`, `s4`, `s5`, `s6`, `s7`, `s8`, `s9`, `s10`, `s11`, `s12`, `s13`, `s14`, `s15`, `s16`, `s17`, `s18`, `s19`, `s20`, `s21`, `s22`, `s23`, `loc`, `WT`, `XS`, `WE` |
+| outputs | `H_NEW`, `HN` |
+| source | `text_wide_h` = `ling:tail/tail_we` ++ `ling:tail/tail_1` ++ `ling:tail/tail_delta_wide_h` ++ `ling:tail/tail_2` (3037 B, `8c1d4cf631d8`) |
+| header | `header_wide_h` = `ling:combine/pick_h` (1444 B, `cbbf84fad66f`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** Ling-3.1-flash: `root.ling.moeTailWide` over f16 sources, the outside plugin's opt-in (turboexl3_ling's
+  `MLX_SERVE_LING_PF_MOE_TAIL=1`, L3) on its served sources (PF_F16_PAIRS, kept: every prompt pair stored as f16).
+- **Shapes and dtypes:** `turboexl3_ling_moe_tail_wide`'s, with s0..s23 f16 [r_i, D] (each word the f16 value of the
+  f32 word the served f32 call stores); every source f16 (a mix is refused: the served combine widens it).
+- **Grid and threadgroup:** `turboexl3_ling_moe_tail_wide`'s.
+- **Template args:** `turboexl3_ling_moe_tail_wide`'s.
+- **Replaces:** `turboexl3_ling_combine_parts_h`'s f32 sum and the same five launches a span as
+  `turboexl3_ling_moe_tail_wide`.
+- **Bits:** `turboexl3_ling_moe_tail_wide`'s words: `tail_delta_wide_h` is `tail_delta_wide` with the source pointer
+  half and the combine's pick_h, so each product `float(yk[..]) · w` widens the half to f32 exactly before it
+  multiplies, as `turboexl3_ling_combine_parts_h` does.
+- **Pinned by:** `src/models/ling/tail_test.zig` "turboexl3 gpu ling tail wide: ..." (GPU, words: the residual and the
+  normed rows against the served chain at every span of the standard request's call) and "turboexl3 ling tail wide
+  texts: ..." (CPU: the f16 text is the f32 one with the source pointer half and pick_h, nothing else).
 
 ## `src/models/ling/router.zig`
 
@@ -1616,3 +1685,29 @@ its word comparison catches a change of a sum's order alone. Each runs on rows b
 - **Bits:** wrong on purpose: the built row whose four words sit in simdgroups 0 to 3 sums to 0, not 2.
 - **Pinned by:** `src/models/ling/mla_rows_test.zig` "turboexl3 gpu ling mla rows: ..." (GPU:
   `TURBOEXL3_LING_MLA_ROWS_RED` fault=group_order_reversed, which must differ from the served words).
+
+### `turboexl3_test_ling_moe_tail_wide_sumsq_rev_fault`
+
+<!-- kernel-facts: turboexl3_test_ling_moe_tail_wide_sumsq_rev_fault -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/ling/tail_test.zig:697` (`test turboexl3 gpu ling tail wide: moeTailWide gives the served chain's words at prompt widths (the combine over the call's JOINLESS parts, the block's astype and shared add, MLX's add and fast rms_norm) at the standard request's spans 4096 x 4, 1965 and 31 over 24 merged sources, f16 and f32; a planted reordering of the norm shows, and its refusals (TURBOEXL3_GPU=1)`) |
+| inputs | `H`, `s0`, `s1`, `s2`, `s3`, `s4`, `s5`, `s6`, `s7`, `s8`, `s9`, `s10`, `s11`, `s12`, `s13`, `s14`, `s15`, `s16`, `s17`, `s18`, `s19`, `s20`, `s21`, `s22`, `s23`, `loc`, `WT`, `XS`, `WE` |
+| outputs | `H_NEW`, `HN` |
+| source | `text_wide_sumsq_rev` = `ling:tail/tail_we` ++ `ling:tail/tail_1` ++ `ling:tail/tail_delta_wide_h` ++ `ling:test/fault/tail_2_sumsq_rev` (3226 B, `f241975d9cc6`) |
+| header | `tail.header_wide_h` = `ling:combine/pick_h` (1444 B, `cbbf84fad66f`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** the red check only: a planted fault, never served.
+- **Shapes and dtypes:** `turboexl3_ling_moe_tail_wide_h`'s.
+- **Grid and threadgroup:** `turboexl3_ling_moe_tail_wide_h`'s.
+- **Template args:** `turboexl3_ling_moe_tail_wide_h`'s.
+- **Replaces:** nothing: a planted fault, `turboexl3_ling_moe_tail_wide_h` with each thread's four squares summed in
+  reverse column order after the loop (`ling:test/fault/tail_2_sumsq_rev` in `tail_2`'s place): the same sum of
+  squares in another order.
+- **Bits:** wrong on purpose: the residual keeps the chain's words, the normed rows must not (a reordered sum of
+  squares moves some rows' rsqrt).
+- **Pinned by:** `src/models/ling/tail_test.zig` "turboexl3 gpu ling tail wide: ..." (GPU: `TURBOEXL3_LING_PF_TAIL_RED`
+  fault=sumsq_rev, whose normed rows must differ from the chain's and whose residual must not).
