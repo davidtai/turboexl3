@@ -1598,6 +1598,7 @@ test "turboexl3 gpu ling prompt linears: a prompt call's rows of root.linear hav
 const ds_test = @import("../deepseek_v41/deepseek_test.zig");
 const mla_latent = @import("mla_latent.zig");
 const mla_latent_test = @import("mla_latent_test.zig");
+const bproj_test = @import("bproj_test.zig");
 
 /// A serial decode step and the verify widths of 2 to 4 rows, the engine's prompt chunk and a layer-major call
 const time_rows = [_]u32{ 1, 2, 3, 4, 4096, 16384 };
@@ -1736,6 +1737,7 @@ test "turboexl3 gpu ling timing: every trunk linear, moeLing and moeLingBanked a
         }
     }
     try timeDecVariants(a, &g, s, cfg);
+    try bproj_test.timeKdaVariants(a, &g, s);
     var nbuf: [8]u32 = undefined;
     const rates = envList("TURBOEXL3_LING_N", &.{ 40, 32 }, &nbuf);
     for (rates) |n| {

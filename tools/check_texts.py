@@ -1858,6 +1858,17 @@ SPLIT_ADDED_KERNELS['turboexl3_dense_dec0_pf'] = ('dec_variant pf: text_dec0 wit
                                                   '(dec_pf_decl, dec_pf_next; dec_pf_ww in dec_tile ++ dec_gemv_arrive_2_1\'s '
                                                   'place)')
 SPLIT_ADDED_KERNELS['turboexl3_dense_dec0_pft4'] = 'dec_variant pft4: text_dec0_pf over header5_t4'
+# D35, the KDA projections' variant launch (Config.kda_bfirst, kda_bt0 / kda_bt1, dec_variant; kdaproj.zig). The served
+# dec0b keeps its text: kdaproj/bmember.metal is cut into bmember_1 (b's threadgroups and rows) and bmember_2
+SPLIT_ADDED_KERNELS['turboexl3_ling_kdaproj_dec0bv'] = ('kdaProjB\'s variant launch: kdaproj/bfirst in bmember_1\'s place '
+                                                        '(BF: b\'s threadgroups first, a row a simdgroup), head_v (BT0 for '
+                                                        'member 0, BT1 for members 1 and 2) in head\'s, then the member '
+                                                        'choice and DEC-ONE\'s statements verbatim in each member\'s branch '
+                                                        '(bt_0, bt_1, bt_close set BTC)')
+SPLIT_ADDED_KERNELS['turboexl3_ling_kdaproj_dec0bv_t4'] = 'turboexl3_ling_kdaproj_dec0bv over dense.header5_t4'
+SPLIT_ADDED_KERNELS['turboexl3_ling_kdaproj_dec0bv_pf'] = ('turboexl3_ling_kdaproj_dec0bv with dense.dec_body0_pf in each '
+                                                           'branch')
+SPLIT_ADDED_KERNELS['turboexl3_ling_kdaproj_dec0bv_pft4'] = 'turboexl3_ling_kdaproj_dec0bv_pf over dense.header5_t4'
 
 def split_report(oprog, nprog, ounits, nunits, orig_dir, new_dir, problems, verbose):
     """--split (declarations moved between files, not only files): checks 1 to 4 over the whole tree instead of per file.
