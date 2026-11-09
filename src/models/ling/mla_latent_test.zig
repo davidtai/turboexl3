@@ -582,7 +582,7 @@ fn reportMlxError(msg: [*:0]const u8, _: ?*anyopaque) callconv(.c) void {
 /// launch MLX refuses (its threadgroup past the pipeline's limit) fails its own lines and the run goes on; mlx-c's
 /// default handler ends the process. Off: that default again.
 pub fn reportMlxErrors(on: bool) void {
-    const Handler = @typeInfo(@TypeOf(setErrorHandler)).@"fn".params[0].type.?;
+    const Handler = @typeInfo(@TypeOf(setErrorHandler)).@"fn".param_types[0].?;
     setErrorHandler(if (on) @as(Handler, @ptrCast(&reportMlxError)) else null, null, null);
 }
 
