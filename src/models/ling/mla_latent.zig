@@ -14,11 +14,22 @@
 //! it sees, in order): a verify call's row has the bits of a one-row call at its position, so an exact verify can run
 //! its rows in one call. Against the host's composed latent attention (MLX's matmuls and softmax) the sums run in other
 //! orders: within tolerance, not byte for byte (`mla_latent_test.zig`).
+//!
+//! Launch 2 has three variants (`Attn`), each a host's opt-in (`Config.mla_latent_rows`, `mla_latent_stage`,
+//! `mla_latent_block`) and each launch 2's words, every tile at its place and every product and sum in its order
+//! (`mla_latent_test.zig`, word for word):
+//! - `turboexl3_ling_mla_attn_rows`: one threadgroup a (key group, 32 heads) for 2 or 4 rows of a call (`rows2`,
+//!   `rows4`), the group's latents and rope keys read once for those rows, each row's softmax and sums its own;
+//! - `turboexl3_ling_mla_attn_stage`: each sub-chunk's latents and rope keys converted to f32 once a threadgroup, in
+//!   threadgroup memory, and every simdgroup's tiles read there;
+//! - `turboexl3_ling_mla_attn_block`: 2 x 2 score tiles a simdgroup over 4 sub-chunks at a time and 4 x 4 output tiles,
+//!   so each word a simdgroup reads serves more tiles.
 const std = @import("std");
 const mlx = @import("sdk").mlx;
 const ks = @import("sdk").kernel_launch;
 const Global = @import("../../core/global.zig").Global;
 const decode = @import("../../core/decode.zig");
+const config = @import("../../core/config.zig");
 
 fn freeArr(a: mlx.mlx_array) void {
     _ = mlx.mlx_array_free(a);
@@ -45,14 +56,46 @@ comptime {
     if (kpt % ck != 0 or ck != 32 or dl != 4 * 128 or dr % 8 != 0 or dv % 4 != 0 or dl % 32 != 0) @compileError("mla_latent: the widths the texts assume");
 }
 
+comptime {
+    // the variants' texts: the stage text stages the values a column a thread (DL threads), the scores' keys in slabs of
+    // 64 dims (the rope key one slab, CK keys of 64 dims 4 words a thread) in a buffer that holds 8 keys of DL + 4 too;
+    // the block text runs 16 simdgroups of 32 columns, 2 x 2 score tiles over 4 sub-chunks (16 key tiles) and 4 M tiles
+    if (dl != attn_threads or dr != 64 or dl % 64 != 0 or (ck * 64) % attn_threads != 0 or 2 * ck * 68 < 8 * (dl + 4) or
+        attn_threads != 16 * 32 or dl != 16 * 32 or heads_per_group != 4 * 8 or 4 * ck != 16 * 8) @compileError("mla_latent: the widths the variants' texts assume");
+}
+
 // ── texts ──
 
 /// The header: the simdgroup matrices launch 2 multiplies on
 pub const text_header: [:0]const u8 = @embedFile("kernels/mla_latent/header.metal");
 /// Launch 1, the query absorbed: ql f32 [S, H, DL]
 pub const text_qabs: [:0]const u8 = @embedFile("kernels/mla_latent/qabs.metal");
+/// Launch 2's pieces: its head and each sub-chunk's scores (A), the online softmax update of each row (B, the variants'
+/// too), the weights times the latents (C) and the loop's end, the outputs (the stage variant's too)
+pub const attn_1 = @embedFile("kernels/mla_latent/attn_1.metal");
+pub const attn_2 = @embedFile("kernels/mla_latent/attn_2.metal");
+pub const attn_3 = @embedFile("kernels/mla_latent/attn_3.metal");
+pub const attn_4 = @embedFile("kernels/mla_latent/attn_4.metal");
 /// Launch 2, the attention's partials: pm, pl f32 [S H NJ], po f32 [S H NJ, DL]
-pub const text_attn: [:0]const u8 = @embedFile("kernels/mla_latent/attn.metal");
+pub const text_attn: [:0]const u8 = attn_1 ++ attn_2 ++ attn_3 ++ attn_4;
+/// The rows variant's pieces around launch 2's softmax update: its head and every row's scores; each row's weights times
+/// the latents, the loop's end and every row's outputs
+pub const rows_1 = @embedFile("kernels/mla_latent/rows_1.metal");
+pub const rows_2 = @embedFile("kernels/mla_latent/rows_2.metal");
+/// Launch 2 for RPT rows a threadgroup (`Attn.rows2`, `rows4`): launch 2's partials, each row's words
+pub const text_attn_rows: [:0]const u8 = rows_1 ++ attn_2 ++ rows_2;
+/// The stage variant's pieces around launch 2's softmax update and outputs: its head and the scores from staged slabs;
+/// the weights times the staged latents and the loop's end
+pub const stage_1 = @embedFile("kernels/mla_latent/stage_1.metal");
+pub const stage_2 = @embedFile("kernels/mla_latent/stage_2.metal");
+/// Launch 2 over f32 staged in threadgroup memory (`Attn.stage`): launch 2's partials, word for word
+pub const text_attn_stage: [:0]const u8 = stage_1 ++ attn_2 ++ stage_2 ++ attn_4;
+/// The block variant's pieces around launch 2's softmax update: its head and a block's scores on 2 x 2 tiles; the 4 x 4
+/// output tiles, the loops' ends and the outputs
+pub const block_1 = @embedFile("kernels/mla_latent/block_1.metal");
+pub const block_2 = @embedFile("kernels/mla_latent/block_2.metal");
+/// Launch 2 on more tiles a simdgroup (`Attn.block`): launch 2's partials, word for word
+pub const text_attn_block: [:0]const u8 = block_1 ++ attn_2 ++ block_2;
 /// Launch 3, the merge and the value half: out OT [1, H, S, DV]
 pub const text_vabs: [:0]const u8 = @embedFile("kernels/mla_latent/vabs.metal");
 
@@ -91,6 +134,50 @@ fn kernelOf(k: Kind) !mlx.mlx_fast_metal_kernel {
     return made;
 }
 
+/// Launch 2's text a call runs (`attnFor`, or a test's choice): launch 2 as it is, or a variant with its words: 2 or 4
+/// rows a threadgroup (`text_attn_rows` at RPT 2 or 4; a call of fewer rows takes them all), its latents and rope keys
+/// staged in f32 (`text_attn_stage`), more tiles a simdgroup (`text_attn_block`)
+pub const Attn = enum(u8) { base, rows2, rows4, stage, block };
+
+const Variant = enum(u8) { rows, stage, block };
+const variant_kernels = Global([3]?mlx.mlx_fast_metal_kernel, "ling_mla_latent_variant_kernels", @splat(null));
+/// The variants whose engagement line has printed (bit `@intFromEnum(Attn)`)
+const variant_said = Global(u8, "ling_mla_latent_variant_said", 0);
+
+fn variantKernel(v: Variant) !mlx.mlx_fast_metal_kernel {
+    lock();
+    defer unlock();
+    const slot = &variant_kernels.get().*[@intFromEnum(v)];
+    if (slot.*) |made| return made;
+    // as launch 2: the cache views read through their strides
+    const made = switch (v) {
+        .rows => ks.newKernel("turboexl3_ling_mla_attn_rows", &attn_in, &attn_out, text_attn_rows, text_header, false),
+        .stage => ks.newKernel("turboexl3_ling_mla_attn_stage", &attn_in, &attn_out, text_attn_stage, text_header, false),
+        .block => ks.newKernel("turboexl3_ling_mla_attn_block", &attn_in, &attn_out, text_attn_block, text_header, false),
+    } orelse return error.KernelCreateFailed;
+    slot.* = made;
+    return made;
+}
+
+/// Launch 2's kernel for `a`
+fn attnKernel(a: Attn) !mlx.mlx_fast_metal_kernel {
+    return switch (a) {
+        .base => kernelOf(.attn),
+        .rows2, .rows4 => variantKernel(.rows),
+        .stage => variantKernel(.stage),
+        .block => variantKernel(.block),
+    };
+}
+
+/// A variant's engagement line, at its first call (where the call runs it)
+fn sayEngaged(a: Attn, p: Plan) void {
+    if (a == .base) return;
+    const bit = @as(u8, 1) << @intCast(@intFromEnum(a));
+    if ((variant_said.get().* & bit) != 0) return;
+    variant_said.get().* |= bit;
+    std.debug.print("[turboexl3] mla latent attn engaged: {s} (launch 2's variant, {d} rows a group; first call {d} rows over {d} keys)\n", .{ @tagName(a), rowsPerGroup(a), p.s, p.t });
+}
+
 /// The process's kernels dropped (a test's or a host's teardown), through the consumer (`decode.freeKernel`)
 pub fn freeKernels() void {
     lock();
@@ -99,10 +186,14 @@ pub fn freeKernels() void {
         decode.freeKernel(k);
         slot.* = null;
     };
+    for (&variant_kernels.get().*) |*slot| if (slot.*) |k| {
+        decode.freeKernel(k);
+        slot.* = null;
+    };
 }
 
 /// This file's module state (`Global`): what a host that shares its units' state registers.
-pub const shared_state = .{ kernel_lock, kernels };
+pub const shared_state = .{ kernel_lock, kernels, variant_kernels, variant_said };
 
 // ── the plan ──
 
@@ -139,6 +230,32 @@ pub fn groupsOf(t: u32) u32 {
     return (t + kpt - 1) / kpt;
 }
 
+/// The query rows a launch-2 threadgroup takes under `a` (the rows text's RPT): 2 or 4 for the rows variants, else 1
+pub fn rowsPerGroup(a: Attn) u32 {
+    return switch (a) {
+        .rows2 => 2,
+        .rows4 => 4,
+        .base, .stage, .block => 1,
+    };
+}
+
+/// Launch 2's grid under `a`: a threadgroup for each (key group, 32 heads of `rowsPerGroup(a)` rows; a call's last
+/// group of rows may hold fewer); launch 2's own (`Plan.attnGrid`) at one row a threadgroup
+pub fn attnGridOf(p: Plan, a: Attn) [3]u32 {
+    const rpt = rowsPerGroup(a);
+    return .{ attn_threads, p.nj, ((p.s + rpt - 1) / rpt) * (p.h / heads_per_group) };
+}
+
+/// Launch 2's text for a call of `rows` rows under `c`: `mla_latent_rows` (2 or 4) at 2 rows or more, else
+/// `mla_latent_block`, else `mla_latent_stage`, else launch 2 as it is (the defaults)
+pub fn attnFor(c: config.Config, rows: u32) Attn {
+    if (rows >= 2 and c.mla_latent_rows == 2) return .rows2;
+    if (rows >= 2 and c.mla_latent_rows == 4) return .rows4;
+    if (c.mla_latent_block) return .block;
+    if (c.mla_latent_stage) return .stage;
+    return .base;
+}
+
 /// `decodeLatent`'s plan from the operands' shapes and dtypes: q_nope [1, H, S, DN], q_rot [1, H, S, DR] (one dtype),
 /// lat [1, 1, T, DL], rot [1, 1, T, DR] (one dtype), kv_b [H (DN + DV), DL]; bf16, f16 or f32 each. A shape the texts
 /// do not take (H not a multiple of 32, S past `max_rows`, a batch) is error.Exl3EngineNotImplemented; operands that do
@@ -171,7 +288,10 @@ fn ci(x: u32) c_int {
 }
 
 fn launch(s: mlx.mlx_stream, k: Kind, l: ks.Launch, inputs: []const mlx.mlx_array, outs: []mlx.mlx_array) !void {
-    const kern = try kernelOf(k);
+    try launchKernel(s, try kernelOf(k), l, inputs, outs);
+}
+
+fn launchKernel(s: mlx.mlx_stream, kern: mlx.mlx_fast_metal_kernel, l: ks.Launch, inputs: []const mlx.mlx_array, outs: []mlx.mlx_array) !void {
     const cfg = try ks.buildConfig(l);
     defer _ = mlx.mlx_fast_metal_kernel_config_free(cfg);
     try ks.applyConfig(kern, cfg, inputs, outs, s);
@@ -182,9 +302,30 @@ fn launch(s: mlx.mlx_stream, k: Kind, l: ks.Launch, inputs: []const mlx.mlx_arra
 /// latent cache lat [1, 1, T, DL] (the normed latents) and rot [1, 1, T, DR] (the roped shared keys) after this step's
 /// rows are appended (the call's rows the last S of the T; read through their strides), kv_b [H (DN + DV), DL] and the
 /// softmax scale. Query row s sits at key position T - S + s and attends to the keys up to it. Shapes and refusals:
-/// `planOf` (before any launch).
+/// `planOf` (before any launch). Launch 2 runs the text `attnFor` picks from the configuration (each variant launch 2's
+/// words).
 pub fn decodeLatent(s: mlx.mlx_stream, q_nope: mlx.mlx_array, q_rot: mlx.mlx_array, lat: mlx.mlx_array, rot: mlx.mlx_array, kv_b: mlx.mlx_array, scale: f32) !mlx.mlx_array {
+    return decodeLatentWith(s, q_nope, q_rot, lat, rot, kv_b, scale, null);
+}
+
+/// `decodeLatent` with launch 2 on `attn` (null: `attnFor` the configuration and the call's rows), the tests' and the
+/// timing's choice of text
+pub fn decodeLatentWith(s: mlx.mlx_stream, q_nope: mlx.mlx_array, q_rot: mlx.mlx_array, lat: mlx.mlx_array, rot: mlx.mlx_array, kv_b: mlx.mlx_array, scale: f32, attn: ?Attn) !mlx.mlx_array {
+    const r = try decodeLatentParts(s, q_nope, q_rot, lat, rot, kv_b, scale, attn);
+    freeArr(r.pm);
+    freeArr(r.pl);
+    freeArr(r.po);
+    return r.out;
+}
+
+/// `decodeLatentWith`'s output and launch 2's partials (pm, pl f32 [S H NJ], po f32 [S H NJ, DL]), which a variant must
+/// give word for word; the caller frees all four
+pub const Parts = struct { out: mlx.mlx_array, pm: mlx.mlx_array, pl: mlx.mlx_array, po: mlx.mlx_array };
+
+/// `decodeLatentWith`, launch 2's partials kept (`Parts`)
+pub fn decodeLatentParts(s: mlx.mlx_stream, q_nope: mlx.mlx_array, q_rot: mlx.mlx_array, lat: mlx.mlx_array, rot: mlx.mlx_array, kv_b: mlx.mlx_array, scale: f32, attn: ?Attn) !Parts {
     const p = try planOf(mlx.getShape(q_nope), mlx.getShape(q_rot), mlx.getShape(lat), mlx.getShape(rot), mlx.getShape(kv_b), .{ mlx.mlx_array_dtype(q_nope), mlx.mlx_array_dtype(q_rot) }, .{ mlx.mlx_array_dtype(lat), mlx.mlx_array_dtype(rot) }, mlx.mlx_array_dtype(kv_b));
+    const a = attn orelse attnFor(config.get().*, p.s);
     // the queries' rows contiguous (a no-op where they are): launch 2 indexes qr flat
     var qn = mlx.mlx_array_new();
     defer freeArr(qn);
@@ -216,23 +357,28 @@ pub fn decodeLatent(s: mlx.mlx_stream, q_nope: mlx.mlx_array, q_rot: mlx.mlx_arr
     defer freeArr(dims);
     const slots: c_int = ci(p.s * p.h * p.nj);
     var parts: [3]mlx.mlx_array = undefined;
-    try launch(s, .attn, .{
-        .grid = p.attnGrid(),
+    // launch 2's constants; the rows text's RPT after them
+    const attn_t = [_]ks.TemplateArg{
+        .{ .name = "H", .value = .{ .int = ci(p.h) } },
+        .{ .name = "S", .value = .{ .int = ci(p.s) } },
+        .{ .name = "DL", .value = .{ .int = ci(dl) } },
+        .{ .name = "DR", .value = .{ .int = ci(dr) } },
+        .{ .name = "KPT", .value = .{ .int = ci(kpt) } },
+        .{ .name = "CK", .value = .{ .int = ci(ck) } },
+        .{ .name = "QT", .value = .{ .dtype = p.q } },
+        .{ .name = "CT", .value = .{ .dtype = p.c } },
+        .{ .name = "RPT", .value = .{ .int = ci(rowsPerGroup(a)) } },
+    };
+    const attn_tl: []const ks.TemplateArg = if (a == .rows2 or a == .rows4) attn_t[0..9] else attn_t[0..8];
+    try launchKernel(s, try attnKernel(a), .{
+        .grid = attnGridOf(p, a),
         .threadgroup = .{ attn_threads, 1, 1 },
         .out_shapes = &.{ &[_]c_int{slots}, &[_]c_int{slots}, &[_]c_int{ slots, ci(dl) } },
         .out_dtypes = &.{ .float32, .float32, .float32 },
-        .template = &.{
-            .{ .name = "H", .value = .{ .int = ci(p.h) } },
-            .{ .name = "S", .value = .{ .int = ci(p.s) } },
-            .{ .name = "DL", .value = .{ .int = ci(dl) } },
-            .{ .name = "DR", .value = .{ .int = ci(dr) } },
-            .{ .name = "KPT", .value = .{ .int = ci(kpt) } },
-            .{ .name = "CK", .value = .{ .int = ci(ck) } },
-            .{ .name = "QT", .value = .{ .dtype = p.q } },
-            .{ .name = "CT", .value = .{ .dtype = p.c } },
-        },
+        .template = attn_tl,
     }, &.{ ql[0], qr, lat, rot, scale_arr, dims }, &parts);
-    defer for (parts) |a| freeArr(a);
+    errdefer for (parts) |x| freeArr(x);
+    sayEngaged(a, p);
     var out: [1]mlx.mlx_array = undefined;
     try launch(s, .vabs, .{
         .grid = p.vabsGrid(),
@@ -250,7 +396,7 @@ pub fn decodeLatent(s: mlx.mlx_stream, q_nope: mlx.mlx_array, q_rot: mlx.mlx_arr
             .{ .name = "OT", .value = .{ .dtype = p.q } },
         },
     }, &.{ parts[0], parts[1], parts[2], kv_b, dims }, &out);
-    return out[0];
+    return .{ .out = out[0], .pm = parts[0], .pl = parts[1], .po = parts[2] };
 }
 
 // ── CPU tests: the texts and the plan ──
@@ -304,4 +450,62 @@ test "turboexl3 ling mla latent plan: Ling's shapes are taken, a batch, an odd h
     try testing.expectError(B, planOf(&.{ 1, 64, 1, 128 }, &.{ 1, 64, 1, 64 }, &.{ 1, 1, 8, 512 }, &.{ 1, 1, 8, 64 }, &.{ 8192, 512 }, .{ bf, bf }, .{ bf, bf }, bf));
     try testing.expectError(error.BadExl3Dtype, planOf(&.{ 1, 64, 1, 128 }, &.{ 1, 64, 1, 64 }, &.{ 1, 1, 8, 512 }, &.{ 1, 1, 8, 64 }, &.{ 16384, 512 }, .{ bf, .float32 }, .{ bf, bf }, bf));
     try testing.expectError(error.BadExl3Dtype, planOf(&.{ 1, 64, 1, 128 }, &.{ 1, 64, 1, 64 }, &.{ 1, 1, 8, 512 }, &.{ 1, 1, 8, 64 }, &.{ 16384, 512 }, .{ bf, bf }, .{ bf, bf }, .int32));
+}
+
+test "turboexl3 ling mla latent variant texts: each is launch 2's online softmax update (attn_2) between pieces of its own, the stage text launch 2's outputs (attn_4) too; each reads every operand launch 2 binds, its constants and the cache's strides; the statements a row's words rest on" {
+    const pin = comptime support.pins(@embedFile("kernels/test/pins/mla_latent_variants.metal"));
+    for ([_][]const u8{ text_attn, text_attn_rows, text_attn_stage, text_attn_block }) |txt| {
+        try testing.expectEqual(@as(usize, 1), std.mem.count(u8, txt, attn_2));
+        for (attn_in) |n| try testing.expect(has(txt, std.mem.span(n)));
+        for (attn_out) |n| try testing.expect(has(txt, std.mem.span(n)));
+        for ([_][]const u8{ "H", "S", "DL", "DR", "KPT", "CK", "QT", "CT" }) |n| try testing.expect(has(txt, n));
+        try testing.expect(has(txt, "lat_strides") and has(txt, "rot_strides") and !has(txt, "_shape"));
+        // a key group counted from position 0
+        try testing.expect(has(txt, pin[0]));
+    }
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, text_attn_stage, attn_4));
+    try testing.expect(has(text_attn_rows, "RPT"));
+    // rows: each row's bound, the sub-chunks it runs, a key it does not see read as 0 and scored -inf
+    for (pin[1..6]) |line| try testing.expect(has(text_attn_rows, line));
+    // stage: the staged word is launch 2's (the converted word, 0 past the bound), launch 2's score statement
+    for (pin[6..9]) |line| try testing.expect(has(text_attn_stage, line));
+    // block: launch 2's operand and score statements on each tile, the rescale of each output tile
+    for (pin[9..13]) |line| try testing.expect(has(text_attn_block, line));
+    for ([_][]const u8{ text_attn, text_attn_stage, text_attn_block }) |txt| try testing.expect(has(txt, pin[13]));
+    try testing.expect(has(text_attn, pin[8]));
+    // MLX writes a kernel's signature from its text's words: a variant names no thread attribute launch 2 does not
+    for ([_][]const u8{ text_attn, text_attn_rows, text_attn_stage, text_attn_block }) |txt| {
+        try testing.expect(!has(txt, pin[14]) and !has(txt, pin[15]));
+    }
+}
+
+test "turboexl3 ling mla latent variants plan: the configuration's choice of launch 2's text per row count, each text's grid, and the configurations the library serves" {
+    const bf: mlx.mlx_dtype = .bfloat16;
+    const p = try planOf(&.{ 1, 64, 3, 128 }, &.{ 1, 64, 3, 64 }, &.{ 1, 1, 19404, 512 }, &.{ 1, 1, 19404, 64 }, &.{ 16384, 512 }, .{ bf, bf }, .{ bf, bf }, bf);
+    try testing.expect(p.nj == 76);
+    try testing.expectEqual(p.attnGrid(), attnGridOf(p, .base));
+    try testing.expectEqual([3]u32{ 512, 76, 6 }, attnGridOf(p, .stage));
+    try testing.expectEqual([3]u32{ 512, 76, 6 }, attnGridOf(p, .block));
+    try testing.expectEqual([3]u32{ 512, 76, 4 }, attnGridOf(p, .rows2));
+    try testing.expectEqual([3]u32{ 512, 76, 2 }, attnGridOf(p, .rows4));
+    const w = try planOf(&.{ 1, 64, 16, 128 }, &.{ 1, 64, 16, 64 }, &.{ 1, 1, 300, 512 }, &.{ 1, 1, 300, 64 }, &.{ 16384, 512 }, .{ bf, bf }, .{ bf, bf }, bf);
+    try testing.expectEqual([3]u32{ 512, 2, 8 }, attnGridOf(w, .rows4));
+    try testing.expectEqual([3]u32{ 512, 2, 16 }, attnGridOf(w, .rows2));
+    try testing.expectEqual(@as(u32, 1), rowsPerGroup(.block));
+    const none: config.Config = .{};
+    for ([_]u32{ 1, 2, 3, 4, 16 }) |rows| try testing.expectEqual(Attn.base, attnFor(none, rows));
+    const r2: config.Config = .{ .mla_latent_rows = 2 };
+    const r4b: config.Config = .{ .mla_latent_rows = 4, .mla_latent_block = true };
+    const st: config.Config = .{ .mla_latent_stage = true };
+    try testing.expectEqual(Attn.base, attnFor(r2, 1));
+    try testing.expectEqual(Attn.rows2, attnFor(r2, 2));
+    try testing.expectEqual(Attn.rows2, attnFor(r2, 16));
+    try testing.expectEqual(Attn.block, attnFor(r4b, 1));
+    try testing.expectEqual(Attn.rows4, attnFor(r4b, 3));
+    try testing.expectEqual(Attn.stage, attnFor(st, 1));
+    try testing.expectEqual(Attn.stage, attnFor(st, 4));
+    for ([_]u8{ 0, 2, 4 }) |r| try testing.expect((config.Config{ .mla_latent_rows = r }).valid());
+    for ([_]u8{ 1, 3, 8 }) |r| try testing.expect(!(config.Config{ .mla_latent_rows = r }).valid());
+    try testing.expect(!(config.Config{ .mla_latent_stage = true, .mla_latent_block = true }).valid());
+    try testing.expect((config.Config{ .mla_latent_rows = 4, .mla_latent_stage = true }).valid());
 }

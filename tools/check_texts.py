@@ -1659,6 +1659,16 @@ SPLIT_ADDED_KERNELS['turboexl3_ling_mla_attn'] = ('the same: the attention\'s pa
                                                   '0, an online softmax a row')
 SPLIT_ADDED_KERNELS['turboexl3_ling_mla_vabs'] = ('the same: a row\'s group partials merged in group order, then kv_b\'s '
                                                   'value half')
+SPLIT_ADDED_KERNELS['turboexl3_ling_mla_attn_rows'] = ('V2 rows: launch 2 of the MLA attention in the latent for 2 or 4 rows '
+                                                       'a threadgroup (models/ling/mla_latent.zig text_attn_rows: rows_1 ++ '
+                                                       'attn_2 ++ rows_2; Config.mla_latent_rows), launch 2\'s words')
+SPLIT_ADDED_KERNELS['turboexl3_ling_mla_attn_stage'] = ('V2 stage: launch 2 with each sub-chunk\'s latents and rope keys '
+                                                        'staged in f32 in threadgroup memory (text_attn_stage: stage_1 ++ '
+                                                        'attn_2 ++ stage_2 ++ attn_4; Config.mla_latent_stage), launch 2\'s '
+                                                        'words')
+SPLIT_ADDED_KERNELS['turboexl3_ling_mla_attn_block'] = ('V2 block: launch 2 on 2 x 2 score tiles and 4 x 4 output tiles a '
+                                                        'simdgroup (text_attn_block: block_1 ++ attn_2 ++ block_2; '
+                                                        'Config.mla_latent_block), launch 2\'s words')
 SPLIT_ADDED_KERNELS['turboexl3_ling_kdaproj_pf'] = ('P4: a KDA layer\'s q|k|v, f and g at prompt rows in one launch '
                                                     '(models/ling/kdaproj_pf.zig text_pf: kdaproj/pf_1, pg2\'s fused_2, '
                                                     'kdaproj/pf_3, pg2\'s fused_4, kdaproj/pf_5, pg2\'s fused_6, the '

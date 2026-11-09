@@ -28,7 +28,7 @@ What it runs on turboexl3 (`root.ling`, `src/models/ling/api.zig`):
 | a KDA layer's q\|k\|v, f and g at decode rows | `root.ling.kdaProj` (a host's opt-in; each member in its own buffers at its own K split), `root.ling.kdaProjPrepared` over the host's prepared rows, `root.ling.kdaProjB` with the layer's b_proj (bf16) as a fourth member | `turboexl3_ling_kdaproj_prep` then `turboexl3_ling_kdaproj_dec0` ([kernels](kernels.md)): each member's `linear` bytes; with b_proj `turboexl3_ling_kdaproj_dec0b`, b's rows the served one-row matmul's |
 | a KDA layer's q\|k\|v, f and g at prompt rows | `root.ling.kdaProjPrompt` (a host's opt-in; each member's prepare and W_hat by its `linear`'s launches) | `turboexl3_ling_kdaproj_pf` ([kernels](kernels.md)): pg2's NAX GEMM and finish over the three members in one launch, each member's `linear` bytes |
 | a MoE layer's router at decode rows (1 to 8) with the read-ahead predictor's scores (the next MoE layer's router on the call's rows) | `root.ling.router.route` (`routerLogits`, `select`, `tableF32`; a host's opt-in) | `turboexl3_ling_router_pred` (DeepSeek's sqrt(softplus(z)) + bias), `turboexl3_ling_router_pred_sig` (Ling's sigmoid(z) + bias) or, on the last MoE layer, `turboexl3_ling_router_logits`, each over the loader's f32 table (or its `_h` twin over the loaded f16 weight), then `turboexl3_ling_router_select` ([kernels](kernels.md)): the host's logits, scores, ids and bf16 weights word for word |
-| an MLA layer's attention at decode rows (1 to 16) over a latent cache (each token's normed 512-wide latent and 64-wide roped shared key) | `mlaLatentDecode` (`mla_latent.zig`) | three of its own: `turboexl3_ling_mla_qabs`, `turboexl3_ling_mla_attn`, `turboexl3_ling_mla_vabs` ([the Ling catalog](kernels.md)) |
+| an MLA layer's attention at decode rows (1 to 16) over a latent cache (each token's normed 512-wide latent and 64-wide roped shared key) | `mlaLatentDecode` (`mla_latent.zig`) | three of its own: `turboexl3_ling_mla_qabs`, `turboexl3_ling_mla_attn`, `turboexl3_ling_mla_vabs` ([the Ling catalog](kernels.md)); a host's opt-in runs launch 2 on a variant with its words: `turboexl3_ling_mla_attn_rows` (`Config.mla_latent_rows`), `_stage` (`mla_latent_stage`) or `_block` (`mla_latent_block`) |
 | an MLA layer's prompt attention over the expanded KV (qk 192, v 128, 64 heads) | `root.ling.mlaFlashPrefill` | `turboexl3_ling_mla_flash` ([kernels.md](kernels.md)): MLX's NAX attention kernel at a tile MLX does not instantiate |
 
 The pairs share each member's K split (z \| a at KS 2, the shared gate \| up at KS 8, the dense gate \| up at KS 1);
@@ -56,8 +56,9 @@ sum, one output rounding), so it is a reordering against the composed path: held
 and to MLX's fused kernel word for word at the head dims MLX instantiates it for. The plugin's switch decides whether a
 prompt takes it; the standard test decides that switch.
 
-`TURBOEXL3_LING_TIME=1` (with `TURBOEXL3_GPU=1`) times the Ling kernels at the model's shapes for the serving plan: every
-trunk linear, `moeLing` and `moeLingBanked`, and the decode forward's linears chained over the 72 layers
+`TURBOEXL3_LING_TIME=1` (with `TURBOEXL3_GPU=1`) times the Ling kernels at the model's shapes for the serving plan:
+`mlaLatentDecode` at the MTP head's cache of the standard request (19,404 keys, rows 1 to 4) on launch 2 and each of
+its variants, every trunk linear, `moeLing` and `moeLingBanked`, and the decode forward's linears chained over the 72 layers
 (`TURBOEXL3_LING_TIME` and `TURBOEXL3_LING_CHAIN` lines), and the prompt call over gathered rows against the plugin's
 chunk at its call shape (`TURBOEXL3_LING_ROWS_TIME` lines). It is a diagnostic: it asserts nothing, and its numbers steer
 work; they never decide it.
@@ -73,6 +74,11 @@ table of every 16-bit gate), and `linear(down)` (`src/models/ling/shared_test.zi
 The MLA attention in the latent reads a layer's cache once at 1,152 B a token (the expanded cache: 40,960). It computes
 in f32 and sums in its own orders, so it is within tolerance of the host's composed latent attention, not byte for
 byte (`mla_latent_test.zig`: against an f64 reference), and a verify call's rows have the bits of one-row calls at
-their positions (the key groups and sub-chunks count from position 0).
+their positions (the key groups and sub-chunks count from position 0). Its launch 2 has three variants, each a host's
+opt-in and each launch 2's words (the output and the partials, word for word, `mla_latent_test.zig`): the rows of a call
+in one threadgroup (`Config.mla_latent_rows` 2 or 4: a key group's latents read once for its rows), the cache's words
+staged in f32 in threadgroup memory (`mla_latent_stage`), and more tiles a simdgroup (`mla_latent_block`: 2 × 2 score
+tiles over 4 sub-chunks, 4 × 4 output tiles). A product or sum in another order is not a variant: it would change the
+words.
 
 No speed verdict comes from this repository: the standard test through the outside plugin decides.
