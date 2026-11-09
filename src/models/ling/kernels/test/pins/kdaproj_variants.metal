@@ -1,0 +1,38 @@
+constexpr uint N = uint(NHW);
+constexpr uint NW = N / 2u;
+constexpr uint WMASK = (WBITS >= 16) ? 0xffffu : ((1u << uint(WBITS)) - 1u);
+constexpr int CB = int(CODEBOOK);
+constexpr uint INC = uint(IN);
+constexpr uint IN_TILES = INC / 16u;
+constexpr uint RBC = uint(RB);
+constexpr uint ROWSC = uint(ROWS);
+constexpr uint NCHC = (ROWSC + RBC - 1u) / RBC;
+constexpr uint NB = INC / 128u;
+constexpr float HAD_SCALE = 0.08838834764831845f;
+const uint jm = (flat < F1) ? 0u : ((flat < F2) ? 1u : 2u);
+const uint mflat = flat - ((jm == 0u) ? 0u : ((jm == 1u) ? F1 : F2));
+const uint mnt = (jm == 0u) ? NT0 : ((jm == 1u) ? NT1 : NT2);
+const uint OUTC = (jm == 0u) ? uint(OUT0) : ((jm == 1u) ? uint(OUT1) : uint(OUT2));
+const uint OUT_TILES = OUTC / 16u;
+const uint KSC = (jm == 0u) ? uint(KS0) : uint(KS1);
+const uint PER = IN_TILES / (KSC * 4u);
+const uint blk = mflat % mnt;
+const uint chunk = threadgroup_position_in_grid.y;
+const uint r0 = chunk * RBC;
+const uint ksl = mflat / mnt;
+const uint sg = simdgroup_index_in_threadgroup;
+const uint L = thread_index_in_simdgroup;
+const uint tid = thread_index_in_threadgroup;
+threadgroup uint arrived_last;
+constexpr uint BTC = uint(BT0);
+constexpr uint BTC = uint(BT1);
+if (jm == 0u || BT0 == BT1) {
+const uint flat = threadgroup_position_in_grid.x - NBF;
+const uint ARR = GCM * KSC;
+const uint ob = blk / GCM;
+threadgroup float red[4][RBC * 16u * BTX];
+const int thrN = int(thread_index_in_simdgroup);
+const device bfloat16_t* mat = wb + size_t(out_row) * size_t(IN);
+const uint rb0 = threadgroup_position_in_grid.y * uint(RB);
+const uint rb1 = min(rb0 + uint(RB), uint(ROWS));
+uint(BT)

@@ -27,15 +27,21 @@
 //! - on operands as the plugin serves them (the pack's I16 trellis words; `[1, rows, in]` bf16 activations, whole or a
 //!   row view of a wider array), `root.lingSharedExpert` gives the composed shared expert's words (rows 1 to 4),
 //!   `root.ling.linearPair` each member's `linear` words (rows 1, 2, 4, 6), and the one-row table one row's own words
-//!   (every trunk shape), each also the words of the same call on U16 words and a contiguous `[rows, in]`.
+//!   (every trunk shape), each also the words of the same call on U16 words and a contiguous `[rows, in]`;
+//! - D35: each DEC-ONE GEMV variant (`Config.dec_variant`: t4, pf, pft4) gives the served GEMV's words at every trunk
+//!   shape and the LM head, rows 1 to 4, through `linear` and over prepared rows; the verify-row table
+//!   (`Config.dec_verify_row_table`) gives o_proj's served words and the three-launch chain's at rows 2 to 4; each with
+//!   red checks (a flipped word, another K split).
 //! TURBOEXL3_LING_N (rates in halfwords per tile; default 40,32) narrows the routed tests. Lines: TURBOEXL3_LING_BYTES,
 //! TURBOEXL3_LING_PARITY, TURBOEXL3_LING_TOP4, TURBOEXL3_LING_BANKED, TURBOEXL3_LING_CACHE, TURBOEXL3_LING_DENSE,
 //! TURBOEXL3_LING_ONE_ROW_TABLE, TURBOEXL3_LING_PAIR, TURBOEXL3_LING_KDA_PROJ, TURBOEXL3_LING_ROWINV,
-//! TURBOEXL3_LING_SERVED.
+//! TURBOEXL3_LING_SERVED, TURBOEXL3_LING_DEC_VARIANT (_RED, _DONE), TURBOEXL3_LING_VERIFY_ROW_TABLE (_RED, _DONE).
 //! Timing (TURBOEXL3_LING_TIME=1 with TURBOEXL3_GPU=1; asserts nothing, guidance only): every trunk linear, `moeLing`
 //! and `moeLingBanked` at Ling's shapes and rows, the decode forward's linears chained over the 72 layers, and the dense
-//! decode GEMV's launch shapes swept per trunk shape on that chain at rows 1 to 8 (asserting bytes only). Lines:
-//! TURBOEXL3_LING_TIME, TURBOEXL3_LING_CHAIN, TURBOEXL3_LING_GEMV (_BEST, _TABLE, _DONE).
+//! decode GEMV's launch shapes swept per trunk shape on that chain at rows 1 to 8 (asserting bytes only); D35's arms:
+//! the DEC-ONE GEMV variants, the verify-row table, `kdaProjB`'s variant launch (bproj_test.zig) and the router's rows
+//! launch (router_test.zig). Lines: TURBOEXL3_LING_TIME, TURBOEXL3_LING_CHAIN, TURBOEXL3_LING_GEMV (_BEST, _TABLE,
+//! _DONE).
 const std = @import("std");
 const sdk = @import("sdk");
 const mlx = sdk.mlx;
@@ -727,6 +733,35 @@ test "turboexl3 ling: Config.dec_one_row_table gives each Ling-3.1-flash trunk s
     try testing.expectEqual(@as(u8, 0), dense.Dense.btSetFor(on, k4)[1]);
 }
 
+test "turboexl3 ling: Config.dec_verify_row_table gives o_proj's shape (8192 -> 4096 at K6) its verify_row_table launch at rows 2 to 4 only, every other trunk shape the rest of the configuration's, beside the one-row table" {
+    const off: config.Config = .{ .dec_one_row_table = true };
+    const on: config.Config = .{ .dec_one_row_table = true, .dec_verify_row_table = true };
+    for (dense_cases) |c| {
+        const shape: dense.Shape = .{ .in = c.in, .out = c.out, .rate = format.Rate.fromN(c.n).?, .dec = .mul1, .out_dtype = .bfloat16 };
+        const e = dense.verifyRowFor(shape);
+        try testing.expectEqual(std.mem.eql(u8, c.name, "kda.o/mla.dense"), e != null);
+        const b_off = dense.Dense.btSetFor(off, shape);
+        const b_on = dense.Dense.btSetFor(on, shape);
+        // one row keeps the one-row table's launch; rows 2 to 4 the entry's; every other row count the plan's
+        try testing.expectEqual(b_off[1], b_on[1]);
+        for (2..b_on.len) |r| {
+            const want: u8 = if (e != null and r <= 4) e.?.bt else 0;
+            try testing.expectEqual(want, b_on[r]);
+            try testing.expectEqual(@as(u8, 0), b_off[r]);
+        }
+        // the entry fits a verify's chunk (2 BT RB within 32 accumulators) and is not btFor's there
+        if (e) |vr| for (2..5) |r| {
+            const rb = dense.Dense.rbFor(@intCast(r));
+            try testing.expect(8 % vr.bt == 0 and 2 * @as(u32, vr.bt) * rb <= 32);
+            try testing.expect(vr.bt != dense.Dense.btFor(rb));
+        };
+    }
+    // the entry's shape at another rate is not a table shape
+    const k4: dense.Shape = .{ .in = 8192, .out = 4096, .rate = format.Rate.fromN(64).?, .dec = .mul1, .out_dtype = .bfloat16 };
+    try testing.expect(dense.verifyRowFor(k4) == null);
+    try testing.expectEqual(@as(u8, 0), dense.Dense.btSetFor(on, k4)[3]);
+}
+
 test "turboexl3 gpu ling dense: the one-row launch table (Config.dec_one_row_table) gives one row's own bytes and the three-launch chain's at every Ling-3.1-flash trunk shape, on its table launch (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
     const s = mlx.mlx_default_gpu_stream_new();
@@ -1209,6 +1244,418 @@ test "turboexl3 gpu ling kda proj: q|k|v, f and g in one launch give each member
     try testing.expectEqual(@as(usize, 0), failed);
 }
 
+// ── DEC-ONE's GEMV variants (`Config.dec_variant`, `dense.dec_variants`: t4, pf, both) at Ling-3.1-flash's shapes ──
+
+/// The variants past DEC-ONE's own (`dense.dec_variants` 1 to 3: t4, pf, pft4), each a byte test's arm
+const dec_variant_arms = [_]u8{ 1, 2, 3 };
+
+/// A K split of a linear of `in` inputs other than `ks` (the smallest divisor of its input tiles over the four
+/// simdgroups that is not `ks`): the red checks' reordering of the same products
+fn otherKs(in: u32, ks: u32) u32 {
+    const q = (in / 16) / 4;
+    var dv: u32 = 1;
+    while (dv <= q) : (dv += 1) {
+        if (dv != ks and q % dv == 0) return dv;
+    }
+    return ks;
+}
+
+/// A trellis as the loader hands it (the pack's I16 words) from its U16 words
+fn i16Trellis(g: *G, s: mlx.mlx_stream, words: []const u16, in: u32, out: u32, n: u32) !mlx.mlx_array {
+    const u = try g.hostArray(std.mem.sliceAsBytes(words), &.{ ci(in / 16), ci(out / 16), ci(n) }, .uint16);
+    var v = mlx.mlx_array_new();
+    mlx.check(mlx.mlx_view(&v, u, .int16, s)) catch |e| {
+        _ = mlx.mlx_array_free(v);
+        return e;
+    };
+    return g.adopt(v);
+}
+
+/// A linear's operands as `ref.synthLinear` draws them (the trellis words, then suh, then svh, from the same generator in
+/// the same order), without the reference weights it reconstructs on the host, which the variant tests do not read
+/// (4096 x 157184 of them at the LM head)
+const Drawn = struct {
+    trellis: []u16,
+    suh: []u16,
+    svh: []u16,
+
+    fn deinit(self: Drawn, a: std.mem.Allocator) void {
+        a.free(self.trellis);
+        a.free(self.suh);
+        a.free(self.svh);
+    }
+};
+
+fn drawLinear(a: std.mem.Allocator, rnd: std.Random, in: u32, out: u32, n: u32) !Drawn {
+    const trellis = try a.alloc(u16, @as(usize, in / 16) * (out / 16) * n);
+    errdefer a.free(trellis);
+    const suh = try a.alloc(u16, in);
+    errdefer a.free(suh);
+    const svh = try a.alloc(u16, out);
+    for (trellis) |*v| v.* = rnd.int(u16);
+    const out_scale: f32 = 1.0 / @sqrt(@as(f32, @floatFromInt(in)));
+    for (suh) |*v| v.* = format.f32ToF16Bits(0.5 + rnd.float(f32));
+    for (svh) |*v| v.* = format.f32ToF16Bits((0.5 + rnd.float(f32)) * out_scale);
+    return .{ .trellis = trellis, .suh = suh, .svh = svh };
+}
+
+// Every DEC-ONE GEMV variant against the served GEMV, word for word, where it runs: a Dense whose prepare runs in its own
+// launch at every row count (`dec_prep_rows` and `dec_prep_out` 0), so each call at rows 1 to 4 takes the GEMV over
+// prepared rows: through `linear` (prep_sc, then the GEMV) and over prep_sc's rows with zeroed counters
+// (`decLinearPrepared`, KDA_EPILOGUE's o_proj). Every Ling-3.1-flash trunk shape (K6; the dense FFN at K4) at x bf16
+// and f32, and the LM head (4096 -> 157184 at the pack's K6) at x bf16: the variants act on the head at a verify's rows,
+// where its prepare runs in its own launch. The trellis as I16 words; the operands synthLinear's draws without its
+// reference weights (`drawLinear`). Each arm also checks that it ran its variant (`dense.dec0VariantRuns`).
+// Red checks: one word flipped in the served output is exactly one differing word; at o_proj's and q|k|v's shapes each
+// variant on a Dense at another K split (the same products summed in another order) must differ from the served words.
+// Lines: TURBOEXL3_LING_DEC_VARIANT (252: 240 at the trunk shapes, 12 at the head), _RED (8), _DONE.
+test "turboexl3 gpu ling dense variants: each DEC-ONE GEMV variant (t4, pf, pft4) gives the served GEMV's words at every Ling-3.1-flash trunk shape and the LM head, rows 1 to 4, x bf16 and f32 (the head bf16), through linear and over prepared rows; red checks: a flipped word, each variant at another K split (TURBOEXL3_GPU=1)" {
+    _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    const s = mlx.mlx_default_gpu_stream_new();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    const a = std.heap.page_allocator;
+    const ks = sdk.kernel_launch;
+    var g = try G.init(a, s);
+    defer g.deinit();
+    const saved = config.get().*;
+    defer config.configure(saved) catch unreachable;
+    var cfg = saved;
+    cfg.dec_variant = 0;
+    var failed: usize = 0;
+    var checks: usize = 0;
+    var reds: usize = 0;
+    for (dense_cases) |c| {
+        var prng = std.Random.DefaultPrng.init(0xD35A ^ (@as(u64, c.in) << 24) ^ c.out);
+        const rnd = prng.random();
+        const rate = format.Rate.fromN(c.n).?;
+        const lin = try drawLinear(a, rnd, c.in, c.out, c.n);
+        defer lin.deinit(a);
+        const mark = g.mark();
+        defer g.resetTo(mark);
+        const trellis = try i16Trellis(&g, s, lin.trellis, c.in, c.out, c.n);
+        const suh = try g.hostArray(std.mem.sliceAsBytes(lin.suh), &.{ci(c.in)}, .float16);
+        const svh = try g.hostArray(std.mem.sliceAsBytes(lin.svh), &.{ci(c.out)}, .float16);
+        const xs = try a.alloc(f32, 4 * c.in);
+        defer a.free(xs);
+        for (xs) |*v| v.* = bfExact(rnd.floatNorm(f32));
+        const want = try a.alloc(f32, 4 * c.out);
+        defer a.free(want);
+        const got = try a.alloc(f32, 4 * c.out);
+        defer a.free(got);
+        // the red checks' shapes: o_proj (KDA o and the MLA output projection) and q|k|v
+        const red = std.mem.eql(u8, c.name, "kda.o/mla.dense") or std.mem.eql(u8, c.name, "kda.qkv");
+        // the LM head at bf16 x only, the dtype its verify rows take
+        const dts: []const mlx.mlx_dtype = if (c.head) &[_]mlx.mlx_dtype{.bfloat16} else &[_]mlx.mlx_dtype{ .bfloat16, .float32 };
+        for (dts) |dt| {
+            try config.configure(cfg);
+            const geo: dense.Shape = .{ .in = c.in, .out = c.out, .rate = rate, .dec = .mul1, .out_dtype = dt };
+            var d = try dense.Dense.init(geo);
+            defer d.deinit();
+            d.dec_prep_rows = 0;
+            d.dec_prep_out = 0;
+            for (1..5) |ru| {
+                const rows: u32 = @intCast(ru);
+                const rm = g.mark();
+                defer g.resetTo(rm);
+                const n = rows * c.out;
+                const x = try g.astype(try g.hostArray(std.mem.sliceAsBytes(xs[0 .. rows * c.in]), &.{ ci(rows), ci(c.in) }, .float32), dt);
+                // prep_sc's rows, once; each GEMV over them reads counters zeroed for it
+                const dc = try d.decCfgs(rows);
+                var po: [3]mlx.mlx_array = undefined;
+                try ks.applyConfig(d.prep_sc, dc.prep, &.{ x, suh }, &po, s);
+                const xp = try g.adopt(po[0]);
+                const xsum = try g.adopt(po[1]);
+                _ = mlx.mlx_array_free(po[2]);
+                const ncnt: c_int = @intCast(try d.decCounters(rows));
+                // the served GEMV through linear, and over the prepared rows
+                try config.configure(cfg);
+                _ = try g.hostF32(try g.astype(try g.adopt(try d.linear(s, x, trellis, suh, svh, rows)), .float32), want[0..n]);
+                _ = try g.hostF32(try g.astype(try g.adopt(try d.decLinearPrepared(s, xp, xsum, try g.zeros(&.{ncnt}, .uint32), trellis, svh, rows)), .float32), got[0..n]);
+                const d_served = bytesDifferF32(got[0..n], want[0..n]);
+                for (dec_variant_arms) |v| {
+                    var vc = cfg;
+                    vc.dec_variant = v;
+                    try config.configure(vc);
+                    const runs0 = dense.dec0VariantRuns(v);
+                    _ = try g.hostF32(try g.astype(try g.adopt(try d.linear(s, x, trellis, suh, svh, rows)), .float32), got[0..n]);
+                    const d_lin = bytesDifferF32(got[0..n], want[0..n]);
+                    _ = try g.hostF32(try g.astype(try g.adopt(try d.decLinearPrepared(s, xp, xsum, try g.zeros(&.{ncnt}, .uint32), trellis, svh, rows)), .float32), got[0..n]);
+                    const d_prep = bytesDifferF32(got[0..n], want[0..n]);
+                    const ran = dense.dec0VariantRuns(v) - runs0;
+                    try config.configure(cfg);
+                    const ok = d_served == 0 and d_lin == 0 and d_prep == 0 and ran == 2;
+                    checks += 1;
+                    std.debug.print("TURBOEXL3_LING_DEC_VARIANT shape={s} in={d} out={d} n={d} rows={d} x={s} ks={d} bt={d} variant={s} linear_differing={d}/{d} prepared_differing={d}/{d} served_prepared_differing={d}/{d} variant_calls={d}/2 {s}\n", .{ c.name, c.in, c.out, c.n, rows, @tagName(dt), d.ks_split, d.btDec(rows, dense.Dense.rbFor(rows)), dense.dec_variants[v].name, d_lin, n, d_prep, n, d_served, n, ran, if (ok) "PASS" else "FAIL" });
+                    if (!ok) failed += 1;
+                }
+                // red: one flipped word of the served output is one differing word
+                if (red and rows == 3 and dt == .bfloat16) {
+                    @memcpy(got[0..n], want[0..n]);
+                    got[n / 2] = @bitCast(@as(u32, @bitCast(got[n / 2])) ^ 1);
+                    const d_flip = bytesDifferF32(got[0..n], want[0..n]);
+                    const ok_flip = d_flip == 1;
+                    reds += 1;
+                    std.debug.print("TURBOEXL3_LING_DEC_VARIANT_RED check=flipped_word shape={s} rows={d} differing={d}/{d} expect=1 {s}\n", .{ c.name, rows, d_flip, n, if (ok_flip) "PASS" else "FAIL" });
+                    if (!ok_flip) failed += 1;
+                    // red: each variant at another K split must differ from the served words (a reordering is caught)
+                    var dk = try dense.Dense.init(geo);
+                    defer dk.deinit();
+                    dk.dec_prep_rows = 0;
+                    dk.dec_prep_out = 0;
+                    const ks_other = otherKs(c.in, d.ks_split);
+                    dk.ks_split = ks_other;
+                    for (dec_variant_arms) |v| {
+                        var vc = cfg;
+                        vc.dec_variant = v;
+                        try config.configure(vc);
+                        _ = try g.hostF32(try g.astype(try g.adopt(try dk.linear(s, x, trellis, suh, svh, rows)), .float32), got[0..n]);
+                        try config.configure(cfg);
+                        const d_ks = bytesDifferF32(got[0..n], want[0..n]);
+                        const ok_ks = ks_other != d.ks_split and d_ks > 0;
+                        reds += 1;
+                        std.debug.print("TURBOEXL3_LING_DEC_VARIANT_RED check=other_ks shape={s} rows={d} ks={d}->{d} variant={s} differing={d}/{d} expect=nonzero {s}\n", .{ c.name, rows, d.ks_split, ks_other, dense.dec_variants[v].name, d_ks, n, if (ok_ks) "PASS" else "FAIL" });
+                        if (!ok_ks) failed += 1;
+                    }
+                }
+            }
+        }
+    }
+    std.debug.print("TURBOEXL3_LING_DEC_VARIANT_DONE checks={d} red={d} {s}\n", .{ checks, reds, if (failed == 0) "PASS" else "FAIL" });
+    try testing.expectEqual(@as(usize, 252), checks);
+    try testing.expectEqual(@as(usize, 8), reds);
+    try testing.expectEqual(@as(usize, 0), failed);
+}
+
+/// TURBOEXL3_LING_TIME's arm for DEC-ONE's GEMV variants (`dense.dec_variants`), guidance only: each trunk shape at rows
+/// 1 to 4 on a Dense made under the outside plugin's launch shapes (`Config.dec_one_row_table`), the served GEMV and each
+/// variant (`linear`: prep_sc, then the GEMV): min and median us a call (8 calls an evaluation), the weights' GB/s, the
+/// variant's min over the served GEMV's, and the calls that ran the variant (0 where the call's prepare runs inside its
+/// launch: no variant acts there). Its own draw. Lines: TURBOEXL3_LING_TIME dec_variant.
+fn timeDecVariants(a: std.mem.Allocator, g: *G, s: mlx.mlx_stream, base: config.Config) !void {
+    defer config.configure(base) catch {};
+    var tc = base;
+    tc.dec_one_row_table = true;
+    tc.dec_variant = 0;
+    var prng = std.Random.DefaultPrng.init(0xD35_71AE);
+    const rnd = prng.random();
+    const Ctx = struct {
+        s: mlx.mlx_stream,
+        x: mlx.mlx_array,
+        p: root.Proj,
+        d: *dense.Dense,
+        rows: usize,
+        pub fn call(cx: @This()) !mlx.mlx_array {
+            return cx.d.linear(cx.s, cx.x, cx.p.trellis, cx.p.suh, cx.p.svh, cx.rows);
+        }
+    };
+    for (dense_cases) |c| {
+        const mark = g.mark();
+        defer g.resetTo(mark);
+        defer _ = mlx.mlx_clear_cache();
+        const p = try ds_test.randProj(a, g, rnd, null, c.in, c.out, c.n);
+        try config.configure(tc);
+        var d = try dense.Dense.init(.{ .in = c.in, .out = c.out, .rate = format.Rate.fromN(c.n).?, .dec = .mul1, .out_dtype = .bfloat16 });
+        defer d.deinit();
+        const wbytes = @as(f64, @floatFromInt(c.in)) * @as(f64, @floatFromInt(c.out)) * @as(f64, @floatFromInt(c.n)) / 128.0;
+        for ([_]u32{ 1, 2, 3, 4 }) |rows| {
+            const rm = g.mark();
+            defer g.resetTo(rm);
+            const ctx: Ctx = .{ .s = s, .x = try ds_test.randBf16(a, g, rnd, &.{ ci(rows), ci(c.in) }), .p = p, .d = &d, .rows = rows };
+            var served_min: f64 = 0;
+            for (0..dense.dec_variants.len) |vi| {
+                const v: u8 = @intCast(vi);
+                var vc = tc;
+                vc.dec_variant = v;
+                try config.configure(vc);
+                const runs0 = dense.dec0VariantRuns(v);
+                const st = try ds_test.timeIt(g, ctx, 8);
+                const calls = dense.dec0VariantRuns(v) - runs0;
+                if (v == 0) served_min = st.min;
+                std.debug.print("TURBOEXL3_LING_TIME dec_variant {s} {d}x{d} n={d} rows={d} variant={s} min_us={d:.1} med_us={d:.1} GBps={d:.0} of_served={d:.3} variant_calls={d}\n", .{ c.name, c.in, c.out, c.n, rows, if (v == 0) "served" else dense.dec_variants[v].name, st.min, st.med, wbytes / (st.min * 1e3), if (served_min > 0) st.min / served_min else 0, calls });
+            }
+        }
+    }
+}
+
+// ── the verify-row table (`Config.dec_verify_row_table`, `dense.verify_row_table`): o_proj at a verify's rows ──
+
+// The table's launch against the served launch and the three-launch chain, word for word: for each table entry, x bf16
+// and f32, rows 2 to 4, a Dense made under the table (with the one-row table, as the outside plugin serves), one made
+// without it and the chain (DEC-ONE off); through `linear`, and over prep_sc's rows with zeroed counters
+// (`decLinearPrepared`, KDA_EPILOGUE's o_proj). Each checks that the table's Dense launches at the entry's tiles and the
+// other at `btFor`'s. Red check: the table's Dense at another K split (the same products summed in another order) must
+// differ. Lines: TURBOEXL3_LING_VERIFY_ROW_TABLE (_RED, _DONE).
+test "turboexl3 gpu ling verify-row table: o_proj's verify rows (2 to 4) on the table's launch (Config.dec_verify_row_table) give the served launch's words and the three-launch chain's, through linear and over prepared rows; red check: the table's launch at another K split (TURBOEXL3_GPU=1)" {
+    _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    const s = mlx.mlx_default_gpu_stream_new();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    const a = std.heap.page_allocator;
+    const ks = sdk.kernel_launch;
+    var g = try G.init(a, s);
+    defer g.deinit();
+    const saved = config.get().*;
+    defer config.configure(saved) catch unreachable;
+    var served_cfg = saved;
+    served_cfg.dec_one_row_table = true;
+    served_cfg.dec_verify_row_table = false;
+    served_cfg.dec_variant = 0;
+    var table_cfg = served_cfg;
+    table_cfg.dec_verify_row_table = true;
+    var failed: usize = 0;
+    var checks: usize = 0;
+    var reds: usize = 0;
+    for (dense.verify_row_table) |e| {
+        var prng = std.Random.DefaultPrng.init(0xD35C ^ (@as(u64, e.in) << 24) ^ e.out);
+        const rnd = prng.random();
+        const rate = format.Rate.fromN(e.n).?;
+        var lin = try ref.synthLinear(a, rnd, 1, e.in, e.out, rate, .mul1);
+        defer lin.deinit(a);
+        const mark = g.mark();
+        defer g.resetTo(mark);
+        const trellis = try i16Trellis(&g, s, lin.trellis, e.in, e.out, e.n);
+        const suh = try g.hostArray(std.mem.sliceAsBytes(lin.suh), &.{ci(e.in)}, .float16);
+        const svh = try g.hostArray(std.mem.sliceAsBytes(lin.svh), &.{ci(e.out)}, .float16);
+        const xs = try a.alloc(f32, 4 * e.in);
+        defer a.free(xs);
+        for (xs) |*v| v.* = bfExact(rnd.floatNorm(f32));
+        // the chain's, the served launch's, the table's and the table's over prepared rows
+        const got = try a.alloc(f32, 4 * 4 * e.out);
+        defer a.free(got);
+        for ([_]mlx.mlx_dtype{ .bfloat16, .float32 }) |dt| {
+            const geo: dense.Shape = .{ .in = e.in, .out = e.out, .rate = rate, .dec = .mul1, .out_dtype = dt };
+            try config.configure(served_cfg);
+            var chain = try dense.Dense.init(geo);
+            defer chain.deinit();
+            chain.dec_on = false;
+            var own = try dense.Dense.init(geo);
+            defer own.deinit();
+            try config.configure(table_cfg);
+            var table = try dense.Dense.init(geo);
+            defer table.deinit();
+            try config.configure(served_cfg);
+            for (2..5) |ru| {
+                const rows: u32 = @intCast(ru);
+                const rm = g.mark();
+                defer g.resetTo(rm);
+                const n = rows * e.out;
+                const x = try g.astype(try g.hostArray(std.mem.sliceAsBytes(xs[0 .. rows * e.in]), &.{ ci(rows), ci(e.in) }, .float32), dt);
+                for ([_]*dense.Dense{ &chain, &own, &table }, 0..) |d, k| {
+                    _ = try g.hostF32(try g.astype(try g.adopt(try d.linear(s, x, trellis, suh, svh, rows)), .float32), got[k * n ..][0..n]);
+                }
+                // over prep_sc's rows (the prepare does not depend on the tiles), the table's GEMV alone
+                const dc = try own.decCfgs(rows);
+                var po: [3]mlx.mlx_array = undefined;
+                try ks.applyConfig(own.prep_sc, dc.prep, &.{ x, suh }, &po, s);
+                const xp = try g.adopt(po[0]);
+                const xsum = try g.adopt(po[1]);
+                _ = mlx.mlx_array_free(po[2]);
+                const ncnt: c_int = @intCast(try table.decCounters(rows));
+                _ = try g.hostF32(try g.astype(try g.adopt(try table.decLinearPrepared(s, xp, xsum, try g.zeros(&.{ncnt}, .uint32), trellis, svh, rows)), .float32), got[3 * n ..][0..n]);
+                const rb = dense.Dense.rbFor(rows);
+                const shape_ok = table.btDec(rows, rb) == e.bt and own.btDec(rows, rb) == dense.Dense.btFor(rb);
+                const d_own = bytesDifferF32(got[n..][0..n], got[0..n]);
+                const d_table = bytesDifferF32(got[2 * n ..][0..n], got[n..][0..n]);
+                const d_prep = bytesDifferF32(got[3 * n ..][0..n], got[n..][0..n]);
+                const ok = shape_ok and d_own == 0 and d_table == 0 and d_prep == 0;
+                checks += 1;
+                std.debug.print("TURBOEXL3_LING_VERIFY_ROW_TABLE in={d} out={d} n={d} x={s} rows={d} served_bt={d} table_bt={d} served_vs_chain={d}/{d} table_vs_served={d}/{d} table_prepared_vs_served={d}/{d} {s}\n", .{ e.in, e.out, e.n, @tagName(dt), rows, own.btDec(rows, rb), table.btDec(rows, rb), d_own, n, d_table, n, d_prep, n, if (ok) "PASS" else "FAIL" });
+                if (!ok) failed += 1;
+                // red: the table's launch at another K split must differ from the served words
+                if (rows == 3 and dt == .bfloat16) {
+                    try config.configure(table_cfg);
+                    var tk = try dense.Dense.init(geo);
+                    defer tk.deinit();
+                    try config.configure(served_cfg);
+                    const ks_other = otherKs(e.in, table.ks_split);
+                    tk.ks_split = ks_other;
+                    _ = try g.hostF32(try g.astype(try g.adopt(try tk.linear(s, x, trellis, suh, svh, rows)), .float32), got[3 * n ..][0..n]);
+                    const d_ks = bytesDifferF32(got[3 * n ..][0..n], got[n..][0..n]);
+                    const ok_ks = ks_other != table.ks_split and tk.btDec(rows, rb) == e.bt and d_ks > 0;
+                    reds += 1;
+                    std.debug.print("TURBOEXL3_LING_VERIFY_ROW_TABLE_RED check=other_ks rows={d} ks={d}->{d} table_bt={d} differing={d}/{d} expect=nonzero {s}\n", .{ rows, table.ks_split, ks_other, tk.btDec(rows, rb), d_ks, n, if (ok_ks) "PASS" else "FAIL" });
+                    if (!ok_ks) failed += 1;
+                }
+            }
+        }
+    }
+    std.debug.print("TURBOEXL3_LING_VERIFY_ROW_TABLE_DONE checks={d} red={d} {s}\n", .{ checks, reds, if (failed == 0) "PASS" else "FAIL" });
+    try testing.expectEqual(@as(usize, 0), failed);
+}
+
+/// TURBOEXL3_LING_TIME's arm for the verify-row table, guidance only: each table entry at rows 2 to 4 through `linear`
+/// on a Dense made under the outside plugin's launch shapes (the one-row table): served (`btFor`'s 2 tiles), the table's
+/// (Config.dec_verify_row_table), 4 tiles (`bt_set`, beyond the table), and the table's with each DEC-ONE GEMV variant:
+/// min and median us a call (8 calls an evaluation), GB/s, the arm's min over the served launch's. Its own draw. Lines:
+/// TURBOEXL3_LING_TIME verify_row.
+fn timeVerifyRows(a: std.mem.Allocator, g: *G, s: mlx.mlx_stream, base: config.Config) !void {
+    defer config.configure(base) catch {};
+    var served_cfg = base;
+    served_cfg.dec_one_row_table = true;
+    served_cfg.dec_verify_row_table = false;
+    served_cfg.dec_variant = 0;
+    var table_cfg = served_cfg;
+    table_cfg.dec_verify_row_table = true;
+    var prng = std.Random.DefaultPrng.init(0xD35_7EB0);
+    const rnd = prng.random();
+    const Ctx = struct {
+        s: mlx.mlx_stream,
+        x: mlx.mlx_array,
+        p: root.Proj,
+        d: *dense.Dense,
+        rows: usize,
+        pub fn call(cx: @This()) !mlx.mlx_array {
+            return cx.d.linear(cx.s, cx.x, cx.p.trellis, cx.p.suh, cx.p.svh, cx.rows);
+        }
+    };
+    const Arm = struct { name: []const u8, table: bool, bt: u8 = 0, v: u8 = 0 };
+    const arms = [_]Arm{
+        .{ .name = "served", .table = false },
+        .{ .name = "table", .table = true },
+        .{ .name = "bt4", .table = false, .bt = 4 },
+        .{ .name = "table_t4", .table = true, .v = 1 },
+        .{ .name = "table_pf", .table = true, .v = 2 },
+        .{ .name = "table_pft4", .table = true, .v = 3 },
+    };
+    for (dense.verify_row_table) |e| {
+        const mark = g.mark();
+        defer g.resetTo(mark);
+        defer _ = mlx.mlx_clear_cache();
+        const p = try ds_test.randProj(a, g, rnd, null, e.in, e.out, e.n);
+        const geo: dense.Shape = .{ .in = e.in, .out = e.out, .rate = format.Rate.fromN(e.n).?, .dec = .mul1, .out_dtype = .bfloat16 };
+        try config.configure(served_cfg);
+        var own = try dense.Dense.init(geo);
+        defer own.deinit();
+        try config.configure(table_cfg);
+        var table = try dense.Dense.init(geo);
+        defer table.deinit();
+        const wbytes = @as(f64, @floatFromInt(e.in)) * @as(f64, @floatFromInt(e.out)) * @as(f64, @floatFromInt(e.n)) / 128.0;
+        for ([_]u32{ 2, 3, 4 }) |rows| {
+            const rm = g.mark();
+            defer g.resetTo(rm);
+            const x = try ds_test.randBf16(a, g, rnd, &.{ ci(rows), ci(e.in) });
+            var served_min: f64 = 0;
+            for (arms) |arm| {
+                var vc = if (arm.table) table_cfg else served_cfg;
+                vc.dec_variant = arm.v;
+                try config.configure(vc);
+                const d = if (arm.table) &table else &own;
+                const bt_was = d.bt_set[rows];
+                if (arm.bt != 0) {
+                    d.bt_set[rows] = arm.bt;
+                    d.resetCfgs();
+                }
+                defer if (arm.bt != 0) {
+                    d.bt_set[rows] = bt_was;
+                    d.resetCfgs();
+                };
+                const st = try ds_test.timeIt(g, Ctx{ .s = s, .x = x, .p = p, .d = d, .rows = rows }, 8);
+                if (served_min == 0) served_min = st.min;
+                std.debug.print("TURBOEXL3_LING_TIME verify_row in={d} out={d} n={d} rows={d} arm={s} bt={d} min_us={d:.1} med_us={d:.1} GBps={d:.0} of_served={d:.3}\n", .{ e.in, e.out, e.n, rows, arm.name, d.btDec(rows, dense.Dense.rbFor(rows)), st.min, st.med, wbytes / (st.min * 1e3), st.min / served_min });
+            }
+        }
+    }
+}
+
 // ── a prompt call's rows at any call width (a layer-major prompt pass runs the trunk linears over the whole prompt) ──
 
 /// The MTP layer's input projection (the 2.60 pack's `eh_proj`, K4): with `dense_cases` but the head, every EXL3 linear
@@ -1401,6 +1848,8 @@ const mla_latent_test = @import("mla_latent_test.zig");
 const mla_rows = @import("mla_rows.zig");
 const mla_rows_test = @import("mla_rows_test.zig");
 const mla_flash = @import("mla_flash.zig");
+const bproj_test = @import("bproj_test.zig");
+const router_test = @import("router_test.zig");
 
 /// A serial decode step and the verify widths of 2 to 4 rows, the engine's prompt chunk and a layer-major call
 const time_rows = [_]u32{ 1, 2, 3, 4, 4096, 16384 };
@@ -1689,6 +2138,10 @@ test "turboexl3 gpu ling timing: every trunk linear, moeLing and moeLingBanked a
             std.debug.print("TURBOEXL3_LING_TIME linear {s} {d}x{d} n={d} rows={d} min_us={d:.1} med_us={d:.1} GBps={d:.0} tflops={d:.2}\n", .{ c.name, c.in, c.out, c.n, rows, st.min, st.med, wbytes / (st.min * 1e3), flops / (st.min * 1e6) });
         }
     }
+    try timeDecVariants(a, &g, s, cfg);
+    try timeVerifyRows(a, &g, s, cfg);
+    try bproj_test.timeKdaVariants(a, &g, s);
+    try router_test.timeRouterRows(a, &g, s);
     var nbuf: [8]u32 = undefined;
     const rates = envList("TURBOEXL3_LING_N", &.{ 40, 32 }, &nbuf);
     for (rates) |n| {

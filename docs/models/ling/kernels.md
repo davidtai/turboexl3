@@ -34,7 +34,7 @@ the down's DEC-ONE GEMV (`turboexl3_dense_dec0`).
 | made at | `src/models/ling/shared.zig:71` (`fn kernelOf`) |
 | inputs | `x`, `suh0`, `suh1`, `w`, `w1`, `svh0`, `svh1`, `suh2`, `sigtab`, `cnt`, `pcnt` |
 | outputs | `y`, `z`, `xsx`, `xp`, `xs` |
-| source | `text_sgu` = `dense/dec_head` ++ `ling:shared/msel` ++ `dense/dec_prep1` ++ `dense/dec_gemv1` ++ `dense/dec_gemv_arrive_1` ++ `ling:shared/mtile` ++ `dense/dec_gemv_arrive_2` ++ `dense/dec_xsum1` ++ `dense/dec_finish_v` ++ `ling:shared/sgu_store` ++ `ling:shared/sgu_pair_1` ++ `ling:shared/sgu_swiglu` ++ `ling:shared/sgu_pair_2` (11827 B, `9233e19e7283`) |
+| source | `text_sgu` = `dense/dec_head` ++ `ling:shared/msel` ++ `dense/dec_prep1` ++ `dense/dec_gemv1` ++ `dense/dec_gemv_arrive_1` ++ `ling:shared/mtile` ++ `dense/dec_gemv_arrive_2_1` ++ `dense/dec_gemv_arrive_2_2` ++ `dense/dec_xsum1` ++ `dense/dec_finish_v` ++ `ling:shared/sgu_store` ++ `ling:shared/sgu_pair_1` ++ `ling:shared/sgu_swiglu` ++ `ling:shared/sgu_pair_2` (11827 B, `9233e19e7283`) |
 | header | `decode.header5` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` (26594 B, `41efbbbbd943`) |
 
 <!-- /kernel-facts -->
@@ -84,7 +84,7 @@ the down's DEC-ONE GEMV (`turboexl3_dense_dec0`).
 | made at | `src/models/ling/shared.zig:72` (`fn kernelOf`) |
 | inputs | `x`, `suh0`, `suh1`, `w`, `w1`, `svh0`, `svh1`, `suh2`, `sig32`, `lim`, `cnt`, `pcnt` |
 | outputs | `y`, `z`, `xsx`, `xp`, `xs` |
-| source | `text_sguco` = `dense/dec_head` ++ `ling:shared/msel` ++ `dense/dec_prep1` ++ `dense/dec_gemv1` ++ `dense/dec_gemv_arrive_1` ++ `ling:shared/mtile` ++ `dense/dec_gemv_arrive_2` ++ `dense/dec_xsum1` ++ `dense/dec_finish_v` ++ `ling:shared/sgu_store` ++ `ling:shared/sgu_pair_1` ++ `ling:shared/sgu_swiglu_clamp_out` ++ `ling:shared/sgu_pair_2` (12373 B, `22dd0e8c6666`) |
+| source | `text_sguco` = `dense/dec_head` ++ `ling:shared/msel` ++ `dense/dec_prep1` ++ `dense/dec_gemv1` ++ `dense/dec_gemv_arrive_1` ++ `ling:shared/mtile` ++ `dense/dec_gemv_arrive_2_1` ++ `dense/dec_gemv_arrive_2_2` ++ `dense/dec_xsum1` ++ `dense/dec_finish_v` ++ `ling:shared/sgu_store` ++ `ling:shared/sgu_pair_1` ++ `ling:shared/sgu_swiglu_clamp_out` ++ `ling:shared/sgu_pair_2` (12373 B, `22dd0e8c6666`) |
 | header | `decode.header5` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` (26594 B, `41efbbbbd943`) |
 
 <!-- /kernel-facts -->
@@ -120,7 +120,7 @@ A KDA layer's z | a, the shared expert's gate | up and the dense FFN's gate | up
 | made at | `src/models/ling/pair.zig:66` (`fn kernelOf`) |
 | inputs | `jxp`, `jxs`, `w0`, `w1`, `svh0`, `svh1`, `cnt` |
 | outputs | `y`, `z` |
-| source | `text_jdec0` = `dense/dec_head` ++ `ling:pair/jrows` ++ `ling:pair/jw` ++ `dense/dec_gemv0` ++ `dense/dec_gemv_arrive_1` ++ `ricursive:ricursive/jtile` ++ `dense/dec_gemv_arrive_2` ++ `dense/dec_xsum0` ++ `dense/dec_finish_v` ++ `dense/dec_finish_store` (7441 B, `e67032a622fb`) |
+| source | `text_jdec0` = `dense/dec_head` ++ `ling:pair/jrows` ++ `ling:pair/jw` ++ `dense/dec_gemv0` ++ `dense/dec_gemv_arrive_1` ++ `ricursive:ricursive/jtile` ++ `dense/dec_gemv_arrive_2_1` ++ `dense/dec_gemv_arrive_2_2` ++ `dense/dec_xsum0` ++ `dense/dec_finish_v` ++ `dense/dec_finish_store` (7441 B, `e67032a622fb`) |
 | header | `decode.header5` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` (26594 B, `41efbbbbd943`) |
 
 <!-- /kernel-facts -->
@@ -157,7 +157,7 @@ A KDA layer's z | a, the shared expert's gate | up and the dense FFN's gate | up
 | made at | `src/models/ling/pair.zig:67` (`fn kernelOf`) |
 | inputs | `x`, `suh0`, `suh1`, `w0`, `w1`, `svh0`, `svh1`, `cnt` |
 | outputs | `y`, `z`, `xsx` |
-| source | `text_jdec1` = `dense/dec_head` ++ `ling:pair/jsuh` ++ `ling:pair/jw` ++ `dense/dec_prep1` ++ `dense/dec_gemv1` ++ `dense/dec_gemv_arrive_1` ++ `ricursive:ricursive/jtile` ++ `dense/dec_gemv_arrive_2` ++ `dense/dec_xsum1` ++ `dense/dec_finish_v` ++ `dense/dec_finish_store` (8776 B, `6f8fa1171cb0`) |
+| source | `text_jdec1` = `dense/dec_head` ++ `ling:pair/jsuh` ++ `ling:pair/jw` ++ `dense/dec_prep1` ++ `dense/dec_gemv1` ++ `dense/dec_gemv_arrive_1` ++ `ricursive:ricursive/jtile` ++ `dense/dec_gemv_arrive_2_1` ++ `dense/dec_gemv_arrive_2_2` ++ `dense/dec_xsum1` ++ `dense/dec_finish_v` ++ `dense/dec_finish_store` (8776 B, `6f8fa1171cb0`) |
 | header | `decode.header5` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` (26594 B, `41efbbbbd943`) |
 
 <!-- /kernel-facts -->
@@ -225,7 +225,7 @@ K split.
 | made at | `src/models/ling/kdaproj.zig:67` (`fn kernelOf`) |
 | inputs | `jxp`, `jxs`, `w0`, `w1`, `w2`, `svh0`, `svh1`, `svh2`, `jcnt` |
 | outputs | `y0`, `y1`, `y2`, `z0`, `z1`, `z2` |
-| source | `text_kdec0` = `ling:kdaproj/head` ++ `ling:kdaproj/member` ++ `dense/dec_gemv0` ++ `dense/dec_gemv_arrive_1` ++ `dense/dec_tile` ++ `dense/dec_gemv_arrive_2` ++ `dense/dec_xsum0` ++ `dense/dec_finish_v` ++ `dense/dec_finish_store` (7971 B, `a9c43d427f96`) |
+| source | `text_kdec0` = `ling:kdaproj/head` ++ `ling:kdaproj/member` ++ `dense/dec_gemv0` ++ `dense/dec_gemv_arrive_1` ++ `dense/dec_tile` ++ `dense/dec_gemv_arrive_2_1` ++ `dense/dec_gemv_arrive_2_2` ++ `dense/dec_xsum0` ++ `dense/dec_finish_v` ++ `dense/dec_finish_store` (7971 B, `a9c43d427f96`) |
 | header | `decode.header5` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` (26594 B, `41efbbbbd943`) |
 
 <!-- /kernel-facts -->
@@ -287,7 +287,7 @@ K split.
 | made at | `src/models/ling/kdaproj.zig:68` (`fn kernelOf`) |
 | inputs | `jxp`, `jxs`, `w0`, `w1`, `w2`, `svh0`, `svh1`, `svh2`, `jcnt`, `xb`, `wb` |
 | outputs | `y0`, `y1`, `y2`, `z0`, `z1`, `z2`, `yb` |
-| source | `text_kdec0b` = `ling:kdaproj/bmember` ++ `ling:kdaproj/head` ++ `ling:kdaproj/member` ++ `dense/dec_gemv0` ++ `dense/dec_gemv_arrive_1` ++ `dense/dec_tile` ++ `dense/dec_gemv_arrive_2` ++ `dense/dec_xsum0` ++ `dense/dec_finish_v` ++ `dense/dec_finish_store` (10779 B, `869bb863886d`) |
+| source | `text_kdec0b` = `ling:kdaproj/bmember_1` ++ `ling:kdaproj/bmember_2` ++ `ling:kdaproj/head` ++ `ling:kdaproj/member` ++ `dense/dec_gemv0` ++ `dense/dec_gemv_arrive_1` ++ `dense/dec_tile` ++ `dense/dec_gemv_arrive_2_1` ++ `dense/dec_gemv_arrive_2_2` ++ `dense/dec_xsum0` ++ `dense/dec_finish_v` ++ `dense/dec_finish_store` (10779 B, `869bb863886d`) |
 | header | `decode.header5` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` (26594 B, `41efbbbbd943`) |
 
 <!-- /kernel-facts -->
@@ -299,6 +299,111 @@ K split.
 - **Replaces:** b_proj's own launches: MLX's matmul at one row, the exact verify's denseRows (a concatenate and a batched matmul) at 2 to 8.
 - **Bits:** the members' are dec0's. b's are MLX's gemv's (gemv.h `GEMVKernel::run` at BM 1, BN 8, SM 1, SN 32, TM 4, TN 4, MLX 0.32): each K slice's products in its order, the simdgroup's shuffle-down sum, then the eight slices' sums added in simdgroup order, one simdgroup running the eight slices in turn; stored in bf16. It needs IN % 1024 == 0, OUTB % 4 == 0, OUTB < 4096 and IN >= 16 OUTB (`kdaproj.bTakes`), where MLX picks that kernel.
 - **Pinned by:** `src/models/ling/bproj_test.zig` "turboexl3 ling bproj texts: ..." (CPU: the composition and the gemv statements, `kernels/test/pins/bproj_texts.metal`) and "turboexl3 gpu ling bproj: ..." (GPU: b's output against the served one-row matmul and denseRows, the members against kdaProj's, word for word at rows 1 to 8).
+
+### `turboexl3_ling_kdaproj_dec0bv`
+
+<!-- kernel-facts: turboexl3_ling_kdaproj_dec0bv -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/ling/kdaproj.zig:70` (`fn kernelOf`) |
+| inputs | `jxp`, `jxs`, `w0`, `w1`, `w2`, `svh0`, `svh1`, `svh2`, `jcnt`, `xb`, `wb` |
+| outputs | `y0`, `y1`, `y2`, `z0`, `z1`, `z2`, `yb` |
+| source | `text_kdec0bv` = `ling:kdaproj/bfirst` ++ `ling:kdaproj/bmember_2` ++ `ling:kdaproj/head_v` ++ `ling:kdaproj/member` ++ `ling:kdaproj/bt_0` ++ `dense/dec_gemv0` ++ `dense/dec_gemv_arrive_1` ++ `dense/dec_tile` ++ `dense/dec_gemv_arrive_2_1` ++ `dense/dec_gemv_arrive_2_2` ++ `dense/dec_xsum0` ++ `dense/dec_finish_v` ++ `dense/dec_finish_store` ++ `ling:kdaproj/bt_1` ++ `dense/dec_gemv0` ++ `dense/dec_gemv_arrive_1` ++ `dense/dec_tile` ++ `dense/dec_gemv_arrive_2_1` ++ `dense/dec_gemv_arrive_2_2` ++ `dense/dec_xsum0` ++ `dense/dec_finish_v` ++ `dense/dec_finish_store` ++ `ling:kdaproj/bt_close` (16101 B, `5fcfec7db1eb`) |
+| header | `decode.header5` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` (26594 B, `41efbbbbd943`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** `kdaProjB` (`ling.kdaProjB`, `kdaproj.gemvVariant`) where the configuration asks a variant launch
+  (`kdaproj.variantFor`): `Config.kda_bfirst`, or `kda_bt0` / `kda_bt1` at a verify's rows (2 or more) where they fit;
+  with `Config.dec_variant` t4 or pf its twins below. The outside plugin turboexl3_ling's candidates KDA_BFIRST and
+  KDA_BT (DEC_T4, DEC_PF for the twins).
+- **Shapes and dtypes:** `turboexl3_ling_kdaproj_dec0b`'s.
+- **Grid and threadgroup:** `((tgs + OUTB / 4) · 128, chunks, 1)` / `(128, 1, 1)`, tgs = OUT0/128 · KS0 · 8/BT0 +
+  (OUT1 + OUT2)/128 · KS1 · 8/BT1 (`kdaproj.tgsAt`): b's OUTB / 4 threadgroups first (BF 1: each row of the chunk on
+  its own simdgroup) or last (BF 0: simdgroup 0 alone, as `turboexl3_ling_kdaproj_dec0b`), the members' in member order.
+- **Template args:** dec0b's with BT0 (member 0's output tiles a threadgroup) and BT1 (members 1 and 2's) in BT's place,
+  and BF (b's threadgroups first). At BT0 == BT1 one branch is compiled.
+- **Replaces:** `turboexl3_ling_kdaproj_dec0b` (the GEMV inventory's D3).
+- **Bits:** byte-identical to `turboexl3_ling_kdaproj_dec0b`: each member's threadgroup runs DEC-ONE's statements over
+  its own prepared rows (`ling:kdaproj/bt_0` and `bt_1` set BTC to the member's tile count, then dense's pieces
+  verbatim), so its output words are its `linear`'s at any tile count (the tiles a threadgroup move no product or sum:
+  each lane's accumulators, the quad fold, the simdgroup sum and the K slices' sum in slice order are per output); b's
+  rows run `ling:kdaproj/bmember_2`'s statements (MLX's gemv over the row) whichever threadgroup position and simdgroup
+  run them.
+- **Pinned by:** `src/models/ling/kdaproj.zig` "turboexl3 ling kdaproj variant texts: ..." (CPU: the composition, the
+  head's member-independent lines kept, `kernels/test/pins/kdaproj_variants.metal`) and "turboexl3 ling kdaproj variant
+  plan: ..." (CPU: the choice per configuration and row count, the grid's cover of each member's (K slice, block) and
+  b's rows at every tile pair, b first or last); `src/models/ling/bproj_test.zig` "turboexl3 gpu ling bproj variants:
+  ..." (GPU: `TURBOEXL3_LING_KDA_VARIANT`, each arm's four outputs against the served launch's word for word at rows 1
+  to 8 and 16; the red checks at another K split and with a word of b's weight changed).
+
+### `turboexl3_ling_kdaproj_dec0bv_t4`
+
+<!-- kernel-facts: turboexl3_ling_kdaproj_dec0bv_t4 -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/ling/kdaproj.zig:71` (`fn kernelOf`) |
+| inputs | `jxp`, `jxs`, `w0`, `w1`, `w2`, `svh0`, `svh1`, `svh2`, `jcnt`, `xb`, `wb` |
+| outputs | `y0`, `y1`, `y2`, `z0`, `z1`, `z2`, `yb` |
+| source | `text_kdec0bv` = `ling:kdaproj/bfirst` ++ `ling:kdaproj/bmember_2` ++ `ling:kdaproj/head_v` ++ `ling:kdaproj/member` ++ `ling:kdaproj/bt_0` ++ `dense/dec_gemv0` ++ `dense/dec_gemv_arrive_1` ++ `dense/dec_tile` ++ `dense/dec_gemv_arrive_2_1` ++ `dense/dec_gemv_arrive_2_2` ++ `dense/dec_xsum0` ++ `dense/dec_finish_v` ++ `dense/dec_finish_store` ++ `ling:kdaproj/bt_1` ++ `dense/dec_gemv0` ++ `dense/dec_gemv_arrive_1` ++ `dense/dec_tile` ++ `dense/dec_gemv_arrive_2_1` ++ `dense/dec_gemv_arrive_2_2` ++ `dense/dec_xsum0` ++ `dense/dec_finish_v` ++ `dense/dec_finish_store` ++ `ling:kdaproj/bt_close` (16101 B, `5fcfec7db1eb`) |
+| header | `dense.header5_t4` = `dense/t4` ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` (26815 B, `fd8d5753490b`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** as `turboexl3_ling_kdaproj_dec0bv` under `Config.dec_variant` 1 (t4).
+- **Shapes and dtypes:** `turboexl3_ling_kdaproj_dec0b`'s.
+- **Grid and threadgroup:** `turboexl3_ling_kdaproj_dec0bv`'s.
+- **Template args:** `turboexl3_ling_kdaproj_dec0bv`'s.
+- **Replaces:** `turboexl3_ling_kdaproj_dec0b` (with banked's group variant t4, as `turboexl3_dense_dec0_t4`).
+- **Bits:** byte-identical: `turboexl3_ling_kdaproj_dec0bv`'s text after `dense/t4`'s define (the same exact t).
+- **Pinned by:** as `turboexl3_ling_kdaproj_dec0bv`'s (arms t4 and, with pf, pft4 and all).
+
+### `turboexl3_ling_kdaproj_dec0bv_pf`
+
+<!-- kernel-facts: turboexl3_ling_kdaproj_dec0bv_pf -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/ling/kdaproj.zig:72` (`fn kernelOf`) |
+| inputs | `jxp`, `jxs`, `w0`, `w1`, `w2`, `svh0`, `svh1`, `svh2`, `jcnt`, `xb`, `wb` |
+| outputs | `y0`, `y1`, `y2`, `z0`, `z1`, `z2`, `yb` |
+| source | `text_kdec0bv_pf` = `ling:kdaproj/bfirst` ++ `ling:kdaproj/bmember_2` ++ `ling:kdaproj/head_v` ++ `ling:kdaproj/member` ++ `ling:kdaproj/bt_0` ++ `dense/dec_pf_decl` ++ `dense/dec_gemv0` ++ `dense/dec_pf_next` ++ `dense/dec_gemv_arrive_1` ++ `dense/dec_pf_ww` ++ `dense/dec_gemv_arrive_2_2` ++ `dense/dec_xsum0` ++ `dense/dec_finish_v` ++ `dense/dec_finish_store` ++ `ling:kdaproj/bt_1` ++ `dense/dec_pf_decl` ++ `dense/dec_gemv0` ++ `dense/dec_pf_next` ++ `dense/dec_gemv_arrive_1` ++ `dense/dec_pf_ww` ++ `dense/dec_gemv_arrive_2_2` ++ `dense/dec_xsum0` ++ `dense/dec_finish_v` ++ `dense/dec_finish_store` ++ `ling:kdaproj/bt_close` (17953 B, `a7e2be1bd90c`) |
+| header | `decode.header5` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` (26594 B, `41efbbbbd943`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** as `turboexl3_ling_kdaproj_dec0bv` under `Config.dec_variant` 2 (pf).
+- **Shapes and dtypes:** `turboexl3_ling_kdaproj_dec0b`'s.
+- **Grid and threadgroup:** `turboexl3_ling_kdaproj_dec0bv`'s.
+- **Template args:** `turboexl3_ling_kdaproj_dec0bv`'s.
+- **Replaces:** `turboexl3_ling_kdaproj_dec0b` (with banked's group variant pf, as `turboexl3_dense_dec0_pf`).
+- **Bits:** byte-identical: `turboexl3_ling_kdaproj_dec0bv`'s text with each branch on `turboexl3_dense_dec0_pf`'s body
+  (`dense.dec_body0_pf`: each input tile's words a pass ahead, the same words and statements).
+- **Pinned by:** as `turboexl3_ling_kdaproj_dec0bv`'s (arm pf).
+
+### `turboexl3_ling_kdaproj_dec0bv_pft4`
+
+<!-- kernel-facts: turboexl3_ling_kdaproj_dec0bv_pft4 -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/ling/kdaproj.zig:73` (`fn kernelOf`) |
+| inputs | `jxp`, `jxs`, `w0`, `w1`, `w2`, `svh0`, `svh1`, `svh2`, `jcnt`, `xb`, `wb` |
+| outputs | `y0`, `y1`, `y2`, `z0`, `z1`, `z2`, `yb` |
+| source | `text_kdec0bv_pf` = `ling:kdaproj/bfirst` ++ `ling:kdaproj/bmember_2` ++ `ling:kdaproj/head_v` ++ `ling:kdaproj/member` ++ `ling:kdaproj/bt_0` ++ `dense/dec_pf_decl` ++ `dense/dec_gemv0` ++ `dense/dec_pf_next` ++ `dense/dec_gemv_arrive_1` ++ `dense/dec_pf_ww` ++ `dense/dec_gemv_arrive_2_2` ++ `dense/dec_xsum0` ++ `dense/dec_finish_v` ++ `dense/dec_finish_store` ++ `ling:kdaproj/bt_1` ++ `dense/dec_pf_decl` ++ `dense/dec_gemv0` ++ `dense/dec_pf_next` ++ `dense/dec_gemv_arrive_1` ++ `dense/dec_pf_ww` ++ `dense/dec_gemv_arrive_2_2` ++ `dense/dec_xsum0` ++ `dense/dec_finish_v` ++ `dense/dec_finish_store` ++ `ling:kdaproj/bt_close` (17953 B, `a7e2be1bd90c`) |
+| header | `dense.header5_t4` = `dense/t4` ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` (26815 B, `fd8d5753490b`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** as `turboexl3_ling_kdaproj_dec0bv` under `Config.dec_variant` 3 (pft4).
+- **Shapes and dtypes:** `turboexl3_ling_kdaproj_dec0b`'s.
+- **Grid and threadgroup:** `turboexl3_ling_kdaproj_dec0bv`'s.
+- **Template args:** `turboexl3_ling_kdaproj_dec0bv`'s.
+- **Replaces:** `turboexl3_ling_kdaproj_dec0b` (pf and t4 together).
+- **Bits:** byte-identical: `turboexl3_ling_kdaproj_dec0bv_pf`'s text after `dense/t4`'s define.
+- **Pinned by:** as `turboexl3_ling_kdaproj_dec0bv`'s (arms pft4 and all).
 
 ## `src/models/ling/kdaproj_pf.zig`
 
@@ -495,7 +600,9 @@ each rounded to bf16 (the product's dtype), widened, then scored with the statem
 MLX's metallib is built `-fno-fast-math`, so its bare exp, log and sqrt are the precise ones: the scores spell them
 precise, and their headers keep each statement's rounding (`#pragma METAL fp contract(off)`). The GEMV statements carry
 no pragma: they compile as MLX's own do. `tableF32` rebuilds the loader's table from the f16 weight's view (astype, then
-+ 0) for a host that keeps the weight in f16 and runs its own matmul where these launches do not serve.
++ 0) for a host that keeps the weight in f16 and runs its own matmul where these launches do not serve. Under
+`Config.router_rows` a call of 2 rows or more over the f16 weight takes the rows launch (the `_hr` kernels): each router
+threadgroup computes its 16 logits for a group of up to 4 rows, so the weight is read once a group, not once a row.
 
 ### `turboexl3_ling_router_logits`
 
@@ -657,6 +764,94 @@ no pragma: they compile as MLX's own do. `tableF32` rebuilds the loader's table 
 - **Pinned by:** `src/models/ling/router_test.zig` "turboexl3 gpu ling router: ..." (GPU, the ids and weights against
   the host's launch then the astype, alone and in `route`, rows 1 to 8); `src/models/ling/router.zig` "turboexl3 ling
   router texts: ..." (CPU, the host's statements).
+
+### `turboexl3_ling_router_logits_hr`
+
+<!-- kernel-facts: turboexl3_ling_router_logits_hr -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/ling/router.zig:413` (`fn rowsKernelOf`) |
+| inputs | `x`, `w` |
+| outputs | `logits` |
+| source | `text_logits_hr` = `ling:router/head_rows` ++ `ling:router/logits_rows_1` ++ `ling:router/logits_wh` ++ `ling:router/logits_rows_2` ++ `ling:router/close` (3210 B, `64478f05ed17`) |
+| header | `""` = (empty) (0 B, `e3b0c44298fc`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** Ling-3.1-flash: `root.ling.router.routerLogits` (and `route`) over the loaded f16 weight at a call of 2
+  rows or more without a predictor (the last MoE layer and the NextN layer), under `Config.router_rows`
+  (`routerLogitsWith`): the outside plugin turboexl3_ling's candidate ROUTER_ROWS (with ROUTER_F16). Not served by
+  default.
+- **Shapes and dtypes:** `turboexl3_ling_router_logits_h`'s, R 2 to 8.
+- **Grid and threadgroup:** `(32·NRG · 128, 1, 1)` / `(128, 1, 1)`: 32 threadgroups (MLX's gemv tiles of 16 logits)
+  for each group of RG = min(R, 4) rows, NRG = ceil(R / RG) groups. Each threadgroup runs its tile for every row of its
+  group; a group past the call's last row repeats that row's reads and stores nothing for it.
+- **Template args:** R, NE, HK, as `turboexl3_ling_router_logits_h`'s (RG and NRG follow from R).
+- **Replaces:** `turboexl3_ling_router_logits_h` at those calls (the GEMV inventory's D5b): 32R threadgroups, each tile's
+  16 weight rows read once a row (R reads of the 4 MiB weight a call), with 32·NRG (one read a group of up to 4 rows).
+- **Bits:** `turboexl3_ling_router_logits_h`'s words. Each row keeps its own coefficients (its x words widened) and its
+  own 4 sums a lane. Each weight word is read once (`ling:router/logits_wh` verbatim: widened, then + 0) and taken by
+  every row of the group in that row's own statement, `result[r][tm] += inter[tn] * v_coeff[r][tn]`: the served
+  launch's statement with the row's index. A row's statements and their order (the K loop, the 4 × 4 tile, the shuffle
+  tree, the store) are those of its threadgroup in the served launch, so its contractions and roundings are too.
+- **Pinned by:** `src/models/ling/router.zig` "turboexl3 ling router rows texts: ..." (CPU: the composition, each per-row
+  statement a row's own and the served one nowhere, every other gemv statement once,
+  `kernels/test/pins/router_rows.metal`) and "turboexl3 ling router rows plan: ..." (CPU: the grid, the calls it takes,
+  the head's cover of each (row, tile) once); `src/models/ling/router_test.zig` "turboexl3 gpu ling router rows: ..."
+  (GPU: `TURBOEXL3_LING_ROUTER_ROWS`, the logits and scores against the served launch's word for word at rows 1 to 8,
+  over the f16 weight and the f32 table; red checks: a flipped word, MLX's several-row matmul, a negated weight word).
+
+### `turboexl3_ling_router_pred_hr`
+
+<!-- kernel-facts: turboexl3_ling_router_pred_hr -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/ling/router.zig:414` (`fn rowsKernelOf`) |
+| inputs | `x`, `w`, `pw`, `pb` |
+| outputs | `logits`, `scores` |
+| source | `text_pred_hr` = `ling:router/head_rows` ++ `ling:router/logits_rows_1` ++ `ling:router/logits_wh` ++ `ling:router/logits_rows_2` ++ `ling:router/pred_open_rows` ++ `ling:router/pred_one` ++ `ling:router/pred_wide` ++ `ling:router/close` (7284 B, `9bc4dd11a86f`) |
+| header | `score_softplus_sqrt` = `ling:router/score_softplus_sqrt` (1499 B, `0f43a7203e4b`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** as `turboexl3_ling_router_logits_hr`, with a `Predictor` at its default score (`.softplus_sqrt`): in
+  `turboexl3_ling_router_pred_h`'s place at a call of 2 rows or more under `Config.router_rows`.
+- **Shapes and dtypes:** `turboexl3_ling_router_pred_h`'s, R 2 to 8.
+- **Grid and threadgroup:** `((32·NRG + P) · 128, 1, 1)` / `(128, 1, 1)`: the router's 32·NRG threadgroups as
+  `turboexl3_ling_router_logits_hr`'s, then the predictor's P as `turboexl3_ling_router_pred`'s (128 at 2 to 5 rows, 64
+  at 6 to 8).
+- **Template args:** R, NE, HK.
+- **Replaces:** `turboexl3_ling_router_pred_h` at those calls (D5b).
+- **Bits:** the logits as `turboexl3_ling_router_logits_hr`'s; the scores `turboexl3_ling_router_pred_h`'s: the
+  predictor's threadgroups run `ling:router/pred_one` and `ling:router/pred_wide` verbatim, their index counted past the
+  router's 32·NRG threadgroups (`ling:router/pred_open_rows`) in place of 32R.
+- **Pinned by:** as `turboexl3_ling_router_logits_hr`'s (the GPU test's DeepSeek score).
+
+### `turboexl3_ling_router_pred_sig_hr`
+
+<!-- kernel-facts: turboexl3_ling_router_pred_sig_hr -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/ling/router.zig:415` (`fn rowsKernelOf`) |
+| inputs | `x`, `w`, `pw`, `pb` |
+| outputs | `logits`, `scores` |
+| source | `text_pred_hr` = `ling:router/head_rows` ++ `ling:router/logits_rows_1` ++ `ling:router/logits_wh` ++ `ling:router/logits_rows_2` ++ `ling:router/pred_open_rows` ++ `ling:router/pred_one` ++ `ling:router/pred_wide` ++ `ling:router/close` (7284 B, `9bc4dd11a86f`) |
+| header | `score_sigmoid` = `ling:router/score_sigmoid` (522 B, `765e609d7b4e`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** as `turboexl3_ling_router_pred_hr`, with `Predictor.score = .sigmoid` (Ling's score, the plugin's
+  PREDICTOR): in `turboexl3_ling_router_pred_sig_h`'s place at a call of 2 rows or more under `Config.router_rows`.
+- **Shapes and dtypes:** `turboexl3_ling_router_pred_sig_h`'s, R 2 to 8.
+- **Grid and threadgroup:** `turboexl3_ling_router_pred_hr`'s.
+- **Template args:** R, NE, HK.
+- **Replaces:** `turboexl3_ling_router_pred_sig_h` at those calls (D5b).
+- **Bits:** the logits as `turboexl3_ling_router_logits_hr`'s; the scores `turboexl3_ling_router_pred_sig_h`'s (the
+  predictor's pieces verbatim, as `turboexl3_ling_router_pred_hr`'s).
+- **Pinned by:** as `turboexl3_ling_router_logits_hr`'s (the GPU test's Ling score).
 
 ### `turboexl3_test_ling_router_host`
 

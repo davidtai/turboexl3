@@ -1881,6 +1881,34 @@ SPLIT_ADDED_KERNELS['turboexl3_test_ling_mla_flash_r1_nope_fault'] = ('test only
                                                                       'key slice read from the nope keys\' row '
                                                                       '(fault/mla_flash_r1_kofs_nope in r1_kofs\'s place), '
                                                                       'a red check')
+# D35, DEC-ONE's GEMV variants (Config.dec_variant, dense.dec_variants; ling-d35-gemv). The kernels the served path runs keep
+# their texts: dec_gemv_arrive_2 is cut into dec_gemv_arrive_2_1 (the tile's words) and _2_2, of the same value
+SPLIT_ADDED_KERNELS['turboexl3_dense_dec0_t4'] = ('dec_variant t4: text_dec0 verbatim, header header5_t4 (dense/t4\'s '
+                                                  'EXL3_T1V 4 before decode.header5): banked\'s group variant t4')
+SPLIT_ADDED_KERNELS['turboexl3_dense_dec0_pf'] = ('dec_variant pf: text_dec0 with each tile\'s words loaded a pass ahead '
+                                                  '(dec_pf_decl, dec_pf_next; dec_pf_ww in dec_tile ++ dec_gemv_arrive_2_1\'s '
+                                                  'place)')
+SPLIT_ADDED_KERNELS['turboexl3_dense_dec0_pft4'] = 'dec_variant pft4: text_dec0_pf over header5_t4'
+# D35, the KDA projections' variant launch (Config.kda_bfirst, kda_bt0 / kda_bt1, dec_variant; kdaproj.zig). The served
+# dec0b keeps its text: kdaproj/bmember.metal is cut into bmember_1 (b's threadgroups and rows) and bmember_2
+SPLIT_ADDED_KERNELS['turboexl3_ling_kdaproj_dec0bv'] = ('kdaProjB\'s variant launch: kdaproj/bfirst in bmember_1\'s place '
+                                                        '(BF: b\'s threadgroups first, a row a simdgroup), head_v (BT0 for '
+                                                        'member 0, BT1 for members 1 and 2) in head\'s, then the member '
+                                                        'choice and DEC-ONE\'s statements verbatim in each member\'s branch '
+                                                        '(bt_0, bt_1, bt_close set BTC)')
+SPLIT_ADDED_KERNELS['turboexl3_ling_kdaproj_dec0bv_t4'] = 'turboexl3_ling_kdaproj_dec0bv over dense.header5_t4'
+SPLIT_ADDED_KERNELS['turboexl3_ling_kdaproj_dec0bv_pf'] = ('turboexl3_ling_kdaproj_dec0bv with dense.dec_body0_pf in each '
+                                                           'branch')
+SPLIT_ADDED_KERNELS['turboexl3_ling_kdaproj_dec0bv_pft4'] = 'turboexl3_ling_kdaproj_dec0bv_pf over dense.header5_t4'
+# D35, the router's rows launch (Config.router_rows; router.zig). The served texts keep theirs: the rows launch swaps
+# router/head, logits_1, logits_2 and pred_open for its own pieces around router/logits_wh, pred_one and pred_wide verbatim
+SPLIT_ADDED_KERNELS['turboexl3_ling_router_logits_hr'] = ('router_rows: turboexl3_ling_router_logits_h with each router '
+                                                          'threadgroup 16 logits of a group of up to 4 rows (head_rows, '
+                                                          'logits_rows_1 ++ logits_wh ++ logits_rows_2), the f16 weight '
+                                                          'read once for them, each row\'s statements the served one\'s')
+SPLIT_ADDED_KERNELS['turboexl3_ling_router_pred_hr'] = ('router_rows: turboexl3_ling_router_pred_h on the rows launch '
+                                                        '(pred_open_rows, then pred_one and pred_wide verbatim)')
+SPLIT_ADDED_KERNELS['turboexl3_ling_router_pred_sig_hr'] = 'router_rows: turboexl3_ling_router_pred_sig_h on the rows launch'
 
 def split_report(oprog, nprog, ounits, nunits, orig_dir, new_dir, problems, verbose):
     """--split (declarations moved between files, not only files): checks 1 to 4 over the whole tree instead of per file.

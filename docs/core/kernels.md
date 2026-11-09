@@ -672,7 +672,7 @@ streamer's slot banks and its grouped variants DeepSeek-V4.1's ([its catalog](..
 | made at | `src/core/dense.zig:449` (`const Dense`) |
 | inputs | `xp`, `xs`, `w`, `svh`, `cnt` |
 | outputs | `y`, `z` |
-| source | `text_dec0` = `dense/dec_head` ++ `dense/dec_gemv0` ++ `dense/dec_gemv_arrive_1` ++ `dense/dec_tile` ++ `dense/dec_gemv_arrive_2` ++ `dense/dec_xsum0` ++ `dense/dec_finish_v` ++ `dense/dec_finish_store` (6206 B, `1f49ed16dcfc`) |
+| source | `text_dec0` = `dense/dec_head` ++ `dense/dec_gemv0` ++ `dense/dec_gemv_arrive_1` ++ `dense/dec_tile` ++ `dense/dec_gemv_arrive_2_1` ++ `dense/dec_gemv_arrive_2_2` ++ `dense/dec_xsum0` ++ `dense/dec_finish_v` ++ `dense/dec_finish_store` (6206 B, `1f49ed16dcfc`) |
 | header | `decode.header5` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` (26594 B, `41efbbbbd943`) |
 
 <!-- /kernel-facts -->
@@ -708,6 +708,90 @@ streamer's slot banks and its grouped variants DeepSeek-V4.1's ([its catalog](..
   `src/models/qwen38/decb_test.zig` "turboexl3 gpu decode merges: o_proj's prepare inside the gate kernel and inside the
   QSA merge equals the ..." (GPU, bytes through Qwen3.8's gated merges).
 
+### `turboexl3_dense_dec0_t4`
+
+<!-- kernel-facts: turboexl3_dense_dec0_t4 -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/core/dense.zig:1671` (`fn dec0Variant`) |
+| inputs | `xp`, `xs`, `w`, `svh`, `cnt` |
+| outputs | `y`, `z` |
+| source | `text_dec0` = `dense/dec_head` ++ `dense/dec_gemv0` ++ `dense/dec_gemv_arrive_1` ++ `dense/dec_tile` ++ `dense/dec_gemv_arrive_2_1` ++ `dense/dec_gemv_arrive_2_2` ++ `dense/dec_xsum0` ++ `dense/dec_finish_v` ++ `dense/dec_finish_store` (6206 B, `1f49ed16dcfc`) |
+| header | `header5_t4` = `dense/t4` ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` (26815 B, `fd8d5753490b`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** core: `Config.dec_variant` 1 (t4), in `turboexl3_dense_dec0`'s place at each of its launches from
+  `Dense.decLinear` (a DEC-ONE call whose prepare runs in `turboexl3_dense_prep_sc`'s launch) and
+  `Dense.decLinearPrepared` (KDA_EPILOGUE's o_proj in the outside plugin turboexl3_ling); made at its first such call
+  (`dense.dec0For`). The shared expert's, the pairs' and the decode merges' DEC-ONE launches keep `turboexl3_dense_dec0`.
+- **Shapes and dtypes:** `turboexl3_dense_dec0`'s.
+- **Grid and threadgroup:** `turboexl3_dense_dec0`'s (the Dense's own configs).
+- **Template args:** `turboexl3_dense_dec0`'s.
+- **Replaces:** `turboexl3_dense_dec0` (banked's group variant t4 carried to DEC-ONE's GEMV: the route BANKED_T4 runs
+  for the routed GEMVs).
+- **Bits:** byte-identical to `turboexl3_dense_dec0`: its text verbatim after `dense/t4`'s one define, `EXL3_T1V 4`,
+  which takes the MUL1 codeword's two pair sums to t as one half2 (`exl3_mul1_t`): the same exact integer t in [0,
+  1020] as the default route's, so every FMA takes the same operands in the same order.
+- **Pinned by:** `src/core/dense.zig` "turboexl3 dense DEC-ONE variants: t4 is text_dec0 after t4's define, ..." (CPU:
+  the define, then `decode.header5` verbatim); `src/models/ling/ling_test.zig` "turboexl3 gpu ling dense variants:
+  each DEC-ONE GEMV variant (t4, pf, pft4) gives the served GEMV's words ..." (GPU: `TURBOEXL3_LING_DEC_VARIANT`
+  variant=t4, word for word at every Ling-3.1-flash trunk shape and the LM head (bf16 x), rows 1 to 4, through
+  `linear` and over prepared rows; the red checks at another K split); `src/models/deepseek_v41/banked_ilp_test.zig`
+  (GPU: every route's t against route 3's for all 65536 codewords).
+
+### `turboexl3_dense_dec0_pf`
+
+<!-- kernel-facts: turboexl3_dense_dec0_pf -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/core/dense.zig:1672` (`fn dec0Variant`) |
+| inputs | `xp`, `xs`, `w`, `svh`, `cnt` |
+| outputs | `y`, `z` |
+| source | `text_dec0_pf` = `dense/dec_head` ++ `dense/dec_pf_decl` ++ `dense/dec_gemv0` ++ `dense/dec_pf_next` ++ `dense/dec_gemv_arrive_1` ++ `dense/dec_pf_ww` ++ `dense/dec_gemv_arrive_2_2` ++ `dense/dec_xsum0` ++ `dense/dec_finish_v` ++ `dense/dec_finish_store` (7132 B, `6c814646b138`) |
+| header | `decode.header5` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` (26594 B, `41efbbbbd943`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** core: `Config.dec_variant` 2 (pf), in `turboexl3_dense_dec0`'s place as `turboexl3_dense_dec0_t4` is.
+- **Shapes and dtypes:** `turboexl3_dense_dec0`'s.
+- **Grid and threadgroup:** `turboexl3_dense_dec0`'s.
+- **Template args:** `turboexl3_dense_dec0`'s.
+- **Replaces:** `turboexl3_dense_dec0` (banked's group variant pf carried to DEC-ONE's GEMV).
+- **Bits:** byte-identical to `turboexl3_dense_dec0`: each input tile's words for lane L are loaded a pass ahead of
+  their decode (`dense/dec_pf_next`: `dense/dec_tile`'s address at tk and tk + 1, `exl3_tile_load`; the loop's first
+  pass loads its own first), and `dense/dec_pf_ww` takes them in `dense/dec_tile` ++ `dense/dec_gemv_arrive_2_1`'s place:
+  the same words, then DEC-ONE's codeword, decode, FMA, fold and finish statements verbatim, in DEC-ONE's order. Two
+  tiles' words a lane are live (BT · 4 more registers).
+- **Pinned by:** `src/core/dense.zig` "turboexl3 dense DEC-ONE variants: ..." (CPU: the composition, the two loads at
+  `dense/dec_tile`'s address, no other tile read); `src/models/ling/ling_test.zig` "turboexl3 gpu ling dense variants:
+  ..." (GPU: `TURBOEXL3_LING_DEC_VARIANT` variant=pf).
+
+### `turboexl3_dense_dec0_pft4`
+
+<!-- kernel-facts: turboexl3_dense_dec0_pft4 -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/core/dense.zig:1673` (`fn dec0Variant`) |
+| inputs | `xp`, `xs`, `w`, `svh`, `cnt` |
+| outputs | `y`, `z` |
+| source | `text_dec0_pf` = `dense/dec_head` ++ `dense/dec_pf_decl` ++ `dense/dec_gemv0` ++ `dense/dec_pf_next` ++ `dense/dec_gemv_arrive_1` ++ `dense/dec_pf_ww` ++ `dense/dec_gemv_arrive_2_2` ++ `dense/dec_xsum0` ++ `dense/dec_finish_v` ++ `dense/dec_finish_store` (7132 B, `6c814646b138`) |
+| header | `header5_t4` = `dense/t4` ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` (26815 B, `fd8d5753490b`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** core: `Config.dec_variant` 3 (pft4), in `turboexl3_dense_dec0`'s place as `turboexl3_dense_dec0_t4` is.
+- **Shapes and dtypes:** `turboexl3_dense_dec0`'s.
+- **Grid and threadgroup:** `turboexl3_dense_dec0`'s.
+- **Template args:** `turboexl3_dense_dec0`'s.
+- **Replaces:** `turboexl3_dense_dec0` (pf and t4 together).
+- **Bits:** byte-identical to `turboexl3_dense_dec0`: `turboexl3_dense_dec0_pf`'s text after `turboexl3_dense_dec0_t4`'s
+  define.
+- **Pinned by:** as `turboexl3_dense_dec0_pf`'s (`TURBOEXL3_LING_DEC_VARIANT` variant=pft4).
+
 ### `turboexl3_dense_dec1`
 
 <!-- kernel-facts: turboexl3_dense_dec1 -->
@@ -717,7 +801,7 @@ streamer's slot banks and its grouped variants DeepSeek-V4.1's ([its catalog](..
 | made at | `src/core/dense.zig:450` (`const Dense`) |
 | inputs | `x`, `suh`, `w`, `svh`, `cnt` |
 | outputs | `y`, `z`, `xsx` |
-| source | `text_dec1` = `dense/dec_head` ++ `dense/dec_prep1` ++ `dense/dec_gemv1` ++ `dense/dec_gemv_arrive_1` ++ `dense/dec_tile` ++ `dense/dec_gemv_arrive_2` ++ `dense/dec_xsum1` ++ `dense/dec_finish_v` ++ `dense/dec_finish_store` (7726 B, `d4555320479f`) |
+| source | `text_dec1` = `dense/dec_head` ++ `dense/dec_prep1` ++ `dense/dec_gemv1` ++ `dense/dec_gemv_arrive_1` ++ `dense/dec_tile` ++ `dense/dec_gemv_arrive_2_1` ++ `dense/dec_gemv_arrive_2_2` ++ `dense/dec_xsum1` ++ `dense/dec_finish_v` ++ `dense/dec_finish_store` (7726 B, `d4555320479f`) |
 | header | `decode.header5` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` (26594 B, `41efbbbbd943`) |
 
 <!-- /kernel-facts -->
