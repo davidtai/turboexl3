@@ -78,8 +78,16 @@ pub const mlaRowsTakes = mla_rows.takes;
 /// else error.InvalidExl3Clamp. Decode rows run form 9's launches (fin7's Ling variant where it clamps), prefill rows the
 /// fused chain (the Ling mid). `moe`'s refusals hold. `ref.moeRowClampedAt` at `silu_out` is the reference.
 pub fn moeLing(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array, scores: mlx.mlx_array, dec: format.Decode, limit: c_int) !mlx.mlx_array {
+    return moeLingWith(s, x, bank, inds, scores, dec, limit, .{});
+}
+
+/// `moeLing` with the call's own choices (`prefill.Call`, `root.moeSwigluWith`): `.{ .dfin = false }` keeps a prompt
+/// call off the fused finish its geometry's engine was built with (`Config.pf_dfin`), on the served route, down launches
+/// and finish: the same bytes. `moeLing` is this at `.{}`. The outside plugin turboexl3_ling's PF_DFIN whole-call switch
+/// decides it once a wide prompt call, from the call's rows, and passes it to each of the call's chunks.
+pub fn moeLingWith(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array, scores: mlx.mlx_array, dec: format.Decode, limit: c_int, call: root.prefill.Call) !mlx.mlx_array {
     if (limit < 0 or limit > 128) return error.InvalidExl3Clamp;
-    return root.moeSwiglu(s, x, bank, inds, scores, dec, @intCast(limit), .silu_out);
+    return root.moeSwigluWith(s, x, bank, inds, scores, dec, @intCast(limit), .silu_out, call);
 }
 
 /// `moeLing`'s prompt call over gathered rows (an expert streamer's slot bank: the outside plugin turboexl3_ling's prompt
@@ -90,8 +98,15 @@ pub fn moeLing(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx.mlx_ar
 /// holding the same values, its y rounded once to `out_dtype`: the plugin's take, its casts and its call in one call with
 /// no gathered copy. The operands and refusals as `root.moeSwigluRows` takes them.
 pub fn moeLingRows(s: mlx.mlx_stream, x: mlx.mlx_array, rows: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array, scores: mlx.mlx_array, dec: format.Decode, limit: c_int, out_dtype: mlx.mlx_dtype) !mlx.mlx_array {
+    return moeLingRowsWith(s, x, rows, bank, inds, scores, dec, limit, out_dtype, .{});
+}
+
+/// `moeLingRows` with the call's own choices (`prefill.Call`, `root.moeSwigluRowsWith`), as `moeLingWith` is
+/// `moeLing`'s: `.{ .dfin = false }` runs the served route, down launches and finish on an engine built with the fused
+/// finish, the same bytes. `moeLingRows` is this at `.{}`.
+pub fn moeLingRowsWith(s: mlx.mlx_stream, x: mlx.mlx_array, rows: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array, scores: mlx.mlx_array, dec: format.Decode, limit: c_int, out_dtype: mlx.mlx_dtype, call: root.prefill.Call) !mlx.mlx_array {
     if (limit < 0 or limit > 128) return error.InvalidExl3Clamp;
-    return root.moeSwigluRows(s, x, rows, bank, inds, scores, dec, @intCast(limit), .silu_out, out_dtype);
+    return root.moeSwigluRowsWith(s, x, rows, bank, inds, scores, dec, @intCast(limit), .silu_out, out_dtype, call);
 }
 
 /// `moeClampedBanked` with Ling-3.1's SwiGLU (`moeLing`'s `limit`): each pair x's row r through the expert at `ids[r]`

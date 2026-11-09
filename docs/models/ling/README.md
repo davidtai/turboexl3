@@ -19,6 +19,7 @@ What it runs on turboexl3 (`root.ling`, `src/models/ling/api.zig`):
 |---|---|---|
 | a routed layer's experts over a stacked bank, any rows | `moeLing` (`limit` 0 or the layer's clamp) | `moe`'s chain at limit 0; with a limit, decode form 9 with `turboexl3_fin7co` and the prefill chain with `turboexl3_pf_t128_midco` |
 | a prompt call's routed pairs over an expert streamer's slot bank, the rows gathered from the layer's MoE input | `moeLingRows` (`limit` 0 or the layer's clamp) | `moeLing`'s prefill chain with the row-map prepare `turboexl3_pf_prep_r` in place of `turboexl3_pf_prep`: no gathered copy of x, y in the caller's dtype, `moeLing`'s bytes over `take(x, rows)` |
+| the same, each call keeping or declining the fused finish (`Config.pf_dfin`) | `moeLingRowsWith`, `moeLingWith` (`prefill.Call`; the outside plugin's PF_DFIN whole-call switch decides once a wide prompt call) | `.{}`: the engine's own ending, `turboexl3_pf_dfin` on an engine built with it; `.{ .dfin = false }`: the served route, `turboexl3_pf_t128_dnm`, `_dnt` and `_fin` on that engine. The same bytes either way |
 | a decode wave's routed pairs over an expert streamer's three slot banks | `moeLingBanked` (`moeLingBankedGateUp`, `moeLingBankedDown`; `moeLingBankedSel` on a selection of the texts) | DeepSeek-V4.1's banked decode with `turboexl3_fin7b` (limit 0) or `turboexl3_fin7cob`, or their grouped texts (`fin7bg`, `fin7cobg`) under `Config.banked_group` 4; with `Config.banked_gu8` the gate\|up's prepare inside its launch (`turboexl3_gu8bg`, `turboexl3_gu8bgm3`, the same bytes) |
 | every trunk linear and the head | `root.linear` | the core's dense linear; a host's opt-in `Config.dec_one_row_table` runs a one-row call on its trunk shape's `dense.one_row_table` launch (the same bytes) |
 | a wide (prompt) routed call's combine: the routed rows times their routing weights, summed over the top-8 | `root.ling.combineRouted` (a joined array), `root.ling.combineParts` (the call's unjoined outputs, JOINLESS) | Ling's own: `turboexl3_ling_combine`, `turboexl3_ling_combine_parts` ([kernels.md](kernels.md)), the words of the host's `sum(multiply(astype(routed, f32), expand_dims(weights, -1)), -2)` |
@@ -52,7 +53,13 @@ of each threshold and a lognormal-popularity call (the threshold arms also over 
 finish at its other stage shapes to that stage shape without it), with ten red checks that must each be caught: a
 flipped word, four planted kernel faults (a value, a route, two pure reorderings), a rounding change, and for the
 threshold each half of the launch writing y marked (exactly its rows differ) and a threshold ignored or off by one
-(`TURBOEXL3_LING_ROWS_VARIANT` and `TURBOEXL3_LING_ROWS_RED` lines). The kernels:
+(`TURBOEXL3_LING_ROWS_VARIANT` and `TURBOEXL3_LING_ROWS_RED` lines). The same test holds the outside plugin's PF_DFIN
+whole-call switch (`prefill.Call`): on the fused finish's engines (plain, and at the threshold of 80 rows) every
+synthetic call at both choices gives the served words, and its line names the ending the call ran from the engine's
+step counts (`prefill.Steps`); the plugin's rule (a wide call of R rows takes the fused finish at R · 8 ≥ 80 · 512) puts
+5,119 and 1,120 rows on the served ending and 5,120 and 16,384 on the fused finish, every call at call_min 0; and three
+more red checks, seen by the engagement check alone, must be caught: a choice ignored and the rule off by one either way
+(`TURBOEXL3_LING_DFIN_CALL` and `TURBOEXL3_LING_ROWS_RED` lines). The kernels:
 [the core's catalog](../../core/kernels.md) (`turboexl3_fin7co`, `turboexl3_pf_midco`, `turboexl3_pf_mid_vco`,
 `turboexl3_pf_t128_midco`) and [DeepSeek-V4.1's](../deepseek_v41/kernels.md) (`turboexl3_fin7b`, `turboexl3_fin7cob`,
 `turboexl3_fin7bg`, `turboexl3_fin7cobg`).
