@@ -29,7 +29,7 @@
 //!   `root.ling.linearPair` each member's `linear` words (rows 1, 2, 4, 6), and the one-row table one row's own words
 //!   (every trunk shape), each also the words of the same call on U16 words and a contiguous `[rows, in]`;
 //! - D35: each DEC-ONE GEMV variant (`Config.dec_variant`: t4, pf, pft4) gives the served GEMV's words at every trunk
-//!   shape but the head, rows 1 to 4, through `linear` and over prepared rows; the verify-row table
+//!   shape and the LM head, rows 1 to 4, through `linear` and over prepared rows; the verify-row table
 //!   (`Config.dec_verify_row_table`) gives o_proj's served words and the three-launch chain's at rows 2 to 4; each with
 //!   red checks (a flipped word, another K split).
 //! TURBOEXL3_LING_N (rates in halfwords per tile; default 40,32) narrows the routed tests. Lines: TURBOEXL3_LING_BYTES,

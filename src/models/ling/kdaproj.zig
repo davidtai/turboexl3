@@ -564,13 +564,14 @@ test "turboexl3 ling kdaproj variant texts: the b launch's member is its two pie
     try testing.expectEqual(@as(usize, 1), count(kbt_0, pin[28]));
     try testing.expectEqual(@as(usize, 1), count(kbt_1, pin[27]));
     try testing.expectEqual(@as(usize, 1), count(text_kdec0bv, pin[26]) * count(text_kdec0bv, pin[27]));
-    // b's row statements are bmember_2's, its choice keeps bmember_1's lines; no BT outside the branches' own
+    // b's row statements are bmember_2's, its choice keeps bmember_1's lines; no BT outside the branches' own (pin 37,
+    // the served head's tile count)
     for (pin[33..37]) |l| {
         try testing.expectEqual(@as(usize, 1), count(kbmember_1, l));
         try testing.expectEqual(@as(usize, 1), count(kbfirst, l));
     }
     for ([_][:0]const u8{ text_kdec0bv, text_kdec0bv_pf }) |txt| {
-        try testing.expectEqual(@as(usize, 0), count(txt, "uint(BT)"));
+        try testing.expectEqual(@as(usize, 0), count(txt, pin[37]));
         try testing.expectEqual(@as(usize, 2), count(txt, dense.dec_gemv0));
         for (kdec0b_in ++ kdec0b_out) |n| try testing.expect(count(txt, std.mem.span(n)) > 0);
         for ([_][]const u8{ "NHW", "CODEBOOK", "WBITS", "IN", "OUT0", "OUT1", "OUT2", "KS0", "KS1", "BT0", "BT1", "RB", "ROWS", "DEFER", "OUT_T", "FB", "OUTB", "BF" }) |n| try testing.expect(count(txt, n) > 0);

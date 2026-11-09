@@ -632,15 +632,15 @@ test "turboexl3 gpu ling router refusals: rows past 8, a hidden size off the tex
 
 const ds_test = @import("../deepseek_v41/deepseek_test.zig");
 
-/// The rows launch against the served launch, word for word: `routerLogitsWith` with and without it over the loaded f16
-/// weight (the weight's view transposed back, what the plugin passes under ROUTER_F16) and over the loader's f32 table
-/// transposed back, without a predictor (the last MoE layer) and beside DeepSeek's and Ling's scores, x's rows by
-/// pattern at rows 1 to 8, two draws each. Each call is checked to have run the rows launch exactly where it acts (the
-/// f16 weight at 2 rows or more; one row and the f32 table keep the served launch). Red checks, which must differ: a
-/// flipped word is exactly one word; MLX's own matmul of the call's rows over the loader's table (another order of the
-/// same products) against the rows launch's logits at rows 2 to 4; with expert 7's largest weight word negated, the rows
-/// launch's logits differ in expert 7's column at every row whose x word there is not zero, and nowhere else. Lines:
-/// TURBOEXL3_LING_ROUTER_ROWS (96), TURBOEXL3_LING_ROUTER_ROWS_RED (5), TURBOEXL3_LING_ROUTER_ROWS_DONE.
+// The rows launch against the served launch, word for word: `routerLogitsWith` with and without it over the loaded f16
+// weight (the weight's view transposed back, what the plugin passes under ROUTER_F16) and over the loader's f32 table
+// transposed back, without a predictor (the last MoE layer) and beside DeepSeek's and Ling's scores, x's rows by
+// pattern at rows 1 to 8, two draws each. Each call is checked to have run the rows launch exactly where it acts (the
+// f16 weight at 2 rows or more; one row and the f32 table keep the served launch). Red checks, which must differ: a
+// flipped word is exactly one word; MLX's own matmul of the call's rows over the loader's table (another order of the
+// same products) against the rows launch's logits at rows 2 to 4; with expert 7's largest weight word negated, the rows
+// launch's logits differ in expert 7's column at every row whose x word there is not zero, and nowhere else. Lines:
+// TURBOEXL3_LING_ROUTER_ROWS (96), TURBOEXL3_LING_ROUTER_ROWS_RED (5), TURBOEXL3_LING_ROUTER_ROWS_DONE.
 test "turboexl3 gpu ling router rows: the rows launch (each router threadgroup 16 logits of up to 4 rows, the f16 weight read once for them) gives the served launch's logits and predictor scores (none, DeepSeek's, Ling's) word for word at rows 1 to 8, and runs only over the f16 weight at 2 rows or more; red checks: a flipped word, MLX's several-row matmul, a weight word (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
     const s = mlx.mlx_default_gpu_stream_new();

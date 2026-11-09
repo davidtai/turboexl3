@@ -35,3 +35,4 @@ const int thrN = int(thread_index_in_simdgroup);
 const device bfloat16_t* mat = wb + size_t(out_row) * size_t(IN);
 const uint rb0 = threadgroup_position_in_grid.y * uint(RB);
 const uint rb1 = min(rb0 + uint(RB), uint(ROWS));
+uint(BT)

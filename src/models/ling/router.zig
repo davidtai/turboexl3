@@ -423,7 +423,7 @@ fn rowsRan(rows: c_int, pred: bool) void {
     rows_runs.get().* += 1;
     if (rows_said.get().*) return;
     rows_said.get().* = true;
-    std.debug.print("[turboexl3] router rows engaged: the f16 weight read once for each group of up to {d} rows (first call {d} rows, {d} router threadgroups{s})\n", .{ rows_group, rows, threadgroupsRows(@intCast(rows), false), if (pred) " and the predictor's" else "" });
+    std.debug.print("[turboexl3] router rows engaged: the f16 weight read once for each group of up to {d} rows (first call {d} rows: {d} groups of 128 threads for the router{s})\n", .{ rows_group, rows, threadgroupsRows(@intCast(rows), false), if (pred) ", the predictor's after them" else "" });
 }
 
 /// The rows launches this process has run (the tests' check that an arm ran it)
