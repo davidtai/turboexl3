@@ -658,7 +658,7 @@ test "turboexl3 ling mla latent nax text: it reads every operand it binds and th
     // close undefines it
     for (pin[8..11]) |line| try testing.expect(has(header_nax, line));
     try testing.expect(std.mem.startsWith(u8, header_nax, steel_nax));
-    try testing.expect(std.mem.endsWith(u8, std.mem.trimRight(u8, text_attn_nax, "\n"), pin[11]));
+    try testing.expect(std.mem.endsWith(u8, std.mem.trimEnd(u8, text_attn_nax, "\n"), pin[11]));
     // the merge reads pm in natural units: the header's exp is metal::exp, not attention_nax's exp2 of log2(e)-scaled scores
     try testing.expect(!has(text_attn_nax, "exp2") and !has(header_nax[steel_nax.len..], "exp2"));
 }
@@ -728,7 +728,7 @@ test "turboexl3 ling mla latent nax: only the latent decode reads Config.mla_lat
     var reads: usize = 0;
     var it = std.mem.splitScalar(u8, @embedFile("mla_latent.zig"), '\n');
     while (it.next()) |line| {
-        const code = std.mem.trimLeft(u8, line, " ");
+        const code = std.mem.trimStart(u8, line, " ");
         if (std.mem.startsWith(u8, code, "//")) continue;
         if (has(code, needle)) reads += 1;
     }
