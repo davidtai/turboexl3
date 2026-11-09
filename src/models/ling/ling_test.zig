@@ -1271,15 +1271,45 @@ fn i16Trellis(g: *G, s: mlx.mlx_stream, words: []const u16, in: u32, out: u32, n
     return g.adopt(v);
 }
 
+/// A linear's operands as `ref.synthLinear` draws them (the trellis words, then suh, then svh, from the same generator in
+/// the same order), without the reference weights it reconstructs on the host, which the variant tests do not read
+/// (4096 x 157184 of them at the LM head)
+const Drawn = struct {
+    trellis: []u16,
+    suh: []u16,
+    svh: []u16,
+
+    fn deinit(self: Drawn, a: std.mem.Allocator) void {
+        a.free(self.trellis);
+        a.free(self.suh);
+        a.free(self.svh);
+    }
+};
+
+fn drawLinear(a: std.mem.Allocator, rnd: std.Random, in: u32, out: u32, n: u32) !Drawn {
+    const trellis = try a.alloc(u16, @as(usize, in / 16) * (out / 16) * n);
+    errdefer a.free(trellis);
+    const suh = try a.alloc(u16, in);
+    errdefer a.free(suh);
+    const svh = try a.alloc(u16, out);
+    for (trellis) |*v| v.* = rnd.int(u16);
+    const out_scale: f32 = 1.0 / @sqrt(@as(f32, @floatFromInt(in)));
+    for (suh) |*v| v.* = format.f32ToF16Bits(0.5 + rnd.float(f32));
+    for (svh) |*v| v.* = format.f32ToF16Bits((0.5 + rnd.float(f32)) * out_scale);
+    return .{ .trellis = trellis, .suh = suh, .svh = svh };
+}
+
 // Every DEC-ONE GEMV variant against the served GEMV, word for word, where it runs: a Dense whose prepare runs in its own
 // launch at every row count (`dec_prep_rows` and `dec_prep_out` 0), so each call at rows 1 to 4 takes the GEMV over
 // prepared rows: through `linear` (prep_sc, then the GEMV) and over prep_sc's rows with zeroed counters
-// (`decLinearPrepared`, KDA_EPILOGUE's o_proj). Every Ling-3.1-flash trunk shape but the head (K6; the dense FFN at K4),
-// the trellis as I16 words, x bf16 and f32. Each arm also checks that it ran its variant (`dense.dec0VariantRuns`).
+// (`decLinearPrepared`, KDA_EPILOGUE's o_proj). Every Ling-3.1-flash trunk shape (K6; the dense FFN at K4) at x bf16
+// and f32, and the LM head (4096 -> 157184 at the pack's K6) at x bf16: the variants act on the head at a verify's rows,
+// where its prepare runs in its own launch. The trellis as I16 words; the operands synthLinear's draws without its
+// reference weights (`drawLinear`). Each arm also checks that it ran its variant (`dense.dec0VariantRuns`).
 // Red checks: one word flipped in the served output is exactly one differing word; at o_proj's and q|k|v's shapes each
 // variant on a Dense at another K split (the same products summed in another order) must differ from the served words.
-// Lines: TURBOEXL3_LING_DEC_VARIANT (_RED, _DONE).
-test "turboexl3 gpu ling dense variants: each DEC-ONE GEMV variant (t4, pf, pft4) gives the served GEMV's words at every Ling-3.1-flash trunk shape but the head, rows 1 to 4, x bf16 and f32, through linear and over prepared rows; red checks: a flipped word, each variant at another K split (TURBOEXL3_GPU=1)" {
+// Lines: TURBOEXL3_LING_DEC_VARIANT (252: 240 at the trunk shapes, 12 at the head), _RED (8), _DONE.
+test "turboexl3 gpu ling dense variants: each DEC-ONE GEMV variant (t4, pf, pft4) gives the served GEMV's words at every Ling-3.1-flash trunk shape and the LM head, rows 1 to 4, x bf16 and f32 (the head bf16), through linear and over prepared rows; red checks: a flipped word, each variant at another K split (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
@@ -1295,11 +1325,10 @@ test "turboexl3 gpu ling dense variants: each DEC-ONE GEMV variant (t4, pf, pft4
     var checks: usize = 0;
     var reds: usize = 0;
     for (dense_cases) |c| {
-        if (c.head) continue;
         var prng = std.Random.DefaultPrng.init(0xD35A ^ (@as(u64, c.in) << 24) ^ c.out);
         const rnd = prng.random();
         const rate = format.Rate.fromN(c.n).?;
-        var lin = try ref.synthLinear(a, rnd, 1, c.in, c.out, rate, .mul1);
+        const lin = try drawLinear(a, rnd, c.in, c.out, c.n);
         defer lin.deinit(a);
         const mark = g.mark();
         defer g.resetTo(mark);
@@ -1315,7 +1344,9 @@ test "turboexl3 gpu ling dense variants: each DEC-ONE GEMV variant (t4, pf, pft4
         defer a.free(got);
         // the red checks' shapes: o_proj (KDA o and the MLA output projection) and q|k|v
         const red = std.mem.eql(u8, c.name, "kda.o/mla.dense") or std.mem.eql(u8, c.name, "kda.qkv");
-        for ([_]mlx.mlx_dtype{ .bfloat16, .float32 }) |dt| {
+        // the LM head at bf16 x only, the dtype its verify rows take
+        const dts: []const mlx.mlx_dtype = if (c.head) &[_]mlx.mlx_dtype{.bfloat16} else &[_]mlx.mlx_dtype{ .bfloat16, .float32 };
+        for (dts) |dt| {
             try config.configure(cfg);
             const geo: dense.Shape = .{ .in = c.in, .out = c.out, .rate = rate, .dec = .mul1, .out_dtype = dt };
             var d = try dense.Dense.init(geo);
@@ -1390,6 +1421,8 @@ test "turboexl3 gpu ling dense variants: each DEC-ONE GEMV variant (t4, pf, pft4
         }
     }
     std.debug.print("TURBOEXL3_LING_DEC_VARIANT_DONE checks={d} red={d} {s}\n", .{ checks, reds, if (failed == 0) "PASS" else "FAIL" });
+    try testing.expectEqual(@as(usize, 252), checks);
+    try testing.expectEqual(@as(usize, 8), reds);
     try testing.expectEqual(@as(usize, 0), failed);
 }
 

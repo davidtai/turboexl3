@@ -737,9 +737,9 @@ streamer's slot banks and its grouped variants DeepSeek-V4.1's ([its catalog](..
 - **Pinned by:** `src/core/dense.zig` "turboexl3 dense DEC-ONE variants: t4 is text_dec0 after t4's define, ..." (CPU:
   the define, then `decode.header5` verbatim); `src/models/ling/ling_test.zig` "turboexl3 gpu ling dense variants:
   each DEC-ONE GEMV variant (t4, pf, pft4) gives the served GEMV's words ..." (GPU: `TURBOEXL3_LING_DEC_VARIANT`
-  variant=t4, word for word at every Ling-3.1-flash trunk shape but the head, rows 1 to 4, through `linear` and over
-  prepared rows; the red checks at another K split); `src/models/deepseek_v41/banked_ilp_test.zig` (GPU: every route's
-  t against route 3's for all 65536 codewords).
+  variant=t4, word for word at every Ling-3.1-flash trunk shape and the LM head (bf16 x), rows 1 to 4, through
+  `linear` and over prepared rows; the red checks at another K split); `src/models/deepseek_v41/banked_ilp_test.zig`
+  (GPU: every route's t against route 3's for all 65536 codewords).
 
 ### `turboexl3_dense_dec0_pf`
 
