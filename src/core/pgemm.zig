@@ -27,7 +27,11 @@ const steel_nax = @import("steel.zig").nax;
 const A = mlx.mlx_array;
 
 pub const text_loop = @embedFile("kernels/pg2/gemm_loop.metal");
-pub const text_fused = @embedFile("kernels/pg2/gemm_fused.metal");
+pub const text_fused = fused_1 ++ fused_2;
+/// `text_fused` in pieces: fused_1 the GEMM and z's halves staged in threadgroup memory, fused_2 the finish over them (the
+/// epilogue trunk_q8.zig's int8 GEMM runs too)
+pub const fused_1 = @embedFile("kernels/pg2/gemm_fused_1.metal");
+pub const fused_2 = @embedFile("kernels/pg2/gemm_fused_2.metal");
 
 fn sentinel(comptime s: []const u8) [:0]const u8 {
     comptime {

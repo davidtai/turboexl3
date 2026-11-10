@@ -27,6 +27,8 @@ pub const unfused = @import("core/unfused.zig");
 pub const dense = @import("core/dense.zig");
 /// pg2: a dense linear's prefill matmul and finish as one launch at this machine's tiles (pgemm.zig); the host sets `pgemm.mode`.
 pub const pgemm = @import("core/pgemm.zig");
+/// Trunk int8: a dense linear's prefill matmul path on int8 at the host's shapes (trunk_q8.zig; `Config.pf_trunk_int8`).
+pub const trunk_q8 = @import("core/trunk_q8.zig");
 pub const prefill = @import("core/prefill.zig");
 /// The kernel texts a consumer may splice into its own Metal (MLX-free; `sources.zig`).
 pub const sources = @import("core/sources.zig");

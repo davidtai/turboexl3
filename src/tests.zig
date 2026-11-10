@@ -14,6 +14,7 @@ comptime {
     _ = @import("core/decode.zig");
     _ = @import("core/dense.zig");
     _ = @import("core/pgemm.zig");
+    _ = @import("core/trunk_q8.zig");
     _ = @import("core/prefill.zig");
     _ = @import("models/qwen38/decb.zig");
     _ = @import("models/qwen38/attn_io.zig");

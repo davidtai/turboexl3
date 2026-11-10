@@ -30,10 +30,16 @@ const unfused = @import("unfused.zig");
 const prefill = @import("prefill.zig");
 const config = @import("config.zig");
 const pgemm = @import("pgemm.zig");
+const trunk_q8 = @import("trunk_q8.zig");
 
 /// prepare for a dense linear: xp half [rows, IN] = H128(f16(x[row]) * suh) per 128-block; LANE_ORDER 1 writes the GEMV's
 /// lane order within each 16-block, 0 the natural order the matmul path needs; one simdgroup per (block, row); x any float dtype
-pub const text_prep = @embedFile("kernels/dense/prep.metal");
+pub const text_prep = prep_1 ++ prep_2 ++ prep_3;
+/// `text_prep` in pieces: prep_1 the constants and the (block, row) of a simdgroup, prep_2 a block's f16 values (x's f16
+/// rounding, suh, the H128's stages: trunk_q8.zig's int8 prepare runs them a block at a time), prep_3 the store
+pub const prep_1 = @embedFile("kernels/dense/prep_1.metal");
+pub const prep_2 = @embedFile("kernels/dense/prep_2.metal");
+pub const prep_3 = @embedFile("kernels/dense/prep_3.metal");
 
 /// text_prep (lane order for the multi-row GEMV, natural for the fused prefill GEMM) plus xs f32 [rows, IN/128], the sum of
 /// each 128-block's rounded values (what a deferred MUL1 affine map needs: sum_i x_i (A t_i + C) = A sum_i x_i t_i + C sum_i x_i)
@@ -50,7 +56,11 @@ pub const text_finish_pieces = @embedFile("kernels/dense/finish_pieces.metal");
 
 /// dequantize: W half [IN, OUT] from the trellis [IN/16, OUT/16, n]; one simdgroup per tile, lane L decodes its 8 weights:
 /// weight m of lane L is row 2 (L & 3) + {0, 1, 8, 9}[m & 3], column (L >> 2) + 8 (m >> 2) of the tile (the GEMV's layout)
-pub const text_dequant = @embedFile("kernels/dense/dequant.metal");
+pub const text_dequant = dequant_1 ++ dequant_2;
+/// `text_dequant` in pieces: dequant_1 a simdgroup's tile loaded, dequant_2 its codewords decoded and stored (trunk_q8.zig's
+/// int8 decode stores them as int8 instead)
+pub const dequant_1 = @embedFile("kernels/dense/dequant_1.metal");
+pub const dequant_2 = @embedFile("kernels/dense/dequant_2.metal");
 
 /// multi-row GEMV: every weight is decoded once per threadgroup and applied to RB rows. z f32 [KS * ROWS, OUT]: K-slice
 /// ks's partial sums of row r at z[ks * ROWS + r]. One 128-thread threadgroup per (BT output tiles, row chunk of RB rows,
@@ -1112,6 +1122,9 @@ pub const Dense = struct {
         // an un-rotated linear's rows past `unrot_min_rows` are one matmul of x against its resident W_std in x's dtype, on
         // the inner product's stream; null keeps the chain below (its W_hat decoded per call)
         if (rows > unrot_min_rows) if (try residentPlain(rs, x, trellis)) |y| return y;
+        // trunk int8 (`Config.pf_trunk_int8` at the host's shapes, trunk_q8.zig; lossy): its int8 prepare on `s`, the int8
+        // decode and the int8 GEMM with the finish on `rs`
+        if (!self.fused_prefill and trunk_q8.takes(self)) return trunk_q8.linearOn(self, s, rs, x, trellis, suh, svh, rows);
         // prefill: prepared rows (natural order) x the trellis, f32 accumulation, f16 inner = the finish's first rounding
         const c = try self.buildCfg(rows, false);
         defer _ = mlx.mlx_fast_metal_kernel_config_free(c.prep);

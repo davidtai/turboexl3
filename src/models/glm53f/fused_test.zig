@@ -1512,3 +1512,215 @@ test "turboexl3 gpu glm53f prefill int8 timing: a 16384-row prompt bank call wit
         pf.opts.int8 = 1;
     }
 }
+
+// ---- Trunk int8 (`Config.pf_trunk_int8`, core/trunk_q8.zig; lossy) ----
+
+/// The trunk int8 tests' rows (pg2's: unaligned and aligned M, past the register path)
+const q8_rows = [_]u32{ 100, 2048, 4100, 8200 };
+
+/// root.linear with the trunk int8 switch `on` and the host's shapes `list` (null: none), both restored after; whether the
+/// int8 GEMM served it
+fn q8Linear(g: *G, c: LinCtx, on: bool, list: ?[]const root.trunk_q8.Shape) !struct { y: mlx.mlx_array, int8: bool } {
+    const saved = root.config.get().*;
+    const saved_shapes = root.trunk_q8.shapes.get().*;
+    defer {
+        root.configure(saved) catch unreachable;
+        root.trunk_q8.shapes.get().* = saved_shapes;
+    }
+    var cfg = saved;
+    cfg.pf_trunk_int8 = on;
+    try root.configure(cfg);
+    root.trunk_q8.shapes.get().* = list;
+    const before = root.trunk_q8.calls.get().*.load(.monotonic);
+    const y = try g.adopt(try root.linear(c.s, c.x, c.p.trellis, c.p.suh, c.p.svh, .mul1));
+    try g.evalAll(&.{y});
+    return .{ .y = y, .int8 = root.trunk_q8.calls.get().*.load(.monotonic) > before };
+}
+
+test "turboexl3 gpu glm53f trunk int8: every trunk linear on int8 (one scale a row) agrees with the chain (cosine >= 0.99, error rms <= 0.1 of y's, finite) at 100 to 8200 rows, bf16 x and y; the switch off is the chain word for word; a call's rows split over two calls give its words (TURBOEXL3_GPU=1)" {
+    _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    const s = mlx.mlx_default_gpu_stream_new();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    const a = std.heap.page_allocator;
+    var g = try G.init(a, s);
+    defer g.deinit();
+    defer _ = mlx.mlx_clear_cache();
+    defer root.releaseEngines();
+    var prng = std.Random.DefaultPrng.init(0x7A8C38);
+    const rnd = prng.random();
+    var pool: [8191]f32 = undefined;
+    for (&pool) |*v| v.* = routed.bfExact(rnd.floatNorm(f32));
+    var max_words: usize = 0;
+    for (root.glm53f.trunk) |l| max_words = @max(max_words, @as(usize, q8_rows[q8_rows.len - 1]) * l.n);
+    const want_buf = try a.alloc(f32, max_words);
+    defer a.free(want_buf);
+    const got_buf = try a.alloc(f32, max_words);
+    defer a.free(got_buf);
+    const split_buf = try a.alloc(f32, max_words);
+    defer a.free(split_buf);
+    var failed = false;
+    for (root.glm53f.trunk) |l| {
+        defer root.releaseEngines();
+        const mark = g.mark();
+        defer g.resetTo(mark);
+        const p = try trunkProj(&g, a, rnd, l.k, l.n);
+        const one = [1]root.trunk_q8.Shape{.{ .k = l.k, .n = l.n }};
+        for (q8_rows) |rows| {
+            const rm = g.mark();
+            defer g.resetTo(rm);
+            const c: LinCtx = .{ .s = s, .x = try trunkX(&g, a, &pool, rows, l.k), .p = p };
+            const words = @as(usize, rows) * l.n;
+            // the chain (the switch off, no shape named)
+            const want = try q8Linear(&g, c, false, null);
+            const wb = try bitsOf(&g, want.y, want_buf[0..words]);
+            // the switch off with the shape named: the chain's words, no int8 launch
+            const off = try q8Linear(&g, c, false, &one);
+            const ob = try bitsOf(&g, off.y, got_buf[0..words]);
+            const od = countDiff(ob, wb, got_buf[0..words]);
+            const off_ok = !off.int8 and od[0] == 0 and od[1] == 0;
+            std.debug.print("TURBOEXL3_GLM_TRUNK_INT8_OFF name={s} k={d} n={d} rows={d} int8={} differing={d}/{d} nonfinite={d} {s}\n", .{ l.name, l.k, l.n, rows, off.int8, od[0], words, od[1], if (off_ok) "PASS" else "FAIL" });
+            if (!off_ok) failed = true;
+            // on: int8, against the chain
+            const on = try q8Linear(&g, c, true, &one);
+            const gb = try bitsOf(&g, on.y, got_buf[0..words]);
+            var dot: f64 = 0;
+            var gg: f64 = 0;
+            var ww: f64 = 0;
+            var ee: f64 = 0;
+            var nonfinite: usize = 0;
+            for (got_buf[0..words], want_buf[0..words]) |gv, wv| {
+                if (!std.math.isFinite(gv) or !std.math.isFinite(wv)) {
+                    nonfinite += 1;
+                    continue;
+                }
+                dot += @as(f64, gv) * wv;
+                gg += @as(f64, gv) * gv;
+                ww += @as(f64, wv) * wv;
+                ee += (@as(f64, gv) - wv) * (@as(f64, gv) - wv);
+            }
+            const cos = dot / @sqrt(gg * ww);
+            const rms = @sqrt(ee / ww);
+            const ok = on.int8 and nonfinite == 0 and cos >= 0.99 and rms <= 0.1;
+            std.debug.print("TURBOEXL3_GLM_TRUNK_INT8_AGREE name={s} k={d} n={d} rows={d} int8={} cos={d:.6} rms_ratio={d:.5} nonfinite={d} {s}\n", .{ l.name, l.k, l.n, rows, on.int8, cos, rms, nonfinite, if (ok) "PASS" else "FAIL" });
+            if (!ok) failed = true;
+            // the rows in two calls (the plugin's KDA spans): the one call's words
+            const r1: u32 = if (rows >= 4096) 2048 else rows / 2;
+            const xa = try g.slice(c.x, &.{ 0, 0 }, &.{ ci(r1), ci(l.k) }, &.{ 1, 1 });
+            const xb = try g.slice(c.x, &.{ ci(r1), 0 }, &.{ ci(rows), ci(l.k) }, &.{ 1, 1 });
+            const ya = try q8Linear(&g, .{ .s = s, .x = xa, .p = p }, true, &one);
+            const yb = try q8Linear(&g, .{ .s = s, .x = xb, .p = p }, true, &one);
+            const yab = try g.concat(&.{ ya.y, yb.y }, 0);
+            const sb = try bitsOf(&g, yab, split_buf[0..words]);
+            const sd = countDiff(sb, gb, split_buf[0..words]);
+            const split_ok = ya.int8 and yb.int8 and sd[0] == 0 and sd[1] == 0;
+            std.debug.print("TURBOEXL3_GLM_TRUNK_INT8_SPLIT name={s} k={d} n={d} rows={d} split={d}+{d} differing={d}/{d} nonfinite={d} {s}\n", .{ l.name, l.k, l.n, rows, r1, rows - r1, sd[0], words, sd[1], if (split_ok) "PASS" else "FAIL" });
+            if (!split_ok) failed = true;
+        }
+    }
+    try testing.expect(!failed);
+}
+
+/// The control's pg2 codes (the plugin's TURBOEXL3_GLM53F_PG2 on the 64-entry chain): the exact arm's tiles
+const control_pg2 = "50115151111";
+/// The trunk int8 timing's rows: a KDA span's 4096 and a 16384-row prompt chunk, 2048 and 8192 beside them
+const q8_time_rows = [_]u32{ 2048, 4096, 8192, 16384 };
+
+const Q8Ctx = struct { c: LinCtx, d: *root.dense.Dense, act: root.trunk_q8.Act, wq: mlx.mlx_array, one: *const [1]root.trunk_q8.Shape };
+
+test "turboexl3 gpu glm53f trunk int8 timing: every trunk linear on int8 against the linear as the control serves it (pg2 at its codes), at 2048 to 16384 rows, and the int8 prepare, decode and GEMM alone beside the exact decode (TURBOEXL3_GLM_TIME=1)" {
+    _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    _ = std.c.getenv("TURBOEXL3_GLM_TIME") orelse return error.SkipZigTest;
+    const s = mlx.mlx_default_gpu_stream_new();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    const a = std.heap.page_allocator;
+    var g = try G.init(a, s);
+    defer g.deinit();
+    defer _ = mlx.mlx_clear_cache();
+    defer root.releaseEngines();
+    var prng = std.Random.DefaultPrng.init(0x7A8C3E);
+    const rnd = prng.random();
+    var pool: [8191]f32 = undefined;
+    for (&pool) |*v| v.* = routed.bfExact(rnd.floatNorm(f32));
+    // the exact arm as the control serves it: pg2 on at the control's codes
+    var pg2_buf: [root.glm53f.trunk.len]root.pgemm.Entry = undefined;
+    const pg2_table = try root.glm53f.pg2Table(control_pg2, &pg2_buf);
+    const saved_mode = root.pgemm.mode.get().*;
+    const saved_table = root.pgemm.host_table.get().*;
+    defer {
+        root.pgemm.mode.get().* = saved_mode;
+        root.pgemm.host_table.get().* = saved_table;
+    }
+    root.pgemm.mode.get().* = .on;
+    root.pgemm.host_table.get().* = pg2_table;
+    const last = q8_time_rows.len - 1;
+    var kda_cut_ms: f64 = 0;
+    var all_cut_ms: f64 = 0;
+    for (root.glm53f.trunk) |l| {
+        defer root.releaseEngines();
+        const mark = g.mark();
+        defer g.resetTo(mark);
+        const p = try trunkProj(&g, a, rnd, l.k, l.n);
+        const one = [1]root.trunk_q8.Shape{.{ .k = l.k, .n = l.n }};
+        var per_forward: u32 = 0;
+        for (trunk_shapes) |t| if (std.mem.eql(u8, t.name, l.name)) {
+            per_forward = t.per_forward;
+        };
+        const d = try root.denseOf(p, l.k, .bfloat16, .mul1);
+        for (q8_time_rows, 0..) |rows, ri| {
+            const rm = g.mark();
+            defer g.resetTo(rm);
+            const c: LinCtx = .{ .s = s, .x = try trunkX(&g, a, &pool, rows, l.k), .p = p };
+            const flops = 2.0 * @as(f64, @floatFromInt(rows)) * @as(f64, @floatFromInt(l.k)) * @as(f64, @floatFromInt(l.n));
+            const act = try root.trunk_q8.prepare(s, d, c.x, p.suh, rows);
+            _ = try g.adopt(act.xq);
+            _ = try g.adopt(act.sx);
+            _ = try g.adopt(act.xsum);
+            const wq = try g.adopt(try root.trunk_q8.decodeW(s, d, p.trellis));
+            try g.evalAll(&.{ act.xq, act.sx, act.xsum, wq });
+            const q: Q8Ctx = .{ .c = c, .d = d, .act = act, .wq = wq, .one = &one };
+            const exact = try timeCall(&g, q, struct {
+                fn f(gg: *G, cc: Q8Ctx) !mlx.mlx_array {
+                    return (try q8Linear(gg, cc.c, false, null)).y;
+                }
+            }.f);
+            const int8 = try timeCall(&g, q, struct {
+                fn f(gg: *G, cc: Q8Ctx) !mlx.mlx_array {
+                    const r = try q8Linear(gg, cc.c, true, cc.one);
+                    if (!r.int8) return error.TrunkInt8NotServed;
+                    return r.y;
+                }
+            }.f);
+            const prep = try timeCall(&g, q, struct {
+                fn f(gg: *G, cc: Q8Ctx) !mlx.mlx_array {
+                    const r = try root.trunk_q8.prepare(cc.c.s, cc.d, cc.c.x, cc.c.p.suh, @intCast(mlx.getShape(cc.c.x)[0]));
+                    _ = try gg.adopt(r.sx);
+                    _ = try gg.adopt(r.xsum);
+                    return gg.adopt(r.xq);
+                }
+            }.f);
+            const dec = try timeCall(&g, q, struct {
+                fn f(gg: *G, cc: Q8Ctx) !mlx.mlx_array {
+                    return gg.adopt(try root.trunk_q8.decodeW(cc.c.s, cc.d, cc.c.p.trellis));
+                }
+            }.f);
+            const gem = try timeCall(&g, q, struct {
+                fn f(gg: *G, cc: Q8Ctx) !mlx.mlx_array {
+                    return gg.adopt(try root.trunk_q8.gemm(cc.c.s, cc.act, cc.wq, cc.c.p.svh, @intCast(mlx.getShape(cc.c.x)[0]), .bfloat16));
+                }
+            }.f);
+            const exact_dec = try timeCall(&g, q, struct {
+                fn f(gg: *G, cc: Q8Ctx) !mlx.mlx_array {
+                    return gg.adopt(try cc.d.dequantize(cc.c.s, cc.c.p.trellis));
+                }
+            }.f);
+            const cut_ms = (exact[0] - int8[0]) * @as(f64, @floatFromInt(per_forward)) / 1000.0;
+            if (ri == last) {
+                all_cut_ms += cut_ms;
+                if (std.mem.startsWith(u8, l.name, "kda.")) kda_cut_ms += cut_ms;
+            }
+            std.debug.print("TURBOEXL3_GLM_TRUNK_INT8_TIME name={s} k={d} n={d} rows={d} exact_min_us={d:.1} exact_med_us={d:.1} int8_min_us={d:.1} int8_med_us={d:.1} ratio={d:.3} exact_tflops={d:.2} int8_tops={d:.2} per_forward={d} forward_ms_cut={d:.2}\n", .{ l.name, l.k, l.n, rows, exact[0], exact[1], int8[0], int8[1], int8[0] / exact[0], flops / (exact[0] * 1e6), flops / (int8[0] * 1e6), per_forward, cut_ms });
+            std.debug.print("TURBOEXL3_GLM_TRUNK_INT8_STAGE name={s} k={d} n={d} rows={d} prep_min_us={d:.1} decode_min_us={d:.1} gemm_min_us={d:.1} gemm_tops={d:.2} exact_decode_min_us={d:.1}\n", .{ l.name, l.k, l.n, rows, prep[0], dec[0], gem[0], flops / (gem[0] * 1e6), exact_dec[0] });
+        }
+    }
+    std.debug.print("TURBOEXL3_GLM_TRUNK_INT8_TOTAL rows={d} kda_forward_ms_cut={d:.2} all_forward_ms_cut={d:.2} (each linear alone, min of 8, times its count in a forward; exact = pg2 at {s})\n", .{ q8_time_rows[last], kda_cut_ms, all_cut_ms, control_pg2 });
+}

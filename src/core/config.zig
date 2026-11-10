@@ -41,6 +41,10 @@ pub const Config = struct {
     /// The routed prefill's gate|up and down GEMMs on int8 (`prefill.Options.int8`, with `pf_t128` and without
     /// `pf_t128_zfit`; lossy): 1 each activation 128-block at its own scale, 2 one scale a row (per token); 0 the exact chain.
     pf_int8: u8 = 0,
+    /// A dense linear's prefill rows on int8 at the host's shapes (`trunk_q8.shapes`; lossy): `Dense.linearOn`'s matmul
+    /// path as trunk_q8.zig's int8 prepare (one scale a row), int8 decode and int8 GEMM with the finish, on MUL1 packs on the
+    /// NAX path; false (or a shape the host did not name) the chain.
+    pf_trunk_int8: bool = false,
     /// Routed prefill rows on the fused GEMM chain; false refuses them (`error.Exl3EngineNotImplemented`).
     prefill: bool = true,
     /// The device passes MLX's NAX gate (an M5-class GPU and macOS 26.2 or later), the consumer's to say. False keeps

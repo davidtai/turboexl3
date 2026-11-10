@@ -1563,6 +1563,35 @@ ADDED[('fused_test.zig', 'test turboexl3 glm53f prefill int8 options: int8 1 or 
 ADDED[('fused_test.zig', 'test turboexl3 gpu glm53f prefill int8: the routed gate|up and down on int8 (a scale each activation 128-block; one scale a row) agree with the exact chain (cosine >= 0.99, error rms <= 0.1 of y\'s, finite), 16384 row-slots in 4096-row calls with the size classes, on the plugin\'s default path and on moeClampedRows, at every SC rate (TURBOEXL3_GPU=1)')] = 'int8\'s agreement with the exact chain, both schemes (GPU)'
 ADDED[('fused_test.zig', 'test turboexl3 gpu glm53f prefill int8 timing: a 16384-row prompt bank call with the routed gate|up and down on int8 (1: a scale each activation 128-block; 2: one scale a row) against the exact chain, in calls of 4096 and 16384 rows on each path with the size classes, and its route, prepare and gate|up alone and through mid and down, over 36 experts\' 455-row runs and over a drawn routing (TURBOEXL3_GLM_TIME=1)')] = 'int8\'s timing against the exact chain (TURBOEXL3_GLM_TIME)'
 
+# trunk int8 (Config.pf_trunk_int8, core/trunk_q8.zig; lossy, off by default): a dense linear's prefill rows on its matmul
+# path on int8 at the host's shapes (trunk_q8.shapes). dense's text_prep is cut into prep_1, prep_2 (a block's f16 values)
+# and prep_3, its text_dequant into dequant_1 (the tile loaded) and dequant_2, pg2's text_fused into fused_1 and fused_2
+# (the finish over the staged halves): the same bytes, so the int8 prepare (trunk_q8 prep_1, dense prep_2, trunk_q8
+# prep_2), decode (dense dequant_1, trunk_q8 dequant_2) and GEMM (trunk_q8 gemm_1, pg2's fused_2) are compositions
+ADDED_FILES['trunk_q8.zig'] = ('trunk int8: the int8 prepare (one scale a row), the trellis decoded to int8 and the int8 '
+                               'GEMM with pg2\'s finish as its epilogue, Dense.linearOn\'s matmul path at the host\'s shapes')
+ADDED_KERNELS[('trunk_q8.zig', 'turboexl3_trunk_q8_prep')] = ('the int8 prepare: text_prep\'s block statements (dense prep_2) '
+                                                              'a block at a time, one threadgroup a row, the row\'s amax / 127, '
+                                                              'int8 in natural order with the f16 values\' sum')
+ADDED_KERNELS[('trunk_q8.zig', 'turboexl3_trunk_q8_dequant')] = ('dequantize\'s tile load (dense dequant_1), each codeword '
+                                                                 'stored as int8 (exl3pf_q8) in wq [OUT, IN], on header_i8')
+ADDED_KERNELS[('trunk_q8.zig', 'turboexl3_trunk_q8_gemm')] = ('an mpp matmul2d of int8 a BM x BN tile with the routed int8 '
+                                                              'epilogue at one scale a row, then pg2\'s finish (fused_2), '
+                                                              'on header_i8')
+ADDED[('dense.zig', 'const trunk_q8')] = 'trunk_q8.zig, the int8 path Dense.linearOn takes at the host\'s shapes'
+REMOVED[('dense.zig', 'comptime #62')] = 'the same block (dec_variants.len checked), numbered #68 past the pieces added before it'
+ADDED[('dense.zig', 'comptime #68')] = 'comptime #62, renumbered: dec_variants.len checked against config.dense_variants'
+CHANGED[('dense.zig', 'const Dense')] += ('; linearOn takes trunk int8 (trunk_q8.takes: Config.pf_trunk_int8 at the host\'s '
+                                          'shapes) on its matmul path, after the resident un-rotated W_std')
+CHANGED[('config.zig', 'const Config')] += '; pf_trunk_int8: trunk int8 at the host\'s shapes (trunk_q8.zig), false by default'
+ADDED[('root.zig', 'const trunk_q8')] = 'trunk_q8.zig, trunk int8 (the host sets trunk_q8.shapes)'
+ADDED[('fused_test.zig', 'const q8_rows')] = 'the trunk int8 tests\' rows (pg2\'s)'
+ADDED[('fused_test.zig', 'fn q8Linear')] = 'root.linear with the trunk int8 switch and shapes set, restored after; whether int8 served'
+ADDED[('fused_test.zig', 'const q8_time_rows')] = 'the trunk int8 timing\'s rows (a KDA span\'s 4096, a 16384-row chunk)'
+ADDED[('fused_test.zig', 'const Q8Ctx')] = 'the trunk int8 timing\'s operands (the linear, its Dense, a prepared call, its wq)'
+ADDED[('fused_test.zig', 'test turboexl3 gpu glm53f trunk int8: every trunk linear on int8 (one scale a row) agrees with the chain (cosine >= 0.99, error rms <= 0.1 of y\'s, finite) at 100 to 8200 rows, bf16 x and y; the switch off is the chain word for word; a call\'s rows split over two calls give its words (TURBOEXL3_GPU=1)')] = 'trunk int8\'s agreement with the chain at every trunk linear, the switch off, rows split (GPU)'
+ADDED[('fused_test.zig', 'test turboexl3 gpu glm53f trunk int8 timing: every trunk linear on int8 against the linear as the control serves it (pg2 at its codes), at 2048 to 16384 rows, and the int8 prepare, decode and GEMM alone beside the exact decode (TURBOEXL3_GLM_TIME=1)')] = 'trunk int8\'s timing against the linear as the control serves it (TURBOEXL3_GLM_TIME)'
+
 
 def metal_strings(fn, toks, corpus):
     """(line, kind, value) of every literal in a .zig file that holds Metal"""
