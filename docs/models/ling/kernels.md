@@ -308,16 +308,24 @@ decode, MLX's f16 matmul (z half written) and the finish (z read back). Here eac
 its own `linear`'s launches (`Dense.prefillOperands`), and one launch runs the three products and finishes: pg2's
 kernel (`turboexl3_pgemm_fused`) with its N tiles running member 0's, then 1's, then 2's.
 
+L6 (the outside plugin turboexl3_ling's KDA_GATE_EPI, off by default): the same launch with member 1's (f's) output
+its bounded gate (`kdaProjPromptGate`, `kdaProjPromptWGate`). The plugin runs f through its one-launch gate
+(`ling_kda_gate`, the ops of mlx-serve's `kdaGateChain`), which reads y_1 back and writes g f32; here member 1's
+tiles run that gate's statements on y_1's words in the store loop (`turboexl3_ling_kdaproj_pfg0`, exp(A_log) for
+each element; `turboexl3_ling_kdaproj_pfg1`, exp(A_log) read from `turboexl3_ling_kda_gate_ea`'s array, made once
+for a layer), and the gate's launch is gone. P4's text is unchanged: pg2's fused_6 is cut at its store loop and
+pf_3 at its output line, the same bytes.
+
 ### `turboexl3_ling_kdaproj_pf`
 
 <!-- kernel-facts: turboexl3_ling_kdaproj_pf -->
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/ling/kdaproj_pf.zig:49` (`fn kernelGet`) |
+| made at | `src/models/ling/kdaproj_pf.zig:52` (`fn kernelGet`) |
 | inputs | `x0`, `x1`, `x2`, `w0`, `w1`, `w2`, `svh0`, `svh1`, `svh2` |
 | outputs | `y0`, `y1`, `y2` |
-| source | `text_pf` = `ling:kdaproj/pf_1` ++ `pg2/gemm_fused_2` ++ `ling:kdaproj/pf_3` ++ `pg2/gemm_fused_4` ++ `ling:kdaproj/pf_5` ++ `pg2/gemm_fused_6` ++ `ling:kdaproj/pf_undef` (5529 B, `7454701fcb9a`) |
+| source | `text_pf` = `ling:kdaproj/pf_1` ++ `pg2/gemm_fused_2` ++ `ling:kdaproj/pf_3_1` ++ `ling:kdaproj/pf_3_2` ++ `pg2/gemm_fused_4` ++ `ling:kdaproj/pf_5` ++ `pg2/gemm_fused_6_1` ++ `pg2/gemm_fused_6_2` ++ `ling:kdaproj/pf_undef` (5529 B, `7454701fcb9a`) |
 | header | `pgemm.header` = `steel_nax` ++ text 'using namespace mlx::steel;\n' ++ `pg2/gemm_loop` ++ text (72 B) (34287 B, `0ab3ef8c4fca`) |
 
 <!-- /kernel-facts -->
@@ -329,6 +337,93 @@ kernel (`turboexl3_pgemm_fused`) with its N tiles running member 0's, then 1's, 
 - **Replaces:** per member, MLX's matmul and the finish: six launches, and z's write and read, for one.
 - **Bits:** each member's are its `linear` chain's: pg2's statements (MLX's NAX gemm_loop verbatim, each column's k in MLX's order whatever the tile; the accumulators rounded to half as MLX's store rounds them; the finish's statements per 128-column block), on that member's operands. A call is taken only where `linear` runs that chain at these rows and MLX runs its regular kernel (`pgemm.mlxRegular`: no split K) on the NAX path.
 - **Pinned by:** `src/models/ling/kdaproj_pf.zig` "turboexl3 ling kdaproj prompt texts: ..." (CPU: the composition of pg2's pieces) and `src/models/ling/kdaproj_pf_test.zig` "turboexl3 gpu ling kdaproj prompt: ..." (GPU: each member against `root.linear` word for word at rows 33 to 16384, the refusal at 32) and "turboexl3 gpu ling kdaproj prompt over given W_hats: ..." (GPU: `kdaProjPromptW` over each member's W_hat, decoded once, against `kdaProjPrompt` word for word at rows 33, 1965 and 4096).
+
+### `turboexl3_ling_kda_gate_ea`
+
+<!-- kernel-facts: turboexl3_ling_kda_gate_ea -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/ling/kdaproj_pf.zig:318` (`fn eaKernelGet`) |
+| inputs | `A_log` |
+| outputs | `gea` |
+| source | `text_gate_ea` = `ling:kdaproj/gate_ea` (349 B, `2b2923832ccb`) |
+| header | `""` = (empty) (0 B, `e3b0c44298fc`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** `kdaproj_pf.gateEa`: the outside plugin turboexl3_ling's KDA_GATE_EPI at G1, once for a KDA layer (its
+  A_log), the result kept with the layer and read by `turboexl3_ling_kdaproj_pfg1`.
+- **Shapes and dtypes:** A_log f32 [n] (a KDA layer's per-channel A_log; n 8192 on Ling-3.1-flash). Out: gea f32 [n].
+- **Grid and threadgroup:** `(ceil(n / 256) · 256, 1, 1)` / `(256, 1, 1)`: one thread a channel.
+- **Template args:** none.
+- **Replaces:** nothing alone: with `turboexl3_ling_kdaproj_pfg1` it takes the gate's first statement out of the store
+  loop, one exp a channel made once in place of one an element.
+- **Bits:** `metal::precise::exp(static_cast<float>(A_log[c]))`, the served one-launch gate's first statement
+  (ling_kda_gate.metal) on the same input; G1's g carries it word for word.
+- **Pinned by:** `src/models/ling/kdaproj_pf.zig` "turboexl3 ling kdaproj gate statements: ..." (CPU: its statement
+  takes the gate's first right-hand side, `kernels/test/pins/kdaproj_gate.metal`) and
+  `src/models/ling/kdaproj_gate_test.zig` "turboexl3 gpu ling kdaproj gate: kdaProjPromptGate's y_0 and y_2 are ..."
+  (GPU: G1's g, which reads it, against the served gate's word for word).
+
+### `turboexl3_ling_kdaproj_pfg0`
+
+<!-- kernel-facts: turboexl3_ling_kdaproj_pfg0 -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/ling/kdaproj_pf.zig:304` (`fn gateKernelGet`) |
+| inputs | `x0`, `x1`, `x2`, `w0`, `w1`, `w2`, `svh0`, `svh1`, `svh2`, `A_log`, `dt_bias`, `lb` |
+| outputs | `y0`, `y1`, `y2` |
+| source | `text_pfg0` = `ling:kdaproj/pf_1` ++ `pg2/gemm_fused_2` ++ `ling:kdaproj/pf_3_1` ++ `ling:kdaproj/pf_3_2g` ++ `pg2/gemm_fused_4` ++ `ling:kdaproj/pf_5` ++ `pg2/gemm_fused_6_1` ++ `ling:kdaproj/pf_6g0` ++ `ling:kdaproj/pf_undef` (6232 B, `8202282622ad`) |
+| header | `pgemm.header` = `steel_nax` ++ text 'using namespace mlx::steel;\n' ++ `pg2/gemm_loop` ++ text (72 B) (34287 B, `0ab3ef8c4fca`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** `kdaProjPromptGate` and `kdaProjPromptWGate` at G0 (`ling.kdaProjPromptGate`, `ling.kdaProjPromptWGate`):
+  the outside plugin turboexl3_ling's KDA_GATE_EPI (off by default), a KDA layer's q|k|v, f and g at prompt rows with
+  f's output its bounded gate, in place of `turboexl3_ling_kdaproj_pf` and the plugin's one-launch gate.
+- **Shapes and dtypes:** `turboexl3_ling_kdaproj_pf`'s, then A_log and dt_bias f32 [N1] (N1 member 1's width, 8192) and
+  lb an f32 scalar (the bound: Ling-3.1-flash's -5). Out: y0 and y2 OUT_T [M, N_m], y1 f32 [M, N1] (the gate g).
+- **Grid and threadgroup:** `turboexl3_ling_kdaproj_pf`'s: the same tile, grid and N tiles' members.
+- **Template args:** `turboexl3_ling_kdaproj_pf`'s.
+- **Replaces:** `turboexl3_ling_kdaproj_pf` and the plugin's one-launch bounded gate (`ling_kda_gate`): f's y_1 never
+  reaches device memory (its OUT_T write and the gate's read), one launch fewer for each KDA layer and call.
+- **Bits:** y0 and y2 are `turboexl3_ling_kdaproj_pf`'s (the same pieces; members 0 and 2 store as pg2's fused_6_2). y1:
+  member 1's value rounded as that store rounds it, then the served gate's statements on it in their order (precise exp
+  of A_log, a + dt_bias in f32, the product, the sigmoid's branch form, times the bound, precise exp), channel o: the
+  served gate's word.
+- **Pinned by:** `src/models/ling/kdaproj_pf.zig` "turboexl3 ling kdaproj gate texts: ..." (CPU: the composition) and
+  "turboexl3 ling kdaproj gate statements: ..." (CPU: the gate's statements against its test-only copy,
+  `kernels/test/pins/kdaproj_gate.metal`); `src/models/ling/kdaproj_gate_test.zig` "turboexl3 gpu ling kdaproj gate:
+  kdaProjPromptGate's y_0 and y_2 are ..." (GPU: y0 and y2 against `kdaProjPrompt`'s, g against the served gate's over
+  `kdaProjPrompt`'s y_1, every word, rows 33 to 16384, and over given W_hats; `TURBOEXL3_LING_KDA_GATE`).
+
+### `turboexl3_ling_kdaproj_pfg1`
+
+<!-- kernel-facts: turboexl3_ling_kdaproj_pfg1 -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/ling/kdaproj_pf.zig:309` (`fn gateKernelGet`) |
+| inputs | `x0`, `x1`, `x2`, `w0`, `w1`, `w2`, `svh0`, `svh1`, `svh2`, `gea`, `dt_bias`, `lb` |
+| outputs | `y0`, `y1`, `y2` |
+| source | `text_pfg1` = `ling:kdaproj/pf_1` ++ `pg2/gemm_fused_2` ++ `ling:kdaproj/pf_3_1` ++ `ling:kdaproj/pf_3_2g` ++ `pg2/gemm_fused_4` ++ `ling:kdaproj/pf_5` ++ `pg2/gemm_fused_6_1` ++ `ling:kdaproj/pf_6g1` ++ `ling:kdaproj/pf_undef` (6214 B, `1de657c4cd05`) |
+| header | `pgemm.header` = `steel_nax` ++ text 'using namespace mlx::steel;\n' ++ `pg2/gemm_loop` ++ text (72 B) (34287 B, `0ab3ef8c4fca`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** `kdaProjPromptGate` and `kdaProjPromptWGate` at G1: as `turboexl3_ling_kdaproj_pfg0`, the gate's
+  exp(A_log) read from `gateEa`'s array (made once for the layer).
+- **Shapes and dtypes:** `turboexl3_ling_kdaproj_pfg0`'s, with gea f32 [N1] (`turboexl3_ling_kda_gate_ea`'s) in A_log's
+  place.
+- **Grid and threadgroup:** `turboexl3_ling_kdaproj_pf`'s.
+- **Template args:** `turboexl3_ling_kdaproj_pf`'s.
+- **Replaces:** as `turboexl3_ling_kdaproj_pfg0`, and the gate's first statement for each element (one exp an element)
+  by one read.
+- **Bits:** `turboexl3_ling_kdaproj_pfg0`'s: gea[o] is that statement's word (the same statement on the same input,
+  `turboexl3_ling_kda_gate_ea`).
+- **Pinned by:** `turboexl3_ling_kdaproj_pfg0`'s tests, at G1 (`form=g1`).
 
 ## `src/models/ling/combine.zig`
 
@@ -1405,3 +1500,165 @@ The wide tail's red check's planted fault: a kernel made only by the wide tail's
   at most once in practice, and that reversal changed none of 16,777,216 normed words.
 - **Pinned by:** `src/models/ling/tail_test.zig` "turboexl3 gpu ling tail wide: ..." (GPU: `TURBOEXL3_LING_PF_TAIL_RED`
   fault=tgsum_rev, whose normed rows must differ from the chain's and whose residual must not).
+
+### `turboexl3_test_ling_kda_gate`
+
+<!-- kernel-facts: turboexl3_test_ling_kda_gate -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/ling/kdaproj_gate_test.zig:109` (`fn servedGate`) |
+| inputs | `A_log`, `a`, `dt_bias`, `lb`, `n_total` |
+| outputs | `g` |
+| source | `@embedFile("kernels/test/copy/ling_kda_gate.metal")` = `ling:test/copy/ling_kda_gate` (1271 B, `de6533c19f38`) |
+| header | `""` = (empty) (0 B, `e3b0c44298fc`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** test only: `servedGate` in `src/models/ling/kdaproj_gate_test.zig`, the reference the gate launches are
+  held to, and its timing's served arm.
+- **Shapes and dtypes:** the plugin's: A_log and dt_bias f32 [W], a [n_total] in the activation dtype (bf16 here), lb
+  f32 and n_total int scalars. Out: g f32 of a's shape.
+- **Grid and threadgroup:** `(ceil(n_total / 256) · 256, 1, 1)` / `(256, 1, 1)`: one thread an element, as the plugin
+  launches it.
+- **Template args:** W (the channels: a's last dimension).
+- **Replaces:** nothing: a verbatim copy of the outside plugin's `ling_kda_gate` (turboexl3_ling-port 165d8ca,
+  overlay/mlx_serve/kernels/kda/ling_kda_gate.metal) under a `//! copied_from:` line; never served.
+- **Bits:** the plugin's gate's (the ops of mlx-serve's `kdaGateChain` in their order, each MLX's own formula).
+- **Pinned by:** `src/models/ling/kdaproj_pf.zig` "turboexl3 ling kdaproj gate statements: ..." (CPU: its seven
+  statements, `kernels/test/pins/kdaproj_gate.metal`); the plugin pins the copy to its own file.
+
+### `turboexl3_test_ling_kdaproj_pfg1_ea_shift_fault`
+
+<!-- kernel-facts: turboexl3_test_ling_kdaproj_pfg1_ea_shift_fault -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/ling/kdaproj_gate_test.zig:269` (`test turboexl3 gpu ling kdaproj gate: kdaProjPromptGate's y_0 and y_2 are kdaProjPrompt's and its g the served one-launch gate of kdaProjPrompt's y_1, word for word, G0 and G1, at prompt rows 33 to 16384; kdaProjPromptWGate's the same over given W_hats; its declines and refusals; planted faults caught (TURBOEXL3_GPU=1)`) |
+| inputs | `x0`, `x1`, `x2`, `w0`, `w1`, `w2`, `svh0`, `svh1`, `svh2`, `gea`, `dt_bias`, `lb` |
+| outputs | `y0`, `y1`, `y2` |
+| source | `comptime faultText(@embedFile("kernels/test/fault/kdagate_g1_ea_shift.metal"))` = `ling:kdaproj/pf_1` ++ `pg2/gemm_fused_2` ++ `ling:kdaproj/pf_3_1` ++ `ling:kdaproj/pf_3_2g` ++ `pg2/gemm_fused_4` ++ `ling:kdaproj/pf_5` ++ `pg2/gemm_fused_6_1` ++ `ling:test/fault/kdagate_g1_ea_shift` ++ `ling:kdaproj/pf_undef` (6087 B, `2b7ed2d0dfbb`) |
+| header | `pgemm.header` = `steel_nax` ++ text 'using namespace mlx::steel;\n' ++ `pg2/gemm_loop` ++ text (72 B) (34287 B, `0ab3ef8c4fca`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** test only: the red checks in `src/models/ling/kdaproj_gate_test.zig` "turboexl3 gpu ling kdaproj gate:
+  kdaProjPromptGate's y_0 and y_2 are ...", swapped into the gate launches for one call
+  (`kdaproj_pf.gate_kernel_override`).
+- **Shapes and dtypes:** `turboexl3_ling_kdaproj_pfg1`'s.
+- **Grid and threadgroup:** `turboexl3_ling_kdaproj_pfg1`'s.
+- **Template args:** `turboexl3_ling_kdaproj_pfg1`'s.
+- **Replaces:** nothing: a planted fault, `turboexl3_ling_kdaproj_pfg1` with gea read at the next channel
+  (`ling:test/fault/kdagate_g1_ea_shift` in the store loop's place).
+- **Bits:** wrong on purpose: member 1's g differs from the served gate's.
+- **Pinned by:** `src/models/ling/kdaproj_gate_test.zig` "turboexl3 gpu ling kdaproj gate: kdaProjPromptGate's y_0 and
+  y_2 are ..." (GPU: its g must differ from the served gate's over `kdaProjPrompt`'s y_1,
+  `TURBOEXL3_LING_KDA_GATE_RED`).
+
+### `turboexl3_test_ling_kdaproj_pfg_dtb_shift_fault`
+
+<!-- kernel-facts: turboexl3_test_ling_kdaproj_pfg_dtb_shift_fault -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/ling/kdaproj_gate_test.zig:266` (`test turboexl3 gpu ling kdaproj gate: kdaProjPromptGate's y_0 and y_2 are kdaProjPrompt's and its g the served one-launch gate of kdaProjPrompt's y_1, word for word, G0 and G1, at prompt rows 33 to 16384; kdaProjPromptWGate's the same over given W_hats; its declines and refusals; planted faults caught (TURBOEXL3_GPU=1)`) |
+| inputs | `x0`, `x1`, `x2`, `w0`, `w1`, `w2`, `svh0`, `svh1`, `svh2`, `A_log`, `dt_bias`, `lb` |
+| outputs | `y0`, `y1`, `y2` |
+| source | `comptime faultText(@embedFile("kernels/test/fault/kdagate_dtb_shift.metal"))` = `ling:kdaproj/pf_1` ++ `pg2/gemm_fused_2` ++ `ling:kdaproj/pf_3_1` ++ `ling:kdaproj/pf_3_2g` ++ `pg2/gemm_fused_4` ++ `ling:kdaproj/pf_5` ++ `pg2/gemm_fused_6_1` ++ `ling:test/fault/kdagate_dtb_shift` ++ `ling:kdaproj/pf_undef` (6133 B, `99ce6389cee5`) |
+| header | `pgemm.header` = `steel_nax` ++ text 'using namespace mlx::steel;\n' ++ `pg2/gemm_loop` ++ text (72 B) (34287 B, `0ab3ef8c4fca`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** test only: the red checks in `src/models/ling/kdaproj_gate_test.zig` "turboexl3 gpu ling kdaproj gate:
+  kdaProjPromptGate's y_0 and y_2 are ...", swapped into the gate launches for one call
+  (`kdaproj_pf.gate_kernel_override`).
+- **Shapes and dtypes:** `turboexl3_ling_kdaproj_pfg0`'s.
+- **Grid and threadgroup:** `turboexl3_ling_kdaproj_pfg0`'s.
+- **Template args:** `turboexl3_ling_kdaproj_pfg0`'s.
+- **Replaces:** nothing: a planted fault, `turboexl3_ling_kdaproj_pfg0` with dt_bias read at the next channel
+  (`ling:test/fault/kdagate_dtb_shift` in the store loop's place).
+- **Bits:** wrong on purpose: member 1's g differs from the served gate's.
+- **Pinned by:** `src/models/ling/kdaproj_gate_test.zig` "turboexl3 gpu ling kdaproj gate: kdaProjPromptGate's y_0 and
+  y_2 are ..." (GPU: its g must differ from the served gate's over `kdaProjPrompt`'s y_1,
+  `TURBOEXL3_LING_KDA_GATE_RED`).
+
+### `turboexl3_test_ling_kdaproj_pfg_fastexp_fault`
+
+<!-- kernel-facts: turboexl3_test_ling_kdaproj_pfg_fastexp_fault -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/ling/kdaproj_gate_test.zig:267` (`test turboexl3 gpu ling kdaproj gate: kdaProjPromptGate's y_0 and y_2 are kdaProjPrompt's and its g the served one-launch gate of kdaProjPrompt's y_1, word for word, G0 and G1, at prompt rows 33 to 16384; kdaProjPromptWGate's the same over given W_hats; its declines and refusals; planted faults caught (TURBOEXL3_GPU=1)`) |
+| inputs | `x0`, `x1`, `x2`, `w0`, `w1`, `w2`, `svh0`, `svh1`, `svh2`, `A_log`, `dt_bias`, `lb` |
+| outputs | `y0`, `y1`, `y2` |
+| source | `comptime faultText(@embedFile("kernels/test/fault/kdagate_fastexp.metal"))` = `ling:kdaproj/pf_1` ++ `pg2/gemm_fused_2` ++ `ling:kdaproj/pf_3_1` ++ `ling:kdaproj/pf_3_2g` ++ `pg2/gemm_fused_4` ++ `ling:kdaproj/pf_5` ++ `pg2/gemm_fused_6_1` ++ `ling:test/fault/kdagate_fastexp` ++ `ling:kdaproj/pf_undef` (6109 B, `c30c4c5766ee`) |
+| header | `pgemm.header` = `steel_nax` ++ text 'using namespace mlx::steel;\n' ++ `pg2/gemm_loop` ++ text (72 B) (34287 B, `0ab3ef8c4fca`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** test only: the red checks in `src/models/ling/kdaproj_gate_test.zig` "turboexl3 gpu ling kdaproj gate:
+  kdaProjPromptGate's y_0 and y_2 are ...", swapped into the gate launches for one call
+  (`kdaproj_pf.gate_kernel_override`).
+- **Shapes and dtypes:** `turboexl3_ling_kdaproj_pfg0`'s.
+- **Grid and threadgroup:** `turboexl3_ling_kdaproj_pfg0`'s.
+- **Template args:** `turboexl3_ling_kdaproj_pfg0`'s.
+- **Replaces:** nothing: a planted fault, `turboexl3_ling_kdaproj_pfg0` with the sigmoid's exp on the fast path
+  (`ling:test/fault/kdagate_fastexp` in the store loop's place).
+- **Bits:** wrong on purpose: member 1's g differs from the served gate's.
+- **Pinned by:** `src/models/ling/kdaproj_gate_test.zig` "turboexl3 gpu ling kdaproj gate: kdaProjPromptGate's y_0 and
+  y_2 are ..." (GPU: its g must differ from the served gate's over `kdaProjPrompt`'s y_1,
+  `TURBOEXL3_LING_KDA_GATE_RED`).
+
+### `turboexl3_test_ling_kdaproj_pfg_member2_fault`
+
+<!-- kernel-facts: turboexl3_test_ling_kdaproj_pfg_member2_fault -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/ling/kdaproj_gate_test.zig:268` (`test turboexl3 gpu ling kdaproj gate: kdaProjPromptGate's y_0 and y_2 are kdaProjPrompt's and its g the served one-launch gate of kdaProjPrompt's y_1, word for word, G0 and G1, at prompt rows 33 to 16384; kdaProjPromptWGate's the same over given W_hats; its declines and refusals; planted faults caught (TURBOEXL3_GPU=1)`) |
+| inputs | `x0`, `x1`, `x2`, `w0`, `w1`, `w2`, `svh0`, `svh1`, `svh2`, `A_log`, `dt_bias`, `lb` |
+| outputs | `y0`, `y1`, `y2` |
+| source | `comptime faultText(@embedFile("kernels/test/fault/kdagate_member2.metal"))` = `ling:kdaproj/pf_1` ++ `pg2/gemm_fused_2` ++ `ling:kdaproj/pf_3_1` ++ `ling:kdaproj/pf_3_2g` ++ `pg2/gemm_fused_4` ++ `ling:kdaproj/pf_5` ++ `pg2/gemm_fused_6_1` ++ `ling:test/fault/kdagate_member2` ++ `ling:kdaproj/pf_undef` (6129 B, `ebad74cab6c9`) |
+| header | `pgemm.header` = `steel_nax` ++ text 'using namespace mlx::steel;\n' ++ `pg2/gemm_loop` ++ text (72 B) (34287 B, `0ab3ef8c4fca`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** test only: the red checks in `src/models/ling/kdaproj_gate_test.zig` "turboexl3 gpu ling kdaproj gate:
+  kdaProjPromptGate's y_0 and y_2 are ...", swapped into the gate launches for one call
+  (`kdaproj_pf.gate_kernel_override`).
+- **Shapes and dtypes:** `turboexl3_ling_kdaproj_pfg0`'s.
+- **Grid and threadgroup:** `turboexl3_ling_kdaproj_pfg0`'s.
+- **Template args:** `turboexl3_ling_kdaproj_pfg0`'s.
+- **Replaces:** nothing: a planted fault, `turboexl3_ling_kdaproj_pfg0` with the gate on member 2's tiles and member 1
+  stored plain (`ling:test/fault/kdagate_member2` in the store loop's place).
+- **Bits:** wrong on purpose: member 1's g differs from the served gate's.
+- **Pinned by:** `src/models/ling/kdaproj_gate_test.zig` "turboexl3 gpu ling kdaproj gate: kdaProjPromptGate's y_0 and
+  y_2 are ..." (GPU: its g must differ from the served gate's over `kdaProjPrompt`'s y_1,
+  `TURBOEXL3_LING_KDA_GATE_RED`).
+
+### `turboexl3_test_ling_kdaproj_pfg_unrounded_fault`
+
+<!-- kernel-facts: turboexl3_test_ling_kdaproj_pfg_unrounded_fault -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/ling/kdaproj_gate_test.zig:265` (`test turboexl3 gpu ling kdaproj gate: kdaProjPromptGate's y_0 and y_2 are kdaProjPrompt's and its g the served one-launch gate of kdaProjPrompt's y_1, word for word, G0 and G1, at prompt rows 33 to 16384; kdaProjPromptWGate's the same over given W_hats; its declines and refusals; planted faults caught (TURBOEXL3_GPU=1)`) |
+| inputs | `x0`, `x1`, `x2`, `w0`, `w1`, `w2`, `svh0`, `svh1`, `svh2`, `A_log`, `dt_bias`, `lb` |
+| outputs | `y0`, `y1`, `y2` |
+| source | `comptime faultText(@embedFile("kernels/test/fault/kdagate_unrounded.metal"))` = `ling:kdaproj/pf_1` ++ `pg2/gemm_fused_2` ++ `ling:kdaproj/pf_3_1` ++ `ling:kdaproj/pf_3_2g` ++ `pg2/gemm_fused_4` ++ `ling:kdaproj/pf_5` ++ `pg2/gemm_fused_6_1` ++ `ling:test/fault/kdagate_unrounded` ++ `ling:kdaproj/pf_undef` (6127 B, `f7f5df3c7278`) |
+| header | `pgemm.header` = `steel_nax` ++ text 'using namespace mlx::steel;\n' ++ `pg2/gemm_loop` ++ text (72 B) (34287 B, `0ab3ef8c4fca`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** test only: the red checks in `src/models/ling/kdaproj_gate_test.zig` "turboexl3 gpu ling kdaproj gate:
+  kdaProjPromptGate's y_0 and y_2 are ...", swapped into the gate launches for one call
+  (`kdaproj_pf.gate_kernel_override`).
+- **Shapes and dtypes:** `turboexl3_ling_kdaproj_pfg0`'s.
+- **Grid and threadgroup:** `turboexl3_ling_kdaproj_pfg0`'s.
+- **Template args:** `turboexl3_ling_kdaproj_pfg0`'s.
+- **Replaces:** nothing: a planted fault, `turboexl3_ling_kdaproj_pfg0` with member 1's word kept at its half round, not
+  rounded to OUT_T, before the gate (`ling:test/fault/kdagate_unrounded` in the store loop's place).
+- **Bits:** wrong on purpose: member 1's g differs from the served gate's.
+- **Pinned by:** `src/models/ling/kdaproj_gate_test.zig` "turboexl3 gpu ling kdaproj gate: kdaProjPromptGate's y_0 and
+  y_2 are ..." (GPU: its g must differ from the served gate's over `kdaProjPrompt`'s y_1,
+  `TURBOEXL3_LING_KDA_GATE_RED`).

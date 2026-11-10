@@ -1925,6 +1925,57 @@ SPLIT_ADDED_KERNELS['turboexl3_ling_router_logits_hr'] = ('router_rows: turboexl
 SPLIT_ADDED_KERNELS['turboexl3_ling_router_pred_hr'] = ('router_rows: turboexl3_ling_router_pred_h on the rows launch '
                                                         '(pred_open_rows, then pred_one and pred_wide verbatim)')
 SPLIT_ADDED_KERNELS['turboexl3_ling_router_pred_sig_hr'] = 'router_rows: turboexl3_ling_router_pred_sig_h on the rows launch'
+# L6 (turboexl3_ling's KDA_GATE_EPI, wave 3): P4 with member 1's (f's) output its bounded gate, made in the store loop
+# (models/ling/kdaproj_pf.zig kdaProjPromptGate). The served texts keep theirs: pg2's fused_6 is cut into fused_6_1 ++
+# fused_6_2 at its store loop and P4's pf_3 into pf_3_1 ++ pf_3_2 at its output line, the same bytes
+SPLIT_ADDED_KERNELS['turboexl3_ling_kdaproj_pfg0'] = ('KDA_GATE_EPI G0: turboexl3_ling_kdaproj_pf\'s pieces with pf_3_2g in '
+                                                      'pf_3_2\'s place (y names members 0 and 2) and pf_6g0 in fused_6_2\'s '
+                                                      '(members 0 and 2 store as fused_6_2; member 1 its word as that store '
+                                                      'rounds it, then the served one-launch gate\'s statements, g f32 into '
+                                                      'y1); A_log, dt_bias and lb after P4\'s operands')
+SPLIT_ADDED_KERNELS['turboexl3_ling_kdaproj_pfg1'] = ('KDA_GATE_EPI G1: turboexl3_ling_kdaproj_pfg0 with pf_6g1 (the '
+                                                      'gate\'s first statement read from gea) and gea in A_log\'s place')
+SPLIT_ADDED_KERNELS['turboexl3_ling_kda_gate_ea'] = ('KDA_GATE_EPI G1\'s gea: exp(A_log) per channel once for a layer '
+                                                     '(gate_ea, the served gate\'s first statement)')
+SPLIT_ADDED_KERNELS['turboexl3_test_ling_kda_gate'] = ('test only: the outside plugin\'s one-launch bounded gate '
+                                                       '(ling_kda_gate.metal, copied verbatim under a copied_from line, '
+                                                       'test/copy), the reference the gate launches are held to')
+SPLIT_ADDED_KERNELS['turboexl3_test_ling_kdaproj_pfg_unrounded_fault'] = ('test only: turboexl3_ling_kdaproj_pfg0 with '
+                                                                           'member 1\'s word not rounded to OUT_T before '
+                                                                           'the gate (fault/kdagate_unrounded in pf_6g0\'s '
+                                                                           'place), a red check')
+SPLIT_ADDED_KERNELS['turboexl3_test_ling_kdaproj_pfg_dtb_shift_fault'] = ('test only: turboexl3_ling_kdaproj_pfg0 with '
+                                                                           'dt_bias read at the next channel '
+                                                                           '(fault/kdagate_dtb_shift), a red check')
+SPLIT_ADDED_KERNELS['turboexl3_test_ling_kdaproj_pfg_fastexp_fault'] = ('test only: turboexl3_ling_kdaproj_pfg0 with the '
+                                                                         'sigmoid\'s exp on the fast path '
+                                                                         '(fault/kdagate_fastexp), a red check')
+SPLIT_ADDED_KERNELS['turboexl3_test_ling_kdaproj_pfg_member2_fault'] = ('test only: turboexl3_ling_kdaproj_pfg0 with the '
+                                                                         'gate on member 2\'s tiles and member 1 stored '
+                                                                         'plain (fault/kdagate_member2), a red check')
+SPLIT_ADDED_KERNELS['turboexl3_test_ling_kdaproj_pfg1_ea_shift_fault'] = ('test only: turboexl3_ling_kdaproj_pfg1 with gea '
+                                                                           'read at the next channel '
+                                                                           '(fault/kdagate_g1_ea_shift), a red check')
+ADDED_FILES['models/ling/kdaproj_gate_test.zig'] = ('kdaProjPromptGate and kdaProjPromptWGate held word for word to '
+                                                    'kdaProjPrompt and the served one-launch gate (its test-only copy) at '
+                                                    'G0 and G1, rows 33 to 16384, their declines and refusals and planted '
+                                                    'faults (GPU); and their timing (TURBOEXL3_LING_TIME)')
+for _n in ('fused_6_1', 'fused_6_2'):
+    ADDED[('core/pgemm.zig', 'const ' + _n)] = 'fused_6 cut at its store loop, where the KDA gate\'s launches put their own'
+CHANGED[('core/pgemm.zig', 'const fused_6')] = 'fused_6_1 ++ fused_6_2: the same text'
+for _n in ('kpf_3_1', 'kpf_3_2'):
+    ADDED[('models/ling/kdaproj_pf.zig', 'const ' + _n)] = 'pf_3 cut at its output line, where the KDA gate\'s launches name their own'
+CHANGED[('models/ling/kdaproj_pf.zig', 'const kpf_3')] = 'kpf_3_1 ++ kpf_3_2: the same text'
+CHANGED[('models/ling/kdaproj_pf.zig', 'const shared_state')] = 'the gate launches\' kernel locks and caches beside P4\'s'
+for _n in ('const kpf_3_2g', 'const kpf_6g0', 'const kpf_6g1', 'const kgate_ea', 'const text_pfg0', 'const text_pfg1',
+           'const text_gate_ea', 'const pfg0_in', 'const pfg1_in', 'const pfg_out', 'const gate_ea_in', 'const gate_ea_out',
+           'const GateForm', 'const gate_kernel_lock', 'const gate_kernel_g0', 'const gate_kernel_g1', 'const ea_kernel_lock',
+           'const ea_kernel_cache', 'const gate_kernel_override', 'fn gateKernelGet', 'fn eaKernelGet', 'const Gate',
+           'fn gateShapeOk', 'fn gateTakes', 'fn gateEa', 'fn kdaProjPromptGate', 'fn kdaProjPromptWGate', 'fn reshapeOut',
+           'fn launchGate', 'fn gateStatement', 'fn onceInOrder'):
+    ADDED[('models/ling/kdaproj_pf.zig', _n)] = 'L6 (KDA_GATE_EPI): the bounded gate in P4\'s store loop'
+for _n in ('const kdaProjPromptGate', 'const kdaProjPromptWGate'):
+    ADDED[('models/ling/api.zig', _n)] = 'the re-export of kdaproj_pf.zig\'s ' + _n[6:]
 
 def split_report(oprog, nprog, ounits, nunits, orig_dir, new_dir, problems, verbose):
     """--split (declarations moved between files, not only files): checks 1 to 4 over the whole tree instead of per file.

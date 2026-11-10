@@ -55,6 +55,11 @@ pub const kdaProjPrompt = kdaproj_pf.kdaProjPrompt;
 /// `kdaProjPrompt` over W_hats the caller decoded once (`kdaproj_pf.kdaProjPromptW`: each member's prepare, then the one
 /// launch over the given W_hats), `kdaProjPrompt`'s words with each trellis's own W_hat
 pub const kdaProjPromptW = kdaproj_pf.kdaProjPromptW;
+/// L6 (the outside plugin's KDA_GATE_EPI): `kdaProjPrompt` with member 1's (f's) output its bounded gate, g f32, made in
+/// the launch's store loop (`kdaproj_pf.kdaProjPromptGate`; `kdaproj_pf.gateTakes` says which gates it takes), and over
+/// given W_hats; `kdaproj_pf.gateEa` makes G1's exp(A_log) once for a layer
+pub const kdaProjPromptGate = kdaproj_pf.kdaProjPromptGate;
+pub const kdaProjPromptWGate = kdaproj_pf.kdaProjPromptWGate;
 
 /// The MoE router at decode rows 1 to 8 in two launches, with the read-ahead predictor's scores (`router.zig`): the
 /// router's logits and the predictor's scores in one launch (`router.routerLogits`), the host's fused router over them

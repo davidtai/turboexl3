@@ -55,7 +55,7 @@ fn kernelGet() !mlx.mlx_fast_metal_kernel {
 }
 
 /// This file's module state (`Global`): what a host that shares its units' state registers.
-pub const shared_state = .{ kernel_lock, kernel_cache };
+pub const shared_state = .{ kernel_lock, kernel_cache, gate_kernel_lock, gate_kernel_g0, gate_kernel_g1, ea_kernel_lock, ea_kernel_cache };
 
 // ── the tile ──
 
@@ -266,11 +266,12 @@ pub const kpf_6g1 = @embedFile("kernels/kdaproj/pf_6g1.metal");
 /// `gateEa`'s launch: exp(A_log) per channel, the gate's first statement
 pub const kgate_ea = @embedFile("kernels/kdaproj/gate_ea.metal");
 
-/// (tests first: the launches' texts and calls come with the next commit; until then the texts are empty, no gate fits
-/// and every call declines)
-pub const text_pfg0: [:0]const u8 = "";
-pub const text_pfg1: [:0]const u8 = "";
-pub const text_gate_ea: [:0]const u8 = "";
+/// G0's launch: P4's pieces with kpf_3_2g in kpf_3_2's place and kpf_6g0 in pg2's fused_6_2's
+pub const text_pfg0: [:0]const u8 = kpf_1 ++ pgemm.fused_2 ++ kpf_3_1 ++ kpf_3_2g ++ pgemm.fused_4 ++ kpf_5 ++ pgemm.fused_6_1 ++ kpf_6g0 ++ kpf_undef;
+/// G1's launch: the same with kpf_6g1
+pub const text_pfg1: [:0]const u8 = kpf_1 ++ pgemm.fused_2 ++ kpf_3_1 ++ kpf_3_2g ++ pgemm.fused_4 ++ kpf_5 ++ pgemm.fused_6_1 ++ kpf_6g1 ++ kpf_undef;
+/// `gateEa`'s text
+pub const text_gate_ea: [:0]const u8 = kgate_ea;
 
 /// G0's operands: P4's, then A_log and dt_bias (f32 [N1]) and the bound (an f32 scalar)
 pub const pfg0_in = [_][*:0]const u8{ "x0", "x1", "x2", "w0", "w1", "w2", "svh0", "svh1", "svh2", "A_log", "dt_bias", "lb" };
@@ -278,13 +279,46 @@ pub const pfg0_in = [_][*:0]const u8{ "x0", "x1", "x2", "w0", "w1", "w2", "svh0"
 pub const pfg1_in = [_][*:0]const u8{ "x0", "x1", "x2", "w0", "w1", "w2", "svh0", "svh1", "svh2", "gea", "dt_bias", "lb" };
 /// The gate launches' outputs: P4's names, y1 f32
 pub const pfg_out = pf_out;
+const gate_ea_in = [_][*:0]const u8{"A_log"};
+const gate_ea_out = [_][*:0]const u8{"gea"};
 
 /// The epilogue's two forms: G0 takes exp(A_log) for each element as the served gate does, G1 reads it from `gateEa`'s
 /// array (one launch per layer, made once by the caller)
 pub const GateForm = enum { g0, g1 };
 
+const gate_kernel_lock = Global(std.atomic.Value(u32), "ling_kdaproj_pfg_kernel_lock", std.atomic.Value(u32).init(0));
+const gate_kernel_g0 = Global(?mlx.mlx_fast_metal_kernel, "ling_kdaproj_pfg0_kernel", null);
+const gate_kernel_g1 = Global(?mlx.mlx_fast_metal_kernel, "ling_kdaproj_pfg1_kernel", null);
+const ea_kernel_lock = Global(std.atomic.Value(u32), "ling_kda_gate_ea_kernel_lock", std.atomic.Value(u32).init(0));
+const ea_kernel_cache = Global(?mlx.mlx_fast_metal_kernel, "ling_kda_gate_ea_kernel", null);
+
 /// Test seam: a kernel the gate launches run in place of their form's (a planted fault's red check; null: the form's)
 pub const gate_kernel_override = Global(?mlx.mlx_fast_metal_kernel, "ling_kdaproj_pfg_kernel_override", null);
+
+fn gateKernelGet(form: GateForm) !mlx.mlx_fast_metal_kernel {
+    if (gate_kernel_override.get().*) |planted| return planted;
+    while (gate_kernel_lock.get().*.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
+    defer gate_kernel_lock.get().*.store(0, .release);
+    if (form == .g0) {
+        if (gate_kernel_g0.get().*) |made0| return made0;
+        const k0 = ks.newKernel("turboexl3_ling_kdaproj_pfg0", &pfg0_in, &pfg_out, text_pfg0, pgemm.header, true) orelse return error.KernelCreateFailed;
+        gate_kernel_g0.get().* = k0;
+        return k0;
+    }
+    if (gate_kernel_g1.get().*) |made1| return made1;
+    const k1 = ks.newKernel("turboexl3_ling_kdaproj_pfg1", &pfg1_in, &pfg_out, text_pfg1, pgemm.header, true) orelse return error.KernelCreateFailed;
+    gate_kernel_g1.get().* = k1;
+    return k1;
+}
+
+fn eaKernelGet() !mlx.mlx_fast_metal_kernel {
+    while (ea_kernel_lock.get().*.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
+    defer ea_kernel_lock.get().*.store(0, .release);
+    if (ea_kernel_cache.get().*) |k| return k;
+    const k = ks.newKernel("turboexl3_ling_kda_gate_ea", &gate_ea_in, &gate_ea_out, text_gate_ea, "", true) orelse return error.KernelCreateFailed;
+    ea_kernel_cache.get().* = k;
+    return k;
+}
 
 /// Member 1's bounded gate for `kdaProjPromptGate`: `a` the KDA layer's per-channel A_log (G0) or its exp from `gateEa`
 /// (G1), `dt_bias` its per-channel bias, both f32 [N1] (N1 member 1's width), and the bound (the config's
@@ -296,34 +330,178 @@ pub const Gate = struct {
     bound: f32,
 };
 
-/// (tests first) Whether a gate's operands fit member 1 of width `n1`: none yet
+/// Whether a gate's operands fit member 1 of width `n1`, from their dtypes and shapes alone (MLX-free): both f32 and
+/// one-dimensional of n1 channels, the bound finite and not 0 (the bounded gate)
 pub fn gateShapeOk(n1: u32, a_dtype: mlx.mlx_dtype, a_shape: []const c_int, dt_dtype: mlx.mlx_dtype, dt_shape: []const c_int, bound: f32) bool {
-    _ = .{ n1, a_dtype, a_shape, dt_dtype, dt_shape, bound };
-    return false;
+    if (a_dtype != .float32 or dt_dtype != .float32) return false;
+    if (a_shape.len != 1 or dt_shape.len != 1 or n1 == 0) return false;
+    if (a_shape[0] != @as(c_int, @intCast(n1)) or dt_shape[0] != @as(c_int, @intCast(n1))) return false;
+    return std.math.isFinite(bound) and bound != 0;
 }
 
-/// (tests first) Whether `kdaProjPromptGate` takes `gate`: never yet
+/// Whether `kdaProjPromptGate` takes `gate` for member 1 of `p` (its operands; `takes` decides the rest)
 pub fn gateTakes(p: [3]root.Proj, gate: Gate) bool {
-    _ = .{ p, gate };
-    return false;
+    if (gate.a.ctx == null or gate.dt_bias.ctx == null) return false;
+    const sh = mlx.getShape(p[1].trellis);
+    if (sh.len != 3) return false;
+    const n1: u32 = @intCast(sh[1] * 16);
+    return gateShapeOk(n1, mlx.mlx_array_dtype(gate.a), mlx.getShape(gate.a), mlx.mlx_array_dtype(gate.dt_bias), mlx.getShape(gate.dt_bias), gate.bound);
 }
 
-/// (tests first) G1's operand: declined until the next commit
+/// G1's operand: exp(A_log) f32 [n] for a KDA layer's A_log f32 [n], the gate's first statement once per channel; the
+/// caller makes it once (at load) and keeps it with the layer. error.BadExl3Shape for another dtype or rank, nothing
+/// launched.
 pub fn gateEa(s: mlx.mlx_stream, A_log: A) !A {
-    _ = .{ s, A_log };
-    return error.Exl3EngineNotImplemented;
+    const sh = mlx.getShape(A_log);
+    if (sh.len != 1 or sh[0] <= 0 or mlx.mlx_array_dtype(A_log) != .float32) return error.BadExl3Shape;
+    const k = try eaKernelGet();
+    const n: u32 = @intCast(sh[0]);
+    const tg: u32 = 256;
+    const cfg = try ks.buildConfig(.{
+        .grid = .{ ((n + tg - 1) / tg) * tg, 1, 1 },
+        .threadgroup = .{ tg, 1, 1 },
+        .out_shapes = &.{&[_]c_int{@intCast(n)}},
+        .out_dtypes = &.{.float32},
+        .template = &.{},
+    });
+    defer _ = mlx.mlx_fast_metal_kernel_config_free(cfg);
+    var o: [1]A = undefined;
+    try ks.applyConfig(k, cfg, &.{A_log}, &o, s);
+    return o[0];
 }
 
-/// (tests first) `kdaProjPrompt` with member 1's output its bounded gate: declined until the next commit
+/// `kdaProjPrompt` with member 1's output its bounded gate: y_0 and y_2 `kdaProjPrompt`'s words, and in member 1's place
+/// g f32 [..., N1], the outside plugin's one-launch bounded gate (the ops of mlx-serve's `kdaGateChain`) of
+/// `kdaProjPrompt`'s y_1, word for word, made in the launch's epilogue (form `gate.form`). Owned results.
+/// error.Exl3EngineNotImplemented where `kdaProjPrompt` declines or the gate's operands do not fit (`gateTakes`),
+/// nothing launched.
 pub fn kdaProjPromptGate(s: mlx.mlx_stream, x: A, p: [3]root.Proj, gate: Gate, dec: format.Decode) ![3]A {
-    _ = .{ s, x, p, gate, dec };
-    return error.Exl3EngineNotImplemented;
+    if (!gateTakes(p, gate)) return error.Exl3EngineNotImplemented;
+    const xsh = mlx.getShape(x);
+    if (xsh.len < 1 or xsh.len > 8) return error.BadExl3Shape;
+    var rows: usize = 1;
+    for (xsh[0 .. xsh.len - 1]) |d| rows *= @as(usize, @intCast(d));
+    const xd = mlx.mlx_array_dtype(x);
+    const tsh0 = mlx.getShape(p[0].trellis);
+    if (tsh0.len != 3) return error.BadExl3Shape;
+    const in_dim: u32 = @intCast(tsh0[0] * 16);
+    if (xsh[xsh.len - 1] != @as(c_int, @intCast(in_dim))) return error.BadExl3Shape;
+    const t = tileFor(in_dim) orelse return error.Exl3EngineNotImplemented;
+    if (!takes(p, rows, xd, t)) return error.Exl3EngineNotImplemented;
+    const rate = format.Rate.fromN(@intCast(tsh0[2])) orelse return error.BadExl3Shape;
+    var x2 = mlx.mlx_array_new();
+    defer _ = mlx.mlx_array_free(x2);
+    try mlx.check(mlx.mlx_reshape(&x2, x, &[_]c_int{ @intCast(rows), @intCast(in_dim) }, 2, s));
+    // each member's prepared rows and W_hat, by its own `linear`'s launches (as `kdaProjPrompt`)
+    var ops: [3][2]A = undefined;
+    var made: usize = 0;
+    defer for (ops[0..made]) |o| for (o) |a| {
+        _ = mlx.mlx_array_free(a);
+    };
+    var outs: [3]u32 = undefined;
+    for (p, 0..) |m, i| {
+        const sh = mlx.getShape(m.trellis);
+        outs[i] = @intCast(sh[1] * 16);
+        const d = try root.denseCached(.{ .in = in_dim, .out = outs[i], .rate = rate, .dec = dec, .out_dtype = xd });
+        ops[i] = (try d.prefillOperands(s, x2, m.trellis, m.suh, rows)) orelse return error.Exl3EngineNotImplemented;
+        made += 1;
+    }
+    const ys = try launchGate(s, .{ ops[0][0], ops[1][0], ops[2][0] }, .{ ops[0][1], ops[1][1], ops[2][1] }, .{ p[0].svh, p[1].svh, p[2].svh }, outs, @intCast(rows), @intCast(in_dim), xd, t, gate);
+    return reshapeOut(s, ys, xsh, outs);
 }
 
-/// (tests first) over given W_hats: declined until the next commit
+/// `kdaProjPromptGate` over W_hats the caller decoded (`kdaProjPromptW`'s operands and declines, then the gate's
+/// launch): every output `kdaProjPromptGate`'s word for word with each trellis's own W_hat. Owned results.
 pub fn kdaProjPromptWGate(s: mlx.mlx_stream, x: A, p: [3]root.Proj, w: [3]A, gate: Gate, dec: format.Decode) ![3]A {
-    _ = .{ s, x, p, w, gate, dec };
-    return error.Exl3EngineNotImplemented;
+    if (!gateTakes(p, gate)) return error.Exl3EngineNotImplemented;
+    const xsh = mlx.getShape(x);
+    if (xsh.len < 1 or xsh.len > 8) return error.BadExl3Shape;
+    var rows: usize = 1;
+    for (xsh[0 .. xsh.len - 1]) |d| rows *= @as(usize, @intCast(d));
+    const xd = mlx.mlx_array_dtype(x);
+    const tsh0 = mlx.getShape(p[0].trellis);
+    if (tsh0.len != 3) return error.BadExl3Shape;
+    const in_dim: u32 = @intCast(tsh0[0] * 16);
+    if (xsh[xsh.len - 1] != @as(c_int, @intCast(in_dim))) return error.BadExl3Shape;
+    const t = tileFor(in_dim) orelse return error.Exl3EngineNotImplemented;
+    if (!takes(p, rows, xd, t)) return error.Exl3EngineNotImplemented;
+    const rate = format.Rate.fromN(@intCast(tsh0[2])) orelse return error.BadExl3Shape;
+    // every member's `linear` Dense, its operands' declines and its W_hat's shape, before any launch (as
+    // `kdaProjPromptW`)
+    var dms: [3]*root.dense.Dense = undefined;
+    var outs: [3]u32 = undefined;
+    for (p, w, &dms, &outs) |m, wm, *dm, *o| {
+        o.* = @intCast(mlx.getShape(m.trellis)[1] * 16);
+        dm.* = try root.denseCached(.{ .in = in_dim, .out = o.*, .rate = rate, .dec = dec, .out_dtype = xd });
+        if (!operandsTaken(dm.*, m.trellis, rows)) return error.Exl3EngineNotImplemented;
+        if (mlx.mlx_array_dtype(wm) != .float16 or !std.mem.eql(c_int, mlx.getShape(wm), &[_]c_int{ @intCast(in_dim), @intCast(o.*) })) return error.BadExl3Shape;
+    }
+    var x2 = mlx.mlx_array_new();
+    defer _ = mlx.mlx_array_free(x2);
+    try mlx.check(mlx.mlx_reshape(&x2, x, &[_]c_int{ @intCast(rows), @intCast(in_dim) }, 2, s));
+    var xp: [3]A = undefined;
+    var made: usize = 0;
+    defer for (xp[0..made]) |a| {
+        _ = mlx.mlx_array_free(a);
+    };
+    for (dms, p) |dm, m| {
+        xp[made] = try dm.prepare(s, x2, m.suh, rows);
+        made += 1;
+    }
+    const ys = try launchGate(s, xp, w, .{ p[0].svh, p[1].svh, p[2].svh }, outs, @intCast(rows), @intCast(in_dim), xd, t, gate);
+    return reshapeOut(s, ys, xsh, outs);
+}
+
+/// The three outputs [M, out_m] reshaped to x's leading dims (`kdaProjPrompt`'s results' shapes); frees `ys`
+fn reshapeOut(s: mlx.mlx_stream, ys: [3]A, xsh: []const c_int, outs: [3]u32) ![3]A {
+    defer for (ys) |y| {
+        _ = mlx.mlx_array_free(y);
+    };
+    var shape: [8]c_int = undefined;
+    for (xsh, 0..) |dd, i| shape[i] = dd;
+    var res: [3]A = .{ mlx.mlx_array_new(), mlx.mlx_array_new(), mlx.mlx_array_new() };
+    errdefer for (res) |r| {
+        _ = mlx.mlx_array_free(r);
+    };
+    for (&res, ys, outs) |*r, y, o| {
+        shape[xsh.len - 1] = @intCast(o);
+        try mlx.check(mlx.mlx_reshape(r, y, &shape, xsh.len, s));
+    }
+    return res;
+}
+
+/// `launch` with member 1's output the gate's g (f32) and the gate's operands after P4's: the same grid, threadgroup
+/// and template, the form's kernel (`gateKernelGet`)
+fn launchGate(s: mlx.mlx_stream, xp: [3]A, w: [3]A, svh: [3]A, outs: [3]u32, m: u32, kd: u32, out_dtype: mlx.mlx_dtype, t: pgemm.Tile, gate: Gate) ![3]A {
+    const kern = try gateKernelGet(gate.form);
+    const tile: u32 = @as(u32, 1) << @intCast(t.swz);
+    const tiles_m = (m + t.bm - 1) / t.bm;
+    const tiles_n = (outs[0] + outs[1] + outs[2]) / t.bn;
+    const cfg = try ks.buildConfig(.{
+        .grid = .{ tiles_n * tile * 32, ((tiles_m + tile - 1) / tile) * t.wn, t.wm },
+        .threadgroup = .{ 32, t.wn, t.wm },
+        .out_shapes = &.{ &[_]c_int{ @intCast(m), @intCast(outs[0]) }, &[_]c_int{ @intCast(m), @intCast(outs[1]) }, &[_]c_int{ @intCast(m), @intCast(outs[2]) } },
+        .out_dtypes = &.{ out_dtype, .float32, out_dtype },
+        .template = &.{
+            .{ .name = "T", .value = .{ .dtype = .float16 } },
+            .{ .name = "BM", .value = .{ .int = t.bm } },
+            .{ .name = "BN", .value = .{ .int = t.bn } },
+            .{ .name = "BK", .value = .{ .int = t.bk } },
+            .{ .name = "WM", .value = .{ .int = t.wm } },
+            .{ .name = "WN", .value = .{ .int = t.wn } },
+            .{ .name = "SWZ", .value = .{ .int = t.swz } },
+            .{ .name = "AM", .value = .{ .int = @intFromBool(m % t.bm == 0) } },
+            .{ .name = "AN", .value = .{ .int = 1 } },
+            .{ .name = "AK", .value = .{ .int = @intFromBool(kd % t.bk == 0) } },
+            .{ .name = "OUT_T", .value = .{ .dtype = out_dtype } },
+        },
+    });
+    defer _ = mlx.mlx_fast_metal_kernel_config_free(cfg);
+    const lb = mlx.mlx_array_new_float(gate.bound);
+    defer _ = mlx.mlx_array_free(lb);
+    var o: [3]A = undefined;
+    try ks.applyConfig(kern, cfg, &.{ xp[0], xp[1], xp[2], w[0], w[1], w[2], svh[0], svh[1], svh[2], gate.a, gate.dt_bias, lb }, &o, s);
+    return o;
 }
 
 // ── CPU tests: the texts ──
