@@ -58,6 +58,8 @@ comptime {
     _ = @import("models/ling/kdaproj_pf.zig");
     _ = @import("models/ling/kdaproj_pf_test.zig");
     _ = @import("models/ling/kdaproj_gate_test.zig");
+    _ = @import("models/ling/kdanorm.zig");
+    _ = @import("models/ling/kdanorm_test.zig");
     _ = @import("models/ling/swiglu_test.zig");
 }
 

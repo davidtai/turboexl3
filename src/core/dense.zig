@@ -33,7 +33,12 @@ const pgemm = @import("pgemm.zig");
 
 /// prepare for a dense linear: xp half [rows, IN] = H128(f16(x[row]) * suh) per 128-block; LANE_ORDER 1 writes the GEMV's
 /// lane order within each 16-block, 0 the natural order the matmul path needs; one simdgroup per (block, row); x any float dtype
-pub const text_prep = @embedFile("kernels/dense/prep.metal");
+pub const text_prep = prep_1 ++ prep_2 ++ prep_3;
+/// text_prep in three pieces, cut at its load (where Ling's KDA norm-gate writer, models/ling/kdanorm.zig, puts its own
+/// values): the block's indices, the load of each lane's four values, then the butterfly and the store
+pub const prep_1 = @embedFile("kernels/dense/prep_1.metal");
+pub const prep_2 = @embedFile("kernels/dense/prep_2.metal");
+pub const prep_3 = @embedFile("kernels/dense/prep_3.metal");
 
 /// text_prep (lane order for the multi-row GEMV, natural for the fused prefill GEMM) plus xs f32 [rows, IN/128], the sum of
 /// each 128-block's rounded values (what a deferred MUL1 affine map needs: sum_i x_i (A t_i + C) = A sum_i x_i t_i + C sum_i x_i)
