@@ -38,6 +38,9 @@ pub const Config = struct {
     /// without `pf_t128_zfit`): successive calls' buffers then match MLX's cache, which reuses a buffer only within two
     /// pages of a request. The kernels run over the call's rows and nothing reads the padding. The same bytes.
     pf_size_class: bool = false,
+    /// The routed prefill's gate|up and down GEMMs on int8 (`prefill.Options.int8`, with `pf_t128` and without
+    /// `pf_t128_zfit`; lossy): 1 each activation 128-block at its own scale, 2 one scale a row (per token); 0 the exact chain.
+    pf_int8: u8 = 0,
     /// Routed prefill rows on the fused GEMM chain; false refuses them (`error.Exl3EngineNotImplemented`).
     prefill: bool = true,
     /// The device passes MLX's NAX gate (an M5-class GPU and macOS 26.2 or later), the consumer's to say. False keeps
@@ -93,7 +96,7 @@ pub const Config = struct {
         const forms = [_]u8{ 3, 5, 6, 7, 8, 9 };
         const spts = [_]u32{ 1, 2, 4, 5, 10, 20 };
         return std.mem.indexOfScalar(u8, &forms, c.decode_form) != null and
-            std.mem.indexOfScalar(u32, &spts, c.shared_spt) != null and c.pf_alay <= 2 and
+            std.mem.indexOfScalar(u32, &spts, c.shared_spt) != null and c.pf_alay <= 2 and c.pf_int8 <= 2 and
             (c.banked_group == 2 or c.banked_group == 4) and (!c.banked_m3 or c.banked_group == 4) and
             (!c.banked_ptg or c.banked_group == 4) and
             c.banked_variant_gu < banked_variants and c.banked_variant_dn < banked_variants and

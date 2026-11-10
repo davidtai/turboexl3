@@ -22,6 +22,11 @@
 //! - every pg2 candidate tile (`pgemm.candidates`, as the plugin's TURBOEXL3_GLM53F_PG2 names them by code) at every
 //!   trunk linear of `api.zig` (`root.glm53f.trunk`) against the chain (dequantize, MLX's matmul, the finish), word for
 //!   word, bf16 x and y, at 100, 2048, 4100 and 8200 rows where MLX runs its regular kernel.
+//! And the routed gate|up and down on int8 (`Config.pf_int8` 1: a scale each activation 128-block; 2: one scale a row;
+//! lossy), held to agreement with the exact chain instead, both with the size classes as the plugin serves them: the
+//! same 4096-row calls' y on both paths at every SC rate, cosine at least 0.99 and the error's rms at most a tenth of y's
+//! (TURBOEXL3_GLM_PF_INT8_AGREE); timed beside the exact chain under TURBOEXL3_GLM_TIME (lines TURBOEXL3_GLM_PF_INT8_TIME
+//! for the call, TURBOEXL3_GLM_PF_INT8_STAGE for its route, prepare and gate|up alone and through mid and down).
 //! - CPU (always): the row-map prepare's text is the prepare's with its one row line swapped for the row map's, and the
 //!   prepare's own text is unchanged by the cut.
 //! - GPU (TURBOEXL3_GPU=1, else skipped): the bytes above, x ~ N(0, 8^2) bf16-exact (about a tenth of the gates and a
@@ -1220,5 +1225,290 @@ test "turboexl3 gpu glm53f prefill options timing: a 16384-row prompt bank call 
             };
         }
         try pfOptsConfigure(saved, null);
+    }
+}
+
+/// `configure` with the routed gate|up and down on int8 at `v` (`Config.pf_int8`; 0 the exact chain) and the size classes
+/// (`Config.pf_size_class`, the plugin's PF_REUSE), every engine released first so the next call's prefill engine is made
+/// under it
+fn pfI8Configure(saved: root.config.Config, v: u8) !void {
+    root.releaseEngines();
+    var c = saved;
+    c.pf_int8 = v;
+    c.pf_size_class = true;
+    try root.configure(c);
+}
+
+/// `saved` back in force, every engine released first
+fn pfI8Restore(saved: root.config.Config) void {
+    root.releaseEngines();
+    root.configure(saved) catch unreachable;
+}
+
+test "turboexl3 glm53f prefill int8 options: int8 1 or 2 rides the 128-row tiles on the deferred MUL1 map, the mixed outputs at their sorted positions, beside the size classes" {
+    const t = testing;
+    const served: prefill.Options = .{ .bm = 64, .small = .mixed, .dbuf = true, .unroll = true, .fragb = true, .intr = true, .defer_affine = true, .ncb = 4, .sintr = true, .froute = true, .alay = 2, .t128 = true };
+    try t.expect(served.valid() and served.int8 == 0);
+    for ([_]u8{ 1, 2 }) |v| {
+        var o = served;
+        o.int8 = v;
+        try t.expect(o.valid());
+        var z = o;
+        z.t128_zfit = true;
+        try t.expect(!z.valid());
+        var d = o;
+        d.defer_affine = false;
+        try t.expect(!d.valid());
+        var q = o;
+        q.t128 = false;
+        try t.expect(!q.valid());
+        var c = o;
+        c.size_class = true;
+        try t.expect(c.valid());
+    }
+    var o3 = served;
+    o3.int8 = 3;
+    try t.expect(!o3.valid());
+}
+
+test "turboexl3 gpu glm53f prefill int8: the routed gate|up and down on int8 (a scale each activation 128-block; one scale a row) agree with the exact chain (cosine >= 0.99, error rms <= 0.1 of y's, finite), 16384 row-slots in 4096-row calls with the size classes, on the plugin's default path and on moeClampedRows, at every SC rate (TURBOEXL3_GPU=1)" {
+    _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    const s = mlx.mlx_default_gpu_stream_new();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    const a = std.heap.page_allocator;
+    var g = try G.init(a, s);
+    defer g.deinit();
+    const saved = root.config.get().*;
+    defer pfI8Restore(saved);
+    var nbuf: [8]u32 = undefined;
+    const rates = routed.envList("TURBOEXL3_GLM_ROUTED_N", &routed.rates_n, &nbuf);
+    const S: usize = 16384;
+    const chunk: usize = 4096;
+    const want = try a.alloc(f32, S * hidden);
+    defer a.free(want);
+    const got = try a.alloc(f32, S * hidden);
+    defer a.free(got);
+    const ones_h = try a.alloc(f32, S);
+    defer a.free(ones_h);
+    @memset(ones_h, 1.0);
+    var failed = false;
+    for (rates) |n| {
+        defer _ = mlx.mlx_clear_cache();
+        defer root.releaseEngines();
+        const rate = format.Rate.fromN(n) orelse return error.Exl3RateUnsupported;
+        const mark = g.mark();
+        defer g.resetTo(mark);
+        var prng = std.Random.DefaultPrng.init(0x618A9 ^ @as(u64, n));
+        const rnd = prng.random();
+        var bank = try ref.synthBank(a, rnd, prompt_slots, hidden, inter, rate);
+        defer bank.deinit(a);
+        const rb = try routed.rootBank(&g, &bank, .uint16);
+        const xh = try a.alloc(f32, act_rows * hidden);
+        defer a.free(xh);
+        for (xh) |*v| v.* = routed.bfExact(sigma * rnd.floatNorm(f32));
+        const x = try g.astype(try g.hostArray(std.mem.sliceAsBytes(xh), &.{ ci(act_rows), ci(hidden) }, .float32), .bfloat16);
+        try g.evalAll(&.{x});
+        const rows = try a.alloc(u32, S);
+        defer a.free(rows);
+        const slots = try a.alloc(u32, S);
+        defer a.free(slots);
+        drawCall(rnd, rows, slots, prompt_slots, 0);
+        try sortBySlot(a, rows, slots, prompt_slots);
+        for ([_]bool{ false, true }) |on_rows| {
+            // the exact chain's y, then each int8 scheme's
+            for ([_]u8{ 0, 1, 2 }) |v| {
+                try pfI8Configure(saved, v);
+                const buf = if (v == 0) want else got;
+                var c0: usize = 0;
+                while (c0 < S) : (c0 += chunk) {
+                    const c1 = @min(c0 + chunk, S);
+                    const m2 = g.mark();
+                    defer g.resetTo(m2);
+                    const y = try chunkCall(&g, s, x, rb, rows[c0..c1], slots[c0..c1], ones_h, on_rows);
+                    _ = try g.hostF32(try g.astype(y, .float32), buf[c0 * hidden .. c1 * hidden]);
+                }
+                if (v == 0) continue;
+                var dot: f64 = 0;
+                var gg: f64 = 0;
+                var ww: f64 = 0;
+                var ee: f64 = 0;
+                var nonfinite: usize = 0;
+                for (got, want) |gv, wv| {
+                    if (!std.math.isFinite(gv) or !std.math.isFinite(wv)) {
+                        nonfinite += 1;
+                        continue;
+                    }
+                    dot += @as(f64, gv) * wv;
+                    gg += @as(f64, gv) * gv;
+                    ww += @as(f64, wv) * wv;
+                    ee += (@as(f64, gv) - wv) * (@as(f64, gv) - wv);
+                }
+                const cos = dot / @sqrt(gg * ww);
+                const rms = @sqrt(ee / ww);
+                const ok = nonfinite == 0 and cos >= 0.99 and rms <= 0.1;
+                std.debug.print("TURBOEXL3_GLM_PF_INT8_AGREE n={d} S={d} int8={d} path={s} cos={d:.6} rms_ratio={d:.5} nonfinite={d} {s}\n", .{ n, S, v, if (on_rows) "rows" else "chain", cos, rms, nonfinite, if (ok) "PASS" else "FAIL" });
+                if (!ok) failed = true;
+            }
+        }
+    }
+    try testing.expect(!failed);
+}
+
+/// The routed prefill's route, prepare and gate|up launches alone over a prompt call's row-slots (`Prefill.routeT128`,
+/// then `prepWith` and `gemmGUT128`, or with `q8` `prepI8` and `gemmGUI8`), every array adopted by `g`: the gate|up
+/// outputs of both launches
+fn guStage(g: *G, pf: *prefill.Prefill, s: mlx.mlx_stream, x: mlx.mlx_array, rows_a: mlx.mlx_array, inds: mlx.mlx_array, ops: prefill.Operands, S: u32, q8: bool) ![4]mlx.mlx_array {
+    const rt = try pf.routeT128(s, inds, S);
+    for ([_]mlx.mlx_array{ rt.order, rt.tiles, rt.tiles128, rt.xbase }) |r| _ = try g.adopt(r);
+    var zt: prefill.ZT128 = undefined;
+    if (q8) {
+        const po = try pf.prepI8(s, x, inds, rt.order, ops, S, rows_a);
+        for (po) |p| _ = try g.adopt(p);
+        zt = try pf.gemmGUI8(s, rt, po[0], po[1], po[5], po[6], po[3], po[4], ops, S);
+    } else {
+        const po = try pf.prepWith(s, x, inds, rt.order, ops, S, rows_a);
+        for (po) |p| _ = try g.adopt(p);
+        zt = try pf.gemmGUT128(s, rt, po[0], po[1], po[3], po[4], ops, S);
+    }
+    return .{ try g.adopt(zt.m[0]), try g.adopt(zt.m[1]), try g.adopt(zt.t[0]), try g.adopt(zt.t[1]) };
+}
+
+/// The routed prefill's launches through mid and the down GEMM over a prompt call's row-slots (`guStage`'s, then
+/// `midT128` and `gemmDT128`, or with `q8` `midI8` and `gemmDI8`), every array adopted by `g`: the down outputs of both
+/// launches
+fn dnStage(g: *G, pf: *prefill.Prefill, s: mlx.mlx_stream, x: mlx.mlx_array, rows_a: mlx.mlx_array, inds: mlx.mlx_array, ops: prefill.Operands, S: u32, q8: bool) ![2]mlx.mlx_array {
+    const rt = try pf.routeT128(s, inds, S);
+    for ([_]mlx.mlx_array{ rt.order, rt.tiles, rt.tiles128, rt.xbase }) |r| _ = try g.adopt(r);
+    var zd: prefill.ZT128 = undefined;
+    if (q8) {
+        const po = try pf.prepI8(s, x, inds, rt.order, ops, S, rows_a);
+        for (po) |p| _ = try g.adopt(p);
+        const zt = try pf.gemmGUI8(s, rt, po[0], po[1], po[5], po[6], po[3], po[4], ops, S);
+        for ([_]mlx.mlx_array{ zt.m[0], zt.m[1], zt.t[0], zt.t[1] }) |z| _ = try g.adopt(z);
+        const xd = try pf.midI8(s, zt, rt, inds, ops, S);
+        for (xd) |d| _ = try g.adopt(d);
+        zd = try pf.gemmDI8(s, rt, xd[0], xd[2], xd[1], ops, S);
+    } else {
+        const po = try pf.prepWith(s, x, inds, rt.order, ops, S, rows_a);
+        for (po) |p| _ = try g.adopt(p);
+        const zt = try pf.gemmGUT128(s, rt, po[0], po[1], po[3], po[4], ops, S);
+        for ([_]mlx.mlx_array{ zt.m[0], zt.m[1], zt.t[0], zt.t[1] }) |z| _ = try g.adopt(z);
+        const xd = try pf.midT128(s, zt, rt, inds, ops, S);
+        for (xd) |d| _ = try g.adopt(d);
+        zd = try pf.gemmDT128(s, rt, xd[0], xd[1], ops, S);
+    }
+    return .{ try g.adopt(zd.m[0]), try g.adopt(zd.t[0]) };
+}
+
+test "turboexl3 gpu glm53f prefill int8 timing: a 16384-row prompt bank call with the routed gate|up and down on int8 (1: a scale each activation 128-block; 2: one scale a row) against the exact chain, in calls of 4096 and 16384 rows on each path with the size classes, and its route, prepare and gate|up alone and through mid and down, over 36 experts' 455-row runs and over a drawn routing (TURBOEXL3_GLM_TIME=1)" {
+    _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    _ = std.c.getenv("TURBOEXL3_GLM_TIME") orelse return error.SkipZigTest;
+    const s = mlx.mlx_default_gpu_stream_new();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    const a = std.heap.page_allocator;
+    var g = try G.init(a, s);
+    defer g.deinit();
+    defer _ = mlx.mlx_clear_cache();
+    const saved = root.config.get().*;
+    defer pfI8Restore(saved);
+    var prng = std.Random.DefaultPrng.init(0x618AA);
+    const rnd = prng.random();
+    // K3, the sc_3.10bpw pack's routed layers
+    const n: u32 = 48;
+    const rate = format.Rate.fromN(n) orelse return error.Exl3RateUnsupported;
+    const mark = g.mark();
+    defer g.resetTo(mark);
+    var bank = try ref.synthBank(a, rnd, prompt_slots, hidden, inter, rate);
+    defer bank.deinit(a);
+    const rb = try routed.rootBank(&g, &bank, .uint16);
+    const xh = try a.alloc(f32, act_rows * hidden);
+    defer a.free(xh);
+    for (xh) |*v| v.* = routed.bfExact(sigma * rnd.floatNorm(f32));
+    const x = try g.astype(try g.hostArray(std.mem.sliceAsBytes(xh), &.{ ci(act_rows), ci(hidden) }, .float32), .bfloat16);
+    try g.evalAll(&.{x});
+    const S: usize = 16384;
+    const ones_h = try a.alloc(f32, S);
+    defer a.free(ones_h);
+    @memset(ones_h, 1.0);
+    const arms = [_][]const u8{ "exact", "i8", "i8t" };
+    // the stages' own engine: the served options (root.pfOptions with the plugin's bk128) with int8 on; the exact
+    // launches beside it, the scheme by its option
+    var pf = try prefill.Prefill.init(.{ .hidden = hidden, .inter = inter, .topk = 1, .experts = prompt_slots, .rate = rate, .dec = .mul1, .limit = @intCast(limit) }, .{ .bm = 64, .small = .mixed, .dbuf = true, .unroll = true, .fragb = true, .intr = true, .defer_affine = true, .ncb = 4, .sintr = true, .froute = true, .alay = 2, .t128 = true, .bk128 = true, .int8 = 1 });
+    defer pf.deinit();
+    const ops: prefill.Operands = .{ .gate_t = rb.gate.trellis, .gate_suh = rb.gate.suh, .gate_svh = rb.gate.svh, .up_t = rb.up.trellis, .up_suh = rb.up.suh, .up_svh = rb.up.svh, .down_t = rb.down.trellis, .down_suh = rb.down.suh, .down_svh = rb.down.svh };
+    for ([_][]const u8{ "runs455", "drawn" }) |routing| {
+        const rows = try a.alloc(u32, S);
+        defer a.free(rows);
+        const slots = try a.alloc(u32, S);
+        defer a.free(slots);
+        if (std.mem.eql(u8, routing, "drawn")) {
+            drawCall(rnd, rows, slots, prompt_slots, 0);
+            try sortBySlot(a, rows, slots, prompt_slots);
+        } else for (rows, slots, 0..) |*r, *sl, i| {
+            r.* = rnd.uintLessThan(u32, act_rows);
+            const run: u32 = @intCast(@min(i / 455, 35));
+            sl.* = run * 2;
+        }
+        for (arms, 0..) |arm, v| {
+            try pfI8Configure(saved, @intCast(v));
+            for ([_]bool{ false, true }) |on_rows| for ([_]usize{ 4096, 16384 }) |chunk| {
+                var t: [8]f64 = undefined;
+                for (0..t.len + 2) |round| {
+                    const m = g.mark();
+                    defer g.resetTo(m);
+                    var outs: [8]mlx.mlx_array = undefined;
+                    var no: usize = 0;
+                    const t0 = nowNs();
+                    var c0: usize = 0;
+                    while (c0 < S) : (c0 += chunk) {
+                        const c1 = @min(c0 + chunk, S);
+                        outs[no] = try chunkCall(&g, s, x, rb, rows[c0..c1], slots[c0..c1], ones_h, on_rows);
+                        no += 1;
+                    }
+                    try g.evalAll(outs[0..no]);
+                    const dt = nowNs() - t0;
+                    if (round >= 2) t[round - 2] = @as(f64, @floatFromInt(dt)) / 1e6;
+                }
+                std.mem.sort(f64, &t, {}, std.sort.asc(f64));
+                const flops = 2.0 * 3.0 * @as(f64, @floatFromInt(S)) * @as(f64, @floatFromInt(hidden)) * @as(f64, @floatFromInt(inter));
+                std.debug.print("TURBOEXL3_GLM_PF_INT8_TIME n={d} S={d} routing={s} path={s} chunk={d} arm={s} min_ms={d:.2} med_ms={d:.2} tflops={d:.2}\n", .{ n, S, routing, if (on_rows) "rows" else "chain", chunk, arm, t[0], t[t.len / 2], flops / (t[0] * 1e9) });
+            };
+        }
+        try pfI8Configure(saved, 0);
+        // the route, prepare and gate|up launches alone, then through mid and down, in 4096-row calls over x's rows
+        // (moeClampedRows' row map)
+        for ([_]bool{ false, true }) |down| for (arms, 0..) |arm, v| {
+            pf.opts.int8 = if (v == 0) 1 else @intCast(v);
+            var t: [8]f64 = undefined;
+            for (0..t.len + 2) |round| {
+                const m = g.mark();
+                defer g.resetTo(m);
+                var outs: [16]mlx.mlx_array = undefined;
+                var no: usize = 0;
+                const t0 = nowNs();
+                var c0: usize = 0;
+                while (c0 < S) : (c0 += 4096) {
+                    const c1 = @min(c0 + 4096, S);
+                    const rows_a = try g.hostArray(std.mem.sliceAsBytes(rows[c0..c1]), &.{ci(c1 - c0)}, .uint32);
+                    const inds = try g.hostArray(std.mem.sliceAsBytes(slots[c0..c1]), &.{ci(c1 - c0)}, .uint32);
+                    if (down) {
+                        const z = try dnStage(&g, &pf, s, x, rows_a, inds, ops, @intCast(c1 - c0), v != 0);
+                        @memcpy(outs[no..][0..2], &z);
+                        no += 2;
+                    } else {
+                        const z = try guStage(&g, &pf, s, x, rows_a, inds, ops, @intCast(c1 - c0), v != 0);
+                        @memcpy(outs[no..][0..4], &z);
+                        no += 4;
+                    }
+                }
+                try g.evalAll(outs[0..no]);
+                const dt = nowNs() - t0;
+                if (round >= 2) t[round - 2] = @as(f64, @floatFromInt(dt)) / 1e6;
+            }
+            std.mem.sort(f64, &t, {}, std.sort.asc(f64));
+            const flops = 2.0 * @as(f64, if (down) 3.0 else 2.0) * @as(f64, @floatFromInt(S)) * @as(f64, @floatFromInt(hidden)) * @as(f64, @floatFromInt(inter));
+            std.debug.print("TURBOEXL3_GLM_PF_INT8_STAGE n={d} S={d} routing={s} chunk=4096 stage={s} arm={s} min_ms={d:.2} med_ms={d:.2} tflops={d:.2}\n", .{ n, S, routing, if (down) "route+prep+gate_up+mid+down" else "route+prep+gate_up", arm, t[0], t[t.len / 2], flops / (t[0] * 1e9) });
+        };
+        pf.opts.int8 = 1;
     }
 }

@@ -1516,6 +1516,53 @@ CHANGED[('dense.zig', 'const Dense')] += ('; DecPrep / decPrepSpec (what prep_sc
 ADDED[('root.zig', 'fn decPrepSpec')] = 'Dense.decPrepSpec on the Dense linear takes'
 ADDED[('root.zig', 'fn decPrepared')] = 'Dense.decPrepared on the Dense linear takes, its operands checked against the spec'
 
+# int8 gate|up and down (prefill.Options.int8, Config.pf_int8; lossy, off by default): the routed prefill's gate, up and
+# down GEMMs on int8 beside the 128-row tiles, 1 a scale each activation 128-block, 2 one scale a row. prep_2 is cut after
+# its two H128s (prep_2_1, prep_2_2) and mid_5 after its H128 (mid_5_1, mid_5_2): the same bytes, so the int8 prepare
+# (prep_1, the row line, prep_2_1, then prep_i8 or prep_i8t) and mid (the 128-row tiles' mid to mid_5_1, then mid_i8 or
+# mid_i8t) are compositions; the GEMM (gemm_i8_1, its op's operands gemm_i8_sel2 or gemm_i8_sel1, gemm_i8_2 on header_i8:
+# an mpp matmul2d of int8 per 128-deep block over the trellis decoded to int8 in threadgroup memory, each block folded at
+# its rows' scales, or with ROWSCALE one fold) writes ZT128's outputs, and finish is the exact chain's
+ADDED_KERNELS[('prefill.zig', 'turboexl3_pf_prep_i8')] = ('the int8 prepare: text_prep to its f16 inputs (prep_2_1), then each '
+                                                          '128-block at its own scale as int8 with its block sums (prep_i8)')
+ADDED_KERNELS[('prefill.zig', 'turboexl3_pf_prep_i8r')] = 'the int8 prepare over a row map (text_prep_rows\' row line)'
+ADDED_KERNELS[('prefill.zig', 'turboexl3_pf_prep_i8t')] = ('the int8 prepare with one scale a row (prep_i8t: the row\'s amax over '
+                                                           'its blocks, one threadgroup a row)')
+ADDED_KERNELS[('prefill.zig', 'turboexl3_pf_prep_i8tr')] = 'turboexl3_pf_prep_i8t over a row map'
+ADDED_KERNELS[('prefill.zig', 'turboexl3_pf_t128_mid_i8')] = ('int8\'s mid: the 128-row tiles\' mid to the down input\'s f16 '
+                                                              'values (mid_5_1), then each 128-block at its own scale as int8 '
+                                                              'with its block sums (mid_i8)')
+ADDED_KERNELS[('prefill.zig', 'turboexl3_pf_t128_mid_i8c')] = 'turboexl3_pf_t128_mid_i8 with the clamped SwiGLU'
+ADDED_KERNELS[('prefill.zig', 'turboexl3_pf_t128_mid_i8t')] = ('int8\'s mid with one scale a row (mid_i8t: the row\'s amax over '
+                                                               'its blocks, one threadgroup a row)')
+ADDED_KERNELS[('prefill.zig', 'turboexl3_pf_t128_mid_i8tc')] = 'turboexl3_pf_t128_mid_i8t with the clamped SwiGLU'
+ADDED_KERNELS[('prefill.zig', 'turboexl3_pf_gemm_i8')] = ('the int8 gate|up GEMMs (gemm_i8_1, gemm_i8_sel2, gemm_i8_2 on '
+                                                          'header_i8: the register path\'s header and the int8 decode, '
+                                                          'i8_helpers)')
+ADDED_KERNELS[('prefill.zig', 'turboexl3_pf_gemm_i8d')] = 'the int8 down GEMM (gemm_i8_1, gemm_i8_sel1, gemm_i8_2 on header_i8)'
+ADDED[('prefill.zig', 'const prep_i8_out')] = 'the int8 prepare\'s outputs (xqg, xqu, inv, xsg, xsu, sxg, sxu)'
+ADDED[('prefill.zig', 'const gemm_i8_in')] = 'the int8 gate|up GEMMs\' inputs (tiles, xq0, xq1, w0, w1, sx0, sx1, xs0, xs1)'
+ADDED[('prefill.zig', 'const gemm_i8d_in')] = 'the int8 down GEMM\'s inputs (tiles, xq0, w0, sx0, xs0)'
+ADDED[('prefill.zig', 'const mid_i8_out')] = 'int8\'s mid\'s outputs (xdq, xsd, sxd)'
+ADDED[('prefill.zig', 'const I8Kernels')] = ('the int8 chain\'s kernels (both schemes\' prepares, row-map prepares and mids, the '
+                                             'gate|up and down GEMMs)')
+CHANGED[('prefill.zig', 'const Options')] += '; int8 (1 a scale each activation 128-block, 2 one scale a row), taken beside t128'
+CHANGED[('prefill.zig', 'const Prefill')] += ('; i8_k (made with Options.int8, freed in deinit; init refuses int8 2 past 32 blocks a '
+                                            'row), prepI8 / prepI8Cap, gemmGUI8 / gemmGUI8Cap, midI8 / midI8Cap, gemmDI8 / '
+                                            'gemmDI8Cap, i8Cfg and moeI8Cap; moeT128With runs moeI8Cap with int8')
+CHANGED[('config.zig', 'const Config')] += '; pf_int8: the routed prefill\'s int8 gate|up and down (prefill.Options.int8), 0 by default'
+CHANGED[('root.zig', 'fn pfOptions')] += '; int8 from Config.pf_int8'
+CHANGED[('root.zig', 'fn prefillFor')] += '; int8 off without the 128-row tiles, the deferred map or with t128_zfit; its engage line'
+ADDED[('root.zig', 'const pf_i8_logged')] = 'the int8 chain\'s engage line, once a process'
+CHANGED[('root.zig', 'const shared_state')] += ' and pf_i8_logged'
+ADDED[('fused_test.zig', 'fn pfI8Configure')] = 'configure with Config.pf_int8 set and the size classes, every engine released first'
+ADDED[('fused_test.zig', 'fn pfI8Restore')] = 'the saved configuration back, every engine released first'
+ADDED[('fused_test.zig', 'fn guStage')] = 'the route, prepare and gate|up launches alone (the int8 timing test\'s stage)'
+ADDED[('fused_test.zig', 'fn dnStage')] = 'the launches through mid and down (the int8 timing test\'s second stage)'
+ADDED[('fused_test.zig', 'test turboexl3 glm53f prefill int8 options: int8 1 or 2 rides the 128-row tiles on the deferred MUL1 map, the mixed outputs at their sorted positions, beside the size classes')] = 'int8\'s option rule (CPU)'
+ADDED[('fused_test.zig', 'test turboexl3 gpu glm53f prefill int8: the routed gate|up and down on int8 (a scale each activation 128-block; one scale a row) agree with the exact chain (cosine >= 0.99, error rms <= 0.1 of y\'s, finite), 16384 row-slots in 4096-row calls with the size classes, on the plugin\'s default path and on moeClampedRows, at every SC rate (TURBOEXL3_GPU=1)')] = 'int8\'s agreement with the exact chain, both schemes (GPU)'
+ADDED[('fused_test.zig', 'test turboexl3 gpu glm53f prefill int8 timing: a 16384-row prompt bank call with the routed gate|up and down on int8 (1: a scale each activation 128-block; 2: one scale a row) against the exact chain, in calls of 4096 and 16384 rows on each path with the size classes, and its route, prepare and gate|up alone and through mid and down, over 36 experts\' 455-row runs and over a drawn routing (TURBOEXL3_GLM_TIME=1)')] = 'int8\'s timing against the exact chain (TURBOEXL3_GLM_TIME)'
+
 
 def metal_strings(fn, toks, corpus):
     """(line, kind, value) of every literal in a .zig file that holds Metal"""

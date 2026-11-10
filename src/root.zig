@@ -702,6 +702,8 @@ const pf_cache = Global([prefill_cache_slots]?prefill.Prefill, "root_pf_cache", 
 const pf_logged = Global(bool, "root_pf_logged", false);
 /// `Config.pf_size_class`'s engage line, once a process
 const pf_class_logged = Global(bool, "root_pf_class_logged", false);
+/// `Config.pf_int8`'s engage line, once a process
+const pf_i8_logged = Global(bool, "root_pf_i8_logged", false);
 
 /// The served prefill variant: 64-row tiles (bm 64) with the register path for <= 32-row remainders in one launch (mixed),
 /// the double-buffered weight stage, unrolled MMA sub-steps, the stage in NAX fragment order and the integer-rate reader
@@ -722,6 +724,7 @@ fn pfOptions() prefill.Options {
     o.t128_bk128 = config.get().pf_t128_bk128;
     o.t128_zfit = config.get().pf_t128_zfit;
     o.size_class = config.get().pf_size_class;
+    o.int8 = config.get().pf_int8;
     return o;
 }
 
@@ -760,6 +763,8 @@ fn prefillFor(geo: prefill.Geometry) !*prefill.Prefill {
     if (!o.t128) o.t128_zfit = false;
     // the size classes: the 128-row tiles' arrays at their sorted positions (not the compact mixed outputs)
     if (!o.t128 or o.t128_zfit) o.size_class = false;
+    // int8 gate|up and down: beside the 128-row tiles, on the deferred map, the mixed outputs at their sorted positions
+    if (!o.t128 or !o.defer_affine or o.t128_zfit) o.int8 = 0;
     pf_cache.get().*[i] = try prefill.Prefill.init(geo, o);
     if (!pf_logged.get().*) {
         pf_logged.get().* = true;
@@ -768,6 +773,10 @@ fn prefillFor(geo: prefill.Geometry) !*prefill.Prefill {
     if (o.size_class and !pf_class_logged.get().*) {
         pf_class_logged.get().* = true;
         std.debug.print("[turboexl3] prefill size classes engaged: a routed call's row-slot-sized arrays at multiples of {d} rows\n", .{prefill.size_class_rows});
+    }
+    if (o.int8 != 0 and !pf_i8_logged.get().*) {
+        pf_i8_logged.get().* = true;
+        std.debug.print("[turboexl3] prefill int8 engaged: the routed gate|up and down GEMMs on int8 ({s})\n", .{if (o.int8 == 2) "per-token scales" else "per-block scales"});
     }
     return &pf_cache.get().*[i].?;
 }
@@ -1149,6 +1158,7 @@ pub const shared_state = .{
     pf_cache,
     pf_logged,
     pf_class_logged,
+    pf_i8_logged,
     PfCapture.calls,
     clamp_logged,
     attn_io.shared_state,
