@@ -24,7 +24,7 @@ T(xs[i] * inv)
 T(xc * inv)
 v[j] = float(half(float(x[row * DIMC + i]))) * float(suh[i]);
 v[j] = float(half(float(ov))) * float(suh[b * 128u + c]);
-float(half(float(
+v[j] = float(half(float(
 ) * float(suh[
 const T zv = z[
 c];
