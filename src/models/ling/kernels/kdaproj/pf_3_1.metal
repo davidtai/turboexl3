@@ -6,4 +6,3 @@
     const device T* A = mem == 0 ? x0 : (mem == 1 ? x1 : x2);
     const device T* B = mem == 0 ? w0 : (mem == 1 ? w1 : w2);
     const device half* svh = mem == 0 ? svh0 : (mem == 1 ? svh1 : svh2);
-    device OUT_T* y = mem == 0 ? y0 : (mem == 1 ? y1 : y2);

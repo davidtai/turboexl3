@@ -35,7 +35,11 @@ pub const fused_2 = @embedFile("kernels/pg2/gemm_fused_2.metal");
 pub const fused_3 = @embedFile("kernels/pg2/gemm_fused_3.metal");
 pub const fused_4 = @embedFile("kernels/pg2/gemm_fused_4.metal");
 pub const fused_5 = @embedFile("kernels/pg2/gemm_fused_5.metal");
-pub const fused_6 = @embedFile("kernels/pg2/gemm_fused_6.metal");
+/// The GEMM and the finish up to its store loop, then the store loop and the row loop's close: cut where the KDA
+/// gate's launches (models/ling/kdaproj_pf.zig `kdaProjPromptGate`) put their own store loop
+pub const fused_6_1 = @embedFile("kernels/pg2/gemm_fused_6_1.metal");
+pub const fused_6_2 = @embedFile("kernels/pg2/gemm_fused_6_2.metal");
+pub const fused_6 = fused_6_1 ++ fused_6_2;
 pub const text_fused = fused_1 ++ fused_2 ++ fused_3 ++ fused_4 ++ fused_5 ++ fused_6;
 
 fn sentinel(comptime s: []const u8) [:0]const u8 {
