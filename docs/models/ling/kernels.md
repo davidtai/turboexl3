@@ -1675,17 +1675,20 @@ place.
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/ling/kdanorm.zig:47` (`fn kernelGet`) |
+| made at | `src/models/ling/kdanorm.zig:51` (`fn kernelGet`) |
 | inputs | `y`, `z`, `norm_w`, `eps`, `sigtab`, `suh` |
 | outputs | `xp` |
 | source | `text_normprep` = `dense/prep_1` ++ `ling:kdanorm/gate` ++ `dense/prep_3` (2098 B, `c70564d5b441`) |
 | header | `decode.header` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` (18000 B, `771237d24284`) |
 
 <!-- /kernel-facts -->
-- **Used by:** `kdanorm.kdaNormGatePrep` (`ling.kdaNormGatePrep`): the outside plugin turboexl3_ling's KDA_NORM_PREP
-  (off by default), a KDA layer's gated norm at prompt rows (the host's fused norm-gate at its table, TAB 1, with the
+- **Used by:** `kdanorm.kdaNormGatePrep` (`ling.kdaNormGatePrep`): the outside plugin turboexl3_ling's planned
+  KDA_NORM_PREP option (off by default; not in the plugin yet), a KDA layer's gated norm at prompt rows (the host's fused norm-gate at its table, TAB 1, with the
   sigmoid gate) written as o_proj's prepared rows, its matmul and finish then `Dense.piecePrepared` and
-  `Dense.finishOf`, where o_proj's `linear` runs its matmul path (`kdanorm.takes`).
+  `Dense.finishOf` over a decoded W_hat. That is `linear`'s bytes on the matmul path over that W_hat: the plugin's
+  LAYER_WHAT over its kept W_hat (`matmulPath`: no pg2, no un-rotated resident trellis, whose arm reads no prepared
+  rows). `kdanorm.takes` sees o_proj's `Dense` (its matmul path at the call's rows), not its trellis, so the caller's
+  condition carries that exclusion.
 - **Shapes and dtypes:** y T [B, S, HV, DV] (bf16 or f16; DV 128), the KDA recurrence's output; z T [B, S, ZSTRIDE]
   (head h's gate at ZOFF + h·DV); norm_w T [DV]; eps f32 (0-d); sigtab T [65536] (MLX's sigmoid of every 16-bit pattern
   of T, the host's table); suh f16 [HV·DV] (o_proj's). Out: xp f16 [B·S, HV·DV], natural order.
@@ -1698,13 +1701,19 @@ place.
 - **Bits:** xp is `turboexl3_dense_prep`'s of the host's output, word for word: the head's sum of squares is the host's
   statements in its order (each lane's four consecutive channels, simd_sum, the precise rsqrt), and each value the
   prepare loads (channel L + 32 j) is the host's per-element statements on that element (normed, the table's sigmoid of
-  z, their product in T), then the prepare's f16 of it times suh.
+  z, their product in T), then the prepare's f16 of it times suh. Both texts compile on one path (MLX's metal_kernel JIT,
+  safe math mode, no pragma). Contraction cannot move a word where every product a sum reads is exact in f32 (a bf16 or
+  f16 square, an f16 product, a divide by 2^7): every f16 input, and bf16 inputs of magnitude zero or 2^-63 up to
+  2^64. Below 2^-63 a bf16 square is subnormal in f32 and the argument does not hold. The record, with its cites:
+  `src/models/ling/README.md`, L5.
 - **Pinned by:** `src/models/ling/kdanorm.zig` "turboexl3 ling kdanorm texts: ..." (CPU: the composition, and
-  text_prep's bytes kept: its length and sha256) and "turboexl3 ling kdanorm statements: ..." (CPU: the gate's
-  statements against the host's copy, `kernels/test/pins/kdanorm.metal`); `src/models/ling/kdanorm_test.zig` "turboexl3
-  gpu ling kdanorm: kdaNormGatePrep's xp is o_proj's prepare of the served norm-gate's output and ..." (GPU: xp against
-  `Dense.prepare` of the served norm-gate's output and o_proj's y against `root.linear` of it, every word, rows 33 to
-  16384; `TURBOEXL3_LING_KDA_NORM`).
+  text_prep's bytes kept: its length and sha256), "turboexl3 ling kdanorm statements: ..." (CPU: the gate's
+  statements against the host's copy, `kernels/test/pins/kdanorm.metal`) and "turboexl3 ling kdanorm attribution: ..."
+  (CPU: the gate's copied sum of squares the copy's line for line, the copy mlx-serve's file by its sha256);
+  `src/models/ling/kdanorm_test.zig` "turboexl3 gpu ling kdanorm: kdaNormGatePrep's xp is o_proj's prepare of the
+  served norm-gate's output and ..." (GPU: xp against `Dense.prepare` of the served norm-gate's output and o_proj's y
+  against `root.linear` of it, every word, rows 33 to 16384, `TURBOEXL3_LING_KDA_NORM`; the refusals at 16 and 32
+  rows, each row's path asserted and `kdanorm.takes` true at 33).
 
 ## `src/models/ling/kdanorm_test.zig`
 
@@ -1717,7 +1726,7 @@ faults.
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/ling/kdanorm_test.zig:64` (`fn servedNormGate`) |
+| made at | `src/models/ling/kdanorm_test.zig:66` (`fn servedNormGate`) |
 | inputs | `y`, `z`, `norm_w`, `eps`, `sigtab` |
 | outputs | `out` |
 | source | `@embedFile("kernels/test/copy/gdn_normgate.metal")` = `ling:test/copy/gdn_normgate` (1175 B, `852e385274a4`) |
@@ -1734,7 +1743,9 @@ faults.
   turboexl3_ling's MLX_SERVE_REF) under a `//! copied_from:` comment line; never served.
 - **Bits:** the host's norm-gate's.
 - **Pinned by:** `src/models/ling/kdanorm.zig` "turboexl3 ling kdanorm statements: ..." (CPU: its statements against the
-  served piece's, `kernels/test/pins/kdanorm.metal`).
+  served piece's, `kernels/test/pins/kdanorm.metal`) and "turboexl3 ling kdanorm attribution: ..." (CPU: its body
+  mlx-serve's `kernels/gdn/gdn_normgate.metal` at bc6c5f2c by that file's sha256 in mlx-serve's digests.txt, and its
+  sum of squares the served piece's line for line).
 
 ### `turboexl3_test_ling_kdanorm_nw_shift_fault`
 
@@ -1742,7 +1753,7 @@ faults.
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/ling/kdanorm_test.zig:231` (`test turboexl3 gpu ling kdanorm: kdaNormGatePrep's xp is o_proj's prepare of the served norm-gate's output and o_proj's y over it is linear's, word for word, at prompt rows 33 to 16384; its refusals before any launch; planted faults caught (TURBOEXL3_GPU=1)`) |
+| made at | `src/models/ling/kdanorm_test.zig:241` (`test turboexl3 gpu ling kdanorm: kdaNormGatePrep's xp is o_proj's prepare of the served norm-gate's output and o_proj's y over it is linear's, word for word, at prompt rows 33 to 16384; its refusals before any launch; planted faults caught (TURBOEXL3_GPU=1)`) |
 | inputs | `y`, `z`, `norm_w`, `eps`, `sigtab`, `suh` |
 | outputs | `xp` |
 | source | `comptime faultText(@embedFile("kernels/test/fault/kdanorm_nw_shift.metal"))` = `dense/prep_1` ++ `ling:test/fault/kdanorm_nw_shift` ++ `dense/prep_3` (2084 B, `df58762a2249`) |
@@ -1768,7 +1779,7 @@ faults.
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/ling/kdanorm_test.zig:234` (`test turboexl3 gpu ling kdanorm: kdaNormGatePrep's xp is o_proj's prepare of the served norm-gate's output and o_proj's y over it is linear's, word for word, at prompt rows 33 to 16384; its refusals before any launch; planted faults caught (TURBOEXL3_GPU=1)`) |
+| made at | `src/models/ling/kdanorm_test.zig:244` (`test turboexl3 gpu ling kdanorm: kdaNormGatePrep's xp is o_proj's prepare of the served norm-gate's output and o_proj's y over it is linear's, word for word, at prompt rows 33 to 16384; its refusals before any launch; planted faults caught (TURBOEXL3_GPU=1)`) |
 | inputs | `y`, `z`, `norm_w`, `eps`, `sigtab`, `suh` |
 | outputs | `xp` |
 | source | `comptime faultText(@embedFile("kernels/test/fault/kdanorm_suh_next_block.metal"))` = `dense/prep_1` ++ `ling:test/fault/kdanorm_suh_next_block` ++ `dense/prep_3` (2083 B, `97ed2295d2cb`) |
@@ -1794,7 +1805,7 @@ faults.
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/ling/kdanorm_test.zig:233` (`test turboexl3 gpu ling kdanorm: kdaNormGatePrep's xp is o_proj's prepare of the served norm-gate's output and o_proj's y over it is linear's, word for word, at prompt rows 33 to 16384; its refusals before any launch; planted faults caught (TURBOEXL3_GPU=1)`) |
+| made at | `src/models/ling/kdanorm_test.zig:243` (`test turboexl3 gpu ling kdanorm: kdaNormGatePrep's xp is o_proj's prepare of the served norm-gate's output and o_proj's y over it is linear's, word for word, at prompt rows 33 to 16384; its refusals before any launch; planted faults caught (TURBOEXL3_GPU=1)`) |
 | inputs | `y`, `z`, `norm_w`, `eps`, `sigtab`, `suh` |
 | outputs | `xp` |
 | source | `comptime faultText(@embedFile("kernels/test/fault/kdanorm_sum_strided.metal"))` = `dense/prep_1` ++ `ling:test/fault/kdanorm_sum_strided` ++ `dense/prep_3` (2129 B, `7cac59b113b2`) |
@@ -1821,7 +1832,7 @@ faults.
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/ling/kdanorm_test.zig:232` (`test turboexl3 gpu ling kdanorm: kdaNormGatePrep's xp is o_proj's prepare of the served norm-gate's output and o_proj's y over it is linear's, word for word, at prompt rows 33 to 16384; its refusals before any launch; planted faults caught (TURBOEXL3_GPU=1)`) |
+| made at | `src/models/ling/kdanorm_test.zig:242` (`test turboexl3 gpu ling kdanorm: kdaNormGatePrep's xp is o_proj's prepare of the served norm-gate's output and o_proj's y over it is linear's, word for word, at prompt rows 33 to 16384; its refusals before any launch; planted faults caught (TURBOEXL3_GPU=1)`) |
 | inputs | `y`, `z`, `norm_w`, `eps`, `sigtab`, `suh` |
 | outputs | `xp` |
 | source | `comptime faultText(@embedFile("kernels/test/fault/kdanorm_z_next_head.metal"))` = `dense/prep_1` ++ `ling:test/fault/kdanorm_z_next_head` ++ `dense/prep_3` (2080 B, `466a3d8115a1`) |

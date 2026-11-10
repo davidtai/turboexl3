@@ -9,12 +9,14 @@
 //!   the matmul), and 16384 (a layer-major call): xp against `Dense.prepare` of the served norm-gate's output (what
 //!   o_proj's `linear` prepares), and o_proj's y (`Dense.piecePrepared` over the W_hat `Dense.dequantize` decodes once,
 //!   then `Dense.finishOf`) against `root.linear` of that output, every word, both finite. Lines: TURBOEXL3_LING_KDA_NORM.
-//! - GPU, the refusals before any launch (16 and 32 rows, the GEMV's and the register path's; y f32; z_off past the
-//!   row; suh bf16); then the planted faults, each in the gate's place for one call at 512 rows, its xp against the
-//!   served chain's (each must differ): norm_w of the next channel, z of the next head, the sum of squares over each
-//!   lane's strided channels, and suh of the next block. Lines: TURBOEXL3_LING_KDA_NORM_RED, then
-//!   TURBOEXL3_LING_KDA_NORM_DONE.
-//! - Both on NAX (the served Ling path's; off it skipped), where `linear` takes rows 17 to 32 on its register path.
+//! - GPU, the refusals before any launch: 16 and 32 rows, the GEMV's and the register path's, each path asserted
+//!   (`Dense.pathFor` .gemv at 16, .small at 32, .matmul at 33) and `kdanorm.takes` false there and true at 33 rows of
+//!   the same operands' shapes, so the path rule alone refuses them; y f32; z_off past the row; suh bf16. Then the
+//!   planted faults, each in the gate's place for one call at 512 rows, its xp against the served chain's (each must
+//!   differ): norm_w of the next channel, z of the next head, the sum of squares over each lane's strided channels, and
+//!   suh of the next block. Lines: TURBOEXL3_LING_KDA_NORM_RED, then TURBOEXL3_LING_KDA_NORM_DONE.
+//! - Both on NAX (the served Ling path's; off it skipped), where `linear` takes rows 17 to 32 on its register path
+//!   (`small_rows` 32; off NAX 0, and 32 rows would be the matmul path's and taken).
 //! - Timing (TURBOEXL3_LING_TIME=1 with TURBOEXL3_GPU=1; asserts nothing, guidance only): the served pair (the host's
 //!   norm-gate, then o_proj's prepare) against the fused launch at rows 512, 1996, 4096, 8192 and 16384, and o_proj's
 //!   chain at 4096 (the norm-gate and `linearOver`'s prepare, matmul and finish against the fused launch, the matmul
@@ -206,11 +208,19 @@ test "turboexl3 gpu ling kdanorm: kdaNormGatePrep's xp is o_proj's prepare of th
     {
         const mark = g.mark();
         defer g.resetTo(mark);
-        // the GEMV's rows and the register path's, y f32, z_off past z's row, suh bf16: refused before any launch
-        for ([_]u32{ 16, 32 }) |sq| {
-            const few = try draw(a, &g, rnd, sq, base);
-            try testing.expectError(error.Exl3EngineNotImplemented, kdanorm.kdaNormGatePrep(s, dn, opOf(few)));
+        // the rows the refusals stand on, NAX's paths: 16 the GEMV's (decode.Kernels.max_rows), 32 the register path's
+        // (small_rows: 32 on NAX, 0 off it, where 32 rows would be the matmul path's and taken), 33 the matmul path's
+        try testing.expectEqual(dense.Dense.Path.gemv, dn.pathFor(16));
+        try testing.expectEqual(dense.Dense.Path.small, dn.pathFor(32));
+        try testing.expectEqual(dense.Dense.Path.matmul, dn.pathFor(33));
+        // the GEMV's rows and the register path's refused before any launch by the path rule alone: the same operands'
+        // shapes at 33 rows are taken
+        for ([_]u32{ 16, 32, 33 }) |sq| {
+            const op = opOf(try draw(a, &g, rnd, sq, base));
+            try testing.expectEqual(sq == 33, kdanorm.takes(dn, op));
+            if (sq != 33) try testing.expectError(error.Exl3EngineNotImplemented, kdanorm.kdaNormGatePrep(s, dn, op));
         }
+        // y f32, z_off past z's row, suh bf16: refused before any launch
         const in = try draw(a, &g, rnd, 512, base);
         var bad = opOf(in);
         bad.y = try g.astype(in.y, .float32);
@@ -221,7 +231,7 @@ test "turboexl3 gpu ling kdanorm: kdaNormGatePrep's xp is o_proj's prepare of th
         bad = opOf(in);
         bad.suh = try g.astype(in.suh, .bfloat16);
         try testing.expectError(error.Exl3EngineNotImplemented, kdanorm.kdaNormGatePrep(s, dn, bad));
-        std.debug.print("TURBOEXL3_LING_KDA_NORM refused: rows=16,32 (the GEMV's and the register path's), y f32, z_off past the row, suh bf16 PASS\n", .{});
+        std.debug.print("TURBOEXL3_LING_KDA_NORM refused: rows=16 (path gemv) and rows=32 (path small, NAX's register path), taken at rows=33 (path matmul); y f32, z_off past the row, suh bf16 PASS\n", .{});
     }
     {
         const mark = g.mark();

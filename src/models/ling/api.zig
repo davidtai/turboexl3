@@ -61,9 +61,9 @@ pub const kdaProjPromptW = kdaproj_pf.kdaProjPromptW;
 pub const kdaProjPromptGate = kdaproj_pf.kdaProjPromptGate;
 pub const kdaProjPromptWGate = kdaproj_pf.kdaProjPromptWGate;
 /// A KDA layer's gated norm at prompt rows written straight into o_proj's prepared rows (the host's fused norm-gate's
-/// statements in dense's prepare, one launch): xp word for word what o_proj's `linear` prepares of the norm-gate's
-/// output, its matmul and finish then `Dense.piecePrepared` and `Dense.finishOf` (`kdanorm.zig`; `kdanorm.takes` says
-/// where it runs)
+/// statements in dense's prepare, one launch): xp word for word what dense's prepare makes of the norm-gate's output,
+/// o_proj's matmul and finish then `Dense.piecePrepared` and `Dense.finishOf` over a decoded W_hat (`kdanorm.zig` says
+/// where that is `linear`'s bytes; `kdanorm.takes` where it runs)
 pub const kdanorm = @import("kdanorm.zig");
 pub const kdaNormGatePrep = kdanorm.kdaNormGatePrep;
 

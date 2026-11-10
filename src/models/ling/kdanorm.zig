@@ -7,9 +7,13 @@
 //! (row, head) as in both kernels (a head is one 128-block at DV 128), the head's sum of squares in the host's own order
 //! (each lane's four consecutive channels, then simd_sum), and each value the prepare loads (channel L + 32 j) made by
 //! the host's per-element statements on that element. So o never reaches device memory, and xp is the prepare's words.
-//! With `Dense.piecePrepared` and `Dense.finishOf` (the matmul and finish `linear` runs at these rows), o_proj's y is
-//! `linear`'s bytes. A call is taken only where o_proj's `linear` runs its matmul path at these rows (`takes`); else
-//! error.Exl3EngineNotImplemented, nothing launched.
+//! o_proj's y is then `Dense.piecePrepared` and `Dense.finishOf` over a W_hat `Dense.dequantize` decoded. That is
+//! `linear`'s bytes on its matmul path over the decoded W_hat: the outside plugin's LAYER_WHAT over its kept W_hat, whose
+//! `matmulPath` also excludes pg2 and an un-rotated resident trellis (that arm of `linear` is one matmul of x against its
+//! resident W_std and reads no prepared rows). A call is taken only where o_proj's `linear` is on its matmul path at
+//! these rows (`takes`); else error.Exl3EngineNotImplemented, nothing launched. `takes` sees o_proj's `Dense`, not its
+//! trellis, so the caller's condition carries the un-rotated resident's exclusion. The design record, with the compile
+//! path and the inputs on which contraction cannot move a word: README.md, L5.
 const std = @import("std");
 const mlx = @import("sdk").mlx;
 const ks = @import("sdk").kernel_launch;
@@ -123,14 +127,17 @@ fn shapesOf(op: Op) Shapes {
 }
 
 /// Whether `kdaNormGatePrep` takes `op` for o_proj `d`: `shapeOk`, o_proj's input o's width (d.shape.in == HV·DV), and
-/// o_proj's `linear` at the call's rows on its matmul path (the path whose prepared rows `Dense.piecePrepared` reads)
+/// o_proj's `linear` at the call's rows on its matmul path (the path whose prepared rows `Dense.piecePrepared` reads).
+/// It reads `d`, not o_proj's trellis: an un-rotated resident trellis (and pg2, for LAYER_WHAT's `matmulPath`) is the
+/// caller's to rule out.
 pub fn takes(d: *const dense.Dense, op: Op) bool {
     const geo = shapeOk(shapesOf(op)) orelse return false;
     return d.shape.in == geo.dim and d.pathFor(geo.rows) == .matmul;
 }
 
 /// xp half [B·S, HV·DV]: o_proj's prepared rows (dense's prepare at LANE_ORDER 0) of the host's norm-gate of `op`, word
-/// for word, in one launch on `s`, a GPU stream; with `d.piecePrepared` and `d.finishOf` o_proj's y. Owned result.
+/// for word, in one launch on `s`, a GPU stream; with `d.piecePrepared` and `d.finishOf` over a decoded W_hat, o_proj's y
+/// (`linear`'s bytes under the module doc's condition). Owned result.
 /// error.Exl3EngineNotImplemented where it does not take the call (`takes`, or not a GPU stream), nothing launched.
 pub fn kdaNormGatePrep(s: mlx.mlx_stream, d: *const dense.Dense, op: Op) !A {
     if (!mlx.streamIsGpu(s) or !takes(d, op)) return error.Exl3EngineNotImplemented;
@@ -189,6 +196,13 @@ fn swap(buf: []u8, text: []const u8, from: []const u8, to: []const u8) []const u
     const n = std.mem.replacementSize(u8, text, from, to);
     _ = std.mem.replace(u8, text, from, to, buf[0..n]);
     return buf[0..n];
+}
+
+/// `hay` from `first` to the end of the first `last` after it
+fn between(hay: []const u8, first: []const u8, last: []const u8) ?[]const u8 {
+    const i = std.mem.indexOf(u8, hay, first) orelse return null;
+    const j = std.mem.indexOfPos(u8, hay, i, last) orelse return null;
+    return hay[i .. j + last.len];
 }
 
 test "turboexl3 ling kdanorm texts: the launch is dense's prepare with the norm-gate in its load's place (text_prep's first and last pieces around it); text_prep is its three pieces, its bytes kept" {
@@ -297,4 +311,30 @@ test "turboexl3 ling kdanorm statements: the gate is the host's norm-gate (its t
     try testing.expect(once(host_copy, pin[16]) and std.mem.endsWith(u8, pin[16], pin[18] ++ ";"));
     try testing.expect(once(kgate, pin[17]) and std.mem.endsWith(u8, pin[17], pin[18] ++ ";"));
     for ([_][]const u8{ pin[24], pin[25] }) |v| try testing.expect(std.mem.startsWith(u8, v, pin[26]) and std.mem.indexOf(u8, v, pin[27]) != null);
+}
+
+test "turboexl3 ling kdanorm attribution: the gate's copied statements are its copied_from source's: the sum of squares from its first statement to the precise rsqrt is the test-only copy's line for line (indent aside), and the copy is mlx-serve's kernels/gdn/gdn_normgate.metal at bc6c5f2c byte for byte (that file's sha256 in mlx-serve's kernels/digests.txt)" {
+    const pin = comptime @import("../../core/test_support.zig").pins(@embedFile("kernels/test/pins/kdanorm.metal"));
+    const host_copy = @embedFile("kernels/test/copy/gdn_normgate.metal");
+    // the copy: its copied_from line, then mlx-serve's file at bc6c5f2c, whose digests.txt entry (there and at main
+    // 66aad949) is this sha256
+    try testing.expect(std.mem.startsWith(u8, host_copy, pin[0]));
+    const body = host_copy[(std.mem.indexOfScalar(u8, host_copy, '\n') orelse return error.TestExpectedEqual) + 1 ..];
+    var h: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(body, &h, .{});
+    const hex = std.fmt.bytesToHex(h, .lower);
+    try testing.expectEqualStrings("1a0a459d1e5f0ef114a19016f9324954a3ca9d1db7ed9f4910acaa594fc07de6", &hex);
+    // the served piece's copied block and the copy's, from the reduction's first statement to its last: the same lines
+    // once each line's indent is trimmed, as many of them, so a statement added, dropped or changed on either side fails
+    const want = between(host_copy, pin[1], pin[8]) orelse return error.TestExpectedEqual;
+    const got = between(kgate, pin[1], pin[8]) orelse return error.TestExpectedEqual;
+    var wi = std.mem.splitScalar(u8, want, '\n');
+    var gi = std.mem.splitScalar(u8, got, '\n');
+    var n: usize = 0;
+    while (wi.next()) |w| : (n += 1) {
+        const l = gi.next() orelse return error.TestExpectedEqual;
+        try testing.expectEqualStrings(std.mem.trimStart(u8, w, " "), std.mem.trimStart(u8, l, " "));
+    }
+    try testing.expect(gi.next() == null);
+    try testing.expectEqual(@as(usize, 9), n);
 }
