@@ -1976,6 +1976,42 @@ for _n in ('const kpf_3_2g', 'const kpf_6g0', 'const kpf_6g1', 'const kgate_ea',
     ADDED[('models/ling/kdaproj_pf.zig', _n)] = 'L6 (KDA_GATE_EPI): the bounded gate in P4\'s store loop'
 for _n in ('const kdaProjPromptGate', 'const kdaProjPromptWGate'):
     ADDED[('models/ling/api.zig', _n)] = 'the re-export of kdaproj_pf.zig\'s ' + _n[6:]
+# L5 (turboexl3_ling's KDA_NORM_PREP, wave 3): a KDA layer's gated norm at prompt rows written straight into o_proj's
+# prepared rows (models/ling/kdanorm.zig kdaNormGatePrep). The served texts keep theirs: dense's prep is cut into prep_1 ++
+# prep_2 ++ prep_3 at its load, the same bytes
+SPLIT_ADDED_KERNELS['turboexl3_ling_kdanorm_prep'] = ('KDA_NORM_PREP: turboexl3_dense_prep\'s pieces with the host\'s fused '
+                                                      'norm-gate\'s statements (kdanorm/gate, under its copied_from line) '
+                                                      'in prep_2\'s place: the head\'s sum of squares in the host\'s order, '
+                                                      'each value the prepare loads the host\'s per-element statements on '
+                                                      'that element; y, z, norm_w, eps, sigtab and suh in, xp out')
+SPLIT_ADDED_KERNELS['turboexl3_test_ling_gdn_normgate'] = ('test only: mlx-serve\'s fused norm-gate (gdn_normgate.metal at '
+                                                           'bc6c5f2c, copied verbatim under a copied_from line, test/copy), '
+                                                           'the served chain the fused launch is held to')
+SPLIT_ADDED_KERNELS['turboexl3_test_ling_kdanorm_nw_shift_fault'] = ('test only: turboexl3_ling_kdanorm_prep with norm_w '
+                                                                     'read at the next channel (fault/kdanorm_nw_shift), '
+                                                                     'a red check')
+SPLIT_ADDED_KERNELS['turboexl3_test_ling_kdanorm_z_next_head_fault'] = ('test only: turboexl3_ling_kdanorm_prep with z '
+                                                                        'read from the next head '
+                                                                        '(fault/kdanorm_z_next_head), a red check')
+SPLIT_ADDED_KERNELS['turboexl3_test_ling_kdanorm_sum_strided_fault'] = ('test only: turboexl3_ling_kdanorm_prep with the '
+                                                                        'sum of squares over each lane\'s strided channels '
+                                                                        '(fault/kdanorm_sum_strided), a red check')
+SPLIT_ADDED_KERNELS['turboexl3_test_ling_kdanorm_suh_next_block_fault'] = ('test only: turboexl3_ling_kdanorm_prep with '
+                                                                           'suh read from the next block '
+                                                                           '(fault/kdanorm_suh_next_block), a red check')
+ADDED_FILES['models/ling/kdanorm.zig'] = ('L5 (KDA_NORM_PREP): kdaNormGatePrep, the host\'s fused norm-gate written '
+                                          'straight into o_proj\'s prepared rows in one launch, its operands\' rules and '
+                                          'its CPU tests (texts, operands, statements against the host\'s copy)')
+ADDED_FILES['models/ling/kdanorm_test.zig'] = ('kdaNormGatePrep held word for word to the served chain (the host\'s '
+                                               'norm-gate, its test-only copy, then o_proj\'s prepare and linear) at rows '
+                                               '33 to 16384, its refusals and planted faults (GPU); and its timing '
+                                               '(TURBOEXL3_LING_TIME)')
+for _n in ('prep_1', 'prep_2', 'prep_3'):
+    ADDED[('core/dense.zig', 'const ' + _n)] = 'text_prep cut at its load, where Ling\'s KDA norm-gate writer puts its own'
+CHANGED[('core/dense.zig', 'const text_prep')] = 'prep_1 ++ prep_2 ++ prep_3: the same text'
+for _n in ('const kdanorm', 'const kdaNormGatePrep'):
+    ADDED[('models/ling/api.zig', _n)] = 'the re-export of kdanorm.zig (L5, KDA_NORM_PREP)'
+CHANGED[('models/ling/api.zig', 'const shared_state')] = 'kdanorm.zig\'s kernel lock and cache beside the others'
 
 def split_report(oprog, nprog, ounits, nunits, orig_dir, new_dir, problems, verbose):
     """--split (declarations moved between files, not only files): checks 1 to 4 over the whole tree instead of per file.

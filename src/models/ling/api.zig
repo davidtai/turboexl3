@@ -60,6 +60,12 @@ pub const kdaProjPromptW = kdaproj_pf.kdaProjPromptW;
 /// given W_hats; `kdaproj_pf.gateEa` makes G1's exp(A_log) once for a layer
 pub const kdaProjPromptGate = kdaproj_pf.kdaProjPromptGate;
 pub const kdaProjPromptWGate = kdaproj_pf.kdaProjPromptWGate;
+/// A KDA layer's gated norm at prompt rows written straight into o_proj's prepared rows (the host's fused norm-gate's
+/// statements in dense's prepare, one launch): xp word for word what o_proj's `linear` prepares of the norm-gate's
+/// output, its matmul and finish then `Dense.piecePrepared` and `Dense.finishOf` (`kdanorm.zig`; `kdanorm.takes` says
+/// where it runs)
+pub const kdanorm = @import("kdanorm.zig");
+pub const kdaNormGatePrep = kdanorm.kdaNormGatePrep;
 
 /// The MoE router at decode rows 1 to 8 in two launches, with the read-ahead predictor's scores (`router.zig`): the
 /// router's logits and the predictor's scores in one launch (`router.routerLogits`), the host's fused router over them
@@ -209,7 +215,7 @@ pub const moeTailParts = tail.moeTailParts;
 pub const moeTailWide = tail.moeTailWide;
 
 /// This file's module state (`Global`): what a host that shares its units' state registers.
-pub const shared_state = .{ shared.shared_state, pair.shared_state, kdaproj.shared_state, router.shared_state, tail.shared_state, mla_latent.shared_state, mla_flash.shared_state, kdaproj_pf.shared_state, swiglu.shared_state };
+pub const shared_state = .{ shared.shared_state, pair.shared_state, kdaproj.shared_state, router.shared_state, tail.shared_state, mla_latent.shared_state, mla_flash.shared_state, kdaproj_pf.shared_state, swiglu.shared_state, kdanorm.shared_state };
 
 /// The MLA prompt attention as one causal flash launch (`mla_flash.zig`): o [B, H, qL, v] = softmax(scale q k^T) v, query
 /// row i over keys 0 .. kL - qL + i, at Ling's heads (qk 192, v 128) or any pair `mla_flash.admits` takes; within

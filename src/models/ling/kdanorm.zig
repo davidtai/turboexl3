@@ -22,10 +22,10 @@ const A = mlx.mlx_array;
 // ── texts ──
 
 /// the norm-gate's statements at head b and the prepare's lanes, each lane's four values as the prepare takes them
-pub const kgate = "";
+pub const kgate = @embedFile("kernels/kdanorm/gate.metal");
 
 /// dense's prepare with the norm-gate in its load's place
-pub const text_normprep: [:0]const u8 = "";
+pub const text_normprep: [:0]const u8 = dense.prep_1 ++ kgate ++ dense.prep_3;
 
 pub const normprep_in = [_][*:0]const u8{ "y", "z", "norm_w", "eps", "sigtab", "suh" };
 pub const normprep_out = [_][*:0]const u8{"xp"};
@@ -88,8 +88,25 @@ pub const Geometry = struct { rows: u32, hv: u32, dim: u32 };
 /// 128 in bf16 or f16, z [B, S, z_stride] with every head's DV channels inside a row (z_off + HV·DV <= z_stride),
 /// norm_w [DV], sigtab [65536], all in y's dtype; eps f32 0-d; suh f16 [HV·DV]; null otherwise
 pub fn shapeOk(x: Shapes) ?Geometry {
-    _ = x;
-    return null;
+    const dt = x.y.dt;
+    if (dt != .bfloat16 and dt != .float16) return null;
+    if (x.z.dt != dt or x.norm_w.dt != dt or x.sigtab.dt != dt) return null;
+    if (x.eps.dt != .float32 or x.eps.sh.len != 0) return null;
+    if (x.suh.dt != .float16) return null;
+    const y = x.y.sh;
+    const z = x.z.sh;
+    if (y.len != 4 or z.len != 3) return null;
+    if (y[0] < 1 or y[1] < 1 or y[2] < 1 or y[3] != 128) return null;
+    if (z[0] != y[0] or z[1] != y[1] or z[2] < 1 or z[2] != @as(c_int, @intCast(x.z_stride))) return null;
+    const hv: u32 = @intCast(y[2]);
+    const dim = hv * 128;
+    if (@as(u64, x.z_off) + dim > x.z_stride) return null;
+    if (x.norm_w.sh.len != 1 or x.norm_w.sh[0] != 128) return null;
+    if (x.sigtab.sh.len != 1 or x.sigtab.sh[0] != 1 << 16) return null;
+    if (x.suh.sh.len != 1 or x.suh.sh[0] != @as(c_int, @intCast(dim))) return null;
+    const rows = @as(u64, @intCast(y[0])) * @as(u64, @intCast(y[1]));
+    if (rows > std.math.maxInt(u32)) return null;
+    return .{ .rows = @intCast(rows), .hv = hv, .dim = dim };
 }
 
 fn shapesOf(op: Op) Shapes {
@@ -116,10 +133,30 @@ pub fn takes(d: *const dense.Dense, op: Op) bool {
 /// for word, in one launch on `s`, a GPU stream; with `d.piecePrepared` and `d.finishOf` o_proj's y. Owned result.
 /// error.Exl3EngineNotImplemented where it does not take the call (`takes`, or not a GPU stream), nothing launched.
 pub fn kdaNormGatePrep(s: mlx.mlx_stream, d: *const dense.Dense, op: Op) !A {
-    _ = s;
-    _ = d;
-    _ = op;
-    return error.Exl3EngineNotImplemented;
+    if (!mlx.streamIsGpu(s) or !takes(d, op)) return error.Exl3EngineNotImplemented;
+    const geo = shapeOk(shapesOf(op)).?;
+    const k = try kernelGet();
+    // the prepare's launch (`Dense.prepare` at these rows: a simdgroup each 128-block of a row) with the norm-gate's
+    // template arguments
+    const cfg = try ks.buildConfig(.{
+        .grid = .{ geo.hv * 32, geo.rows, 1 },
+        .threadgroup = .{ 32, 1, 1 },
+        .out_shapes = &.{&[_]c_int{ @intCast(geo.rows), @intCast(geo.dim) }},
+        .out_dtypes = &.{.float16},
+        .template = &.{
+            .{ .name = "T", .value = .{ .dtype = mlx.mlx_array_dtype(op.y) } },
+            .{ .name = "DIM", .value = .{ .int = @intCast(geo.dim) } },
+            .{ .name = "LANE_ORDER", .value = .{ .int = 0 } },
+            .{ .name = "HV", .value = .{ .int = @intCast(geo.hv) } },
+            .{ .name = "DV", .value = .{ .int = 128 } },
+            .{ .name = "ZSTRIDE", .value = .{ .int = @intCast(op.z_stride) } },
+            .{ .name = "ZOFF", .value = .{ .int = @intCast(op.z_off) } },
+        },
+    });
+    defer _ = mlx.mlx_fast_metal_kernel_config_free(cfg);
+    var outs: [1]A = undefined;
+    try ks.applyConfig(k, cfg, &.{ op.y, op.z, op.norm_w, op.eps, op.sigtab, op.suh }, &outs, s);
+    return outs[0];
 }
 
 // ── tests (CPU) ──

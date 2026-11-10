@@ -19,7 +19,7 @@ The joined launches, the value residual's prepare and the MLP's clamped SwiGLU i
 | made at | `src/models/ricursive/ricursive.zig:104` (`fn kernelOf`) |
 | inputs | `xa`, `x0`, `blend`, `suh` |
 | outputs | `xp` |
-| source | `text_blend_prep` = `ricursive:ricursive/blend_struct` ++ `ricursive:ricursive/blend_all` ++ `dense/prep` (1795 B, `8f18f915cffe`) |
+| source | `text_blend_prep` = `ricursive:ricursive/blend_struct` ++ `ricursive:ricursive/blend_all` ++ `dense/prep_1` ++ `dense/prep_2` ++ `dense/prep_3` (1795 B, `8f18f915cffe`) |
 | header | `decode.header` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` (18000 B, `771237d24284`) |
 
 <!-- /kernel-facts -->
@@ -131,7 +131,7 @@ The joined launches, the value residual's prepare and the MLP's clamped SwiGLU i
 | made at | `src/models/ricursive/ricursive.zig:106` (`fn kernelOf`) |
 | inputs | `gate`, `up`, `sigtab`, `lim`, `suh` |
 | outputs | `xp` |
-| source | `text_swiglu_prep` = `ricursive:ricursive/swiglu_x` ++ `dense/prep` (2402 B, `a7d5131c1474`) |
+| source | `text_swiglu_prep` = `ricursive:ricursive/swiglu_x` ++ `dense/prep_1` ++ `dense/prep_2` ++ `dense/prep_3` (2402 B, `a7d5131c1474`) |
 | header | `decode.header` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` (18000 B, `771237d24284`) |
 
 <!-- /kernel-facts -->

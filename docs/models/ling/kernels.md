@@ -1662,3 +1662,181 @@ The wide tail's red check's planted fault: a kernel made only by the wide tail's
 - **Pinned by:** `src/models/ling/kdaproj_gate_test.zig` "turboexl3 gpu ling kdaproj gate: kdaProjPromptGate's y_0 and
   y_2 are ..." (GPU: its g must differ from the served gate's over `kdaProjPrompt`'s y_1,
   `TURBOEXL3_LING_KDA_GATE_RED`).
+
+## `src/models/ling/kdanorm.zig`
+
+L5 (KDA_NORM_PREP): a KDA layer's gated norm at prompt rows written straight into o_proj's prepared rows: dense's
+prepare (`turboexl3_dense_prep`'s text, cut at its load) with the host's fused norm-gate's statements in the load's
+place.
+
+### `turboexl3_ling_kdanorm_prep`
+
+<!-- kernel-facts: turboexl3_ling_kdanorm_prep -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/ling/kdanorm.zig:47` (`fn kernelGet`) |
+| inputs | `y`, `z`, `norm_w`, `eps`, `sigtab`, `suh` |
+| outputs | `xp` |
+| source | `text_normprep` = `dense/prep_1` ++ `ling:kdanorm/gate` ++ `dense/prep_3` (2098 B, `c70564d5b441`) |
+| header | `decode.header` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` (18000 B, `771237d24284`) |
+
+<!-- /kernel-facts -->
+- **Used by:** `kdanorm.kdaNormGatePrep` (`ling.kdaNormGatePrep`): the outside plugin turboexl3_ling's KDA_NORM_PREP
+  (off by default), a KDA layer's gated norm at prompt rows (the host's fused norm-gate at its table, TAB 1, with the
+  sigmoid gate) written as o_proj's prepared rows, its matmul and finish then `Dense.piecePrepared` and
+  `Dense.finishOf`, where o_proj's `linear` runs its matmul path (`kdanorm.takes`).
+- **Shapes and dtypes:** y T [B, S, HV, DV] (bf16 or f16; DV 128), the KDA recurrence's output; z T [B, S, ZSTRIDE]
+  (head h's gate at ZOFF + h·DV); norm_w T [DV]; eps f32 (0-d); sigtab T [65536] (MLX's sigmoid of every 16-bit pattern
+  of T, the host's table); suh f16 [HV·DV] (o_proj's). Out: xp f16 [B·S, HV·DV], natural order.
+- **Grid and threadgroup:** `(HV · 32, B·S, 1)` / `(32, 1, 1)`: `turboexl3_dense_prep`'s at IN = HV·DV, a simdgroup each
+  (row, 128-block); the block is the head (DV 128), the host's simdgroup for the same (row, head).
+- **Template args:** T (y's dtype), DIM (HV·DV), LANE_ORDER 0, HV, DV (128), ZSTRIDE, ZOFF.
+- **Replaces:** the host's fused norm-gate (mlx-serve `gdnNormGateFusedTab`, its `mlxserve_gdn_normgate` at TAB 1) and
+  o_proj's prepare (`turboexl3_dense_prep` in its `linear`): one launch for two, and the norm-gate's output (T [B·S,
+  HV·DV]) never reaches device memory.
+- **Bits:** xp is `turboexl3_dense_prep`'s of the host's output, word for word: the head's sum of squares is the host's
+  statements in its order (each lane's four consecutive channels, simd_sum, the precise rsqrt), and each value the
+  prepare loads (channel L + 32 j) is the host's per-element statements on that element (normed, the table's sigmoid of
+  z, their product in T), then the prepare's f16 of it times suh.
+- **Pinned by:** `src/models/ling/kdanorm.zig` "turboexl3 ling kdanorm texts: ..." (CPU: the composition, and
+  text_prep's bytes kept: its length and sha256) and "turboexl3 ling kdanorm statements: ..." (CPU: the gate's
+  statements against the host's copy, `kernels/test/pins/kdanorm.metal`); `src/models/ling/kdanorm_test.zig` "turboexl3
+  gpu ling kdanorm: kdaNormGatePrep's xp is o_proj's prepare of the served norm-gate's output and ..." (GPU: xp against
+  `Dense.prepare` of the served norm-gate's output and o_proj's y against `root.linear` of it, every word, rows 33 to
+  16384; `TURBOEXL3_LING_KDA_NORM`).
+
+## `src/models/ling/kdanorm_test.zig`
+
+The served chain the fused launch is held to (the host's norm-gate, its test-only copy) and the red checks' planted
+faults.
+
+### `turboexl3_test_ling_gdn_normgate`
+
+<!-- kernel-facts: turboexl3_test_ling_gdn_normgate -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/ling/kdanorm_test.zig:64` (`fn servedNormGate`) |
+| inputs | `y`, `z`, `norm_w`, `eps`, `sigtab` |
+| outputs | `out` |
+| source | `@embedFile("kernels/test/copy/gdn_normgate.metal")` = `ling:test/copy/gdn_normgate` (1175 B, `852e385274a4`) |
+| header | `""` = (empty) (0 B, `e3b0c44298fc`) |
+
+<!-- /kernel-facts -->
+- **Used by:** test only: `servedNormGate` in `src/models/ling/kdanorm_test.zig`, the served chain's first launch the
+  fused launch is held to, and its timing's served arm.
+- **Shapes and dtypes:** the host's: y T [B, S, HV, DV], z T [B, S, ZSTRIDE], norm_w T [DV], eps f32 (0-d), sigtab T
+  [65536]. Out: out T [B, S, HV·DV].
+- **Grid and threadgroup:** `(32, B·S, HV)` / `(32, 1, 1)`: a simdgroup each (row, head), as the host launches it.
+- **Template args:** T, HV, DV, ZSTRIDE, ZOFF, TAB (1 here), SWISH (0 here: the sigmoid gate), in the host's order.
+- **Replaces:** nothing: a verbatim copy of mlx-serve's `kernels/gdn/gdn_normgate.metal` at bc6c5f2c (the outside plugin
+  turboexl3_ling's MLX_SERVE_REF) under a `//! copied_from:` comment line; never served.
+- **Bits:** the host's norm-gate's.
+- **Pinned by:** `src/models/ling/kdanorm.zig` "turboexl3 ling kdanorm statements: ..." (CPU: its statements against the
+  served piece's, `kernels/test/pins/kdanorm.metal`).
+
+### `turboexl3_test_ling_kdanorm_nw_shift_fault`
+
+<!-- kernel-facts: turboexl3_test_ling_kdanorm_nw_shift_fault -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/ling/kdanorm_test.zig:231` (`test turboexl3 gpu ling kdanorm: kdaNormGatePrep's xp is o_proj's prepare of the served norm-gate's output and o_proj's y over it is linear's, word for word, at prompt rows 33 to 16384; its refusals before any launch; planted faults caught (TURBOEXL3_GPU=1)`) |
+| inputs | `y`, `z`, `norm_w`, `eps`, `sigtab`, `suh` |
+| outputs | `xp` |
+| source | `comptime faultText(@embedFile("kernels/test/fault/kdanorm_nw_shift.metal"))` = `dense/prep_1` ++ `ling:test/fault/kdanorm_nw_shift` ++ `dense/prep_3` (2084 B, `df58762a2249`) |
+| header | `decode.header` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` (18000 B, `771237d24284`) |
+
+<!-- /kernel-facts -->
+- **Used by:** test only: the red checks in `src/models/ling/kdanorm_test.zig` "turboexl3 gpu ling kdanorm:
+  kdaNormGatePrep's xp is o_proj's prepare of the served norm-gate's output and ...", swapped into the fused launch for
+  one call (`kdanorm.kernel_override`).
+- **Shapes and dtypes:** `turboexl3_ling_kdanorm_prep`'s.
+- **Grid and threadgroup:** `turboexl3_ling_kdanorm_prep`'s.
+- **Template args:** `turboexl3_ling_kdanorm_prep`'s.
+- **Replaces:** nothing: a planted fault, `turboexl3_ling_kdanorm_prep` with norm_w read at the next channel
+  (`ling:test/fault/kdanorm_nw_shift` in the gate's place).
+- **Bits:** wrong on purpose: its xp differs from the served chain's.
+- **Pinned by:** `src/models/ling/kdanorm_test.zig` "turboexl3 gpu ling kdanorm: kdaNormGatePrep's xp is o_proj's
+  prepare of the served norm-gate's output and ..." (GPU: its xp must differ from the served chain's at 512 rows,
+  `TURBOEXL3_LING_KDA_NORM_RED`).
+
+### `turboexl3_test_ling_kdanorm_suh_next_block_fault`
+
+<!-- kernel-facts: turboexl3_test_ling_kdanorm_suh_next_block_fault -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/ling/kdanorm_test.zig:234` (`test turboexl3 gpu ling kdanorm: kdaNormGatePrep's xp is o_proj's prepare of the served norm-gate's output and o_proj's y over it is linear's, word for word, at prompt rows 33 to 16384; its refusals before any launch; planted faults caught (TURBOEXL3_GPU=1)`) |
+| inputs | `y`, `z`, `norm_w`, `eps`, `sigtab`, `suh` |
+| outputs | `xp` |
+| source | `comptime faultText(@embedFile("kernels/test/fault/kdanorm_suh_next_block.metal"))` = `dense/prep_1` ++ `ling:test/fault/kdanorm_suh_next_block` ++ `dense/prep_3` (2083 B, `97ed2295d2cb`) |
+| header | `decode.header` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` (18000 B, `771237d24284`) |
+
+<!-- /kernel-facts -->
+- **Used by:** test only: the red checks in `src/models/ling/kdanorm_test.zig` "turboexl3 gpu ling kdanorm:
+  kdaNormGatePrep's xp is o_proj's prepare of the served norm-gate's output and ...", swapped into the fused launch for
+  one call (`kdanorm.kernel_override`).
+- **Shapes and dtypes:** `turboexl3_ling_kdanorm_prep`'s.
+- **Grid and threadgroup:** `turboexl3_ling_kdanorm_prep`'s.
+- **Template args:** `turboexl3_ling_kdanorm_prep`'s.
+- **Replaces:** nothing: a planted fault, `turboexl3_ling_kdanorm_prep` with suh read from the next block
+  (`ling:test/fault/kdanorm_suh_next_block` in the gate's place).
+- **Bits:** wrong on purpose: its xp differs from the served chain's.
+- **Pinned by:** `src/models/ling/kdanorm_test.zig` "turboexl3 gpu ling kdanorm: kdaNormGatePrep's xp is o_proj's
+  prepare of the served norm-gate's output and ..." (GPU: its xp must differ from the served chain's at 512 rows,
+  `TURBOEXL3_LING_KDA_NORM_RED`).
+
+### `turboexl3_test_ling_kdanorm_sum_strided_fault`
+
+<!-- kernel-facts: turboexl3_test_ling_kdanorm_sum_strided_fault -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/ling/kdanorm_test.zig:233` (`test turboexl3 gpu ling kdanorm: kdaNormGatePrep's xp is o_proj's prepare of the served norm-gate's output and o_proj's y over it is linear's, word for word, at prompt rows 33 to 16384; its refusals before any launch; planted faults caught (TURBOEXL3_GPU=1)`) |
+| inputs | `y`, `z`, `norm_w`, `eps`, `sigtab`, `suh` |
+| outputs | `xp` |
+| source | `comptime faultText(@embedFile("kernels/test/fault/kdanorm_sum_strided.metal"))` = `dense/prep_1` ++ `ling:test/fault/kdanorm_sum_strided` ++ `dense/prep_3` (2129 B, `7cac59b113b2`) |
+| header | `decode.header` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` (18000 B, `771237d24284`) |
+
+<!-- /kernel-facts -->
+- **Used by:** test only: the red checks in `src/models/ling/kdanorm_test.zig` "turboexl3 gpu ling kdanorm:
+  kdaNormGatePrep's xp is o_proj's prepare of the served norm-gate's output and ...", swapped into the fused launch for
+  one call (`kdanorm.kernel_override`).
+- **Shapes and dtypes:** `turboexl3_ling_kdanorm_prep`'s.
+- **Grid and threadgroup:** `turboexl3_ling_kdanorm_prep`'s.
+- **Template args:** `turboexl3_ling_kdanorm_prep`'s.
+- **Replaces:** nothing: a planted fault, `turboexl3_ling_kdanorm_prep` with the sum of squares over each lane's strided
+  channels (L + 32 i) in place of the host's four consecutive ones (`ling:test/fault/kdanorm_sum_strided` in the gate's
+  place).
+- **Bits:** wrong on purpose: its xp differs from the served chain's.
+- **Pinned by:** `src/models/ling/kdanorm_test.zig` "turboexl3 gpu ling kdanorm: kdaNormGatePrep's xp is o_proj's
+  prepare of the served norm-gate's output and ..." (GPU: its xp must differ from the served chain's at 512 rows,
+  `TURBOEXL3_LING_KDA_NORM_RED`).
+
+### `turboexl3_test_ling_kdanorm_z_next_head_fault`
+
+<!-- kernel-facts: turboexl3_test_ling_kdanorm_z_next_head_fault -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/ling/kdanorm_test.zig:232` (`test turboexl3 gpu ling kdanorm: kdaNormGatePrep's xp is o_proj's prepare of the served norm-gate's output and o_proj's y over it is linear's, word for word, at prompt rows 33 to 16384; its refusals before any launch; planted faults caught (TURBOEXL3_GPU=1)`) |
+| inputs | `y`, `z`, `norm_w`, `eps`, `sigtab`, `suh` |
+| outputs | `xp` |
+| source | `comptime faultText(@embedFile("kernels/test/fault/kdanorm_z_next_head.metal"))` = `dense/prep_1` ++ `ling:test/fault/kdanorm_z_next_head` ++ `dense/prep_3` (2080 B, `466a3d8115a1`) |
+| header | `decode.header` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` (18000 B, `771237d24284`) |
+
+<!-- /kernel-facts -->
+- **Used by:** test only: the red checks in `src/models/ling/kdanorm_test.zig` "turboexl3 gpu ling kdanorm:
+  kdaNormGatePrep's xp is o_proj's prepare of the served norm-gate's output and ...", swapped into the fused launch for
+  one call (`kdanorm.kernel_override`).
+- **Shapes and dtypes:** `turboexl3_ling_kdanorm_prep`'s.
+- **Grid and threadgroup:** `turboexl3_ling_kdanorm_prep`'s.
+- **Template args:** `turboexl3_ling_kdanorm_prep`'s.
+- **Replaces:** nothing: a planted fault, `turboexl3_ling_kdanorm_prep` with z read from the next head
+  (`ling:test/fault/kdanorm_z_next_head` in the gate's place).
+- **Bits:** wrong on purpose: its xp differs from the served chain's.
+- **Pinned by:** `src/models/ling/kdanorm_test.zig` "turboexl3 gpu ling kdanorm: kdaNormGatePrep's xp is o_proj's
+  prepare of the served norm-gate's output and ..." (GPU: its xp must differ from the served chain's at 512 rows,
+  `TURBOEXL3_LING_KDA_NORM_RED`).
