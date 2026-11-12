@@ -26,7 +26,7 @@ The grouped linear `wo_a` at decode rows.
 | made at | `src/models/deepseek_v41/grouped.zig:130` (`const Grouped`) |
 | inputs | `zd`, `slots`, `scores`, `down_svh`, `hsx` |
 | outputs | `y` |
-| source | `decode.text_dfin3` = `decode/dfin3_1` ++ `decode/dfin3_expert` ++ `decode/dfin3_2` (1324 B, `f7c3494d91f8`) |
+| source | `decode.text_dfin3` = `decode/dfin3_1a` ++ `decode/dfin3_1b` ++ `decode/dfin3_1c` ++ `decode/dfin3_expert` ++ `decode/dfin3_2` (1324 B, `f7c3494d91f8`) |
 | header | `decode.header` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` (18000 B, `771237d24284`) |
 
 <!-- /kernel-facts -->
@@ -229,10 +229,10 @@ decode among the row-slots of one id (`Config.banked_group`). `Banked` keeps the
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/deepseek_v41/banked.zig:258` (`const Banked`) |
+| made at | `src/models/deepseek_v41/banked.zig:282` (`const Banked`) |
 | inputs | `zd`, `slots`, `scores`, `down_svh0`, `down_svh1`, `down_svh2`, `hsx` |
 | outputs | `y` |
-| source | `text_dfin3b` = `decode/dfin3_1` ++ `deepseek_v41:banked/dfin3b_expert` ++ `decode/dfin3_2` (1610 B, `7274aee7befe`) |
+| source | `text_dfin3b` = `decode/dfin3_1a` ++ `decode/dfin3_1b` ++ `decode/dfin3_1c` ++ `deepseek_v41:banked/dfin3b_expert` ++ `decode/dfin3_2` (1610 B, `7274aee7befe`) |
 | header | `header` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` (18000 B, `771237d24284`) |
 
 <!-- /kernel-facts -->
@@ -273,12 +273,12 @@ decode among the row-slots of one id (`Config.banked_group`). `Banked` keeps the
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/deepseek_v41/banked.zig:287` (`const Banked`) |
+| made at | `src/models/deepseek_v41/banked.zig:317` (`const Banked`) |
 | inputs | `zd`, `slots`, `scores`, `down_svh0`, `down_svh1`, `down_svh2`, `hsx` |
 | outputs | `y` |
-| source | `text_dfin3bg` = `decode/dfin3_1` ++ `deepseek_v41:banked/skip_rk_next` ++ `deepseek_v41:banked/dfin3b_expert` ++ `decode/dfin3_2` (1701 B, `f4c14dd1211a`) |
+| source | `text_dfin3bg` = `decode/dfin3_1a` ++ `decode/dfin3_1b` ++ `decode/dfin3_1c` ++ `deepseek_v41:banked/skip_rk_next` ++ `deepseek_v41:banked/dfin3b_expert` ++ `decode/dfin3_2` (1701 B, `f4c14dd1211a`) |
 | header | `header` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` (18000 B, `771237d24284`) |
-| made at | `src/models/deepseek_v41/banked.zig:315` (`const Banked`) (the same text) |
+| made at | `src/models/deepseek_v41/banked.zig:351` (`const Banked`) (the same text) |
 
 <!-- /kernel-facts -->
 
@@ -312,7 +312,7 @@ decode among the row-slots of one id (`Config.banked_group`). `Banked` keeps the
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/deepseek_v41/banked.zig:256` (`const Banked`) |
+| made at | `src/models/deepseek_v41/banked.zig:280` (`const Banked`) |
 | inputs | `hdp`, `slots`, `down_t0`, `down_t1`, `down_t2` |
 | outputs | `zd` |
 | source | `text_down3b` = `decode/down3_1` ++ `decode/rk_line` ++ `decode/down3_2` ++ `deepseek_v41:banked/down3b_w` ++ `decode/down3_3` (2506 B, `67a8776af847`) |
@@ -357,12 +357,12 @@ decode among the row-slots of one id (`Config.banked_group`). `Banked` keeps the
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/deepseek_v41/banked.zig:285` (`const Banked`) |
+| made at | `src/models/deepseek_v41/banked.zig:315` (`const Banked`) |
 | inputs | `hdp`, `slots`, `down_t0`, `down_t1`, `down_t2` |
 | outputs | `zd` |
 | source | `text_down3bg` = `decode/down3_1` ++ `decode/rk_line` ++ `deepseek_v41:banked/down3g_2` ++ `deepseek_v41:banked/down3b_w` ++ `deepseek_v41:banked/down3g_3` (2585 B, `b9686e67ab4a`) |
 | header | `header_group` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26373 B, `b7023ef0567c`) |
-| made at | `src/models/deepseek_v41/banked.zig:409` (`const Banked`) |
+| made at | `src/models/deepseek_v41/banked.zig:459` (`const Banked`) |
 | inputs | `hdp`, `slots`, `down_t0`, `down_t1`, `down_t2` |
 | outputs | `zd` |
 | source | `text_down3bg` = `decode/down3_1` ++ `decode/rk_line` ++ `deepseek_v41:banked/down3g_2` ++ `deepseek_v41:banked/down3b_w` ++ `deepseek_v41:banked/down3g_3` (2585 B, `b9686e67ab4a`) |
@@ -410,7 +410,7 @@ decode among the row-slots of one id (`Config.banked_group`). `Banked` keeps the
 | fact | from the code |
 |---|---|
 | names | `turboexl3_down3bg_ku`, `turboexl3_down3bg_pf`, `turboexl3_down3bg_xh`, `turboexl3_down3bg_m2`, `turboexl3_down3bg_sh`, `turboexl3_down3bg_t4`, `turboexl3_down3bg_t1`, `turboexl3_down3bg_t0`, `turboexl3_down3bg_pfxh`, `turboexl3_down3bg_pfsh`, `turboexl3_down3bg_xhm2` |
-| made at | `src/models/deepseek_v41/banked.zig:409` (`const Banked`) |
+| made at | `src/models/deepseek_v41/banked.zig:459` (`const Banked`) |
 | inputs | `hdp`, `slots`, `down_t0`, `down_t1`, `down_t2` |
 | outputs | `zd` |
 | source | `text_down3bg` = `decode/down3_1` ++ `decode/rk_line` ++ `deepseek_v41:banked/down3g_2` ++ `deepseek_v41:banked/down3b_w` ++ `deepseek_v41:banked/down3g_3` (2585 B, `b9686e67ab4a`) |
@@ -466,12 +466,12 @@ decode among the row-slots of one id (`Config.banked_group`). `Banked` keeps the
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/deepseek_v41/banked.zig:313` (`const Banked`) |
+| made at | `src/models/deepseek_v41/banked.zig:349` (`const Banked`) |
 | inputs | `hdp`, `slots`, `down_t0`, `down_t1`, `down_t2` |
 | outputs | `zd` |
 | source | `text_down3bgm3` = `decode/down3_1` ++ `decode/rk_line` ++ `deepseek_v41:banked/down3g_2` ++ `deepseek_v41:banked/down3b_w` ++ `deepseek_v41:banked/down3g_3m3` (2756 B, `3274179feb75`) |
 | header | `header_group` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26373 B, `b7023ef0567c`) |
-| made at | `src/models/deepseek_v41/banked.zig:407` (`const Banked`) |
+| made at | `src/models/deepseek_v41/banked.zig:457` (`const Banked`) |
 | inputs | `hdp`, `slots`, `down_t0`, `down_t1`, `down_t2` |
 | outputs | `zd` |
 | source | `text_down3bgm3` = `decode/down3_1` ++ `decode/rk_line` ++ `deepseek_v41:banked/down3g_2` ++ `deepseek_v41:banked/down3b_w` ++ `deepseek_v41:banked/down3g_3m3` (2756 B, `3274179feb75`) |
@@ -519,7 +519,7 @@ decode among the row-slots of one id (`Config.banked_group`). `Banked` keeps the
 | fact | from the code |
 |---|---|
 | names | `turboexl3_down3bgm3_ku`, `turboexl3_down3bgm3_pf`, `turboexl3_down3bgm3_xh`, `turboexl3_down3bgm3_m2`, `turboexl3_down3bgm3_sh`, `turboexl3_down3bgm3_t4`, `turboexl3_down3bgm3_t1`, `turboexl3_down3bgm3_t0`, `turboexl3_down3bgm3_pfxh`, `turboexl3_down3bgm3_pfsh`, `turboexl3_down3bgm3_xhm2` |
-| made at | `src/models/deepseek_v41/banked.zig:407` (`const Banked`) |
+| made at | `src/models/deepseek_v41/banked.zig:457` (`const Banked`) |
 | inputs | `hdp`, `slots`, `down_t0`, `down_t1`, `down_t2` |
 | outputs | `zd` |
 | source | `text_down3bgm3` = `decode/down3_1` ++ `decode/rk_line` ++ `deepseek_v41:banked/down3g_2` ++ `deepseek_v41:banked/down3b_w` ++ `deepseek_v41:banked/down3g_3m3` (2756 B, `3274179feb75`) |
@@ -575,10 +575,10 @@ decode among the row-slots of one id (`Config.banked_group`). `Banked` keeps the
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/deepseek_v41/banked.zig:254` (`const Banked`) |
+| made at | `src/models/deepseek_v41/banked.zig:274` (`const Banked`) |
 | inputs | `zg`, `zu`, `slots`, `gate_svh0`, `gate_svh1`, `gate_svh2`, `up_svh0`, `up_svh1`, `up_svh2`, `down_suh0`, `down_suh1`, `down_suh2`, `xsg`, `xsu` |
 | outputs | `hd`, `hs` |
-| source | `text_fin7cb` = `decode/fin7_1` ++ `deepseek_v41:banked/fin7b_expert` ++ `decode/fin7_2` ++ `decode/fin7_planes` ++ `decode/fin7_3` ++ `decode/fin7_sums` ++ `decode/fin7_4` ++ `decode/fin7_swiglu_clamp` ++ `decode/fin7_5` (2959 B, `68747f002dd1`) |
+| source | `text_fin7cb` = `decode/fin7_1a` ++ `decode/fin7_1b` ++ `deepseek_v41:banked/fin7b_expert` ++ `decode/fin7_2` ++ `decode/fin7_planes` ++ `decode/fin7_3` ++ `decode/fin7_sums` ++ `decode/fin7_4` ++ `decode/fin7_swiglu_clamp` ++ `decode/fin7_5` (2959 B, `68747f002dd1`) |
 | header | `header5` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` (26594 B, `41efbbbbd943`) |
 
 <!-- /kernel-facts -->
@@ -593,8 +593,8 @@ decode among the row-slots of one id (`Config.banked_group`). `Banked` keeps the
   lane order) and hs f32 [rows, inter/128] (its 128-block sums): `root.BankedHalf`.
 - **Grid and threadgroup:** `((inter/128)·32, rows, 1)` / `(32, 1, 1)`.
 - **Template args:** INTER (inter), RKC (rows), KS (KS_gu), DEFER (1 for MUL1: the deferred affine map applied here),
-  NBH (hidden/128), LIMIT (the clamp, 1 to 128; DeepSeek-V4.1's swiglu_limit 10). A banked call needs a clamped top-1
-  geometry (`bankedKernels` refuses any other).
+  NBH (hidden/128), LIMIT (the clamp, 1 to 128; DeepSeek-V4.1's swiglu_limit 10). A banked call needs a top-1 geometry
+  (`bankedKernels` refuses any other); an unclamped one builds `turboexl3_fin7b`, Ling's clamp `turboexl3_fin7cob`.
 - **Replaces:** `turboexl3_fin7c` (fin7 with the clamped SwiGLU), launched once per bank by each bank's own `moeClamped`
   call: one launch over the three banks.
 - **Bits:** byte-identical to `moeClamped` on the pair's bank at top-1 with score 1: `fin7b_expert` (the slot row and
@@ -616,12 +616,12 @@ decode among the row-slots of one id (`Config.banked_group`). `Banked` keeps the
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/deepseek_v41/banked.zig:283` (`const Banked`) |
+| made at | `src/models/deepseek_v41/banked.zig:309` (`const Banked`) |
 | inputs | `zg`, `zu`, `slots`, `gate_svh0`, `gate_svh1`, `gate_svh2`, `up_svh0`, `up_svh1`, `up_svh2`, `down_suh0`, `down_suh1`, `down_suh2`, `xsg`, `xsu` |
 | outputs | `hd`, `hs` |
-| source | `text_fin7cbg` = `decode/fin7_1` ++ `deepseek_v41:banked/skip_rk` ++ `deepseek_v41:banked/fin7b_expert` ++ `decode/fin7_2` ++ `decode/fin7_planes` ++ `decode/fin7_3` ++ `decode/fin7_sums` ++ `decode/fin7_4` ++ `decode/fin7_swiglu_clamp` ++ `decode/fin7_5` (3076 B, `25e578bf80c8`) |
+| source | `text_fin7cbg` = `decode/fin7_1a` ++ `decode/fin7_1b` ++ `deepseek_v41:banked/skip_rk` ++ `deepseek_v41:banked/fin7b_expert` ++ `decode/fin7_2` ++ `decode/fin7_planes` ++ `decode/fin7_3` ++ `decode/fin7_sums` ++ `decode/fin7_4` ++ `decode/fin7_swiglu_clamp` ++ `decode/fin7_5` (3076 B, `25e578bf80c8`) |
 | header | `header5` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` (26594 B, `41efbbbbd943`) |
-| made at | `src/models/deepseek_v41/banked.zig:311` (`const Banked`) (the same text) |
+| made at | `src/models/deepseek_v41/banked.zig:343` (`const Banked`) (the same text) |
 
 <!-- /kernel-facts -->
 
@@ -652,7 +652,7 @@ decode among the row-slots of one id (`Config.banked_group`). `Banked` keeps the
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/deepseek_v41/banked.zig:252` (`const Banked`) |
+| made at | `src/models/deepseek_v41/banked.zig:270` (`const Banked`) |
 | inputs | `xgp`, `xup`, `slots`, `gate_t0`, `gate_t1`, `gate_t2`, `up_t0`, `up_t1`, `up_t2` |
 | outputs | `zg`, `zu` |
 | source | `text_gu3b` = `decode/gu3_1` ++ `decode/rk_line` ++ `decode/gu3_2` ++ `deepseek_v41:banked/gu3b_w` ++ `decode/gu3_3` ++ `decode/gu3_stores` ++ `decode/gu3_4` (2717 B, `cf09a195e002`) |
@@ -698,12 +698,12 @@ decode among the row-slots of one id (`Config.banked_group`). `Banked` keeps the
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/deepseek_v41/banked.zig:281` (`const Banked`) |
+| made at | `src/models/deepseek_v41/banked.zig:305` (`const Banked`) |
 | inputs | `xgp`, `xup`, `slots`, `gate_t0`, `gate_t1`, `gate_t2`, `up_t0`, `up_t1`, `up_t2` |
 | outputs | `zg`, `zu` |
 | source | `text_gu3bg` = `decode/gu3_1` ++ `decode/rk_line` ++ `deepseek_v41:banked/gu3g_2` ++ `deepseek_v41:banked/gu3b_w` ++ `deepseek_v41:banked/gu3g_3` (2796 B, `e427ea27f330`) |
 | header | `header_group` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26373 B, `b7023ef0567c`) |
-| made at | `src/models/deepseek_v41/banked.zig:404` (`const Banked`) |
+| made at | `src/models/deepseek_v41/banked.zig:454` (`const Banked`) |
 | inputs | `xgp`, `xup`, `slots`, `gate_t0`, `gate_t1`, `gate_t2`, `up_t0`, `up_t1`, `up_t2` |
 | outputs | `zg`, `zu` |
 | source | `text_gu3bg` = `decode/gu3_1` ++ `decode/rk_line` ++ `deepseek_v41:banked/gu3g_2` ++ `deepseek_v41:banked/gu3b_w` ++ `deepseek_v41:banked/gu3g_3` (2796 B, `e427ea27f330`) |
@@ -751,7 +751,7 @@ decode among the row-slots of one id (`Config.banked_group`). `Banked` keeps the
 | fact | from the code |
 |---|---|
 | names | `turboexl3_gu3bg_ku`, `turboexl3_gu3bg_pf`, `turboexl3_gu3bg_xh`, `turboexl3_gu3bg_m2`, `turboexl3_gu3bg_sh`, `turboexl3_gu3bg_t4`, `turboexl3_gu3bg_t1`, `turboexl3_gu3bg_t0`, `turboexl3_gu3bg_pfxh`, `turboexl3_gu3bg_pfsh`, `turboexl3_gu3bg_xhm2` |
-| made at | `src/models/deepseek_v41/banked.zig:404` (`const Banked`) |
+| made at | `src/models/deepseek_v41/banked.zig:454` (`const Banked`) |
 | inputs | `xgp`, `xup`, `slots`, `gate_t0`, `gate_t1`, `gate_t2`, `up_t0`, `up_t1`, `up_t2` |
 | outputs | `zg`, `zu` |
 | source | `text_gu3bg` = `decode/gu3_1` ++ `decode/rk_line` ++ `deepseek_v41:banked/gu3g_2` ++ `deepseek_v41:banked/gu3b_w` ++ `deepseek_v41:banked/gu3g_3` (2796 B, `e427ea27f330`) |
@@ -808,12 +808,12 @@ decode among the row-slots of one id (`Config.banked_group`). `Banked` keeps the
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/deepseek_v41/banked.zig:309` (`const Banked`) |
+| made at | `src/models/deepseek_v41/banked.zig:339` (`const Banked`) |
 | inputs | `xgp`, `xup`, `slots`, `gate_t0`, `gate_t1`, `gate_t2`, `up_t0`, `up_t1`, `up_t2` |
 | outputs | `zg`, `zu` |
 | source | `text_gu3bgm3` = `decode/gu3_1` ++ `decode/rk_line` ++ `deepseek_v41:banked/gu3g_2` ++ `deepseek_v41:banked/gu3b_w` ++ `deepseek_v41:banked/gu3g_3m3` (2967 B, `5d637580686f`) |
 | header | `header_group` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26373 B, `b7023ef0567c`) |
-| made at | `src/models/deepseek_v41/banked.zig:402` (`const Banked`) |
+| made at | `src/models/deepseek_v41/banked.zig:452` (`const Banked`) |
 | inputs | `xgp`, `xup`, `slots`, `gate_t0`, `gate_t1`, `gate_t2`, `up_t0`, `up_t1`, `up_t2` |
 | outputs | `zg`, `zu` |
 | source | `text_gu3bgm3` = `decode/gu3_1` ++ `decode/rk_line` ++ `deepseek_v41:banked/gu3g_2` ++ `deepseek_v41:banked/gu3b_w` ++ `deepseek_v41:banked/gu3g_3m3` (2967 B, `5d637580686f`) |
@@ -860,7 +860,7 @@ decode among the row-slots of one id (`Config.banked_group`). `Banked` keeps the
 | fact | from the code |
 |---|---|
 | names | `turboexl3_gu3bgm3_ku`, `turboexl3_gu3bgm3_pf`, `turboexl3_gu3bgm3_xh`, `turboexl3_gu3bgm3_m2`, `turboexl3_gu3bgm3_sh`, `turboexl3_gu3bgm3_t4`, `turboexl3_gu3bgm3_t1`, `turboexl3_gu3bgm3_t0`, `turboexl3_gu3bgm3_pfxh`, `turboexl3_gu3bgm3_pfsh`, `turboexl3_gu3bgm3_xhm2` |
-| made at | `src/models/deepseek_v41/banked.zig:402` (`const Banked`) |
+| made at | `src/models/deepseek_v41/banked.zig:452` (`const Banked`) |
 | inputs | `xgp`, `xup`, `slots`, `gate_t0`, `gate_t1`, `gate_t2`, `up_t0`, `up_t1`, `up_t2` |
 | outputs | `zg`, `zu` |
 | source | `text_gu3bgm3` = `decode/gu3_1` ++ `decode/rk_line` ++ `deepseek_v41:banked/gu3g_2` ++ `deepseek_v41:banked/gu3b_w` ++ `deepseek_v41:banked/gu3g_3m3` (2967 B, `5d637580686f`) |
@@ -916,7 +916,7 @@ decode among the row-slots of one id (`Config.banked_group`). `Banked` keeps the
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/deepseek_v41/banked.zig:250` (`const Banked`) |
+| made at | `src/models/deepseek_v41/banked.zig:268` (`const Banked`) |
 | inputs | `x`, `slots`, `gate_suh0`, `gate_suh1`, `gate_suh2`, `up_suh0`, `up_suh1`, `up_suh2` |
 | outputs | `xg`, `xu`, `sg`, `su` |
 | source | `text_prep2b` = `decode/prep2_1` ++ `deepseek_v41:banked/prep2b_expert` ++ `decode/prep2_row` ++ `decode/prep2_2` (2352 B, `affd7b64e88f`) |
@@ -956,12 +956,12 @@ decode among the row-slots of one id (`Config.banked_group`). `Banked` keeps the
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/deepseek_v41/banked.zig:279` (`const Banked`) |
+| made at | `src/models/deepseek_v41/banked.zig:303` (`const Banked`) |
 | inputs | `x`, `slots`, `gate_suh0`, `gate_suh1`, `gate_suh2`, `up_suh0`, `up_suh1`, `up_suh2` |
 | outputs | `xg`, `xu`, `sg`, `su` |
 | source | `text_prep2bg` = `decode/prep2_1` ++ `deepseek_v41:banked/skip_rk` ++ `deepseek_v41:banked/prep2b_expert` ++ `decode/prep2_row` ++ `decode/prep2_2` (2469 B, `110fd5d50005`) |
 | header | `header` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` (18000 B, `771237d24284`) |
-| made at | `src/models/deepseek_v41/banked.zig:307` (`const Banked`) (the same text) |
+| made at | `src/models/deepseek_v41/banked.zig:337` (`const Banked`) (the same text) |
 
 <!-- /kernel-facts -->
 
@@ -988,10 +988,126 @@ decode among the row-slots of one id (`Config.banked_group`). `Banked` keeps the
   today's, ..." and `src/models/deepseek_v41/banked_ilp_test.zig` "turboexl3 gpu banked ilp: every grouped GEMV
   variant's gate|up outputs and rows, ..." (GPU), which hold the whole call's hd, hs and y.
 
-## `src/models/deepseek_v41/f3.zig`
+### `turboexl3_fin7b`
 
-F3 (`root.sharedSwiglu`): the shared expert's gate and up finishes, the clamped SwiGLU and the down's prepare in one
-launch. `F3` keeps it beside a `dense.Dense`.
+<!-- kernel-facts: turboexl3_fin7b -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/deepseek_v41/banked.zig:276` (`const Banked`) |
+| inputs | `zg`, `zu`, `slots`, `gate_svh0`, `gate_svh1`, `gate_svh2`, `up_svh0`, `up_svh1`, `up_svh2`, `down_suh0`, `down_suh1`, `down_suh2`, `xsg`, `xsu` |
+| outputs | `hd`, `hs` |
+| source | `text_fin7b` = `decode/fin7_1a` ++ `decode/fin7_1b` ++ `deepseek_v41:banked/fin7b_expert` ++ `decode/fin7_2` ++ `decode/fin7_planes` ++ `decode/fin7_3` ++ `decode/fin7_sums` ++ `decode/fin7_4` ++ `decode/fin7_swiglu` ++ `decode/fin7_5` (2606 B, `972e3be9c60d`) |
+| header | `header5` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` (26594 B, `41efbbbbd943`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** Ling-3.1-flash: launch 3 of `root.moeLingBanked` at limit 0 (its layers 4 to 64, whose routed SwiGLU is
+  not clamped; `Config.banked_group` 2), the end of its gate|up half; it prepares the down's input. Any banked call
+  whose geometry has `limit` 0.
+- **Shapes and dtypes:** as `turboexl3_fin7cb`.
+- **Grid and threadgroup:** as `turboexl3_fin7cb`.
+- **Template args:** INTER, RKC, KS, DEFER, NBH (fin7's five; no LIMIT).
+- **Replaces:** `turboexl3_fin7`, launched once per bank by each bank's own `moe` call: one launch over the three banks.
+- **Bits:** byte-identical to `moeLing` (so `moe`) at limit 0 on the pair's bank at top-1 with score 1:
+  `turboexl3_fin7cb` with fin7's own SwiGLU line in place of the clamp, every other statement the same.
+- **Pinned by:** `src/models/ling/ling_test.zig` "turboexl3 ling texts: each Ling kernel is its base text with the
+  SwiGLU line swapped for Ling's clamp ..." (CPU: this text is its base with the one swap, nothing else; only a clamp
+  reads LIMIT); `src/models/ling/ling_test.zig` "turboexl3 gpu ling banked: every pair of moeLingBanked over three banks
+  is moeLing's ..." (GPU: every pair byte for byte against `moeLing` on its bank at top-1, rows 1, 2, 8, 16, 48, limits
+  0 and 10, `banked_group` 2 and 4, trellis I16 and U16, Ling's routed geometry over synthetic banks of 20, 12 and 8
+  experts at n 40 and 32).
+
+### `turboexl3_fin7bg`
+
+<!-- kernel-facts: turboexl3_fin7bg -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/deepseek_v41/banked.zig:311` (`const Banked`) |
+| inputs | `zg`, `zu`, `slots`, `gate_svh0`, `gate_svh1`, `gate_svh2`, `up_svh0`, `up_svh1`, `up_svh2`, `down_suh0`, `down_suh1`, `down_suh2`, `xsg`, `xsu` |
+| outputs | `hd`, `hs` |
+| source | `text_fin7bg` = `decode/fin7_1a` ++ `decode/fin7_1b` ++ `deepseek_v41:banked/skip_rk` ++ `deepseek_v41:banked/fin7b_expert` ++ `decode/fin7_2` ++ `decode/fin7_planes` ++ `decode/fin7_3` ++ `decode/fin7_sums` ++ `decode/fin7_4` ++ `decode/fin7_swiglu` ++ `decode/fin7_5` (2723 B, `3f74ff0e778e`) |
+| header | `header5` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` (26594 B, `41efbbbbd943`) |
+| made at | `src/models/deepseek_v41/banked.zig:345` (`const Banked`) (the same text) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** Ling-3.1-flash: as `turboexl3_fin7b`, under `Config.banked_group` 4 (the grouped texts; with `banked_m3`
+  too).
+- **Shapes and dtypes:** as `turboexl3_fin7cbg`.
+- **Grid and threadgroup:** as `turboexl3_fin7cbg`.
+- **Template args:** INTER, RKC, KS, DEFER, NBH (no LIMIT).
+- **Replaces:** as `turboexl3_fin7b`.
+- **Bits:** byte-identical to `turboexl3_fin7b` on every row-slot `fin7cbg` serves (a skipped row-slot's outputs
+  untouched): `turboexl3_fin7cbg` with fin7's own SwiGLU line in place of the clamp.
+- **Pinned by:** `src/models/ling/ling_test.zig` "turboexl3 ling texts: each Ling kernel is its base text with the
+  SwiGLU line swapped for Ling's clamp ..." (CPU: this text is its base with the one swap, nothing else; only a clamp
+  reads LIMIT); `src/models/ling/ling_test.zig` "turboexl3 gpu ling banked: every pair of moeLingBanked over three banks
+  is moeLing's ..." (GPU: every pair byte for byte against `moeLing` on its bank at top-1, rows 1, 2, 8, 16, 48, limits
+  0 and 10, `banked_group` 2 and 4, trellis I16 and U16, Ling's routed geometry over synthetic banks of 20, 12 and 8
+  experts at n 40 and 32).
+
+### `turboexl3_fin7cob`
+
+<!-- kernel-facts: turboexl3_fin7cob -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/deepseek_v41/banked.zig:278` (`const Banked`) |
+| inputs | `zg`, `zu`, `slots`, `gate_svh0`, `gate_svh1`, `gate_svh2`, `up_svh0`, `up_svh1`, `up_svh2`, `down_suh0`, `down_suh1`, `down_suh2`, `xsg`, `xsu` |
+| outputs | `hd`, `hs` |
+| source | `text_fin7cob` = `decode/fin7_1a` ++ `decode/fin7_1b` ++ `deepseek_v41:banked/fin7b_expert` ++ `decode/fin7_2` ++ `decode/fin7_planes` ++ `decode/fin7_3` ++ `decode/fin7_sums` ++ `decode/fin7_4` ++ `decode/fin7_swiglu_clamp_out` ++ `decode/fin7_5` (3015 B, `8b48ab86e9ab`) |
+| header | `header5` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` (26594 B, `41efbbbbd943`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** Ling-3.1-flash: launch 3 of `root.moeLingBanked` with a limit (its layers 65 to 71,
+  `expert_swiglu_limit_list` 10; `Config.banked_group` 2).
+- **Shapes and dtypes:** as `turboexl3_fin7cb`.
+- **Grid and threadgroup:** as `turboexl3_fin7cb`.
+- **Template args:** fin7's five, then LIMIT (an integer 1 to 128, Ling-3.1's 10): the gate's SiLU clamped from above at
+  LIMIT and up to [−LIMIT, LIMIT], in f32 on the finished f16 values; a NaN passes through.
+- **Replaces:** `turboexl3_fin7co`, launched once per bank by each bank's own `moeLing` call: one launch over the three
+  banks.
+- **Bits:** byte-identical to `moeLing` on the pair's bank at top-1 with score 1: `turboexl3_fin7cb` with Ling's clamp
+  piece in place of DeepSeek's, every other statement the same.
+- **Pinned by:** `src/models/ling/ling_test.zig` "turboexl3 ling texts: each Ling kernel is its base text with the
+  SwiGLU line swapped for Ling's clamp ..." (CPU: this text is its base with the one swap, nothing else; only a clamp
+  reads LIMIT); `src/models/ling/ling_test.zig` "turboexl3 gpu ling banked: every pair of moeLingBanked over three banks
+  is moeLing's ..." (GPU: every pair byte for byte against `moeLing` on its bank at top-1, rows 1, 2, 8, 16, 48, limits
+  0 and 10, `banked_group` 2 and 4, trellis I16 and U16, Ling's routed geometry over synthetic banks of 20, 12 and 8
+  experts at n 40 and 32).
+
+### `turboexl3_fin7cobg`
+
+<!-- kernel-facts: turboexl3_fin7cobg -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/deepseek_v41/banked.zig:313` (`const Banked`) |
+| inputs | `zg`, `zu`, `slots`, `gate_svh0`, `gate_svh1`, `gate_svh2`, `up_svh0`, `up_svh1`, `up_svh2`, `down_suh0`, `down_suh1`, `down_suh2`, `xsg`, `xsu` |
+| outputs | `hd`, `hs` |
+| source | `text_fin7cobg` = `decode/fin7_1a` ++ `decode/fin7_1b` ++ `deepseek_v41:banked/skip_rk` ++ `deepseek_v41:banked/fin7b_expert` ++ `decode/fin7_2` ++ `decode/fin7_planes` ++ `decode/fin7_3` ++ `decode/fin7_sums` ++ `decode/fin7_4` ++ `decode/fin7_swiglu_clamp_out` ++ `decode/fin7_5` (3132 B, `02a993e5f353`) |
+| header | `header5` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` (26594 B, `41efbbbbd943`) |
+| made at | `src/models/deepseek_v41/banked.zig:347` (`const Banked`) (the same text) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** Ling-3.1-flash: as `turboexl3_fin7cob`, under `Config.banked_group` 4.
+- **Shapes and dtypes:** as `turboexl3_fin7cbg`.
+- **Grid and threadgroup:** as `turboexl3_fin7cbg`.
+- **Template args:** fin7's five, then LIMIT (an integer 1 to 128, Ling-3.1's 10): the gate's SiLU clamped from above at
+  LIMIT and up to [−LIMIT, LIMIT], in f32 on the finished f16 values; a NaN passes through.
+- **Replaces:** as `turboexl3_fin7cob`.
+- **Bits:** byte-identical to `turboexl3_fin7cob` on every row-slot it serves: `turboexl3_fin7cbg` with Ling's clamp
+  piece in place of DeepSeek's.
+- **Pinned by:** `src/models/ling/ling_test.zig` "turboexl3 ling texts: each Ling kernel is its base text with the
+  SwiGLU line swapped for Ling's clamp ..." (CPU: this text is its base with the one swap, nothing else; only a clamp
+  reads LIMIT); `src/models/ling/ling_test.zig` "turboexl3 gpu ling banked: every pair of moeLingBanked over three banks
+  is moeLing's ..." (GPU: every pair byte for byte against `moeLing` on its bank at top-1, rows 1, 2, 8, 16, 48, limits
+  0 and 10, `banked_group` 2 and 4, trellis I16 and U16, Ling's routed geometry over synthetic banks of 20, 12 and 8
+  experts at n 40 and 32).
 
 ### `turboexl3_dense_swiglu_prep`
 

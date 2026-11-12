@@ -49,6 +49,8 @@ pub const ricursive = @import("models/ricursive/ricursive.zig");
 /// The model entry points (root re-exports each under its own name)
 pub const qwen38 = @import("models/qwen38/api.zig");
 pub const deepseek_v41 = @import("models/deepseek_v41/api.zig");
+/// Ling-3.1-flash's entry points
+pub const ling = @import("models/ling/api.zig");
 /// GLM-5.3-Flash's trunk linears at prefill rows and the pg2 table a host builds from their tile codes
 pub const glm53f = @import("models/glm53f/api.zig");
 /// DeepSeek-V4.1's shared expert's fused SwiGLU (models/deepseek_v41/api.zig)
@@ -142,8 +144,9 @@ pub fn validateCall(x: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array, scores: m
 /// at a geometry past a full cache fails with error.Exl3EngineCacheFull. One served model needs a handful of each:
 /// GLM-5.3-Flash's SC packs (models/glm53f) 20 dense (in, out, K) per activation dtype of the 64, at most 4 decode
 /// geometries of the 16 and 5 prefill geometries of the 16 (glm53f_test.zig's per-pack count holds each pack to them).
-/// A test that runs more geometries in one process frees them between its cases (`releaseEngines`).
-pub const engine_cache_slots = 16;
+/// A test that runs more geometries in one process frees them between its cases (`releaseEngines`). The decode caches
+/// hold 32: the Ling GPU tests make 17 routed geometries in one process (ling_test.zig's kernel cache test).
+pub const engine_cache_slots = 32;
 pub const dense_cache_slots = 64;
 pub const prefill_cache_slots = 16;
 
@@ -160,7 +163,7 @@ pub fn kernelsFor(geo: decode.Geometry, out_dtype: mlx.mlx_dtype) !*decode.Kerne
         if (slot.*) |*k| {
             const g = k.geo;
             if (g.hidden == geo.hidden and g.inter == geo.inter and g.topk == geo.topk and g.rate.n == geo.rate.n and
-                g.dec.codebook == geo.dec.codebook and g.dec.window == geo.dec.window and g.limit == geo.limit and k.out_dtype == out_dtype) return k;
+                g.dec.codebook == geo.dec.codebook and g.dec.window == geo.dec.window and g.limit == geo.limit and (g.limit == 0 or g.clamp == geo.clamp) and k.out_dtype == out_dtype) return k;
         } else if (free_slot == null) free_slot = i;
     }
     const i = free_slot orelse return error.Exl3EngineCacheFull;
@@ -723,6 +726,8 @@ fn pfOptions() prefill.Options {
     var o: prefill.Options = .{ .bm = 64, .small = .mixed, .dbuf = true, .unroll = true, .fragb = true, .intr = true, .defer_affine = true, .ncb = 4, .sintr = true, .froute = true };
     o.alay = config.get().pf_alay;
     o.t128 = config.get().pf_t128;
+    // the fused finish (off by default; the same bytes)
+    o.dfin = config.get().pf_dfin;
     o.bk128 = config.get().pf_bk128;
     o.half_rows = config.get().pf_half_rows;
     o.t128_bk128 = config.get().pf_t128_bk128;
@@ -734,18 +739,8 @@ fn pfOptions() prefill.Options {
     return o;
 }
 
-fn prefillFor(geo: prefill.Geometry) !*prefill.Prefill {
-    while (pf_lock.get().*.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
-    defer pf_lock.get().*.store(0, .release);
-    var free_slot: ?usize = null;
-    for (&pf_cache.get().*, 0..) |*slot, i| {
-        if (slot.*) |*p| {
-            const g = p.geo;
-            if (g.hidden == geo.hidden and g.inter == geo.inter and g.topk == geo.topk and g.experts == geo.experts and
-                g.rate.n == geo.rate.n and g.dec.codebook == geo.dec.codebook and g.dec.window == geo.dec.window and g.limit == geo.limit) return p;
-        } else if (free_slot == null) free_slot = i;
-    }
-    const i = free_slot orelse return error.Exl3EngineCacheFull;
+/// `pfOptions` with what `geo` cannot take dropped: the options `prefillFor` builds the geometry's kernels with.
+fn pfOptionsFor(geo: prefill.Geometry) prefill.Options {
     var o = pfOptions();
     if (geo.rate.n % 16 != 0) o.intr = false; // the integer-rate reader needs whole bits per weight
     if (!o.intr or o.small == .off) o.sintr = false; // the register path's use of it: intr's, where a register path runs
@@ -771,6 +766,30 @@ fn prefillFor(geo: prefill.Geometry) !*prefill.Prefill {
     if (!o.t128 or o.t128_zfit) o.size_class = false;
     // int8 gate|up and down: beside the 128-row tiles, on the deferred map, the mixed outputs at their sorted positions
     if (!o.t128 or !o.defer_affine or o.t128_zfit) o.int8 = 0;
+    // the compact mixed outputs' and int8's mids clamp the gate's input only: a silu_out clamp keeps the exact chain
+    if (geo.limit != 0 and geo.clamp != .gate_in) {
+        o.t128_zfit = false;
+        o.int8 = 0;
+    }
+    // the fused finish: a row's one slot (top-1), the 128-row tiles (one down launch over both tables), whole 128-column
+    // blocks a threadgroup, its staging within 32 KB
+    if (geo.topk != 1 or !o.t128 or o.t128_bk128 or o.t128_zfit or o.size_class or o.int8 != 0 or (o.ncb != 2 and o.ncb != 4) or o.wsp != 0 or o.dfinBytes() > 32768) o.dfin = false;
+    return o;
+}
+
+fn prefillFor(geo: prefill.Geometry) !*prefill.Prefill {
+    while (pf_lock.get().*.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
+    defer pf_lock.get().*.store(0, .release);
+    var free_slot: ?usize = null;
+    for (&pf_cache.get().*, 0..) |*slot, i| {
+        if (slot.*) |*p| {
+            const g = p.geo;
+            if (g.hidden == geo.hidden and g.inter == geo.inter and g.topk == geo.topk and g.experts == geo.experts and
+                g.rate.n == geo.rate.n and g.dec.codebook == geo.dec.codebook and g.dec.window == geo.dec.window and g.limit == geo.limit and (g.limit == 0 or g.clamp == geo.clamp)) return p;
+        } else if (free_slot == null) free_slot = i;
+    }
+    const i = free_slot orelse return error.Exl3EngineCacheFull;
+    const o = pfOptionsFor(geo);
     pf_cache.get().*[i] = try prefill.Prefill.init(geo, o);
     if (!pf_logged.get().*) {
         pf_logged.get().* = true;
@@ -784,6 +803,11 @@ fn prefillFor(geo: prefill.Geometry) !*prefill.Prefill {
         pf_i8_logged.get().* = true;
         std.debug.print("[turboexl3] prefill int8 engaged: the routed gate|up and down GEMMs on int8 ({s}{s})\n", .{ if (o.int8 == 2) "per-token scales" else "per-block scales", if (o.int8_c2 == 1020) "" else ", weights centered at 509.5" });
     }
+    // the fused finish's own line, at each geometry built with it (a handful a process; the served shape prints none), so
+    // the line names what the geometry runs: the top-1 rows path's dfin beside a top-8 geometry's; the launch shapes it
+    // names are the served constants
+    if (o.dfin)
+        std.debug.print("[turboexl3] prefill variant engaged: bm={d} small={s} t128={} cut={d} gu_ncb={d} dfin={} dfr={d} (topk {d}, experts {d})\n", .{ o.bm, @tagName(o.small), o.t128, prefill.t128_cut, prefill.gu_ncb, o.dfin, prefill.dfr, geo.topk, geo.experts });
     return &pf_cache.get().*[i].?;
 }
 
@@ -797,13 +821,22 @@ pub fn freeArr(a: mlx.mlx_array) void {
 /// `Config.prefill` or `Config.nax` is off (the host keeps its prefill arm for them). Gate, up and down must share a rate.
 pub fn moe(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array, scores: mlx.mlx_array, dec: format.Decode, verify_rows: bool) !mlx.mlx_array {
     _ = verify_rows;
-    return moeSwiglu(s, x, bank, inds, scores, dec, 0);
+    return moeSwiglu(s, x, bank, inds, scores, dec, 0, .gate_in);
 }
 
-/// `moe`'s chains with the SwiGLU's clamp `limit` (0: none, `moe` itself; `moeClamped`). The clamp is part of the decode and
+/// `moe`'s chains with the SwiGLU's clamp `limit` (0: none, `moe` itself; `moeClamped`, `moeLing`) at `clamp` (where it
+/// clamps, `format.ClampAt`; the models' entries pass it). The clamp is part of the decode and
 /// prefill geometries, so a clamped call builds and caches its own kernels (fin7's and the mids' clamped variants) beside
 /// the unclamped ones, and every other kernel is the unclamped chain's.
-fn moeSwiglu(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array, scores: mlx.mlx_array, dec: format.Decode, limit: u32) !mlx.mlx_array {
+pub fn moeSwiglu(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array, scores: mlx.mlx_array, dec: format.Decode, limit: u32, clamp: format.ClampAt) !mlx.mlx_array {
+    return moeSwigluWith(s, x, bank, inds, scores, dec, limit, clamp, .{});
+}
+
+/// `moeSwiglu` with the call's own choices (`prefill.Call`): its prefill rows take the fused finish (`Config.pf_dfin`)
+/// only where the call keeps it and its geometry's engine was built with it; `.{ .dfin = false }` runs the served route,
+/// down launches and finish on that engine, the same bytes. Decode rows have no such choice. `moeSwiglu` is this at
+/// `.{}`.
+pub fn moeSwigluWith(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array, scores: mlx.mlx_array, dec: format.Decode, limit: u32, clamp: format.ClampAt, call: prefill.Call) !mlx.mlx_array {
     const geo = try validateCall(x, bank, inds, scores);
     if (geo.gate_up.n != geo.down.n) return error.Exl3EngineNotImplemented;
     const xsh = mlx.getShape(x);
@@ -812,14 +845,14 @@ fn moeSwiglu(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx.mlx_arra
     const K: c_int = mlx.getShape(inds)[2];
     if (limit != 0 and !clamp_logged.get().*) {
         clamp_logged.get().* = true;
-        std.debug.print("[turboexl3] clamped SwiGLU engaged (swiglu_limit {d}): fin7's and the prefill mid's clamped variants\n", .{limit});
+        std.debug.print("[turboexl3] clamped SwiGLU engaged (swiglu_limit {d}, clamp {t}): fin7's and the prefill mid's clamped variants\n", .{ limit, clamp });
     }
     if (rows > kernels.DECODE_ROWS_MAX) {
         if (!config.get().prefill or !config.get().nax) return error.Exl3EngineNotImplemented;
-        return moePrefill(s, x, bank, inds, scores, dec, geo, rows, K, limit);
+        return moePrefill(s, x, bank, inds, scores, dec, geo, rows, K, limit, clamp, call);
     }
     if (SlotStats.enabled()) SlotStats.record(inds, rows, @intCast(K)) catch {};
-    const dgeo: decode.Geometry = .{ .hidden = @intCast(geo.hidden), .inter = @intCast(geo.width), .topk = @intCast(K), .rate = geo.gate_up, .dec = dec, .limit = limit };
+    const dgeo: decode.Geometry = .{ .hidden = @intCast(geo.hidden), .inter = @intCast(geo.width), .topk = @intCast(K), .rate = geo.gate_up, .dec = dec, .limit = limit, .clamp = clamp };
     // the operands the kernels take as the host holds them: x [rows, D] (bf16/f16/f32), slots [rows * K] (i32/u32), scores
     // [rows * K] (bf16/f16/f32); the kernels convert in place and write y in x's dtype, so no cast launches per layer. At one
     // row (`flatOperands`) the host's x [1, 1, D], inds and scores [1, 1, K] go as they are: every kernel indexes them flat
@@ -906,10 +939,10 @@ const PfCapture = struct {
     }
 };
 
-fn moePrefill(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array, scores: mlx.mlx_array, dec: format.Decode, geo: Geometry, rows: usize, K: c_int, limit: u32) !mlx.mlx_array {
+fn moePrefill(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array, scores: mlx.mlx_array, dec: format.Decode, geo: Geometry, rows: usize, K: c_int, limit: u32, clamp: format.ClampAt, call: prefill.Call) !mlx.mlx_array {
     const xsh = mlx.getShape(x);
     const rows_c: c_int = @intCast(rows);
-    const pf = try prefillFor(.{ .hidden = @intCast(geo.hidden), .inter = @intCast(geo.width), .topk = @intCast(K), .experts = @intCast(geo.experts), .rate = geo.gate_up, .dec = dec, .limit = limit });
+    const pf = try prefillFor(.{ .hidden = @intCast(geo.hidden), .inter = @intCast(geo.width), .topk = @intCast(K), .experts = @intCast(geo.experts), .rate = geo.gate_up, .dec = dec, .limit = limit, .clamp = clamp });
     var x2 = mlx.mlx_array_new();
     defer freeArr(x2);
     try mlx.check(mlx.mlx_reshape(&x2, x, &[_]c_int{ rows_c, xsh[2] }, 2, s));
@@ -931,7 +964,7 @@ fn moePrefill(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx.mlx_arr
         .down_suh = bank.down.suh,
         .down_svh = bank.down.svh,
     };
-    const y0 = if (pf.opts.t128) try pf.moeT128(s, x2, inds1, s1, ops, rows, mlx.mlx_array_dtype(x)) else try pf.moe(s, x2, inds1, s1, ops, rows, mlx.mlx_array_dtype(x));
+    const y0 = if (pf.opts.t128) try pf.moeT128WithCall(s, x2, inds1, s1, ops, rows, mlx.mlx_array_dtype(x), null, null, call) else try pf.moeWith(s, x2, inds1, s1, ops, rows, mlx.mlx_array_dtype(x), null);
     defer freeArr(y0);
     var y = mlx.mlx_array_new();
     errdefer freeArr(y);
@@ -967,9 +1000,33 @@ pub const moeFusedSharedRouted = qwen38.moeFusedSharedRouted;
 /// `limit` in 1..128, else error.InvalidExl3Clamp. `ref.moeRowClamped` is the reference.
 pub fn moeClamped(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array, scores: mlx.mlx_array, dec: format.Decode, limit: c_int) !mlx.mlx_array {
     if (limit <= 0 or limit > 128) return error.InvalidExl3Clamp;
-    return moeSwiglu(s, x, bank, inds, scores, dec, @intCast(limit));
+    return moeSwiglu(s, x, bank, inds, scores, dec, @intCast(limit), .gate_in);
 }
 const clamp_logged = Global(bool, "root_clamp_logged", false);
+
+/// `moeSwiglu`'s prefill chain at top-1 over gathered rows (an expert streamer's prompt calls over its slot bank:
+/// Ling-3.1's `ling.moeLingRows`): row-slot p reads x's row `rows[p]` (x [n, hidden], the layer's activation) in the
+/// chain's prepare (`prefill.text_prep_rows`), runs the expert at slot `inds[p]` at weight `scores[p]`, and y [S, hidden]
+/// in `out_dtype` holds row-slot p's output at row p. No gathered copy of x is made, and the prepare rounds every x value
+/// to f16 through f32 whatever x's dtype, so row p is, bit for bit, row p of `moeSwiglu` at top-1 over `take(x, rows)` in
+/// any float dtype holding the same values (x [1, S, hidden], inds and scores [1, S, 1]), its y rounded once to
+/// `out_dtype` (the chain's finish stores the one f32 sum in `out_dtype`, as an astype of an f32 y does): the same
+/// geometry, so the same cached engine and launches but the prepare. x [n, hidden] bf16, f16 or f32; rows u32 [S], each
+/// below n (not checked: the caller's routing); inds u32 or i32 [S] (slots of the bank); scores f32, bf16 or f16 [S]; S
+/// more than `kernels.DECODE_ROWS_MAX` (a caller pads a smaller call, as `moe`'s prefill callers do); `out_dtype` bf16,
+/// f16 or f32; `limit` 0 (none) to 128 at `clamp`, as `moeSwiglu` takes them, else error.InvalidExl3Clamp.
+/// `Config.prefill` and `Config.nax` as `moe`'s prefill rows; gate, up and down at one rate. GLM-5.3-Flash's
+/// `moeClampedRows` (glm53f-fused) is this chain at `limit` 1 to 128 and `gate_in`.
+pub fn moeSwigluRows(s: mlx.mlx_stream, x: mlx.mlx_array, rows: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array, scores: mlx.mlx_array, dec: format.Decode, limit: u32, clamp: format.ClampAt, out_dtype: mlx.mlx_dtype) !mlx.mlx_array {
+    return moeSwigluRowsWith(s, x, rows, bank, inds, scores, dec, limit, clamp, out_dtype, .{});
+}
+
+/// `moeSwigluRows` with the call's own choices (`prefill.Call`): the call takes the fused finish (`Config.pf_dfin`) only
+/// where it keeps it and its geometry's engine was built with it; `.{ .dfin = false }` runs the served route, down
+/// launches and finish on that engine (`Prefill.moeT128WithCall`), the same bytes. `moeSwigluRows` is this at `.{}`.
+pub fn moeSwigluRowsWith(s: mlx.mlx_stream, x: mlx.mlx_array, rows: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array, scores: mlx.mlx_array, dec: format.Decode, limit: u32, clamp: format.ClampAt, out_dtype: mlx.mlx_dtype, call: prefill.Call) !mlx.mlx_array {
+    return swigluRows(s, x, rows, bank, inds, scores, dec, limit, clamp, out_dtype, null, call);
+}
 
 /// `moeClamped`'s prefill chain at top-1 over gathered rows (GLM-5.3-Flash's prompt calls over an expert streamer's slot
 /// bank, models/glm53f): row-slot p reads x's row `rows[p]`, runs the expert at slot `inds[p]` at weight `scores[p]`, and y
@@ -983,7 +1040,8 @@ const clamp_logged = Global(bool, "root_clamp_logged", false);
 /// f16 or f32; `limit` 1..128, else error.InvalidExl3Clamp. `Config.prefill` and `Config.nax` as `moe`'s prefill rows;
 /// gate, up and down at one rate.
 pub fn moeClampedRows(s: mlx.mlx_stream, x: mlx.mlx_array, rows: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array, scores: mlx.mlx_array, dec: format.Decode, limit: c_int, out_dtype: mlx.mlx_dtype) !mlx.mlx_array {
-    return clampedRows(s, x, rows, bank, inds, scores, dec, limit, out_dtype, null);
+    if (limit <= 0 or limit > 128) return error.InvalidExl3Clamp;
+    return swigluRows(s, x, rows, bank, inds, scores, dec, @intCast(limit), .gate_in, out_dtype, null, .{});
 }
 
 /// `moeClampedRows` over a call whose `inds` hold at most `call_experts` distinct slots (the caller's count, 1 or more;
@@ -991,12 +1049,15 @@ pub fn moeClampedRows(s: mlx.mlx_stream, x: mlx.mlx_array, rows: mlx.mlx_array, 
 /// outputs take `prefill.t128ZCap` rows (64 an expert, at most S) in place of S. The same bytes.
 pub fn moeClampedRowsFit(s: mlx.mlx_stream, x: mlx.mlx_array, rows: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array, scores: mlx.mlx_array, dec: format.Decode, limit: c_int, out_dtype: mlx.mlx_dtype, call_experts: u32) !mlx.mlx_array {
     if (call_experts == 0) return error.BadExl3Shape;
-    return clampedRows(s, x, rows, bank, inds, scores, dec, limit, out_dtype, call_experts);
+    if (limit <= 0 or limit > 128) return error.InvalidExl3Clamp;
+    return swigluRows(s, x, rows, bank, inds, scores, dec, @intCast(limit), .gate_in, out_dtype, call_experts, .{});
 }
 
-/// `moeClampedRows`' body; `call_experts` as `moeClampedRowsFit`'s (null: the call's row count bounds the compact outputs).
-fn clampedRows(s: mlx.mlx_stream, x: mlx.mlx_array, rows: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array, scores: mlx.mlx_array, dec: format.Decode, limit: c_int, out_dtype: mlx.mlx_dtype, call_experts: ?u32) !mlx.mlx_array {
-    if (limit <= 0 or limit > 128) return error.InvalidExl3Clamp;
+/// The rows chain's body (`moeSwigluRowsWith`, `moeClampedRows`, `moeClampedRowsFit`): `limit` 0 (none) to 128 at
+/// `clamp`; `call_experts` as `moeClampedRowsFit`'s (null: the call's row count bounds the compact outputs); `call` as
+/// `moeSwigluRowsWith`'s.
+fn swigluRows(s: mlx.mlx_stream, x: mlx.mlx_array, rows: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array, scores: mlx.mlx_array, dec: format.Decode, limit: u32, clamp: format.ClampAt, out_dtype: mlx.mlx_dtype, call_experts: ?u32, call: prefill.Call) !mlx.mlx_array {
+    if (limit > 128) return error.InvalidExl3Clamp;
     if (!config.get().prefill or !config.get().nax) return error.Exl3EngineNotImplemented;
     const xsh = mlx.getShape(x);
     const rs = mlx.getShape(rows);
@@ -1012,11 +1073,11 @@ fn clampedRows(s: mlx.mlx_stream, x: mlx.mlx_array, rows: mlx.mlx_array, bank: B
         (out_dtype != .bfloat16 and out_dtype != .float32 and out_dtype != .float16)) return error.BadExl3Dtype;
     const geo = try bankGeometry(bank, xsh[1]);
     if (geo.gate_up.n != geo.down.n) return error.Exl3EngineNotImplemented;
-    if (!clamp_logged.get().*) {
+    if (limit != 0 and !clamp_logged.get().*) {
         clamp_logged.get().* = true;
-        std.debug.print("[turboexl3] clamped SwiGLU engaged (swiglu_limit {d}): fin7's and the prefill mid's clamped variants\n", .{limit});
+        std.debug.print("[turboexl3] clamped SwiGLU engaged (swiglu_limit {d}, clamp {t}): fin7's and the prefill mid's clamped variants\n", .{ limit, clamp });
     }
-    const pf = try prefillFor(.{ .hidden = @intCast(geo.hidden), .inter = @intCast(geo.width), .topk = 1, .experts = @intCast(geo.experts), .rate = geo.gate_up, .dec = dec, .limit = @intCast(limit) });
+    const pf = try prefillFor(.{ .hidden = @intCast(geo.hidden), .inter = @intCast(geo.width), .topk = 1, .experts = @intCast(geo.experts), .rate = geo.gate_up, .dec = dec, .limit = limit, .clamp = clamp });
     const ops: prefill.Operands = .{
         .gate_t = bank.gate.trellis,
         .gate_suh = bank.gate.suh,
@@ -1028,7 +1089,7 @@ fn clampedRows(s: mlx.mlx_stream, x: mlx.mlx_array, rows: mlx.mlx_array, bank: B
         .down_suh = bank.down.suh,
         .down_svh = bank.down.svh,
     };
-    if (pf.opts.t128) return pf.moeT128With(s, x, inds, scores, ops, S, out_dtype, rows, call_experts);
+    if (pf.opts.t128) return pf.moeT128WithCall(s, x, inds, scores, ops, S, out_dtype, rows, call_experts, call);
     return pf.moeWith(s, x, inds, scores, ops, S, out_dtype, rows);
 }
 
@@ -1053,6 +1114,32 @@ pub const moeClampedBankedDownSel = deepseek_v41.moeClampedBankedDownSel;
 pub const moeClampedBankedDownV = deepseek_v41.moeClampedBankedDownV;
 pub const moeClampedBankedDownSelV = deepseek_v41.moeClampedBankedDownSelV;
 
+/// Ling-3.1-flash's routed experts: unclamped, or clamped after the SiLU, stacked and banked, and a streamer's prompt call
+/// over gathered rows (models/ling/api.zig)
+pub const moeLing = ling.moeLing;
+pub const moeLingRows = ling.moeLingRows;
+/// `moeLing` and `moeLingRows` with the call's own choices (`prefill.Call`: the fused finish or the served ending, a call at
+/// a time; the outside plugin's PF_DFIN whole-call switch)
+pub const moeLingWith = ling.moeLingWith;
+pub const moeLingRowsWith = ling.moeLingRowsWith;
+pub const moeLingBanked = ling.moeLingBanked;
+pub const moeLingBankedSel = ling.moeLingBankedSel;
+pub const moeLingBankedGateUp = ling.moeLingBankedGateUp;
+pub const moeLingBankedDown = ling.moeLingBankedDown;
+/// Ling-3.1-flash's shared expert at decode rows: the gate and the up in one launch with the host's SwiGLU and the down's
+/// prepare in its pairs' second finishes, then the down's GEMV (models/ling/shared.zig)
+pub const lingSharedExpert = ling.sharedExpert;
+pub const lingSharedTakes = ling.sharedTakes;
+pub const lingSigmoidTable = ling.sigmoidTable;
+/// Ling-3.1-flash's prefill SwiGLU epilogue: up's finish at prompt rows running the host's SwiGLU of the gate's value
+/// and its own (models/ling/swiglu.zig)
+pub const lingUpSwiglu = ling.upSwiglu;
+/// The same over a W_hat the caller decoded once (models/ling/swiglu.zig `upSwigluW`)
+pub const lingUpSwigluW = ling.upSwigluW;
+/// Ling-3.1-flash's routed combine at prompt rows, joined and JOINLESS (models/ling/combine.zig)
+pub const ling_combine = @import("models/ling/combine.zig");
+/// Ling-3.1-flash's MLA attention at decode rows in the latent (models/ling/mla_latent.zig)
+pub const mlaLatentDecode = ling.mlaLatentDecode;
 /// Test seam: every engine this process compiled freed and its slot emptied (the decode, dense, prefill and grouped
 /// caches, and the banked, shared-head and F3 states keyed by those engines' addresses, which go first so no stale
 /// key names a reused slot). For a test that runs more geometries in one process than a served model does
@@ -1142,6 +1229,30 @@ test "turboexl3 root: the served prefill options follow the config, and the deco
     decode_form_override.get().* = 3;
     defer decode_form_override.get().* = null;
     try t.expectEqual(@as(u8, 3), decodeForm());
+    // the routed prefill's launch shapes are constants at the served values (V1's knobs: the remainder cut 64, gate|up's
+    // column blocks 1, the fused finish's staging rows 32, bm 64, the mixed launch); the fused finish is off by default,
+    // from its field; at Ling's routed geometries (n 40 and 32) it is valid, and a top-8 geometry drops it (a row's slots
+    // in other tiles)
+    try t.expect(prefill.t128_cut == 64 and prefill.gu_ncb == 1 and prefill.dfr == 32 and o.bm == 64 and o.small == .mixed and !o.dfin);
+    for ([_]u32{ 40, 32 }) |n| {
+        const g1: prefill.Geometry = .{ .hidden = 4096, .inter = 1280, .topk = 1, .experts = 512, .rate = format.Rate.fromN(n).?, .dec = .mul1, .limit = 10, .clamp = .silu_out };
+        var g8 = g1;
+        g8.topk = 8;
+        try config.configure(.{});
+        try t.expect(pfOptionsFor(g1).valid() and pfOptionsFor(g1).t128 and !pfOptionsFor(g1).dfin);
+        try config.configure(.{ .pf_dfin = true });
+        const q = pfOptionsFor(g1);
+        try t.expect(q.valid() and q.t128 and q.dfin and q.bm == 64);
+        const q8 = pfOptionsFor(g8);
+        try t.expect(q8.valid() and !q8.dfin);
+        // a call's ending on those engines (`prefill.Call`): the top-1 engine's own is the fused finish, a call that
+        // declines it the served ending; the top-8 engine has the served ending whatever the call keeps
+        try t.expect(prefill.endOf(q, .{}) == .dfin and prefill.endOf(q, .{ .dfin = false }) == .served and prefill.endOf(q8, .{}) == .served);
+        // the fused finish needs the 128-row tiles (one down launch over both tables): without them it drops it
+        try config.configure(.{ .pf_t128 = false, .pf_dfin = true });
+        const m = pfOptionsFor(g1);
+        try t.expect(m.valid() and m.small == .mixed and !m.dfin);
+    }
 }
 
 /// turboexl3's module state (`Global`): what a host that shares its objects' state registers (mlx-serve:
@@ -1178,6 +1289,8 @@ pub const shared_state = .{
     ricursive.shared_state,
     qwen38.shared_state,
     deepseek_v41.shared_state,
+    ling.shared_state,
+    ling_combine.shared_state,
     glm53f.shared_gu.shared_state,
     glm53f.pair_ks.shared_state,
 };

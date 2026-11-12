@@ -1,0 +1,1 @@
+            if (DEFER != 0) exl3pf_affine(Dt, (op == 0 ? xs0 : xs0) + ulong(row0 + tm) * ulong(NBX), int(NBX), sgp, L);

@@ -77,6 +77,11 @@ pub const Decode = struct {
     pub const mcg: Decode = .{ .codebook = .mcg };
 };
 
+/// Where a clamped SwiGLU clamps (a geometry's `limit` > 0): `gate_in`, DeepSeek-V4's and GLM's, clamps the gate from
+/// above before the SiLU, silu(min(g, L)) * clamp(u, -L, L); `silu_out`, Ling-3.1's (exllamav3's `act_limit` with SiLU),
+/// clamps the SiLU's output from above, min(silu(g), L) * clamp(u, -L, L). The up is clamped both ways in either.
+pub const ClampAt = enum { gate_in, silu_out };
+
 /// A trellis rate K = n/16 bits per weight, n the halfwords a packed 256-weight tile carries (even, 16..128).
 /// Weight t's codeword is the 16-bit window of the tile's circular bitstream ending at `bitEnd(t)`.
 pub const Rate = struct {

@@ -33,6 +33,8 @@ const fin7_3 = decode.fin7_3;
 const fin7_sums = decode.fin7_sums;
 const fin7_4 = decode.fin7_4;
 const fin7_swiglu_clamp = decode.fin7_swiglu_clamp;
+const fin7_swiglu = decode.fin7_swiglu;
+const fin7_swiglu_clamp_out = decode.fin7_swiglu_clamp_out;
 const fin7_5 = decode.fin7_5;
 const down3_1 = decode.down3_1;
 const down3_2 = decode.down3_2;
@@ -58,6 +60,10 @@ const down_outputs = decode.down_outputs;
 pub const text_prep2b = prep2_1 ++ prep2b_expert ++ prep2_row ++ prep2_body;
 pub const text_gu3b = gu3_1 ++ rk_line ++ gu3_2 ++ gu3b_w ++ gu3_3 ++ gu3_stores ++ gu3_4;
 pub const text_fin7cb = fin7_1 ++ fin7b_expert ++ fin7_2 ++ fin7_planes ++ fin7_3 ++ fin7_sums ++ fin7_4 ++ fin7_swiglu_clamp ++ fin7_5;
+/// Ling-3.1 (`models/ling/api.zig`): fin7cb with fin7's own SwiGLU line (an unclamped geometry, `Geometry.limit` 0) and
+/// with Ling's clamp after the SiLU (`Geometry.clamp` `silu_out`), every other statement fin7cb's.
+pub const text_fin7b = fin7_1 ++ fin7b_expert ++ fin7_2 ++ fin7_planes ++ fin7_3 ++ fin7_sums ++ fin7_4 ++ fin7_swiglu ++ fin7_5;
+pub const text_fin7cob = fin7_1 ++ fin7b_expert ++ fin7_2 ++ fin7_planes ++ fin7_3 ++ fin7_sums ++ fin7_4 ++ fin7_swiglu_clamp_out ++ fin7_5;
 pub const text_down3b = down3_1 ++ rk_line ++ down3_2 ++ down3b_w ++ down3_3;
 pub const text_dfin3b = dfin3_1 ++ dfin3b_expert ++ dfin3_2;
 const prep2b_expert = @embedFile("kernels/banked/prep2b_expert.metal");
@@ -148,6 +154,9 @@ pub const group_kernel_names = group_gu_names ++ group_down_names ++ group_gu_m3
 pub const text_prep2bg = prep2_1 ++ skip_rk ++ prep2b_expert ++ prep2_row ++ prep2_body;
 pub const text_gu3bg = gu3_1 ++ rk_line ++ gu3g_2 ++ gu3b_w ++ gu3g_3;
 pub const text_fin7cbg = fin7_1 ++ skip_rk ++ fin7b_expert ++ fin7_2 ++ fin7_planes ++ fin7_3 ++ fin7_sums ++ fin7_4 ++ fin7_swiglu_clamp ++ fin7_5;
+/// fin7cbg's Ling-3.1 forms, as `text_fin7b` and `text_fin7cob` are fin7cb's.
+pub const text_fin7bg = fin7_1 ++ skip_rk ++ fin7b_expert ++ fin7_2 ++ fin7_planes ++ fin7_3 ++ fin7_sums ++ fin7_4 ++ fin7_swiglu ++ fin7_5;
+pub const text_fin7cobg = fin7_1 ++ skip_rk ++ fin7b_expert ++ fin7_2 ++ fin7_planes ++ fin7_3 ++ fin7_sums ++ fin7_4 ++ fin7_swiglu_clamp_out ++ fin7_5;
 pub const text_down3bg = down3_1 ++ rk_line ++ down3g_2 ++ down3b_w ++ down3g_3;
 pub const text_dfin3bg = dfin3_1 ++ skip_rk_next ++ dfin3b_expert ++ dfin3_2;
 /// hw4b: the grouped GEMVs with an M = 3 member path (`gu3g_3m3`, `down3g_3m3`): a lead with three members runs it, where
@@ -251,16 +260,22 @@ pub const Banked = struct {
         self.* = undefined;
     }
 
-    /// The banked decode's kernels, made on first use: a clamped top-1 geometry's (each row-slot a pair at weight 1, its
-    /// SwiGLU fin7c's); error.Exl3EngineNotImplemented for any other.
+    /// The banked decode's kernels, made on first use: a top-1 geometry's (each row-slot a pair at weight 1), its SwiGLU
+    /// the geometry's (DeepSeek-V4.1's clamp, none, or Ling-3.1's clamp after the SiLU); error.Exl3EngineNotImplemented for any other.
     fn bankedKernels(self: *Banked, k3: *Kernels3) !*const BankedKernels {
         if (self.banked) |*b| return b;
-        if (k3.geo.limit == 0 or k3.geo.topk != 1) return error.Exl3EngineNotImplemented;
+        if (k3.geo.topk != 1) return error.Exl3EngineNotImplemented;
         const prep = ks.newKernel("turboexl3_prep2b", &prep2b_inputs, &prep2_outputs, text_prep2b, header, true) orelse return error.KernelCreateFailed;
         errdefer freeKernel(prep);
         const gu = ks.newKernel("turboexl3_gu3b", &gu3b_inputs, &gu3_outputs, text_gu3b, header, true) orelse return error.KernelCreateFailed;
         errdefer freeKernel(gu);
-        const fin = ks.newKernel("turboexl3_fin7cb", &fin7b_inputs, &fin3_outputs, text_fin7cb, header5, true) orelse return error.KernelCreateFailed;
+        // the geometry's SwiGLU: DeepSeek-V4.1's clamp (fin7cb), none (fin7b) or Ling-3.1's clamp after the SiLU (fin7cob)
+        const fin = (if (k3.geo.limit != 0 and k3.geo.clamp == .gate_in)
+            ks.newKernel("turboexl3_fin7cb", &fin7b_inputs, &fin3_outputs, text_fin7cb, header5, true)
+        else if (k3.geo.limit == 0)
+            ks.newKernel("turboexl3_fin7b", &fin7b_inputs, &fin3_outputs, text_fin7b, header5, true)
+        else
+            ks.newKernel("turboexl3_fin7cob", &fin7b_inputs, &fin3_outputs, text_fin7cob, header5, true)) orelse return error.KernelCreateFailed;
         errdefer freeKernel(fin);
         const down = ks.newKernel("turboexl3_down3b", &down3b_inputs, &down3_outputs, text_down3b, header, true) orelse return error.KernelCreateFailed;
         errdefer freeKernel(down);
@@ -284,12 +299,18 @@ pub const Banked = struct {
     /// The grouped banked kernels (`banked_group` 4), made on first use; the geometry as `bankedKernels` takes it.
     fn bankedKernelsG(self: *Banked, k3: *Kernels3) !*const BankedKernels {
         if (self.banked_g) |*b| return b;
-        if (k3.geo.limit == 0 or k3.geo.topk != 1) return error.Exl3EngineNotImplemented;
+        if (k3.geo.topk != 1) return error.Exl3EngineNotImplemented;
         const prep = ks.newKernel("turboexl3_prep2bg", &prep2b_inputs, &prep2_outputs, text_prep2bg, header, true) orelse return error.KernelCreateFailed;
         errdefer freeKernel(prep);
         const gu = ks.newKernel("turboexl3_gu3bg", &gu3b_inputs, &gu3_outputs, text_gu3bg, header_group, true) orelse return error.KernelCreateFailed;
         errdefer freeKernel(gu);
-        const fin = ks.newKernel("turboexl3_fin7cbg", &fin7b_inputs, &fin3_outputs, text_fin7cbg, header5, true) orelse return error.KernelCreateFailed;
+        // the geometry's SwiGLU: fin7cbg, fin7bg or fin7cobg (as bankedKernels' fin7cb, fin7b or fin7cob)
+        const fin = (if (k3.geo.limit != 0 and k3.geo.clamp == .gate_in)
+            ks.newKernel("turboexl3_fin7cbg", &fin7b_inputs, &fin3_outputs, text_fin7cbg, header5, true)
+        else if (k3.geo.limit == 0)
+            ks.newKernel("turboexl3_fin7bg", &fin7b_inputs, &fin3_outputs, text_fin7bg, header5, true)
+        else
+            ks.newKernel("turboexl3_fin7cobg", &fin7b_inputs, &fin3_outputs, text_fin7cobg, header5, true)) orelse return error.KernelCreateFailed;
         errdefer freeKernel(fin);
         const down = ks.newKernel("turboexl3_down3bg", &down3b_inputs, &down3_outputs, text_down3bg, header_group, true) orelse return error.KernelCreateFailed;
         errdefer freeKernel(down);
@@ -312,12 +333,18 @@ pub const Banked = struct {
     /// hw4b's kernels (`text_gu3bgm3`, `text_down3bgm3`; prep2bg, fin7cbg and dfin3bg the grouped texts), made on first use.
     fn bankedKernelsGM3(self: *Banked, k3: *Kernels3) !*const BankedKernels {
         if (self.banked_gm3) |*b| return b;
-        if (k3.geo.limit == 0 or k3.geo.topk != 1) return error.Exl3EngineNotImplemented;
+        if (k3.geo.topk != 1) return error.Exl3EngineNotImplemented;
         const prep = ks.newKernel("turboexl3_prep2bg", &prep2b_inputs, &prep2_outputs, text_prep2bg, header, true) orelse return error.KernelCreateFailed;
         errdefer freeKernel(prep);
         const gu = ks.newKernel("turboexl3_gu3bgm3", &gu3b_inputs, &gu3_outputs, text_gu3bgm3, header_group, true) orelse return error.KernelCreateFailed;
         errdefer freeKernel(gu);
-        const fin = ks.newKernel("turboexl3_fin7cbg", &fin7b_inputs, &fin3_outputs, text_fin7cbg, header5, true) orelse return error.KernelCreateFailed;
+        // the geometry's SwiGLU: fin7cbg, fin7bg or fin7cobg (as bankedKernels' fin7cb, fin7b or fin7cob)
+        const fin = (if (k3.geo.limit != 0 and k3.geo.clamp == .gate_in)
+            ks.newKernel("turboexl3_fin7cbg", &fin7b_inputs, &fin3_outputs, text_fin7cbg, header5, true)
+        else if (k3.geo.limit == 0)
+            ks.newKernel("turboexl3_fin7bg", &fin7b_inputs, &fin3_outputs, text_fin7bg, header5, true)
+        else
+            ks.newKernel("turboexl3_fin7cobg", &fin7b_inputs, &fin3_outputs, text_fin7cobg, header5, true)) orelse return error.KernelCreateFailed;
         errdefer freeKernel(fin);
         const down = ks.newKernel("turboexl3_down3bgm3", &down3b_inputs, &down3_outputs, text_down3bgm3, header_group, true) orelse return error.KernelCreateFailed;
         errdefer freeKernel(down);
@@ -343,7 +370,21 @@ pub const Banked = struct {
     pub const BankedSel = enum { configured, g4, g4m3, g4p, g4m3p };
     /// A set's texts: the banked ones (GROUP 2), today's grouped ones or hw4b's, or either's persistent GEMVs (the texts
     /// hw2's variants run on)
-    const Texts = enum { banked, g4, g4m3, g4p, g4m3p };
+    pub const Texts = enum { banked, g4, g4m3, g4p, g4m3p };
+
+    /// The texts a call on `sel` runs (`bankedSetSel`'s choice, read without a launch): a test's check that an arm ran the
+    /// texts it names (`configured` follows `banked_group`, `banked_m3` and `banked_ptg` as this state took them at its
+    /// first call).
+    pub fn selTexts(self: *const Banked, sel: BankedSel) Texts {
+        return switch (sel) {
+            .configured => if (self.banked_group == 4) (if (self.banked_ptg) (if (self.banked_m3) Texts.g4m3p else .g4p) else if (self.banked_m3) Texts.g4m3 else .g4) else .banked,
+            .g4 => .g4,
+            .g4m3 => .g4m3,
+            .g4p => .g4p,
+            .g4m3p => .g4m3p,
+        };
+    }
+
     const BankedSet = struct { k: BankedKernels, c: Cfg, texts: Texts };
 
     /// The banked launches and configs at `banked_group`: the banked texts at 2, the grouped texts at 4 (hw4b's with
@@ -389,7 +430,7 @@ pub const Banked = struct {
 
     /// `bankedSetSel` with the grouped GEMVs of `variant` (`group_variants`; 0: the set's own) on the set's grouped texts
     /// (today's or hw4b's); any but 0 needs grouped texts (`banked_group` 4, or `sel` g4 or g4m3).
-    fn bankedSetSelV(self: *Banked, k3: *Kernels3, rows: usize, sel: BankedSel, variant: u8) !struct { k: BankedKernels, c: Cfg } {
+    fn bankedSetSelV(self: *Banked, k3: *Kernels3, rows: usize, sel: BankedSel, variant: u8) !struct { k: BankedKernels, c: Cfg, texts: Texts } {
         if (variant >= group_variants.len) return error.BadExl3Shape;
         const set = try self.bankedSetSel(k3, rows, sel);
         var k = set.k;
@@ -399,7 +440,7 @@ pub const Banked = struct {
             k.gu = g.gu;
             k.down = g.down;
         }
-        return .{ .k = k, .c = set.c };
+        return .{ .k = k, .c = set.c, .texts = set.texts };
     }
 
     /// Variant `v`'s grouped gate|up and down GEMVs (`group_variants`, v >= 1) on today's grouped texts or, `m3`, on
@@ -465,6 +506,7 @@ pub const Banked = struct {
             _ = mlx.mlx_array_free(a);
         };
         var z: [2]mlx.mlx_array = undefined; // the split-K gate|up planes
+        if (variant != 0) sayVariant(.gate_up, variant, set.texts);
         try ks.applyConfig(k.gu, c.gu, &.{ xp[0], xp[1], ids, b[0].gate_t, b[1].gate_t, b[2].gate_t, b[0].up_t, b[1].up_t, b[2].up_t }, &z, s);
         defer for (z) |a| {
             _ = mlx.mlx_array_free(a);
@@ -499,6 +541,7 @@ pub const Banked = struct {
         const c = set.c;
         const ones = try self.bankedOnes();
         const b = banks;
+        if (variant != 0) sayVariant(.down, variant, set.texts);
         const zd = try one(k.down, c.down, &.{ hd, ids, b[0].down_t, b[1].down_t, b[2].down_t }, s);
         defer _ = mlx.mlx_array_free(zd);
         return one(k.dfin, c.dfin, &.{ zd, ids, ones, b[0].down_svh, b[1].down_svh, b[2].down_svh, hs }, s);
@@ -565,6 +608,19 @@ pub fn forKernels(k3: *const Kernels3) !*Banked {
     return &cache.get().*[i].?.b;
 }
 
+/// The grouped GEMVs whose variant a banked call has run (bit v: the gate and up GEMV on `group_variants[v]`; bit 16 + v:
+/// the down GEMV), each engagement line printed once.
+const variant_said = Global(u32, "deepseek_v41_banked_variant_said", 0);
+
+/// A banked call's engagement line for its grouped GEMV on `variant` (not 0), printed at the first call of each half
+/// on each variant, where the call runs it.
+fn sayVariant(half: enum { gate_up, down }, variant: u8, texts: Banked.Texts) void {
+    const bit = @as(u32, 1) << @intCast(@as(u32, variant) + @as(u32, if (half == .down) 16 else 0));
+    if ((variant_said.get().* & bit) != 0) return;
+    variant_said.get().* |= bit;
+    std.debug.print("[turboexl3] banked variant engaged: the grouped {s} GEMV on variant {s} ({s} texts)\n", .{ @tagName(half), group_variants[variant].name, @tagName(texts) });
+}
+
 /// Every banked state freed (`root.releaseEngines`, before the `Kernels3` they sit beside): no call in flight.
 pub fn releaseAll() void {
     while (cache_lock.get().*.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
@@ -576,5 +632,5 @@ pub fn releaseAll() void {
 }
 
 /// This file's module state (`Global`): what a host that shares its units' state registers.
-pub const shared_state = .{ cache_lock, cache };
+pub const shared_state = .{ cache_lock, cache, variant_said };
 

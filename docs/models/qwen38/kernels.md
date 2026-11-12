@@ -406,7 +406,7 @@ The attention projections at prefill rows: ATTN-IN, the four-member prepare, ATT
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/qwen38/attn_io.zig:161` (`fn stdKernelsGet`) |
+| made at | `src/models/qwen38/attn_io.zig:162` (`fn stdKernelsGet`) |
 | inputs | `zq`, `zk`, `zv`, `qw`, `kw`, `angles`, `eps` |
 | outputs | `oq`, `og`, `ok`, `ov` |
 | source | `text_epi_attn` = `qwen38:attn_io/epi_attn_head` ++ `qwen38:attn_io/finish_attn_tail` (3228 B, `da424bee4fd4`) |
@@ -453,7 +453,7 @@ The attention projections at prefill rows: ATTN-IN, the four-member prepare, ATT
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/qwen38/attn_io.zig:135` (`fn kernelsGet`) |
+| made at | `src/models/qwen38/attn_io.zig:136` (`fn kernelsGet`) |
 | inputs | `zq`, `zk`, `zv`, `svq`, `svk`, `svv`, `qw`, `kw`, `angles`, `eps` |
 | outputs | `oq`, `og`, `ok`, `ov` |
 | source | `text_finish_attn` = `qwen38:attn_io/finish_attn_head` ++ `qwen38:attn_io/finish_attn_tail` (3849 B, `a2f266f9027c`) |
@@ -503,7 +503,7 @@ The attention projections at prefill rows: ATTN-IN, the four-member prepare, ATT
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/qwen38/attn_io.zig:163` (`fn stdKernelsGet`) |
+| made at | `src/models/qwen38/attn_io.zig:164` (`fn stdKernelsGet`) |
 | inputs | `attn`, `gate`, `sigtab` |
 | outputs | `xg` |
 | source | `text_gate_plain` = `qwen38:attn_io/gate_plain` (668 B, `506154a55c35`) |
@@ -542,7 +542,7 @@ The attention projections at prefill rows: ATTN-IN, the four-member prepare, ATT
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/qwen38/attn_io.zig:133` (`fn kernelsGet`) |
+| made at | `src/models/qwen38/attn_io.zig:134` (`fn kernelsGet`) |
 | inputs | `x`, `suh0`, `suh1`, `suh2` |
 | outputs | `xp0`, `xp1`, `xp2` |
 | source | `text_prep3` = `qwen38:attn_io/prep3` (1182 B, `6b33ee16e5e9`) |
@@ -575,7 +575,7 @@ The attention projections at prefill rows: ATTN-IN, the four-member prepare, ATT
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/qwen38/attn_io.zig:149` (`fn prep4KernelGet`) |
+| made at | `src/models/qwen38/attn_io.zig:150` (`fn prep4KernelGet`) |
 | inputs | `x`, `suh0`, `suh1`, `suh2`, `suh3` |
 | outputs | `xp0`, `xp1`, `xp2`, `xp3` |
 | source | `text_prep4` = `qwen38:attn_io/prep4` (1223 B, `5147798afc93`) |
@@ -611,7 +611,7 @@ The attention projections at prefill rows: ATTN-IN, the four-member prepare, ATT
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/qwen38/attn_io.zig:137` (`fn kernelsGet`) |
+| made at | `src/models/qwen38/attn_io.zig:138` (`fn kernelsGet`) |
 | inputs | `attn`, `gate`, `sigtab`, `suh` |
 | outputs | `xp` |
 | source | `text_prep_gate` = `qwen38:attn_io/prep_gate` (1220 B, `601d54307261`) |
@@ -654,7 +654,7 @@ The decode-row merges (rows 1 to 16) on DEC-ONE's launches.
 | made at | `src/models/qwen38/decb.zig:181` (`fn kernelsGet`) |
 | inputs | `xp`, `xs`, `w`, `svh`, `cnt`, `qn`, `qeps`, `angles`, `kn`, `ring`, `pcos`, `psin`, `peps`, `invr`, `ln` |
 | outputs | `y`, `z`, `oq`, `op` |
-| source | `text_dec0_idx` = `dense/dec_head` ++ `qwen38:decb/idx_dec_decl` ++ `dense/dec_gemv0` ++ `dense/dec_gemv_arrive_1` ++ `dense/dec_tile` ++ `dense/dec_gemv_arrive_2` ++ `dense/dec_xsum0` ++ `dense/dec_finish_v` ++ `qwen38:decb/idx_dec_finish_1` ++ `qwen38:decb/idx_qrope` ++ `qwen38:decb/idx_dec_finish_2` ++ `qwen38:decb/idx_pool` ++ `qwen38:decb/idx_dec_finish_3` (9228 B, `28ce4602bd28`) |
+| source | `text_dec0_idx` = `dense/dec_head` ++ `qwen38:decb/idx_dec_decl` ++ `dense/dec_gemv0_head` ++ `dense/dec_gemv_loop` ++ `dense/dec_gemv0_x` ++ `dense/dec_gemv_arrive_1` ++ `dense/dec_tile` ++ `dense/dec_gemv_arrive_2a` ++ `dense/dec_gemv_arrive_2b` ++ `dense/dec_gemv_arrive_2c` ++ `dense/dec_xsum0` ++ `dense/dec_finish_v` ++ `qwen38:decb/idx_dec_finish_1` ++ `qwen38:decb/idx_qrope` ++ `qwen38:decb/idx_dec_finish_2` ++ `qwen38:decb/idx_pool` ++ `qwen38:decb/idx_dec_finish_3` (9228 B, `28ce4602bd28`) |
 | header | `decode.header5` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` (26594 B, `41efbbbbd943`) |
 
 <!-- /kernel-facts -->
@@ -707,7 +707,7 @@ The decode-row merges (rows 1 to 16) on DEC-ONE's launches.
 | made at | `src/models/qwen38/decb.zig:178` (`fn kernelsGet`) |
 | inputs | `xp`, `xs`, `w`, `svh`, `cnt` |
 | outputs | `yq`, `yg`, `z` |
-| source | `text_dec0_planes` = `dense/dec_head` ++ `dense/dec_gemv0` ++ `dense/dec_gemv_arrive_1` ++ `dense/dec_tile` ++ `dense/dec_gemv_arrive_2` ++ `dense/dec_xsum0` ++ `dense/dec_finish_v` ++ `qwen38:decb/planes_store_dec` (6384 B, `e7352682e47c`) |
+| source | `text_dec0_planes` = `dense/dec_head` ++ `dense/dec_gemv0_head` ++ `dense/dec_gemv_loop` ++ `dense/dec_gemv0_x` ++ `dense/dec_gemv_arrive_1` ++ `dense/dec_tile` ++ `dense/dec_gemv_arrive_2a` ++ `dense/dec_gemv_arrive_2b` ++ `dense/dec_gemv_arrive_2c` ++ `dense/dec_xsum0` ++ `dense/dec_finish_v` ++ `qwen38:decb/planes_store_dec` (6384 B, `e7352682e47c`) |
 | header | `decode.header5` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` (26594 B, `41efbbbbd943`) |
 
 <!-- /kernel-facts -->
@@ -747,7 +747,7 @@ The decode-row merges (rows 1 to 16) on DEC-ONE's launches.
 | made at | `src/models/qwen38/decb.zig:182` (`fn kernelsGet`) |
 | inputs | `x`, `suh`, `w`, `svh`, `cnt`, `qn`, `qeps`, `angles`, `kn`, `ring`, `pcos`, `psin`, `peps`, `invr`, `ln` |
 | outputs | `y`, `z`, `xsx`, `oq`, `op` |
-| source | `text_dec1_idx` = `dense/dec_head` ++ `qwen38:decb/idx_dec_decl` ++ `dense/dec_prep1` ++ `dense/dec_gemv1` ++ `dense/dec_gemv_arrive_1` ++ `dense/dec_tile` ++ `dense/dec_gemv_arrive_2` ++ `dense/dec_xsum1` ++ `dense/dec_finish_v` ++ `qwen38:decb/idx_dec_finish_1` ++ `qwen38:decb/idx_qrope` ++ `qwen38:decb/idx_dec_finish_2` ++ `qwen38:decb/idx_pool` ++ `qwen38:decb/idx_dec_finish_3` (10748 B, `6765c9aa771b`) |
+| source | `text_dec1_idx` = `dense/dec_head` ++ `qwen38:decb/idx_dec_decl` ++ `dense/dec_prep1_1` ++ `dense/dec_prep1_2` ++ `dense/dec_prep1_3` ++ `dense/dec_gemv1_head` ++ `dense/dec_gemv_loop` ++ `dense/dec_gemv1_x` ++ `dense/dec_gemv_arrive_1` ++ `dense/dec_tile` ++ `dense/dec_gemv_arrive_2a` ++ `dense/dec_gemv_arrive_2b` ++ `dense/dec_gemv_arrive_2c` ++ `dense/dec_xsum1` ++ `dense/dec_finish_v` ++ `qwen38:decb/idx_dec_finish_1` ++ `qwen38:decb/idx_qrope` ++ `qwen38:decb/idx_dec_finish_2` ++ `qwen38:decb/idx_pool` ++ `qwen38:decb/idx_dec_finish_3` (10748 B, `6765c9aa771b`) |
 | header | `decode.header5` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` (26594 B, `41efbbbbd943`) |
 
 <!-- /kernel-facts -->
@@ -788,7 +788,7 @@ The decode-row merges (rows 1 to 16) on DEC-ONE's launches.
 | made at | `src/models/qwen38/decb.zig:179` (`fn kernelsGet`) |
 | inputs | `x`, `suh`, `w`, `svh`, `cnt` |
 | outputs | `yq`, `yg`, `z`, `xsx` |
-| source | `text_dec1_planes` = `dense/dec_head` ++ `dense/dec_prep1` ++ `dense/dec_gemv1` ++ `dense/dec_gemv_arrive_1` ++ `dense/dec_tile` ++ `dense/dec_gemv_arrive_2` ++ `dense/dec_xsum1` ++ `dense/dec_finish_v` ++ `qwen38:decb/planes_store_dec` (7904 B, `58f26c31f476`) |
+| source | `text_dec1_planes` = `dense/dec_head` ++ `dense/dec_prep1_1` ++ `dense/dec_prep1_2` ++ `dense/dec_prep1_3` ++ `dense/dec_gemv1_head` ++ `dense/dec_gemv_loop` ++ `dense/dec_gemv1_x` ++ `dense/dec_gemv_arrive_1` ++ `dense/dec_tile` ++ `dense/dec_gemv_arrive_2a` ++ `dense/dec_gemv_arrive_2b` ++ `dense/dec_gemv_arrive_2c` ++ `dense/dec_xsum1` ++ `dense/dec_finish_v` ++ `qwen38:decb/planes_store_dec` (7904 B, `58f26c31f476`) |
 | header | `decode.header5` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` (26594 B, `41efbbbbd943`) |
 
 <!-- /kernel-facts -->
@@ -1245,7 +1245,7 @@ keeps them beside a geometry's `decode.Kernels3`.
 | made at | `src/models/qwen38/shared.zig:468` (`const SharedHeads`) |
 | inputs | `zg`, `zu`, `slots`, `gate_svh`, `up_svh`, `down_suh`, `xsg`, `xsu`, `szg`, `szu`, `sxsg`, `sxsu`, `sh_gate_svh`, `sh_up_svh`, `sh_down_suh`, `sigtab` |
 | outputs | `hd`, `hs`, `sxpd`, `sxsd` |
-| source | `text_fin7s` = `qwen38:shared/shared_fin_head_1` ++ `qwen38:shared/shared_fin_head_2` ++ `qwen38:shared/shared_fin_head_xg` ++ `qwen38:shared/shared_fin_head_xu` ++ `qwen38:shared/shared_fin_head_3` ++ `qwen38:shared/shared_fin_head_g` ++ `qwen38:shared/shared_fin_head_u` ++ `qwen38:shared/shared_fin_head_4` ++ `qwen38:shared/shared_fin_head_end` ++ `decode/fin7_1` ++ `decode/expert_line` ++ `decode/fin7_2` ++ `decode/fin7_planes` ++ `decode/fin7_3` ++ `decode/fin7_sums` ++ `decode/fin7_4` ++ `decode/fin7_swiglu` ++ `decode/fin7_5` (3541 B, `d3a1e73e7d7d`) |
+| source | `text_fin7s` = `qwen38:shared/shared_fin_head_1` ++ `qwen38:shared/shared_fin_head_2` ++ `qwen38:shared/shared_fin_head_xg` ++ `qwen38:shared/shared_fin_head_xu` ++ `qwen38:shared/shared_fin_head_3` ++ `qwen38:shared/shared_fin_head_g` ++ `qwen38:shared/shared_fin_head_u` ++ `qwen38:shared/shared_fin_head_4` ++ `qwen38:shared/shared_fin_head_end` ++ `decode/fin7_1a` ++ `decode/fin7_1b` ++ `decode/expert_line` ++ `decode/fin7_2` ++ `decode/fin7_planes` ++ `decode/fin7_3` ++ `decode/fin7_sums` ++ `decode/fin7_4` ++ `decode/fin7_swiglu` ++ `decode/fin7_5` (3541 B, `d3a1e73e7d7d`) |
 | header | `header_s` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` ++ `qwen38:shared/shared` (30584 B, `af3e3f8b3d2f`) |
 
 <!-- /kernel-facts -->
@@ -1291,7 +1291,7 @@ keeps them beside a geometry's `decode.Kernels3`.
 | made at | `src/models/qwen38/shared.zig:478` (`const SharedHeads`) |
 | inputs | `zg`, `zu`, `slots`, `gate_svh`, `up_svh`, `down_suh`, `xsg`, `xsu`, `szg`, `szu`, `sxsg`, `sxsu`, `sh_gate_svh`, `sh_up_svh`, `sh_down_suh`, `sigtab` |
 | outputs | `hd`, `hs`, `sxpd`, `sxsd` |
-| source | `text_fin7t` = `qwen38:shared/shared_fin2_head` ++ `decode/fin7_1` ++ `decode/expert_line` ++ `decode/fin7_2` ++ `decode/fin7_planes` ++ `decode/fin7_3` ++ `decode/fin7_sums` ++ `decode/fin7_4` ++ `decode/fin7_swiglu` ++ `decode/fin7_5` (3565 B, `5e1018b542e5`) |
+| source | `text_fin7t` = `qwen38:shared/shared_fin2_head` ++ `decode/fin7_1a` ++ `decode/fin7_1b` ++ `decode/expert_line` ++ `decode/fin7_2` ++ `decode/fin7_planes` ++ `decode/fin7_3` ++ `decode/fin7_sums` ++ `decode/fin7_4` ++ `decode/fin7_swiglu` ++ `decode/fin7_5` (3565 B, `5e1018b542e5`) |
 | header | `header_t` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` ++ `qwen38:shared/shared` ++ `qwen38:shared/shared2` (39410 B, `435a7ae9ef8e`) |
 
 <!-- /kernel-facts -->

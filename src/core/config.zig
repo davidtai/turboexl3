@@ -20,6 +20,10 @@ pub const Config = struct {
     pf_alay: u8 = 2,
     /// Each expert's full 128-row runs in 128-row prefill tiles. The same bytes.
     pf_t128: bool = true,
+    /// The routed prefill's finish as the down GEMM's epilogue (`prefill.Options.dfin`): every top-1 routed prefill call
+    /// (an expert streamer's prompt calls, `moeSwigluRows`, or `moe` at top-1), the down launch writing y; a call can
+    /// decline it (`prefill.Call`, the `...With` entries) for the served ending of the same engine. The same bytes.
+    pf_dfin: bool = false,
     /// The routed prefill's down GEMM in 128-deep K stages (`prefill.Options.bk128`: two 64-deep sub-stages per buffer
     /// between barriers). The same bytes.
     pf_bk128: bool = false,
@@ -69,6 +73,15 @@ pub const Config = struct {
     nax: bool = true,
     /// Dense decode linears in one launch (DEC-ONE); false the three-launch chain. The same bytes.
     dec_one: bool = true,
+    /// A one-row dense decode call on its trunk shape's entry of `dense.one_row_table` (Ling-3.1-flash's shapes on the M5
+    /// Max: output tiles per GEMV threadgroup, and DEC-ONE's prepare inside the launch or in its own); a shape the table
+    /// does not name keeps the rest of this configuration's. Launch shape only: the same bytes.
+    dec_one_row_table: bool = false,
+    /// Ling-3.1-flash's router (`ling.routerLogits`) at a call of 2 rows or more over the f16 weight on the rows launch
+    /// (`turboexl3_ling_router_logits_hr`, `_pred_hr`, `_pred_sig_hr`): each router threadgroup 16 logits of each row of a
+    /// group of up to 4 rows, every weight word read once for them, each row's statements the served launch's. The same
+    /// bytes.
+    router_rows: bool = false,
     /// DEC-ONE's GEMV variant (`dense.dec_variants`, `dense_variants` of them; 0 today's): another schedule of the same
     /// reads, decodes and sums, so the same bytes. A dense shape's engine reads it when it is made.
     dense_variant: u8 = 0,
@@ -95,6 +108,18 @@ pub const Config = struct {
     /// runs (today's, or hw4b's with `banked_m3`). Any but 0 needs `banked_group` 4.
     banked_variant_gu: u8 = 0,
     banked_variant_dn: u8 = 0,
+    /// Ling-3.1-flash's MLA attention in the latent (`ling.mlaLatentDecode`): launch 2 with each sub-chunk's latents and
+    /// rope keys staged in f32 in threadgroup memory (`mla_latent.Attn.stage`). The same bytes.
+    mla_latent_stage: bool = false,
+    /// The same launch on the matrix units (`mla_latent.Attn` `nax_served`; `turboexl3_ling_mla_attn_nax`): the query
+    /// rounded to the cache's dtype, the scores and the weighted sums on MLX steel's NAX tiles into f32. Not the same
+    /// bytes: a host serves it where the words move no output (the plugin: the MTP head, whose drafts the exact verify
+    /// checks). Ahead of `mla_latent_stage` at every call it takes (a bf16 or f16 cache), which keeps the rest.
+    mla_latent_nax: bool = false,
+    /// Ling-3.1-flash's MLA prompt attention over the rope-once cache (`ling.mlaFlashPrefillRope1`: each head's nope keys
+    /// and the token's one roped key read in place, the expanded key never built); off refuses the calls. The same bytes
+    /// as `ling.mlaFlashPrefill` over the expanded key.
+    mla_rope_once: bool = false,
     /// The grouped banked GEMVs as persistent threadgroups (`banked_ptg.text_gu3bgp`, `text_down3bgp`, or hw4b's with
     /// `banked_m3`): each runs the call's work items in turn from one lead list, so no threadgroup runs for a row-slot that
     /// leads nothing and no work item scans its members. The same work items, so the same bytes. Needs `banked_group` 4.
@@ -167,6 +192,8 @@ test "turboexl3 config: the defaults are valid and served; an unserved form, sli
     for ([_]u8{ 0, 4, 10 }) |f| try t.expect(!(Config{ .decode_form = f }).valid());
     try t.expect(!(Config{ .shared_spt = 3 }).valid());
     try t.expect(!(Config{ .pf_alay = 3 }).valid());
+    // the routed prefill's fused finish: off by default
+    try t.expect(!d.pf_dfin and (Config{ .pf_dfin = true }).valid());
     // the int8 center: 510 (today's texts) by default, 509.5 served, any other refused
     try t.expectEqual(@as(u16, 1020), d.pf_int8_c2);
     try t.expect((Config{ .pf_int8 = 1, .pf_int8_c2 = 1019 }).valid());
@@ -195,6 +222,16 @@ test "turboexl3 config: the defaults are valid and served; an unserved form, sli
     try t.expect(!(Config{ .banked_group = 4, .banked_variant_dn = banked_variants }).valid());
     try t.expect(d.dense_lean);
     try t.expect(d.fused_fin_fold);
+    try t.expect(!d.dec_one_row_table);
+    try t.expect((Config{ .dec_one_row_table = true }).valid());
+    try t.expect(!d.router_rows and (Config{ .router_rows = true }).valid());
+    try t.expect(!d.mla_latent_stage and (Config{ .mla_latent_stage = true }).valid());
+    // the NAX launch: off by default, with the stage (ahead of it)
+    try t.expect(!d.mla_latent_nax);
+    try t.expect((Config{ .mla_latent_nax = true }).valid());
+    try t.expect((Config{ .mla_latent_nax = true, .mla_latent_stage = true }).valid());
+    try t.expect(!d.mla_rope_once);
+    try t.expect((Config{ .mla_rope_once = true }).valid());
     // DEC-ONE's variants and output tiles: today's by default, every variant and tile count served, others refused
     try t.expectEqual(@as(u8, 0), d.dense_variant);
     try t.expectEqualSlices(u8, &.{ 0, 0, 0, 0, 0 }, &d.dec_bt);

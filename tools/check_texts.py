@@ -7,7 +7,8 @@ usage: python3 tools/check_texts.py ORIG_SRC [NEW_SRC] [-v] [--split]
             inside it, e.g. afb52be: `git worktree add /tmp/t3-orig afb52be`, then /tmp/t3-orig/src)
   NEW_SRC   the sources after it (default: this repository's src/)
   -v        every kernel and text const, one line each
-  --split   a change that moves declarations between files: checks 1 to 4 over the whole tree (`split_report`)
+  --split   a change that moves declarations between files: checks 1 to 4 over the whole tree (`split_report`); a
+            kernel, Zig file or test it removes on purpose is listed in SPLIT_REMOVED_KERNELS, _FILES or _TESTS
 
 All on the host, no Zig needed. Both trees are tokenized and their texts evaluated: string literals, `@embedFile`, `++`,
 consts, `module.const`, `if` (a comptime condition: only the taken branch, as Zig analyzes it), `&.{ ... }`, labeled blocks
@@ -1680,6 +1681,168 @@ ADDED[('attn_io_test.zig', 'test turboexl3 gpu attn_io trunk int8: with q|gate, 
        'chain over linear\'s int8 byte for byte, and agree with the exact ones (TURBOEXL3_GPU=1)')] = (
     'ATTN-IN\'s, ATTN-OUT\'s and the indexer\'s int8 paths against the chain over linear\'s int8 (GPU)')
 
+# Ling-3.1-flash (src/models/ling): its routed SwiGLU, unclamped or clamped after the SiLU, stacked and banked
+ADDED_FILES['models/ling/api.zig'] = ('Ling-3.1\'s entry points (moeLing, moeLingBanked and its halves) over root\'s routed '
+                                      'chain and DeepSeek-V4.1\'s banked decode, the SwiGLU its geometry\'s')
+ADDED_FILES['ling_test.zig'] = ('Ling-3.1\'s tests: its texts\' compositions, the reference clamp and the refusals (CPU); '
+                                'moeLing against moe and the reference, moeLingBanked against moeLing byte for byte, and '
+                                'linear at every trunk shape (GPU)')
+# Ling-3.1-flash's shared expert at decode rows in two dependent launches (models/ling/shared.zig)
+ADDED_FILES['models/ling/shared.zig'] = ('Ling-3.1\'s shared expert at decode rows: the gate and the up in one DEC-ONE launch, '
+                                         'each in its own buffers, whose pairs of output blocks run the host\'s SwiGLU and the '
+                                         'down\'s prepare (turboexl3_ling_sgu, _sguco), then the down\'s DEC-ONE GEMV')
+ADDED_FILES['shared_test.zig'] = ('Ling-3.1\'s shared expert\'s tests: the texts\' compositions and pins (CPU); sharedExpert '
+                                  'against the composed chain word for word (GPU)')
+# Ling-3.1-flash's same-input trunk pairs in one DEC-ONE launch (models/ling/pair.zig)
+ADDED_FILES['models/ling/pair.zig'] = ('Ling-3.1\'s same-input trunk pairs (z | a, the shared and the dense gate | up) in one '
+                                       'DEC-ONE GEMV launch, each member in its own buffers (turboexl3_ling_pair_prep, '
+                                       '_pair_dec0, _pair_dec1: dense\'s prep_sc and DEC-ONE texts with the member chosen after '
+                                       'their head, Ripple\'s member tile address)')
+# Ling-3.1-flash's KDA projections in one DEC-ONE launch (models/ling/kdaproj.zig)
+ADDED_FILES['models/ling/kdaproj.zig'] = ('Ling-3.1\'s KDA decode projections (q|k|v, f and g of one input) in one DEC-ONE '
+                                          'GEMV launch, each member in its own buffers at its own K split '
+                                          '(turboexl3_ling_kdaproj_prep, _kdaproj_dec0: dense\'s prep_sc with the member chosen '
+                                          'first, dense\'s text_dec0 under a three-member head), and its CPU tests')
+# Ling-3.1-flash's routed combine at prompt rows (turboexl3_ling_combine, _combine_parts)
+ADDED_FILES['models/ling/combine.zig'] = ('Ling-3.1\'s wide routed call combine in one launch (combineRouted, combineParts: '
+                                          'MLX\'s sum(multiply(astype(routed, f32), expand_dims(weights, -1)), -2) word for '
+                                          'word, over a joined array or the call\'s JOINLESS sources) and its texts\' CPU test')
+ADDED_FILES['models/ling/combine_test.zig'] = ('the combine\'s GPU tests: both entries against MLX\'s composed combine word for '
+                                               'word, the refusals')
+# Ling-3.1-flash's MoE tail at decode rows in one launch (turboexl3_ling_moe_tail): the routed sum, its astype, the shared
+# expert's add and mlx-serve's add_norm (turboexl3_ling's MLX_SERVE_LING_MOE_TAIL)
+ADDED_FILES['models/ling/tail.zig'] = ('Ling-3.1\'s MoE tail at decode rows 1 to 8 in one launch (moeTail: mlx-serve\'s '
+                                      'add_norm text cut at its delta, tail_1 ++ tail_delta ++ tail_2, the delta the '
+                                      'routed sum in the combine\'s statements, rounded to T, plus the shared expert)')
+ADDED_FILES['models/ling/tail_test.zig'] = ('moeTail against the chain it replaces (the source\'s routed sum, the astype, '
+                                           'the shared add, MLX\'s add and fast rms_norm) word for word at rows 1 to 8, '
+                                           'limits 0 and 10, the joined and flat rows, planted signed zeros (GPU)')
+ADDED[('models/ling/api.zig', 'const tail')] = 'tail.zig, a MoE layer\'s tail at decode rows in one launch'
+ADDED[('models/ling/api.zig', 'const moeTail')] = 'the re-export of tail.zig\'s moeTail'
+CHANGED[('models/ling/api.zig', 'const shared_state')] = 'registers the module state of the files the change added'
+# E4: the decode join folded into the MoE tail (turboexl3_ling_moe_tail_parts; turboexl3_ling's MLX_SERVE_LING_ROUTED_JOIN)
+ADDED[('models/ling/tail.zig', 'fn moeTailParts')] = ('moeTail over the routed call\'s unjoined outputs: each pair\'s row '
+                                                     'read in place at its (source, row), the streamer\'s join folded in')
+ADDED[('models/ling/tail.zig', 'const tail_delta_parts')] = 'the delta over the unjoined outputs (kernels/tail/tail_delta_parts)'
+ADDED[('models/ling/tail.zig', 'const pick')] = 'the parts launch\'s header: the source choice (kernels/tail/pick)'
+ADDED[('models/ling/tail.zig', 'const text_parts')] = 'tail_1 ++ tail_delta_parts ++ tail_2'
+ADDED[('models/ling/tail.zig', 'const max_sources')] = 'the sources a parts launch binds (8)'
+ADDED[('models/ling/tail.zig', 'const parts_in_names')] = 'the parts launch\'s operand names'
+ADDED[('models/ling/tail.zig', 'comptime #0')] = 'parts_in_names names max_sources sources'
+ADDED[('models/ling/tail.zig', 'const parts_kernel')] = 'the parts launch\'s kernel, made at its first call'
+ADDED[('models/ling/tail.zig', 'fn partsKernelOf')] = 'makes turboexl3_ling_moe_tail_parts'
+ADDED[('models/ling/tail.zig', 'const Call')] = 'a tail call\'s checked shape, both entries\''
+ADDED[('models/ling/tail.zig', 'fn callOf')] = 'both entries\' first checks (moeTail\'s, moved)'
+ADDED[('models/ling/tail.zig', 'fn checkRest')] = 'both entries\' last checks (moeTail\'s, moved)'
+ADDED[('models/ling/tail.zig', 'fn launch')] = 'the add_norm config and the launch (moeTail\'s, moved)'
+CHANGED[('models/ling/tail.zig', 'fn moeTail')] = 'its checks and launch moved to callOf, checkRest and launch, the same order and config'
+CHANGED[('models/ling/tail.zig', 'const shared_state')] = 'adds parts_kernel'
+ADDED[('models/ling/api.zig', 'const moeTailParts')] = 'the re-export of tail.zig\'s moeTailParts'
+# Ling-3.1-flash's MoE router at decode rows with the read-ahead predictor's scores (turboexl3_ling_router_*)
+ADDED_FILES['models/ling/router.zig'] = ('Ling-3.1\'s MoE router at decode rows 1 to 8 in two launches (routerLogits: MLX\'s '
+                                         'one-row gemv_t for the logits beside its gemv / gemv_wide for the read-ahead '
+                                         'predictor\'s scores; select: the host\'s fused router text verbatim, its weights '
+                                         'stored in bf16; route: both) and its texts\' CPU tests')
+ADDED_FILES['models/ling/router_test.zig'] = ('the router\'s GPU tests: the logits, both predictor scores, the ids and the '
+                                              'weights against the host\'s launches word for word at rows 1 to 8, the refusals')
+# Ling-3.1-flash's prompt call over gathered rows (glm53f-fused b0f22c9's library part, ported): the prepare with a row map
+# (turboexl3_pf_prep_r), root.moeSwigluRows and ling.moeLingRows
+ADDED_KERNELS[('prefill.zig', 'turboexl3_pf_prep_r')] = ('the prepare with its row line swapped for the row map\'s '
+                                                        '(text_prep_rows: prep_1, prep_rmap, prep_2): each slot\'s x row '
+                                                        'read through rmap, an expert streamer\'s prompt rows gathered '
+                                                        'in the prepare')
+ADDED[('prefill.zig', 'const prep_rows_in')] = 'the row-map prepare\'s operand names (the prepare\'s, then rmap)'
+ADDED[('root.zig', 'fn moeSwigluRows')] = ('moeSwiglu\'s prefill chain at top-1 over gathered rows (the row-map prepare), y '
+                                         'in a chosen dtype, limit 0 to 128 at either clamp: an expert streamer\'s prompt '
+                                         'calls')
+ADDED[('root.zig', 'const moeLingRows')] = 'the re-export of models/ling/api.zig\'s moeLingRows'
+ADDED[('models/ling/api.zig', 'fn moeLingRows')] = ('moeLing\'s prompt call over gathered rows: root.moeSwigluRows at '
+                                                  'Ling-3.1\'s SwiGLU (the clamp after the SiLU)')
+ADDED_FILES['models/ling/rows_test.zig'] = ('moeLingRows held to turboexl3_ling\'s prompt chunk (take, bf16, f32, moeLing at '
+                                            'top-1) byte for byte at Ling\'s shapes, the row-map prepare\'s text (CPU), and '
+                                            'its timing against that chunk (TURBOEXL3_LING_TIME)')
+# Ling-3.1-flash's MLA attention at decode rows in the latent (ling-latent): mlaLatentDecode's three launches
+ADDED_FILES['models/ling/mla_latent.zig'] = ('Ling-3.1\'s MLA attention at decode rows over a latent cache (decodeLatent, '
+                                             'takes): the query absorbed into the latent, the attention\'s partials, their '
+                                             'merge and the value half, in f32')
+ADDED_KERNELS[('models/ling/mla_latent.zig', 'turboexl3_ling_mla_qabs')] = 'q_nope through kv_b\'s key half into the latent'
+ADDED_KERNELS[('models/ling/mla_latent.zig', 'turboexl3_ling_mla_attn')] = ('the attention\'s partials over the latent cache, '
+                                                                           'key groups of 256 from position 0')
+ADDED_KERNELS[('models/ling/mla_latent.zig', 'turboexl3_ling_mla_vabs')] = ('a row\'s group partials merged in group order, '
+                                                                           'then kv_b\'s value half')
+ADDED_FILES['models/ling/mla_latent_test.zig'] = ('decodeLatent against an f64 reference within tolerance, its rows '
+                                                  'against one-row calls and strided views against contiguous ones byte for '
+                                                  'byte, and no worse than the served expanded attention (GPU)')
+# a KDA layer's b_proj (bf16) as a fourth member of kdaProj's GEMV launch (turboexl3_ling's MLX_SERVE_LING_KDA_BPROJ):
+# turboexl3_ling_kdaproj_dec0b, MLX's gemv over b's weight on the grid's threadgroups past the three members'
+ADDED_KERNELS[('models/ling/kdaproj.zig', 'turboexl3_ling_kdaproj_dec0b')] = ('dec0\'s text with b_proj\'s threadgroups before its head '
+                                                                 '(kdaproj/bmember: MLX\'s gemv at BM 1, BN 8 over each row)')
+ADDED[('models/ling/kdaproj.zig', 'const kdec0b_in')] = 'dec0b\'s operand names: dec0\'s, then x\'s rows and b\'s weight'
+ADDED[('models/ling/kdaproj.zig', 'const kdec0b_out')] = 'dec0b\'s outputs: dec0\'s, then b\'s'
+ADDED[('models/ling/kdaproj.zig', 'fn bTakes')] = 'where kdaProjB takes b\'s weight (bf16 [OUTB, in], the widths MLX\'s gemv runs at BM 1, BN 8)'
+ADDED[('models/ling/kdaproj.zig', 'fn kdaProjB')] = 'kdaProj with b_proj as a fourth member of its GEMV launch'
+ADDED[('models/ling/kdaproj.zig', 'fn prepare')] = 'kdaProj\'s prepare launch, moved out of it for kdaProjB (the same launch)'
+ADDED[('models/ling/kdaproj.zig', 'const BMember')] = 'b_proj\'s operands in the GEMV launch'
+ADDED[('models/ling/kdaproj.zig', 'fn gemvWith')] = 'gemv\'s body, and with b_proj its threadgroups after the members\' (dec0b)'
+CHANGED[('models/ling/kdaproj.zig', 'const Kind')] = 'adds dec0b'
+CHANGED[('models/ling/kdaproj.zig', 'const kernels')] = 'a slot for dec0b'
+CHANGED[('models/ling/kdaproj.zig', 'fn kernelOf')] = 'makes dec0b'
+CHANGED[('models/ling/kdaproj.zig', 'fn kdaProj')] = 'its prepare launch moved to prepare (the same launch and config)'
+CHANGED[('models/ling/kdaproj.zig', 'fn gemv')] = 'its body moved to gemvWith (without b_proj: the same launch and config)'
+ADDED[('models/ling/api.zig', 'const kdaProjB')] = 'the re-export of kdaproj.zig\'s kdaProjB'
+ADDED_FILES['models/ling/bproj_test.zig'] = ('kdaProjB held to the served b_proj (the one-row matmul, the exact verify\'s '
+                                             'denseRows) and kdaProj\'s members word for word at rows 1 to 8, and dec0b\'s '
+                                             'text (CPU)')
+# Ling-3.1-flash's MLA prompt attention as one causal flash launch (ling-flash)
+ADDED_FILES['models/ling/mla_flash.zig'] = ('Ling-3.1\'s MLA prompt attention in one launch (mlaFlashPrefill): MLX 0.32.5\'s '
+                                            'attention_nax at qk 192, v 128, its parameters from the operands')
+ADDED_FILES['mla_flash_test.zig'] = ('the flash kernel\'s text, refusals and dump units (CPU); MLX\'s fused SDPA word for '
+                                     'word at 128 / 128 and 96 / 64, and an f64 reference at Ling\'s heads (GPU)')
+ADDED_KERNELS[('mla_flash.zig', 'turboexl3_ling_mla_flash')] = ('MLX\'s attention_nax less its mask, sinks, log-sum-exp '
+                                                                'and window arms (kernels/mla_flash/body_*.metal)')
+# P4: a KDA layer's q|k|v, f and g at prompt rows in one launch past their prepares and W_hats (turboexl3_ling's
+# MLX_SERVE_LING_KDA_PROJ_PROMPT): pg2's fused NAX GEMM and dense finish over the three members
+ADDED_KERNELS[('models/ling/kdaproj_pf.zig', 'turboexl3_ling_kdaproj_pf')] = ('pg2\'s body with the member choice: '
+                                                                           'kdaproj/pf_1 (the members\' shapes and N tiles), '
+                                                                           'pg2\'s fused_2, kdaproj/pf_3 (the tile\'s member, '
+                                                                           'its operands and output), pg2\'s fused_4, '
+                                                                           'kdaproj/pf_5 (the column in the member), pg2\'s '
+                                                                           'fused_6, the macro\'s end; pg2\'s header')
+ADDED_FILES['models/ling/kdaproj_pf.zig'] = ('Ling-3.1\'s KDA projections at prompt rows (q|k|v, f and g of one input): each '
+                                             'member\'s prepare and W_hat by its linear\'s launches, then the three products '
+                                             'and finishes in one launch (kdaProjPrompt, turboexl3_ling_kdaproj_pf), and its '
+                                             'texts\' CPU tests')
+ADDED_FILES['models/ling/kdaproj_pf_test.zig'] = ('kdaProjPrompt held to each member\'s linear word for word at prompt rows 33 to '
+                                                  '16384, the refusal at 32 rows (GPU); its timing against the three linear '
+                                                  'calls over a short tile sweep (TURBOEXL3_LING_TIME)')
+ADDED[('models/ling/api.zig', 'const kdaproj_pf')] = 'kdaproj_pf.zig, the KDA projections at prompt rows in one launch'
+ADDED[('models/ling/api.zig', 'const kdaProjPrompt')] = 'the re-export of kdaproj_pf.zig\'s kdaProjPrompt'
+ADDED[('core/dense.zig', 'fn prefillOperands')] = ('linearOn\'s prefill operands (its prepare and W_hat, the same launches) for a '
+                                                   'caller that runs the product itself')
+for _i in range(1, 7):
+    ADDED[('core/pgemm.zig', 'const fused_%d' % _i)] = 'a piece of pg2\'s fused body, cut where a grouped launch puts its own statements'
+CHANGED[('core/pgemm.zig', 'const text_fused')] = 'its six pieces concatenated (fused_1 to fused_6): the same text'
+CHANGED[('core/pgemm.zig', 'const header')] = 'pub: models/ling/kdaproj_pf.zig\'s grouped launch reads it'
+# Ling-3.1-flash's prefill SwiGLU epilogue (turboexl3_ling's MLX_SERVE_LING_SWIGLU_EPI): up's finish at prompt rows running
+# the host's SwiGLU of the gate's value and its own (turboexl3_ling_finish_sgu / _sguco); dense's finish cut at its store
+ADDED_KERNELS[('models/ling/swiglu.zig', 'turboexl3_ling_finish_sgu')] = ('dense\'s finish_v, its store loop with up\'s value kept and '
+                                                                         'the gate\'s read, the shared expert\'s unclamped SwiGLU '
+                                                                         '(sgu_swiglu), h stored')
+ADDED_KERNELS[('models/ling/swiglu.zig', 'turboexl3_ling_finish_sguco')] = ('turboexl3_ling_finish_sgu with the SwiGLU clamped '
+                                                                           'after the SiLU (sgu_swiglu_clamp_out)')
+CHANGED[('dense.zig', 'const text_finish')] = 'finish_v ++ finish_store (the same text, cut at its store loop)'
+ADDED[('dense.zig', 'const finish_v')] = 'text_finish\'s loads and butterfly, before its store loop'
+ADDED[('dense.zig', 'const finish_store')] = 'text_finish\'s store loop'
+ADDED_FILES['models/ling/swiglu.zig'] = ('Ling-3.1\'s prefill SwiGLU epilogue: upSwiglu (up\'s inner product by linear\'s '
+                                         'own launches, then its finish running the host\'s SwiGLU of the gate\'s value and '
+                                         'its own: the composed chain\'s words), takes, the two texts')
+ADDED[('models/ling/api.zig', 'const swiglu')] = 'swiglu.zig, the prefill SwiGLU epilogue'
+ADDED[('models/ling/api.zig', 'const upSwiglu')] = 'the re-export of swiglu.zig\'s upSwiglu'
+ADDED[('root.zig', 'const lingUpSwiglu')] = 'the re-export of models/ling/api.zig\'s upSwiglu'
+ADDED_FILES['models/ling/swiglu_test.zig'] = ('upSwiglu held to the composed chain (linear\'s gate and up, the host\'s SwiGLU as '
+                                              'MLX\'s ops) word for word at the shared expert\'s and the dense layers\' shapes, '
+                                              'rows 17 to 16384, limits 0 and 10, its declines and refusals (GPU), the texts\' '
+                                              'composition (CPU), and its timing (TURBOEXL3_LING_TIME)')
 
 def metal_strings(fn, toks, corpus):
     """(line, kind, value) of every literal in a .zig file that holds Metal"""
@@ -1898,9 +2061,435 @@ def rekey_tables(units):
 # whose values it changes, each with what changed (anything else that differs fails). They hold one change's entries
 # while it is checked against its base and are emptied after it lands, so a later run allows nothing by them (aa0222f's
 # joint layout used them: turboexl3_ric_jdec1 and _blend changed, the two interleaved test references added)
-SPLIT_CHANGED_KERNELS = {}
-SPLIT_ADDED_KERNELS = {}
-SPLIT_CHANGED_CONSTS = {}
+SPLIT_CHANGED_KERNELS = {
+    'turboexl3_ling_router_logits': ('Ling-3.1\'s router logits: MLX\'s gemv (BM 4, SN 32: 32 threadgroups a row) over the '
+                                     'loader\'s column-major table, read as [512, hidden] row-major (router/logits_1 ++ '
+                                     'logits_w ++ logits_2), in place of gemv_t over a row-major table, which MLX copied the '
+                                     'table to and the served matmul never runs'),
+    'turboexl3_ling_router_pred': 'the same router half beside the unchanged predictor (head and pred_open at 32 a row)',
+    'turboexl3_ling_router_pred_sig': 'the same router half beside the unchanged predictor (head and pred_open at 32 a row)',
+}
+SPLIT_ADDED_KERNELS = {
+    'turboexl3_fin7co': 'Ling-3.1\'s clamp after the SiLU: text_fin7 with its SwiGLU line swapped for fin7_swiglu_clamp_out',
+    'turboexl3_pf_midco': 'Ling-3.1\'s clamp: text_mid with its SwiGLU line swapped for mid_swiglu_clamp_out',
+    'turboexl3_pf_mid_vco': 'Ling-3.1\'s clamp: text_mid_v, the same swap',
+    'turboexl3_pf_t128_midco': 'Ling-3.1\'s clamp: text_mid_t128, the same swap',
+    'turboexl3_fin7b': 'the banked fin7 unclamped (Ling-3.1\'s layers below the clamp): fin7cb with fin7\'s own SwiGLU line',
+    'turboexl3_fin7cob': 'the banked fin7 with Ling-3.1\'s clamp: fin7cb with fin7_swiglu_clamp_out in place of the clamp',
+    'turboexl3_fin7bg': 'fin7b\'s grouped text (fin7cbg with fin7\'s own SwiGLU line)',
+    'turboexl3_fin7cobg': 'fin7cob\'s grouped text (fin7cbg with fin7_swiglu_clamp_out)',
+    'turboexl3_ling_sgu': ('Ling-3.1\'s shared expert: text_dec1 over the gate and the up (msel, mtile) with the pair\'s '
+                           'SwiGLU and the down\'s prepare in its second finishes'),
+    'turboexl3_ling_sguco': 'the same with the clamp after the SiLU (sgu_swiglu_clamp_out)',
+    'turboexl3_ling_pair_prep': ('Ling-3.1\'s same-input pair: dense\'s prep_sc for both members on the grid\'s z (jprep ++ '
+                                 'text_prep_sc)'),
+    'turboexl3_ling_pair_dec0': ('Ling-3.1\'s pair: text_dec0 with the member chosen after its head (jrows, jw) and Ripple\'s '
+                                 'member tile address (jtile)'),
+    'turboexl3_ling_pair_dec1': ('Ling-3.1\'s pair: text_dec1 with the member chosen after its head (jsuh, jw) and Ripple\'s '
+                                 'member tile address (jtile)'),
+    'turboexl3_ling_kdaproj_prep': ('Ling-3.1\'s KDA projections: dense\'s prep_sc for the three members on the grid\'s z '
+                                    '(kdaproj/prep ++ text_prep_sc)'),
+    'turboexl3_ling_kdaproj_dec0': ('Ling-3.1\'s KDA projections: text_dec0 after its head under the three-member head and '
+                                    'the member choice (kdaproj/head, kdaproj/member), each member at its own K split'),
+    'turboexl3_ling_combine': 'Ling-3.1\'s routed combine over a joined array (models/ling/combine.zig): MLX\'s Multiply and '
+                              'col_reduce_small sum in one launch, word for word',
+    'turboexl3_ling_combine_parts': 'the same over a wide call\'s JOINLESS sources (each pair\'s (source, row))',
+    'turboexl3_pf_prep_r': ('the prepare with its row line swapped for the row map\'s (text_prep_rows: prep_1, prep_rmap, '
+                            'prep_2): each slot\'s x row read through rmap, an expert streamer\'s prompt rows gathered in '
+                            'the prepare (root.moeSwigluRows, ling.moeLingRows; glm53f-fused b0f22c9\'s port)'),
+    'turboexl3_ling_mla_flash': 'Ling-3.1\'s MLA prompt attention in one launch: MLX 0.32.5\'s attention_nax at qk 192, v 128 '
+                                'less its mask, sinks, log-sum-exp and window arms',
+}
+SPLIT_ADDED_KERNELS['turboexl3_ling_moe_tail'] = ('Ling-3.1\'s MoE tail at decode rows (models/ling/tail.zig): mlx-serve\'s '
+                                                  'add_norm (the plain arm) with its delta the routed sum over the call\'s '
+                                                  'joined rows in the combine\'s statements, rounded to T, plus the shared '
+                                                  'expert (tail_1 ++ tail_delta ++ tail_2); ling.moeTail')
+SPLIT_ADDED_KERNELS['turboexl3_ling_moe_tail_parts'] = ('the MoE tail over the routed call\'s unjoined outputs '
+                                                        '(models/ling/tail.zig): tail_1 ++ tail_delta_parts ++ tail_2, '
+                                                        'each pair\'s row read in place at its (source, row), header '
+                                                        'pick; ling.moeTailParts')
+SPLIT_ADDED_KERNELS['turboexl3_ling_router_logits'] = ('Ling-3.1\'s router logits at decode rows (models/ling/router.zig): '
+                                                       'MLX\'s one-row gemv over the loader\'s column-major table a row '
+                                                       '(router/head ++ logits_1 ++ logits_w ++ logits_2 ++ close)')
+SPLIT_ADDED_KERNELS['turboexl3_ling_router_pred'] = ('the same beside the read-ahead predictor\'s threadgroups (pred_open, '
+                                                     'pred_one: MLX\'s gemv at one row, pred_wide: its gemv_wide at 2 to 8), '
+                                                     'DeepSeek\'s sqrt(softplus(z)) + bias (header score_softplus_sqrt)')
+SPLIT_ADDED_KERNELS['turboexl3_ling_router_pred_sig'] = 'the same with Ling\'s sigmoid(z) + bias (header score_sigmoid)'
+SPLIT_ADDED_KERNELS['turboexl3_ling_router_select'] = ('the host\'s fused router at sigmoid_bias_grouped, its text verbatim '
+                                                       '(router/select), TOUT bfloat16')
+SPLIT_ADDED_KERNELS['turboexl3_test_ling_router_host'] = ('test only: the host\'s fused router at its own config (TOUT f32), '
+                                                          'the router test\'s reference')
+SPLIT_ADDED_KERNELS['turboexl3_ling_kdaproj_dec0b'] = ('kdaProj\'s GEMV launch with a KDA layer\'s b_proj (bf16) as a '
+                                                       'fourth member (kdaproj.zig text_kdec0b: kdaproj/bmember before '
+                                                       'text_kdec0): MLX\'s gemv at BM 1, BN 8 over b\'s weight on the '
+                                                       'threadgroups past the members\', each row the served one-row '
+                                                       'matmul\'s; ling.kdaProjB')
+SPLIT_ADDED_KERNELS['turboexl3_ling_router_logits_h'] = ('Ling-3.1\'s router logits over the loaded f16 weight (E10): '
+                                                         'turboexl3_ling_router_logits with the table\'s read swapped for the '
+                                                         'f16 word widened, then + 0 (router/logits_wh)')
+SPLIT_ADDED_KERNELS['turboexl3_ling_router_pred_h'] = 'turboexl3_ling_router_pred over the loaded f16 weight (router/logits_wh)'
+SPLIT_ADDED_KERNELS['turboexl3_ling_router_pred_sig_h'] = ('turboexl3_ling_router_pred_sig over the loaded f16 weight '
+                                                           '(router/logits_wh)')
+SPLIT_ADDED_KERNELS['turboexl3_ling_mla_qabs'] = ('Ling-3.1\'s MLA attention at decode rows in the latent '
+                                                  '(models/ling/mla_latent.zig): q_nope through kv_b\'s key half, f32')
+SPLIT_ADDED_KERNELS['turboexl3_ling_mla_attn'] = ('the same: the attention\'s partials over the latent cache (latents and '
+                                                  'roped shared keys), key groups of 256 and 32-key sub-chunks from position '
+                                                  '0, an online softmax a row')
+SPLIT_ADDED_KERNELS['turboexl3_ling_mla_vabs'] = ('the same: a row\'s group partials merged in group order, then kv_b\'s '
+                                                  'value half')
+SPLIT_ADDED_KERNELS['turboexl3_ling_mla_attn_stage'] = ('V2 stage: launch 2 with each sub-chunk\'s latents and rope keys '
+                                                        'staged in f32 in threadgroup memory (text_attn_stage: stage_1 ++ '
+                                                        'attn_2 ++ stage_2 ++ attn_4; Config.mla_latent_stage), launch 2\'s '
+                                                        'words')
+SPLIT_ADDED_KERNELS['turboexl3_ling_kdaproj_pf'] = ('P4: a KDA layer\'s q|k|v, f and g at prompt rows in one launch '
+                                                    '(models/ling/kdaproj_pf.zig text_pf: kdaproj/pf_1, pg2\'s fused_2, '
+                                                    'kdaproj/pf_3, pg2\'s fused_4, kdaproj/pf_5, pg2\'s fused_6, the '
+                                                    'macro\'s end): pg2\'s fused NAX GEMM and dense finish with the N '
+                                                    'tiles running each member\'s in turn, each member\'s linear bytes; '
+                                                    'ling.kdaProjPrompt')
+SPLIT_ADDED_KERNELS['turboexl3_ling_finish_sgu'] = ('Ling-3.1\'s prefill SwiGLU epilogue (models/ling/swiglu.zig '
+                                                  'text_finish_sgu: dense/finish_v, swiglu/epi_open, shared/sgu_swiglu, '
+                                                  'swiglu/epi_close): up\'s finish with its value kept, then the host\'s '
+                                                  'SwiGLU of the gate\'s value and its own; ling.upSwiglu')
+SPLIT_ADDED_KERNELS['turboexl3_ling_finish_sguco'] = ('turboexl3_ling_finish_sgu with the clamp after the SiLU '
+                                                    '(shared/sgu_swiglu_clamp_out)')
+SPLIT_CHANGED_CONSTS = {
+    'head': 'models/ling/router.zig: launch 1\'s router threadgroups at 512 / 16 a row (MLX\'s gemv tiles)',
+    'pred_open': 'models/ling/router.zig: the predictor\'s threadgroups after 512 / 16 a row of the router\'s',
+    'logits_gemv': 'models/ling/router.zig: MLX\'s gemv over the loader\'s column-major table (logits_1 ++ logits_w ++ logits_2)',
+    'text_logits': 'models/ling/router.zig: the router half as MLX\'s gemv over the loader\'s table',
+    'text_pred': 'models/ling/router.zig: the router half as MLX\'s gemv over the loader\'s table',
+}
+# --split against a base: what a strip removes on purpose (the Ling final strip: each rejected candidate's code, one
+# commit each), by name with the candidate it belonged to. A kernel, a Zig file or a test missing from NEW fails unless it
+# is listed here; each listed one is printed as removed (intended). Emptied after the strip lands, as the tables above.
+SPLIT_REMOVED_KERNELS = {}
+SPLIT_REMOVED_FILES = {}
+SPLIT_REMOVED_TESTS = {}
+
+# strip2 (2026-11-09, main): the Ling dead-code strip after the final tree (rejected and closed candidates), against ling-combo2 908b167
+_S2_MLAROWS = "R13 MLA_ROWS (D4, rejected): the MLA chain's plain kv_b and head gate at decode and verify rows in one GEMV launch (models/ling/mla_rows.zig, ling.mlaRows, Config.mla_rows)"
+SPLIT_REMOVED_KERNELS['turboexl3_ling_mla_rows'] = _S2_MLAROWS
+SPLIT_REMOVED_KERNELS['turboexl3_test_ling_mla_rows_krev_fault'] = _S2_MLAROWS
+SPLIT_REMOVED_KERNELS['turboexl3_test_ling_mla_rows_sgrev_fault'] = _S2_MLAROWS
+SPLIT_REMOVED_FILES['models/ling/mla_rows.zig'] = _S2_MLAROWS
+SPLIT_REMOVED_FILES['models/ling/mla_rows_test.zig'] = _S2_MLAROWS
+SPLIT_REMOVED_TESTS["turboexl3 ling mla rows texts: the launch is its five pieces in order; MLX's gemv statements (each row's tile read, products, shuffle-down sum, threadgroup sum and store) once each, the accumulate and the threadgroup sum each a piece of their own, no contraction pragma; the operands and template arguments it names, and no shape buffer"] = _S2_MLAROWS
+SPLIT_REMOVED_TESTS["turboexl3 ling mla rows plan: MLX's gemv tile for kv_b (BM 8) and the head gate (BN 8), and the router's (BM 4) its text names; the rows a threadgroup takes and their chunks at rows 1 to 16 and caps 1 to 8; a verify's 2 to 4 rows in one chunk from cap 4; the declines"] = _S2_MLAROWS
+SPLIT_REMOVED_TESTS["turboexl3 ling mla rows faults: each planted fault is the launch's text with one piece swapped, the accumulate for its reverse K order, the threadgroup sum for its reverse simdgroup order"] = _S2_MLAROWS
+SPLIT_REMOVED_TESTS["turboexl3 gpu ling mla rows: kv_b and the head gate in one GEMV launch give the served words (the one-row matmul, the exact verify's denseRows) at rows 1 to 8, 12 and 16 and caps 1 to 8, on random rows and on built rows an order change moves, weights as the loader keeps them; red checks (two planted reorderings, a changed weight word, swapped rows) differ; the configuration's path and the refusals (TURBOEXL3_GPU=1)"] = _S2_MLAROWS
+_S2_V2 = 'V2 rows, rows2 and block (MLA_LATENT_ROWS, _ROWS2, _BLOCK: candidates, superseded by MLA_LATENT_NAX, kept): launch 2 of the MLA attention in the latent for 2 or 4 rows a threadgroup, and on 2 x 2 / 4 x 4 tiles (Config.mla_latent_rows, mla_latent_block; mla_latent.Attn.rows2, rows4, block)'
+SPLIT_REMOVED_KERNELS['turboexl3_ling_mla_attn_rows'] = _S2_V2
+SPLIT_REMOVED_KERNELS['turboexl3_ling_mla_attn_block'] = _S2_V2
+_S2_VRT = "D35 VERIFY_ROW_TABLE (closed by TIME: 1.09/1.74/2.19 of the served at 2/3/4 rows): o_proj at a verify's rows on one output tile a GEMV threadgroup (Config.dec_verify_row_table, dense.verify_row_table)"
+SPLIT_REMOVED_TESTS["turboexl3 ling: Config.dec_verify_row_table gives o_proj's shape (8192 -> 4096 at K6) its verify_row_table launch at rows 2 to 4 only, every other trunk shape the rest of the configuration's, beside the one-row table"] = _S2_VRT
+SPLIT_REMOVED_TESTS["turboexl3 gpu ling verify-row table: o_proj's verify rows (2 to 4) on the table's launch (Config.dec_verify_row_table) give the served launch's words and the three-launch chain's, through linear and over prepared rows; red check: the table's launch at another K split (TURBOEXL3_GPU=1)"] = _S2_VRT
+_S2_KDA = "D35 KDA_BFIRST/KDA_BT (closed by TIME in-family, no A/B: KDA_BFIRST 0.996-1.007 of the served, KDA_BT pairs 1.004-1.54): kdaProjB's variant launch, b's threadgroups first and the members' tiles a threadgroup apart, with its DEC_T4/DEC_PF twins (Config.kda_bfirst, kda_bt0 / kda_bt1; kdaproj.variantFor). D35's cut of kdaproj/bmember.metal (bmember_1 ++ bmember_2, the same value) stays"
+SPLIT_REMOVED_KERNELS['turboexl3_ling_kdaproj_dec0bv'] = _S2_KDA
+SPLIT_REMOVED_KERNELS['turboexl3_ling_kdaproj_dec0bv_t4'] = _S2_KDA
+SPLIT_REMOVED_KERNELS['turboexl3_ling_kdaproj_dec0bv_pf'] = _S2_KDA
+SPLIT_REMOVED_KERNELS['turboexl3_ling_kdaproj_dec0bv_pft4'] = _S2_KDA
+SPLIT_REMOVED_TESTS["turboexl3 ling kdaproj variant texts: the b launch's member is its two pieces; the variant launch is kbfirst in bmember_1's place, its head, the member choice, then DEC-ONE's statements over prepared rows in each member's branch (pf's in the pf text) and nothing else; every operand and argument named, no shape buffers"] = _S2_KDA
+SPLIT_REMOVED_TESTS["turboexl3 ling kdaproj variant plan: the configuration's variant launch per row count (the members' tiles apart at a verify's rows where they fit, b first and DEC-ONE's GEMV variant at every row count); the variant grid covers each member's (K slice, block) and b's output rows once, at every pair of tile counts, b first or last"] = _S2_KDA
+SPLIT_REMOVED_TESTS["turboexl3 gpu ling bproj variants: each variant launch (b first; q|k|v's and f and g's tiles apart; t4, pf, pft4; all together) gives kdaProjB's words, b's and the three members', at rows 1 to 8 and 16, operands as the loader keeps them; red checks: a flipped word, q|k|v at another K split, one word of b's weight (TURBOEXL3_GPU=1)"] = _S2_KDA
+_S2_DEC = "D35 DEC_T4/DEC_PF (closed by TIME in-family, no A/B: no consistent winner, pf and pft4 1.03-1.3 of the served, t4 about 1.0 at the big shapes, the small shapes 0.6-3.2 scatter): DEC-ONE's GEMV variants t4, pf and pft4 over prepared rows (Config.dec_variant, dense.dec_variants, dense.dec0For). D35's cut of dense/dec_gemv_arrive_2.metal (dec_gemv_arrive_2_1 ++ _2_2, the same value) stays"
+SPLIT_REMOVED_KERNELS['turboexl3_dense_dec0_t4'] = _S2_DEC
+SPLIT_REMOVED_KERNELS['turboexl3_dense_dec0_pf'] = _S2_DEC
+SPLIT_REMOVED_KERNELS['turboexl3_dense_dec0_pft4'] = _S2_DEC
+SPLIT_REMOVED_TESTS["turboexl3 dense DEC-ONE variants: t4 is text_dec0 after t4's define, pf is text_dec0 with each tile's words loaded a pass ahead (dec_tile's address, arrive_2_1's load) and nothing else; the variant table is the config's"] = _S2_DEC
+SPLIT_REMOVED_TESTS["turboexl3 gpu ling dense variants: each DEC-ONE GEMV variant (t4, pf, pft4) gives the served GEMV's words at every Ling-3.1-flash trunk shape and the LM head, rows 1 to 4, x bf16 and f32 (the head bf16), through linear and over prepared rows; red checks: a flipped word, each variant at another K split (TURBOEXL3_GPU=1)"] = _S2_DEC
+_S2_DFMIN = "V1 per-tile dfin_min (PF_DFIN_MIN, superseded by V1c's whole-call rule; dfin.min80 1.04-1.05 of the served in TIME, no A/B): the fused finish only for the experts of at least DFMIN rows in the call (prefill.Options.dfin_min, Config.pf_dfin_min, DfinMinKernels). V1's cuts of finish_1 (finish_1_1 ++ _2 ++ _3) and gemm_small_3 (gemm_small_3_1 ++ _2), the same values, stay"
+SPLIT_REMOVED_KERNELS['turboexl3_pf_t128n_route'] = _S2_DFMIN
+SPLIT_REMOVED_KERNELS['turboexl3_pf_t256n_route'] = _S2_DFMIN
+SPLIT_REMOVED_KERNELS['turboexl3_pf_t128_dnmn'] = _S2_DFMIN
+SPLIT_REMOVED_KERNELS['turboexl3_pf_t128_dntn'] = _S2_DFMIN
+SPLIT_REMOVED_KERNELS['turboexl3_pf_dfinn'] = _S2_DFMIN
+SPLIT_REMOVED_KERNELS['turboexl3_test_pf_dfinn_gemm_fault'] = _S2_DFMIN
+SPLIT_REMOVED_KERNELS['turboexl3_test_pf_dfinn_fin_fault'] = _S2_DFMIN
+SPLIT_REMOVED_TESTS["turboexl3 prefill dfin_min texts: the route also writes each expert's rows; the served down launches are theirs with the skip; the one launch writing y is text_dfin with its skip beside the served finish with its item index"] = _S2_DFMIN
+RENAMED_TESTS[('prefill.zig', "turboexl3 prefill call: a call runs the fused finish only where its engine was built with it and the call keeps it (its threshold's chain with dfin_min); .{} is the engine's own ending, .{ .dfin = false } the served one")] = "turboexl3 prefill call: a call runs the fused finish only where its engine was built with it and the call keeps it; .{} is the engine's own ending, .{ .dfin = false } the served one"
+_S2_T256 = "V1 t256 (PF_T256, never kept): the 128-row tiles' launch over tiles of up to 256 rows on the bm-256 body (prefill.Options.t256, Config.pf_t256, text_froute_t256). V1's cut of froute_t128_2 (froute_t128_2_1 .. _2_5, the same value) stays"
+SPLIT_REMOVED_KERNELS['turboexl3_pf_t256_route'] = _S2_T256
+SPLIT_REMOVED_KERNELS['turboexl3_test_pf_t256_route_fault'] = _S2_T256
+SPLIT_REMOVED_TESTS["turboexl3 prefill 256-row tiles tables: every sorted position in exactly one tile; an expert's tiles never more than at 128 rows; at a cut of at most 64, ceil(rows / 256) of them; the 128-row tiles' bounds hold"] = _S2_T256
+RENAMED_TESTS[('prefill.zig', "turboexl3 prefill variant texts: the 256-row route is the 128-row route at 256 rows; the fused down GEMM is gemm1_text with its tile read and its store swapped for the two-table read and the finish's own statements")] = "turboexl3 prefill variant texts: the fused down GEMM is gemm1_text with its tile read and its store swapped for the two-table read and the finish's own statements"
+RENAMED_TESTS[('prefill.zig', 'turboexl3 prefill variant options: t256 needs t128; gate|up takes 1, 2 or 4 column blocks; the fused finish needs whole 128-column blocks, one down launch over every row and its staging within 32 KB')] = 'turboexl3 prefill variant options: the fused finish needs the 128-row tiles, whole 128-column blocks and its staging within 32 KB'
+RENAMED_TESTS[('prefill.zig', "turboexl3 prefill variant metal sources: the 256-row tiles' route and launches, and the fused down GEMM over two tables and one, as standalone translation units (TURBOEXL3_METAL_DUMP=1)")] = 'turboexl3 prefill variant metal sources: the fused down GEMM over the two tables, as standalone translation units (TURBOEXL3_METAL_DUMP=1)'
+RENAMED_TESTS[('rows_test.zig', "turboexl3 gpu ling rows variants: the routed chain's variants (256-row tiles, the remainder cut, gate-up column blocks, the fused finish, the plain launches) are the served engine's words on synthetic calls at every row bucket, n 40 and 32, limits 0 and 10; planted faults are caught (TURBOEXL3_GPU=1)")] = "turboexl3 gpu ling rows variants: the routed chain's fused finish (over both tables at the served options, and at each other stage shape it takes) is the served engine's words on synthetic calls at every row bucket, n 40 and 32, limits 0 and 10; planted faults are caught (TURBOEXL3_GPU=1)"
+
+_R10 = ("R10 ROUTER_ADDNORM (M6, rejected): the post-attention add_norm folded into the router's launch 1 "
+        '(models/ling/anroute.zig, ling.addNormLogits)')
+SPLIT_REMOVED_KERNELS['turboexl3_ling_router_an_logits'] = _R10
+SPLIT_REMOVED_KERNELS['turboexl3_ling_router_an_logits_h'] = _R10
+SPLIT_REMOVED_KERNELS['turboexl3_ling_router_an_pred'] = _R10
+SPLIT_REMOVED_KERNELS['turboexl3_ling_router_an_pred_h'] = _R10
+SPLIT_REMOVED_KERNELS['turboexl3_ling_router_an_pred_sig'] = _R10
+SPLIT_REMOVED_KERNELS['turboexl3_ling_router_an_pred_sig_h'] = _R10
+SPLIT_REMOVED_FILES['models/ling/anroute.zig'] = _R10
+SPLIT_REMOVED_FILES['models/ling/anroute_test.zig'] = _R10
+SPLIT_REMOVED_TESTS[("turboexl3 ling anroute texts: each text is launch 1's composition with the "
+                     "add_norm's sums after the head, x's reads swapped for the normed rows' readers and nothing "
+                     "else; launch 1's texts are their pieces' compositions")] = _R10
+SPLIT_REMOVED_TESTS[("turboexl3 gpu ling anroute: addNormLogits gives the served chain's words (the "
+                     "add_norm's: MLX's add and fast rms_norm; then routerLogits over its normed rows): the "
+                     "residual, the normed rows, the logits and the predictor's scores at rows 1 to 8, over the "
+                     "loader's f32 table and the loaded f16 weight, with no predictor and each score, on rows of "
+                     'every scale, a row of signed zeros and cancelling columns (TURBOEXL3_GPU=1)')] = _R10
+_R9 = ("R9 MLA_PROJ_FUSED (E5, rejected): an MLA layer's q_a, kv_a and head gate in one GEMV launch "
+       '(models/ling/mlaproj.zig, ling.mlaProjG)')
+SPLIT_REMOVED_KERNELS['turboexl3_ling_mlaproj_prep'] = _R9
+SPLIT_REMOVED_KERNELS['turboexl3_ling_mlaproj_dec0g'] = _R9
+SPLIT_REMOVED_FILES['models/ling/mlaproj.zig'] = _R9
+SPLIT_REMOVED_FILES['models/ling/mlaproj_test.zig'] = _R9
+SPLIT_REMOVED_TESTS[("turboexl3 ling mlaproj texts: dense's prep_sc verbatim after the member choice; the "
+                     "gate's member, then dense's DEC-ONE text over prepared rows verbatim after its head, under "
+                     'the two-member head and the member choice; each operand bound by name')] = _R9
+SPLIT_REMOVED_TESTS[("turboexl3 ling mlaproj plan: Ling's members keep their own K splits (q_a 8, kv_a "
+                     '16) at decode rows 1 to 16; past the decode rows, two affine deferrals and widths DEC-ONE '
+                     'does not take decline')] = _R9
+SPLIT_REMOVED_TESTS[("turboexl3 ling mlaproj grid: the head's member, K slice and block of every member "
+                     "threadgroup cover each member's (K slice, block) once, at every tile count; the gate's "
+                     'threadgroups follow them')] = _R9
+SPLIT_REMOVED_TESTS[("turboexl3 gpu ling mlaproj: mlaProjG's q_a and kv_a are each one's own linear and "
+                     "its gate the served g_proj (one-row matmul, the exact verify's denseRows), word for word "
+                     'at rows 1 to 8, operands as the loader keeps them (TURBOEXL3_GPU=1)')] = _R9
+SPLIT_REMOVED_TESTS[("turboexl3 gpu ling mlaproj timing: ten MLA layers' q_a, kv_a and gate, the served "
+                     "launches against mlaProjG's two, at rows 1 to 4, and their bytes (TURBOEXL3_LING_TIME=1)")] = _R9
+_R11 = ('R11 ROUTER_PROMPT (PR, rejected): the MoE router at prompt widths in one launch '
+        '(models/ling/router_prompt.zig, ling.router_prompt.logits), with its audit case d48ac6a (PR-1)')
+SPLIT_REMOVED_KERNELS['turboexl3_ling_router_prompt'] = _R11
+SPLIT_REMOVED_FILES['models/ling/router_prompt.zig'] = _R11
+SPLIT_REMOVED_FILES['models/ling/router_prompt_test.zig'] = _R11
+SPLIT_REMOVED_TESTS[("turboexl3 ling router_prompt: MLX's tile per architecture class, MLX's TF32 gate, "
+                     'and the regular kernel only where MLX runs it')] = _R11
+SPLIT_REMOVED_TESTS[("turboexl3 ling router_prompt texts: the loop is MLX's gemm_loop (pg2's verbatim "
+                     "copy) but for its f32 tiles loaded from each operand's own type and B's -0.0 stored +0.0; "
+                     "the kernel attribute's macro closes the header and the body undefines it")] = _R11
+SPLIT_REMOVED_TESTS[("turboexl3 gpu ling router_prompt: logits over the loaded f16 weight's view and "
+                     "over the loader's f32 table gives the stock call's words (tableF32, then MLX's matmul) at "
+                     'every span width MLX runs its regular kernel at (TURBOEXL3_GPU=1)')] = _R11
+SPLIT_REMOVED_TESTS[('turboexl3 gpu ling router_prompt refusals: one row and every span MLX runs on its '
+                     'NAX split K (1365 rows and fewer), x not bf16, a row-major or bf16 weight '
+                     '(TURBOEXL3_GPU=1)')] = _R11
+SPLIT_REMOVED_TESTS[("turboexl3 gpu ling timing: router_prompt's logits in one launch against the "
+                     "router's stock call at prompt widths (tableF32, then MLX's matmul) (TURBOEXL3_LING_TIME=1)")] = _R11
+_R6 = ("R6 DEVWAVE_LUT (M3, rejected): DEVROUTE's device wave in one call (ling.moeLingBankedLut, "
+       'ds.bankedGateUpLutAct, the LUT prepare turboexl3_prep2bgl)')
+SPLIT_REMOVED_KERNELS['turboexl3_prep2bgl'] = _R6
+SPLIT_REMOVED_FILES['models/ling/devlut_test.zig'] = _R6
+SPLIT_REMOVED_TESTS[('turboexl3 ling devlut texts: prep2bgl is prep2bg with its skip and expert lines '
+                     "swapped for the LUT's and the id line before them, nothing else")] = _R6
+SPLIT_REMOVED_TESTS[("turboexl3 gpu ling devlut: moeLingBankedLut is DEVROUTE's device wave (the LUT "
+                     "taken at the routed experts, x's rows taken per pair, moeLingBanked) byte for byte, tokens "
+                     "1 to 6 and 8 at top-8, limits 0 and 10, x bf16 and f32, on the streamer's banks "
+                     '(TURBOEXL3_GPU=1)')] = _R6
+_R2 = ("R2 NORM_FUSED (E3, rejected): the mixer input's residual add, RMSNorm and EXL3 prepares in one launch "
+       '(models/ling/addnorm.zig, ling.addNormLinears, addNormPrepare)')
+SPLIT_REMOVED_KERNELS['turboexl3_ling_addnorm1'] = _R2
+SPLIT_REMOVED_KERNELS['turboexl3_ling_addnorm2'] = _R2
+SPLIT_REMOVED_KERNELS['turboexl3_ling_addnorm3'] = _R2
+SPLIT_REMOVED_FILES['models/ling/addnorm.zig'] = _R2
+SPLIT_REMOVED_FILES['models/ling/addnorm_test.zig'] = _R2
+SPLIT_REMOVED_TESTS[("turboexl3 ling addnorm texts: the launches are the norm, the members' prepares in "
+                     "member order and the counters; the prepare is text_prep_s's statements on the row in "
+                     "threadgroup memory, the counters prep_sc's loop, the norm mlx-serve's add_norm statements")] = _R2
+SPLIT_REMOVED_TESTS[('turboexl3 ling addnorm plan: no member, more than three, rows outside 1 to 16 and '
+                     'float32 rows are refused before any Dense is made')] = _R2
+SPLIT_REMOVED_TESTS[("turboexl3 gpu ling addnorm: the add, its RMSNorm and up to three linears' prepares "
+                     "in one launch give MLX's add, MLX's fast rms_norm and each linear's bytes at decode rows 1 "
+                     "to 8, 12 and 16, each linear's prepare inside or in its own launch (TURBOEXL3_GPU=1)")] = _R2
+SPLIT_REMOVED_TESTS[('turboexl3 gpu ling addnorm: refusals come before any launch: a width other than '
+                     '4096, mixed dtypes, a non-f32 or non-scalar eps, a suh of another width (TURBOEXL3_GPU=1)')] = _R2
+_GU8 = ('BANKED_GU8 (B8, superseded by BANKED_T4, S14): gu8b, the banked grouped gate|up with its prepare inside '
+        'its launch (Config.banked_gu8, BankedSel.g4gu8 and g4m3gu8)')
+SPLIT_REMOVED_KERNELS['turboexl3_gu8bg'] = _GU8
+SPLIT_REMOVED_KERNELS['turboexl3_gu8bgm3'] = _GU8
+_WIDE = ('DEC_ONE_ROW_WIDE (superseded by ONE_ROW_TABLE, S10): Config.dec_one_row_wide, a one-row dense decode '
+         "call on two rows' launch shape")
+SPLIT_REMOVED_TESTS[("turboexl3 gpu ling dense: a one-row call on two rows' launch shape "
+                     "(Config.dec_one_row_wide) gives one row's own bytes and the three-launch chain's at every "
+                     'Ling-3.1-flash trunk shape (TURBOEXL3_GPU=1)')] = _WIDE
+# the Ling banked test selects each arm's texts (moeLingBankedSel): Config.banked_group set in the process selected nothing
+RENAMED_TESTS[('ling_test.zig', "turboexl3 gpu ling banked: every pair of moeLingBanked over three banks is moeLing's on "
+                                "its bank at top-1 with score 1, byte for byte, at limits 0 and 10 and banked groups 2 and "
+                                "4 (TURBOEXL3_GPU=1)")] = (
+    "turboexl3 gpu ling banked: every pair of moeLingBanked over three banks is moeLing's on its bank at top-1 with "
+    "score 1, byte for byte, at limits 0 and 10, on the configured texts (group 2), the grouped texts (g4) and the M = 3 "
+    "path (g4m3), each selected (TURBOEXL3_GPU=1)")
+
+# strip2 V2: the latent variants test holds only the stage now
+RENAMED_TESTS[('mla_latent_test.zig', "turboexl3 gpu ling mla latent variants: rows2, rows4, stage and block give launch 2's words, the output and launch 2's partials word for word, at rows 1 to 4 and keys 1 to 19,404, on the plugin's operands (kv_b through the loader's rows view, the head's cache as a wider buffer's first rows, the query halves as views) and two strided caches; a planted fault differs (TURBOEXL3_GPU=1)")] = (
+    "turboexl3 gpu ling mla latent variants: stage gives launch 2's words, the output and launch 2's partials word for word, at rows 1 to 4 and keys 1 to 19,404, on the plugin's operands (kv_b through the loader's rows view, the head's cache as a wider buffer's first rows, the query halves as views) and two strided caches; a planted fault differs (TURBOEXL3_GPU=1)")
+
+# strip2 D1 shapes: the latent NAX launch keeps its one shape (nax_sd_m2_k32); its tests name it, and the m2_k64 fixture
+RENAMED_TESTS[('mla_latent.zig', "turboexl3 ling mla latent nax plan: each shape's grid and threads, the configuration's text and its fallback, the calls a shape takes, the split shapes' threadgroup memory")] = "turboexl3 ling mla latent nax plan: the shape's grid and threads, the configuration's text and its fallback, the calls the shape takes, its threadgroup memory"
+RENAMED_TESTS[('mla_latent_test.zig', 'turboexl3 ling mla latent nax metal source: the kernel as standalone translation units, bf16 split at 1 M tile and whole at 4, f16 split at 2 (TURBOEXL3_METAL_DUMP=1)')] = 'turboexl3 ling mla latent nax metal source: the kernel at its shape as standalone translation units, bf16 and f16 (TURBOEXL3_METAL_DUMP=1)'
+RENAMED_TESTS[('mla_latent_test.zig', "turboexl3 gpu ling mla latent nax: every NAX shape within naxBound of the host's f64 absorbed attention on the plugin's operands at rows 1 to 5 and keys 1 to 19,404, beside the served stage form's error; the strided caches; a planted fault breaks the bound; a refused call falls back to the served text (TURBOEXL3_GPU=1)")] = "turboexl3 gpu ling mla latent nax: the NAX shape and the m2_k64 fixture within naxBound of the host's f64 absorbed attention on the plugin's operands at rows 1 to 5 and keys 1 to 19,404, beside the served stage form's error; the strided caches; a planted fault breaks the bound; a refused call falls back to the served text (TURBOEXL3_GPU=1)"
+SPLIT_ADDED_KERNELS['turboexl3_test_ling_mla_attn_nax_m2_k64'] = ('test only: turboexl3_ling_mla_attn_nax at 64 keys a step with the whole scores (fault/mla_latent_nax_m2_k64 ahead of nax ++ nax_close, on the served shape\'s launch): the m2_k64 shape strip2 took out of the shape table, a red check\'s row-count-dependent split')
+
+# the router's column-major table (E2's fix) and its f16 weight (E10): the router tests' names say what they now hold
+RENAMED_TESTS[('router.zig', ("turboexl3 ling router texts: the logits and predictor texts are one composition, the predictor's "
+    "branch spliced before the close; MLX's GEMV statements carry no contraction pragma and the scores' "
+    "headers do; the select text is the host's statements; every operand a name its text reads"))] = ('turboexl3 ling router texts: the logits and predictor texts are one composition per weight dtype, '
+    "the table's read the only piece the f16 texts swap and the predictor's branch spliced before the "
+    "close; MLX's GEMV statements carry no contraction pragma and the scores' headers do; the select "
+    "text is the host's statements; every operand a name its text reads")
+RENAMED_TESTS[('router.zig', ("turboexl3 ling router plan: launch 1's threadgroups per row count (the router's 8 a row; the "
+    "predictor's 32 at one row, 128 at 2 to 5 rows, 64 at 6 to 8) and the shapes the launches take (rows "
+    '1 to 8, hidden a multiple of 1024 below 8192)'))] = ("turboexl3 ling router plan: launch 1's threadgroups per row count (the router's 32 a row; the "
+    "predictor's 32 at one row, 128 at 2 to 5 rows, 64 at 6 to 8) and the shapes the launches take (rows "
+    '1 to 8, hidden a multiple of 1024 below 8192)')
+RENAMED_TESTS[('router_test.zig', ("turboexl3 gpu ling router: routerLogits, select and route give the host's logits (one-row gemv_t a "
+    "row), predictor scores (DeepSeek's and Ling's, gemv at one row and gemv_wide at 2 to 8) and ids and "
+    'bf16 weights (its fused router, then the astype) word for word at rows 1 to 8 (TURBOEXL3_GPU=1)'))] = ("turboexl3 gpu ling router: routerLogits, select and route over the loader's table (f32, transposed "
+    'back) and over the loaded f16 weight give the served logits (one-row gemv over the column-major '
+    "table, denseRows at 2 to 8), predictor scores (DeepSeek's and Ling's, gemv at one row and gemv_wide "
+    'at 2 to 8) and ids and bf16 weights word for word at rows 1 to 8 (TURBOEXL3_GPU=1)')
+
+# Ling-3.1-flash's routed-chain variants (ling-v1-routed, each a prefill.Options field off by default; the kernels the
+# served chain runs keep their texts: gemm_3, gemm_op1_xsz and froute_t128_2 are cut into pieces of the same values)
+SPLIT_ADDED_KERNELS['turboexl3_pf_dfin'] = ('Options.dfin: gemm1_text with its stage taking the finish\'s own staging '
+                                            'at DFR 64 (gemm_dfin_bs in gemm_2\'s place), its tile read from one of two '
+                                            'tables (gemm_dfin_tile in gemm_3_2\'s place) and its store replaced by the '
+                                            'finish\'s own statements (gemm_dfin_epi_1 ++ finish_2 ++ gemm_dfin_load ++ '
+                                            'finish_4 ++ gemm_dfin_epi_2 in gemm_op1_xsz_2 ++ gemm_5\'s place), header '
+                                            'header_nax ++ h128')
+SPLIT_ADDED_KERNELS['turboexl3_test_pf_dfin_fault'] = ('test only: turboexl3_pf_dfin with a planted fault (tile 0\'s '
+                                                       'products unrounded, fault/dfin_4 in finish_4\'s place), a red check')
+SPLIT_ADDED_KERNELS['turboexl3_test_pf_dfin_order_fault'] = ('test only: turboexl3_pf_dfin with a planted reduction-order '
+                                                             'fault (tile 0\'s H128 stages reordered, fault/dfin_4_order in '
+                                                             'finish_4\'s place), a red check')
+SPLIT_ADDED_KERNELS['turboexl3_test_pf_dfin_korder_fault'] = ('test only: turboexl3_pf_dfin with a planted K-order fault '
+                                                              '(tile 0\'s K stages in reverse order, fault/gemm_4_krev in '
+                                                              'gemm_4\'s place), a red check')
+# L1 (turboexl3_ling's MLX_SERVE_LING_PF_F16_PAIRS): a prompt call's routed pairs stored as f16 (moeLingRowsPairsF16)
+# and the JOINLESS combine over f16 sources (turboexl3_ling_combine_parts_h)
+ADDED_FILES['models/ling/f16pairs_test.zig'] = ('moeLingRowsPairsF16 and the combine over f16 sources held word for '
+                                                'word to the served f32 pairs and combine at the standard request\'s '
+                                                'call, a 2,048-token call and a padded call, both endings, with red '
+                                                'checks (GPU); the exactness rule and the host round-trip (CPU)')
+SPLIT_ADDED_KERNELS['turboexl3_ling_combine_parts_h'] = ('turboexl3_ling_combine_parts over f16 sources (PF_F16_PAIRS): '
+                                                         'src_parts_h and pick_h, the source pointers half, the same '
+                                                         'statements; the product widens each word exactly')
+# L3 (turboexl3_ling's MLX_SERVE_LING_PF_MOE_TAIL): a layer-major MoE layer's tail at a prompt span's rows in one launch
+# over its wide routed call's JOINLESS parts (moeTailWide), f32 and f16 sources, and the red check's planted fault
+SPLIT_ADDED_KERNELS['turboexl3_ling_moe_tail_wide'] = ('the MoE tail at prompt widths (models/ling/tail.zig): tail_we ++ '
+                                                        'tail_1 ++ tail_delta_wide ++ tail_2, the parts delta with the '
+                                                        'combine\'s 24-source pick, W and eps from WE; header the '
+                                                        'combine\'s pick')
+SPLIT_ADDED_KERNELS['turboexl3_ling_moe_tail_wide_h'] = ('turboexl3_ling_moe_tail_wide over f16 sources (PF_F16_PAIRS): '
+                                                          'tail_delta_wide_h, the source pointer half and the combine\'s '
+                                                          'pick_h, the same statements')
+SPLIT_ADDED_KERNELS['turboexl3_test_ling_moe_tail_wide_tgsum_rev_fault'] = ('test only: turboexl3_ling_moe_tail_wide_h '
+                                                                             'with the threadgroup sum reversed '
+                                                                             '(fault/tail_2_tgsum_rev), a red check')
+SPLIT_ADDED_KERNELS['turboexl3_ling_mla_flash_r1'] = ('rope-once: the MLA prompt attention over the rope-once cache '
+                                                      '(models/ling/mla_flash.zig text_body_r1: the base body\'s pieces '
+                                                      'with r1_setup and r1_kstep added, body_kofs and body_kload swapped '
+                                                      'for r1_kofs and r1_kload): each key slice read from the nope keys '
+                                                      'or the roped key, the base\'s words; ling.mlaFlashPrefillRope1, '
+                                                      'Config.mla_rope_once. The base text is unchanged (body.metal cut '
+                                                      'into body_1 .. body_5 at the key reads, the same bytes)')
+SPLIT_ADDED_KERNELS['turboexl3_test_ling_mla_flash_r1_nope_fault'] = ('test only: turboexl3_ling_mla_flash_r1 with every '
+                                                                      'key slice read from the nope keys\' row '
+                                                                      '(fault/mla_flash_r1_kofs_nope in r1_kofs\'s place), '
+                                                                      'a red check')
+# D35, the router's rows launch (Config.router_rows; router.zig). The served texts keep theirs: the rows launch swaps
+# router/head, logits_1, logits_2 and pred_open for its own pieces around router/logits_wh, pred_one and pred_wide verbatim
+SPLIT_ADDED_KERNELS['turboexl3_ling_router_logits_hr'] = ('router_rows: turboexl3_ling_router_logits_h with each router '
+                                                          'threadgroup 16 logits of a group of up to 4 rows (head_rows, '
+                                                          'logits_rows_1 ++ logits_wh ++ logits_rows_2), the f16 weight '
+                                                          'read once for them, each row\'s statements the served one\'s')
+SPLIT_ADDED_KERNELS['turboexl3_ling_router_pred_hr'] = ('router_rows: turboexl3_ling_router_pred_h on the rows launch '
+                                                        '(pred_open_rows, then pred_one and pred_wide verbatim)')
+SPLIT_ADDED_KERNELS['turboexl3_ling_router_pred_sig_hr'] = 'router_rows: turboexl3_ling_router_pred_sig_h on the rows launch'
+# L6 (turboexl3_ling's KDA_GATE_EPI, wave 3): P4 with member 1's (f's) output its bounded gate, made in the store loop
+# (models/ling/kdaproj_pf.zig kdaProjPromptGate). The served texts keep theirs: pg2's fused_6 is cut into fused_6_1 ++
+# fused_6_2 at its store loop and P4's pf_3 into pf_3_1 ++ pf_3_2 at its output line, the same bytes
+SPLIT_ADDED_KERNELS['turboexl3_ling_kdaproj_pfg0'] = ('KDA_GATE_EPI G0: turboexl3_ling_kdaproj_pf\'s pieces with pf_3_2g in '
+                                                      'pf_3_2\'s place (y names members 0 and 2) and pf_6g0 in fused_6_2\'s '
+                                                      '(members 0 and 2 store as fused_6_2; member 1 its word as that store '
+                                                      'rounds it, then the served one-launch gate\'s statements, g f32 into '
+                                                      'y1); A_log, dt_bias and lb after P4\'s operands')
+SPLIT_ADDED_KERNELS['turboexl3_ling_kdaproj_pfg1'] = ('KDA_GATE_EPI G1: turboexl3_ling_kdaproj_pfg0 with pf_6g1 (the '
+                                                      'gate\'s first statement read from gea) and gea in A_log\'s place')
+SPLIT_ADDED_KERNELS['turboexl3_ling_kda_gate_ea'] = ('KDA_GATE_EPI G1\'s gea: exp(A_log) per channel once for a layer '
+                                                     '(gate_ea, the served gate\'s first statement)')
+SPLIT_ADDED_KERNELS['turboexl3_test_ling_kda_gate'] = ('test only: the outside plugin\'s one-launch bounded gate '
+                                                       '(ling_kda_gate.metal, copied verbatim under a copied_from line, '
+                                                       'test/copy), the reference the gate launches are held to')
+SPLIT_ADDED_KERNELS['turboexl3_test_ling_kdaproj_pfg_unrounded_fault'] = ('test only: turboexl3_ling_kdaproj_pfg0 with '
+                                                                           'member 1\'s word not rounded to OUT_T before '
+                                                                           'the gate (fault/kdagate_unrounded in pf_6g0\'s '
+                                                                           'place), a red check')
+SPLIT_ADDED_KERNELS['turboexl3_test_ling_kdaproj_pfg_dtb_shift_fault'] = ('test only: turboexl3_ling_kdaproj_pfg0 with '
+                                                                           'dt_bias read at the next channel '
+                                                                           '(fault/kdagate_dtb_shift), a red check')
+SPLIT_ADDED_KERNELS['turboexl3_test_ling_kdaproj_pfg_fastexp_fault'] = ('test only: turboexl3_ling_kdaproj_pfg0 with the '
+                                                                         'sigmoid\'s exp on the fast path '
+                                                                         '(fault/kdagate_fastexp), a red check')
+SPLIT_ADDED_KERNELS['turboexl3_test_ling_kdaproj_pfg_member2_fault'] = ('test only: turboexl3_ling_kdaproj_pfg0 with the '
+                                                                         'gate on member 2\'s tiles and member 1 stored '
+                                                                         'plain (fault/kdagate_member2), a red check')
+SPLIT_ADDED_KERNELS['turboexl3_test_ling_kdaproj_pfg1_ea_shift_fault'] = ('test only: turboexl3_ling_kdaproj_pfg1 with gea '
+                                                                           'read at the next channel '
+                                                                           '(fault/kdagate_g1_ea_shift), a red check')
+ADDED_FILES['models/ling/kdaproj_gate_test.zig'] = ('kdaProjPromptGate and kdaProjPromptWGate held word for word to '
+                                                    'kdaProjPrompt and the served one-launch gate (its test-only copy) at '
+                                                    'G0 and G1, rows 33 to 16384, their declines and refusals and planted '
+                                                    'faults (GPU); and their timing (TURBOEXL3_LING_TIME)')
+for _n in ('fused_6_1', 'fused_6_2'):
+    ADDED[('core/pgemm.zig', 'const ' + _n)] = 'fused_6 cut at its store loop, where the KDA gate\'s launches put their own'
+CHANGED[('core/pgemm.zig', 'const fused_6')] = 'fused_6_1 ++ fused_6_2: the same text'
+for _n in ('kpf_3_1', 'kpf_3_2'):
+    ADDED[('models/ling/kdaproj_pf.zig', 'const ' + _n)] = 'pf_3 cut at its output line, where the KDA gate\'s launches name their own'
+CHANGED[('models/ling/kdaproj_pf.zig', 'const kpf_3')] = 'kpf_3_1 ++ kpf_3_2: the same text'
+CHANGED[('models/ling/kdaproj_pf.zig', 'const shared_state')] = 'the gate launches\' kernel locks and caches beside P4\'s'
+for _n in ('const kpf_3_2g', 'const kpf_6g0', 'const kpf_6g1', 'const kgate_ea', 'const text_pfg0', 'const text_pfg1',
+           'const text_gate_ea', 'const pfg0_in', 'const pfg1_in', 'const pfg_out', 'const gate_ea_in', 'const gate_ea_out',
+           'const GateForm', 'const gate_kernel_lock', 'const gate_kernel_g0', 'const gate_kernel_g1', 'const ea_kernel_lock',
+           'const ea_kernel_cache', 'const gate_kernel_override', 'fn gateKernelGet', 'fn eaKernelGet', 'const Gate',
+           'fn gateShapeOk', 'fn gateTakes', 'fn gateEa', 'fn kdaProjPromptGate', 'fn kdaProjPromptWGate', 'fn reshapeOut',
+           'fn launchGate', 'fn gateStatement', 'fn onceInOrder'):
+    ADDED[('models/ling/kdaproj_pf.zig', _n)] = 'L6 (KDA_GATE_EPI): the bounded gate in P4\'s store loop'
+for _n in ('const kdaProjPromptGate', 'const kdaProjPromptWGate'):
+    ADDED[('models/ling/api.zig', _n)] = 'the re-export of kdaproj_pf.zig\'s ' + _n[6:]
+# L5 (turboexl3_ling's KDA_NORM_PREP, wave 3): a KDA layer's gated norm at prompt rows written straight into o_proj's
+# prepared rows (models/ling/kdanorm.zig kdaNormGatePrep). The served texts keep theirs: dense's prep is cut into prep_1 ++
+# prep_2 ++ prep_3 at its load, the same bytes
+SPLIT_ADDED_KERNELS['turboexl3_ling_kdanorm_prep'] = ('KDA_NORM_PREP: turboexl3_dense_prep\'s pieces with the host\'s fused '
+                                                      'norm-gate\'s statements (kdanorm/gate, under its copied_from line) '
+                                                      'in prep_2\'s place: the head\'s sum of squares in the host\'s order, '
+                                                      'each value the prepare loads the host\'s per-element statements on '
+                                                      'that element; y, z, norm_w, eps, sigtab and suh in, xp out')
+SPLIT_ADDED_KERNELS['turboexl3_test_ling_gdn_normgate'] = ('test only: mlx-serve\'s fused norm-gate (gdn_normgate.metal at '
+                                                           'bc6c5f2c, copied verbatim under a copied_from line, test/copy), '
+                                                           'the served chain the fused launch is held to')
+SPLIT_ADDED_KERNELS['turboexl3_test_ling_kdanorm_nw_shift_fault'] = ('test only: turboexl3_ling_kdanorm_prep with norm_w '
+                                                                     'read at the next channel (fault/kdanorm_nw_shift), '
+                                                                     'a red check')
+SPLIT_ADDED_KERNELS['turboexl3_test_ling_kdanorm_z_next_head_fault'] = ('test only: turboexl3_ling_kdanorm_prep with z '
+                                                                        'read from the next head '
+                                                                        '(fault/kdanorm_z_next_head), a red check')
+SPLIT_ADDED_KERNELS['turboexl3_test_ling_kdanorm_sum_strided_fault'] = ('test only: turboexl3_ling_kdanorm_prep with the '
+                                                                        'sum of squares over each lane\'s strided channels '
+                                                                        '(fault/kdanorm_sum_strided), a red check')
+SPLIT_ADDED_KERNELS['turboexl3_test_ling_kdanorm_suh_next_block_fault'] = ('test only: turboexl3_ling_kdanorm_prep with '
+                                                                           'suh read from the next block '
+                                                                           '(fault/kdanorm_suh_next_block), a red check')
+ADDED_FILES['models/ling/kdanorm.zig'] = ('L5 (KDA_NORM_PREP): kdaNormGatePrep, the host\'s fused norm-gate written '
+                                          'straight into o_proj\'s prepared rows in one launch, its operands\' rules and '
+                                          'its CPU tests (texts, operands, statements against the host\'s copy)')
+ADDED_FILES['models/ling/kdanorm_test.zig'] = ('kdaNormGatePrep held word for word to the served chain (the host\'s '
+                                               'norm-gate, its test-only copy, then o_proj\'s prepare and linear) at rows '
+                                               '33 to 16384, its refusals and planted faults (GPU); and its timing '
+                                               '(TURBOEXL3_LING_TIME)')
+for _n in ('prep_1', 'prep_2', 'prep_3'):
+    ADDED[('core/dense.zig', 'const ' + _n)] = 'text_prep cut at its load, where Ling\'s KDA norm-gate writer puts its own'
+CHANGED[('core/dense.zig', 'const text_prep')] = 'prep_1 ++ prep_2 ++ prep_3: the same text'
+for _n in ('const kdanorm', 'const kdaNormGatePrep'):
+    ADDED[('models/ling/api.zig', _n)] = 'the re-export of kdanorm.zig (L5, KDA_NORM_PREP)'
+CHANGED[('models/ling/api.zig', 'const shared_state')] = 'kdanorm.zig\'s kernel lock and cache beside the others'
 
 def split_report(oprog, nprog, ounits, nunits, orig_dir, new_dir, problems, verbose):
     """--split (declarations moved between files, not only files): checks 1 to 4 over the whole tree instead of per file.
@@ -1922,7 +2511,10 @@ def split_report(oprog, nprog, ounits, nunits, orig_dir, new_dir, problems, verb
     same = 0
     for name in sorted(set(ok_) | set(nk)):
         if name not in nk:
-            problems.append(f'kernel {name}: removed')
+            if name in SPLIT_REMOVED_KERNELS:
+                print(f'   removed (intended) {name}: {SPLIT_REMOVED_KERNELS[name]}')
+            else:
+                problems.append(f'kernel {name}: removed')
             continue
         if name not in ok_:
             if name in SPLIT_ADDED_KERNELS:
@@ -1985,7 +2577,14 @@ def split_report(oprog, nprog, ounits, nunits, orig_dir, new_dir, problems, verb
     print('4. tests (split): every test name kept')
     ot = {t for u in ounits.values() for t in u.tests}
     nt = {t for u in nunits.values() for t in u.tests}
+    renamed = {old: new for ((_rf, old), new) in RENAMED_TESTS.items()}
     for t in sorted(ot - nt):
+        if t in renamed and renamed[t] in nt:
+            print(f'   renamed (RENAMED_TESTS) "{t[:60]}" -> "{renamed[t][:60]}"')
+            continue
+        if t in SPLIT_REMOVED_TESTS:
+            print(f'   removed (intended) "{t[:60]}": {SPLIT_REMOVED_TESTS[t]}')
+            continue
         problems.append(f'test "{t[:70]}" missing')
     print(f'   {len(ot)} tests before, {len(nt)} after, {len(nt - ot)} added\n')
 
@@ -2019,12 +2618,19 @@ def main():
     ounits, nunits = load(orig_dir, omap), load(new_dir, lambda rel: rel)
     oprog, nprog = Program(orig_dir, ounits, omap), Program(new_dir, nunits)
     rekey_tables(nunits)
-    added_files = []
+    added_files, removed_files = [], []
     for f in sorted(set(ounits) ^ set(nunits)):
         if f in nunits and f in ADDED_FILES:
             added_files.append(f)
+        elif split and f in ounits and f in SPLIT_REMOVED_FILES:
+            removed_files.append(f)
         else:
             problems.append(f'{f}: only in {"ORIG" if f in ounits else "NEW"}')
+    if removed_files:
+        print('0. files (split): the Zig files the change removed on purpose (SPLIT_REMOVED_FILES)')
+        for f in removed_files:
+            print(f'   removed (intended) {f}: {SPLIT_REMOVED_FILES[f]}')
+        print()
 
     if split:
         split_report(oprog, nprog, ounits, nunits, orig_dir, new_dir, problems, verbose)

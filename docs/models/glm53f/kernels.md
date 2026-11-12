@@ -19,7 +19,7 @@ The shared expert's gate | up in one launch.
 | made at | `src/models/glm53f/shared_gu.zig:48` (`fn kernelOf`) |
 | inputs | `x`, `suh0`, `suh1`, `w0`, `w1`, `svh`, `cnt` |
 | outputs | `y0`, `y1`, `z`, `xsx` |
-| source | `text_gu` = `dense/dec_head` ++ `glm53f:shared_gu/jsel_pair` ++ `dense/dec_prep1` ++ `dense/dec_gemv1_head` ++ `dense/dec_gemv_loop` ++ `dense/dec_gemv1_x` ++ `dense/dec_gemv_arrive_1` ++ `ricursive:ricursive/jtile` ++ `dense/dec_gemv_arrive_2a` ++ `dense/dec_gemv_arrive_2b` ++ `dense/dec_gemv_arrive_2c` ++ `dense/dec_xsum1` ++ `dense/dec_finish_v` ++ `glm53f:shared_gu/jstore_pair` (8868 B, `9ab319baece4`) |
+| source | `text_gu` = `dense/dec_head` ++ `glm53f:shared_gu/jsel_pair` ++ `dense/dec_prep1_1` ++ `dense/dec_prep1_2` ++ `dense/dec_prep1_3` ++ `dense/dec_gemv1_head` ++ `dense/dec_gemv_loop` ++ `dense/dec_gemv1_x` ++ `dense/dec_gemv_arrive_1` ++ `ricursive:ricursive/jtile` ++ `dense/dec_gemv_arrive_2a` ++ `dense/dec_gemv_arrive_2b` ++ `dense/dec_gemv_arrive_2c` ++ `dense/dec_xsum1` ++ `dense/dec_finish_v` ++ `glm53f:shared_gu/jstore_pair` (8868 B, `9ab319baece4`) |
 | header | `decode.header5` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` (26594 B, `41efbbbbd943`) |
 
 <!-- /kernel-facts -->
@@ -58,6 +58,18 @@ The shared expert's gate | up in one launch.
 Two linears of one input at their own K splits in one launch (a DSA layer's q_a and kv_a).
 
 ### `turboexl3_glm53f_pair_ks`
+
+<!-- kernel-facts: turboexl3_glm53f_pair_ks -->
+
+| fact | from the code |
+|---|---|
+| made at | `src/models/glm53f/pair_ks.zig:51` (`fn kernelOf`) |
+| inputs | `x`, `suh0`, `suh1`, `w0`, `w1`, `svh`, `cnt` |
+| outputs | `y0`, `y1`, `z`, `xsx` |
+| source | `text_ks` = `glm53f:pair_ks/ks_head` ++ `glm53f:shared_gu/jsel_pair` ++ `dense/dec_prep1_1` ++ `glm53f:pair_ks/ks_prep1_2` ++ `dense/dec_prep1_3` ++ `dense/dec_gemv1_head` ++ `dense/dec_gemv_loop` ++ `dense/dec_gemv1_x` ++ `dense/dec_gemv_arrive_1` ++ `ricursive:ricursive/jtile` ++ `dense/dec_gemv_arrive_2a` ++ `dense/dec_gemv_arrive_2b` ++ `dense/dec_gemv_arrive_2c` ++ `dense/dec_xsum1` ++ `dense/dec_finish_v` ++ `glm53f:shared_gu/jstore_pair` (9831 B, `5c2014de800a`) |
+| header | `decode.header5` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` (26594 B, `41efbbbbd943`) |
+
+<!-- /kernel-facts -->
 
 | fact | from the code |
 |---|---|

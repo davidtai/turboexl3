@@ -1,7 +1,7 @@
 //! pg2: a dense linear's prefill matmul and finish as one launch, at the shapes this machine runs faster that way.
 //! `linearOn`'s matmul path at prefill rows is three launches past the prepare: the W_hat decode, MLX's f16 matmul (z half
 //! [M, N] written, MLX's fused NAX kernel) and the finish (z read, y written: f16(H128(f16(z)) * svh) per 128-column
-//! block, kernels/dense/finish.metal). pg2 runs the matmul and the finish as one kernel (kernels/pg2/gemm_fused.metal):
+//! block, dense.text_finish). pg2 runs the matmul and the finish as one kernel (kernels/pg2/gemm_fused_*.metal):
 //! MLX's fused NAX GEMM body (steel/gemm/kernels/steel_gemm_fused_nax.h `gemm`, MLX 0.32.3; its gemm_loop verbatim,
 //! kernels/pg2/gemm_loop.metal: SK 32, the 16 x 32 x 16 multiply-accumulate on the f16 operands, f32 accumulation, k in
 //! MLX's order) at a tile of this machine's choosing, then the finish as its epilogue: the accumulators rounded to half as
@@ -30,8 +30,21 @@ pub const text_loop = @embedFile("kernels/pg2/gemm_loop.metal");
 pub const text_fused = fused_1 ++ fused_2;
 /// `text_fused` in pieces: fused_1 the GEMM and z's halves staged in threadgroup memory, fused_2 the finish over them (the
 /// epilogue trunk_q8.zig's int8 GEMM runs too)
-pub const fused_1 = @embedFile("kernels/pg2/gemm_fused_1.metal");
-pub const fused_2 = @embedFile("kernels/pg2/gemm_fused_2.metal");
+pub const fused_1 = fused_1_1 ++ fused_1_2 ++ fused_1_3 ++ fused_1_4 ++ fused_1_5 ++ fused_1_6;
+pub const fused_2 = fused_2_1 ++ fused_2_2;
+/// fused_1 in pieces, cut where a grouped launch (Ling's KDA prompt projections, models/ling/kdaproj_pf.zig) puts its own
+/// statements: the shapes, the block and its bounds, the operands, the block's row, its column, then the GEMM to z's
+/// staged halves
+pub const fused_1_1 = @embedFile("kernels/pg2/gemm_fused_1_1.metal");
+pub const fused_1_2 = @embedFile("kernels/pg2/gemm_fused_1_2.metal");
+pub const fused_1_3 = @embedFile("kernels/pg2/gemm_fused_1_3.metal");
+pub const fused_1_4 = @embedFile("kernels/pg2/gemm_fused_1_4.metal");
+pub const fused_1_5 = @embedFile("kernels/pg2/gemm_fused_1_5.metal");
+pub const fused_1_6 = @embedFile("kernels/pg2/gemm_fused_1_6.metal");
+/// fused_2 in pieces: the finish up to its store loop, then the store loop and the row loop's close: cut where the KDA
+/// gate's launches (models/ling/kdaproj_pf.zig `kdaProjPromptGate`) put their own store loop
+pub const fused_2_1 = @embedFile("kernels/pg2/gemm_fused_2_1.metal");
+pub const fused_2_2 = @embedFile("kernels/pg2/gemm_fused_2_2.metal");
 
 fn sentinel(comptime s: []const u8) [:0]const u8 {
     comptime {
@@ -45,7 +58,7 @@ fn sentinel(comptime s: []const u8) [:0]const u8 {
 /// MLX's kernel attribute on the generated definition: `[[kernel]]` becomes `[[kernel, max_total_threads_per_threadgroup(WM
 /// * WN * 32)]]` (WM and WN the definition's template parameters, MLX's own expression); the body's last line undefines
 /// the macro, so the explicit instantiation MLX appends keeps its plain `[[kernel]]`.
-const header: [:0]const u8 = sentinel(steel_nax ++ "using namespace mlx::steel;\n" ++ text_loop ++ "\n#define kernel kernel, max_total_threads_per_threadgroup(WM * WN * 32)\n");
+pub const header: [:0]const u8 = sentinel(steel_nax ++ "using namespace mlx::steel;\n" ++ text_loop ++ "\n#define kernel kernel, max_total_threads_per_threadgroup(WM * WN * 32)\n");
 const body: [:0]const u8 = sentinel(text_fused ++ "\n#undef kernel\n");
 
 const fused_in = [_][*:0]const u8{ "x", "w", "svh" };
@@ -256,7 +269,7 @@ pub fn warm(s: mlx.mlx_stream, out_dtype: mlx.mlx_dtype, only: ?[2]u32) !void {
 const testing = std.testing;
 
 test "pgemm: the epilogue runs the finish's statements, the loop is MLX's gemm_loop by its statements, the table's tiles exact by construction" {
-    const finish = @embedFile("kernels/dense/finish.metal");
+    const finish = @embedFile("kernels/dense/finish_v.metal") ++ @embedFile("kernels/dense/finish_store.metal");
     var it = std.mem.splitScalar(u8, finish, '\n');
     var lines: usize = 0;
     while (it.next()) |line| {

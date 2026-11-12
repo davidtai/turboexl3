@@ -246,7 +246,8 @@ pub const BankedOuts = struct { hd: mlx.mlx_array, hs: mlx.mlx_array, y: mlx.mlx
 /// as the geometry's banked state was configured (null): the same hd, hs and y every way (glm53f/wave3_test.zig's calls).
 pub fn moeClampedBankedWave(s: mlx.mlx_stream, x: mlx.mlx_array, banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, limit: c_int, sel: BankedSel, vgu: u8, vdn: u8, out_dtype: mlx.mlx_dtype, wave3: ?bool) !BankedOuts {
     if (out_dtype != .bfloat16 and out_dtype != .float16 and out_dtype != .float32) return error.BadExl3Dtype;
-    const c = try bankedCall(banks, ids, dec, limit);
+    if (limit <= 0 or limit > 128) return error.InvalidExl3Clamp;
+    const c = try bankedCall(banks, ids, dec, .{ .limit = @intCast(limit) });
     const xs = mlx.getShape(x);
     if (xs.len != 2 or xs[0] != @as(c_int, @intCast(c.rows)) or xs[1] != @as(c_int, @intCast(c.geo.hidden))) return error.BadExl3Shape;
     const xd = mlx.mlx_array_dtype(x);
@@ -283,7 +284,18 @@ pub fn moeClampedBankedGateUpV(s: mlx.mlx_stream, x: mlx.mlx_array, banks: *cons
 
 /// `moeClampedBankedGateUp` on `sel`'s texts with the grouped gate|up GEMV of `variant` on them.
 pub fn moeClampedBankedGateUpSelV(s: mlx.mlx_stream, x: mlx.mlx_array, banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, limit: c_int, sel: BankedSel, variant: u8) !BankedHalf {
-    const c = try bankedCall(banks, ids, dec, limit);
+    if (limit <= 0 or limit > 128) return error.InvalidExl3Clamp;
+    return bankedGateUpAct(s, x, banks, ids, dec, .{ .limit = @intCast(limit) }, sel, variant);
+}
+
+/// A banked call's SwiGLU: its clamp `limit` (0: none) and where it clamps (`format.ClampAt`). DeepSeek-V4.1's entries
+/// pass `limit` 1..128 at `gate_in`; Ling-3.1's (`models/ling/api.zig`) 0, or 1..128 at `silu_out`.
+pub const BankedAct = struct { limit: u32, clamp: format.ClampAt = .gate_in };
+
+/// The banked gate|up at `act` (`moeClampedBankedGateUpSelV` for every SwiGLU the banked texts hold): fin7cb's text is the
+/// geometry's (`banked.zig` `finText`), every other launch the same.
+pub fn bankedGateUpAct(s: mlx.mlx_stream, x: mlx.mlx_array, banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, act: BankedAct, sel: BankedSel, variant: u8) !BankedHalf {
+    const c = try bankedCall(banks, ids, dec, act);
     const xs = mlx.getShape(x);
     if (xs.len != 2 or xs[0] != @as(c_int, @intCast(c.rows)) or xs[1] != @as(c_int, @intCast(c.geo.hidden))) return error.BadExl3Shape;
     const xd = mlx.mlx_array_dtype(x);
@@ -311,7 +323,14 @@ pub fn moeClampedBankedDownV(s: mlx.mlx_stream, h: BankedHalf, banks: *const [3]
 
 /// `moeClampedBankedDown` on `sel`'s texts with the grouped down GEMV of `variant` on them.
 pub fn moeClampedBankedDownSelV(s: mlx.mlx_stream, h: BankedHalf, banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, limit: c_int, sel: BankedSel, variant: u8) !mlx.mlx_array {
-    const c = try bankedCall(banks, ids, dec, limit);
+    if (limit <= 0 or limit > 128) return error.InvalidExl3Clamp;
+    return bankedDownAct(s, h, banks, ids, dec, .{ .limit = @intCast(limit) }, sel, variant);
+}
+
+/// The banked down at `act` (`moeClampedBankedDownSelV` for every SwiGLU the banked texts hold); its kernels are the
+/// gate|up's geometry's, so a call passes the `act` its gate|up took.
+pub fn bankedDownAct(s: mlx.mlx_stream, h: BankedHalf, banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, act: BankedAct, sel: BankedSel, variant: u8) !mlx.mlx_array {
+    const c = try bankedCall(banks, ids, dec, act);
     const r: c_int = @intCast(c.rows);
     const w: c_int = @intCast(c.geo.inter);
     if (!std.mem.eql(c_int, mlx.getShape(h.hd), &.{ r, w }) or !std.mem.eql(c_int, mlx.getShape(h.hs), &.{ r, @divExact(w, 128) })) return error.BadExl3Shape;
@@ -324,8 +343,8 @@ pub fn moeClampedBankedDownSelV(s: mlx.mlx_stream, h: BankedHalf, banks: *const 
 /// take them.
 const BankedCall = struct { geo: decode.Geometry, rows: usize, kb: [3]decode.Kernels.Bank };
 
-fn bankedCall(banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, limit: c_int) !BankedCall {
-    if (limit <= 0 or limit > 128) return error.InvalidExl3Clamp;
+fn bankedCall(banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, act: BankedAct) !BankedCall {
+    if (act.limit > 128) return error.InvalidExl3Clamp;
     const is = mlx.getShape(ids);
     if (is.len != 1 or is[0] < 1 or is[0] > banked_rows_max) return error.BadExl3Shape;
     const idd = mlx.mlx_array_dtype(ids);
@@ -345,7 +364,7 @@ fn bankedCall(banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, lim
         .down_svh = b.down.svh,
     };
     return .{
-        .geo = .{ .hidden = @intCast(geo.hidden), .inter = @intCast(geo.width), .topk = 1, .rate = geo.gate_up, .dec = dec, .limit = @intCast(limit) },
+        .geo = .{ .hidden = @intCast(geo.hidden), .inter = @intCast(geo.width), .topk = 1, .rate = geo.gate_up, .dec = dec, .limit = act.limit, .clamp = act.clamp },
         .rows = @intCast(is[0]),
         .kb = kb,
     };

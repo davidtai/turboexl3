@@ -33,6 +33,19 @@
 //! the mixed launch over the rest; each launch writes its own output, and mid and finish read each row from the launch that
 //! computed it. bm 128 and bm 64 run the same per-simdgroup K loop, so every output sums the same 16-deep MMAs in the same
 //! order: `moe`'s bytes.
+//!
+//! `Options.dfin` runs the finish as the down GEMM's epilogue (top-1 calls: a row's one slot) on the 128-row tiles'
+//! engine (`t128`): the down launch writes y itself, so zd is never written or read and the finish launch is gone. A
+//! threadgroup owns `ncb` 64-column blocks, so whole 128-column blocks: it keeps an even block's outputs rounded to f16
+//! as the store rounds them, then after the odd block stages both in threadgroup memory, `dfr` (32) tile rows a round
+//! in the weight stage's buffer the pair's last stage freed, and runs the finish's own statements on them. One down
+//! launch writes every row, over both of the route's tables (the 128-row tiles', then each mixed-table tile as a
+//! part-full tile on the same body). The same f16 words in, the same finish statements: the finish's y.
+//!
+//! A call may decline the fused finish (`Call`, `endOf`; `moeT128WithCall`): on an engine built with `Options.dfin`, a
+//! call with `Call.dfin` false runs the served route, down launches and finish, kernels such an engine builds as the
+//! served engine does (`T128Kernels`), at the served launch shapes: the served engine's launches and bytes.
+//! `Prefill.steps` counts the steps an engine ran (its route and its ending).
 const std = @import("std");
 const mlx = @import("sdk").mlx;
 const ks = @import("sdk").kernel_launch;
@@ -181,13 +194,23 @@ const mid_swiglu_clamp = @embedFile("kernels/prefill/mid_swiglu_clamp.metal");
 pub const text_midc = mid_1 ++ mid_2 ++ mid_3 ++ mid_4 ++ mid_swiglu_clamp ++ mid_5;
 pub const text_mid_vc = mid_v_1 ++ mid_swiglu_clamp ++ mid_v_2;
 pub const text_mid_t128c: [:0]const u8 = sentinel(mid_1 ++ mid_t128_pick ++ mid_2 ++ mid_t128_loads ++ mid_4 ++ mid_swiglu_clamp ++ mid_5);
+/// Ling-3.1's clamp (`Geometry.clamp` `silu_out`): each mid with its SwiGLU line replaced by `mid_swiglu_clamp_out` (the
+/// SiLU's output clamped from above at LIMIT and the up to [-LIMIT, LIMIT]), every other statement the mid's.
+const mid_swiglu_clamp_out = @embedFile("kernels/prefill/mid_swiglu_clamp_out.metal");
+pub const text_midco = mid_1 ++ mid_2 ++ mid_3 ++ mid_4 ++ mid_swiglu_clamp_out ++ mid_5;
+pub const text_mid_vco = mid_v_1 ++ mid_swiglu_clamp_out ++ mid_v_2;
+pub const text_mid_t128co: [:0]const u8 = sentinel(mid_1 ++ mid_t128_pick ++ mid_2 ++ mid_t128_loads ++ mid_4 ++ mid_swiglu_clamp_out ++ mid_5);
 
 /// The down finish and the slot reduce, per (128-block of hidden, row): y OUT_T [R, HID] = sum over the row's slots in slot
 /// order of score * f16(H128(zd[inv[slot]]) * 2^-3.5 * svh_e).
 pub const text_finish = finish_1 ++ finish_2 ++ finish_3 ++ finish_4;
 /// `text_finish` in the pieces the 128-row tiles' finish (`text_finish_t128`) composes: finish_1 ends at the expert line,
 /// finish_3 is the down load
-const finish_1 = @embedFile("kernels/prefill/finish_1.metal");
+const finish_1 = finish_1_1 ++ @embedFile("kernels/prefill/finish_1_2.metal") ++ finish_1_3;
+/// `finish_1` cut at its two grid lines (`finish_1_2`: the 128-block and the row from the threadgroup's place in the
+/// grid)
+const finish_1_1 = @embedFile("kernels/prefill/finish_1_1.metal");
+const finish_1_3 = @embedFile("kernels/prefill/finish_1_3.metal");
 const finish_2 = @embedFile("kernels/prefill/finish_2.metal");
 const finish_3 = @embedFile("kernels/prefill/finish_3.metal");
 const finish_4 = @embedFile("kernels/prefill/finish_4.metal");
@@ -226,11 +249,53 @@ fn gemmText(comptime two: bool, comptime mixed: bool, comptime zb: bool) []const
     const stage = if (mixed) @embedFile("kernels/prefill/gemm_mixed_bs.metal") else @embedFile("kernels/prefill/gemm_2.metal");
     const wx = if (two) @embedFile("kernels/prefill/gemm_op2_wx.metal") else @embedFile("kernels/prefill/gemm_op1_wx.metal");
     const xsz2 = if (zb) @embedFile("kernels/prefill/gemm_op2_xsz_zb.metal") else @embedFile("kernels/prefill/gemm_op2_xsz.metal");
-    const xsz1 = if (zb) @embedFile("kernels/prefill/gemm_op1_xsz_zb.metal") else @embedFile("kernels/prefill/gemm_op1_xsz.metal");
+    const xsz1 = if (zb) @embedFile("kernels/prefill/gemm_op1_xsz_zb.metal") else gemm_op1_xsz;
     const xsz = if (two) xsz2 else xsz1;
-    return @embedFile("kernels/prefill/gemm_1.metal") ++ stage ++ @embedFile("kernels/prefill/gemm_3.metal") ++ wx ++ @embedFile("kernels/prefill/gemm_4.metal") ++ xsz ++
+    return @embedFile("kernels/prefill/gemm_1.metal") ++ stage ++ gemm_3 ++ wx ++ @embedFile("kernels/prefill/gemm_4.metal") ++ xsz ++
         @embedFile("kernels/prefill/gemm_5.metal");
 }
+
+/// The GEMM's tile setup cut at its three table reads (`gemm_3_2`: the tile's expert, first row and rows), where the
+/// fused down GEMM reads its tile from one of two tables (`gemm_dfin_tile`)
+const gemm_3 = gemm_3_1 ++ @embedFile("kernels/prefill/gemm_3_2.metal") ++ gemm_3_3;
+const gemm_3_1 = @embedFile("kernels/prefill/gemm_3_1.metal");
+const gemm_3_3 = @embedFile("kernels/prefill/gemm_3_3.metal");
+/// The down GEMM's (op 0 alone) epilogue cut after its deferred MUL1 map (`gemm_op1_xsz_1`), before its store's address
+/// (`gemm_op1_xsz_2`): the fused down GEMM keeps the map and replaces the store
+const gemm_op1_xsz = gemm_op1_xsz_1 ++ @embedFile("kernels/prefill/gemm_op1_xsz_2.metal");
+const gemm_op1_xsz_1 = @embedFile("kernels/prefill/gemm_op1_xsz_1.metal");
+
+/// The down GEMM with the finish as its epilogue (`Options.dfin`, `Prefill.gemmDFin`): `gemm1_text` (the shared-decode
+/// body, its K loop and deferred map verbatim) with four changes. Its weight stage takes, with DFR 64, the finish's own
+/// staging past it (`gemm_dfin_bs` in `gemm_2`'s place). Its tile is read from `tiles` or, with T2, past its rows from
+/// `tiles2` (`gemm_dfin_tile`). Its store is replaced (`gemm_dfin_epi_1`): an even column block's outputs are kept in
+/// registers rounded to f16 (dfk, NAXFrag::store's static_cast, the zd store's rounding), and after the odd block each
+/// round of DFR tile rows stores both blocks' f16 outputs in threadgroup memory (dfz, a 128-column block a row: DFR 32 in
+/// the stage buffer the pair's last stage was read from, DFR 64 in its own), then each (row, 128-block) item runs the
+/// finish's statements (`finish_2`, `finish_4`) with the row's halves read from dfz where the finish reads zd
+/// (`gemm_dfin_load`), y at the slot's row. `g4` is `gemm_4` and `fin4` `finish_4` (a test passes a planted fault).
+fn dfinBody(comptime g4: []const u8, comptime fin4: []const u8) []const u8 {
+    return @embedFile("kernels/prefill/gemm_1.metal") ++ @embedFile("kernels/prefill/gemm_dfin_bs.metal") ++ @embedFile("kernels/prefill/gemm_dfin_decl.metal") ++
+        gemm_3_1 ++ @embedFile("kernels/prefill/gemm_dfin_tile.metal") ++ gemm_3_3 ++ @embedFile("kernels/prefill/gemm_op1_wx.metal") ++
+        g4 ++ gemm_op1_xsz_1 ++ @embedFile("kernels/prefill/gemm_dfin_epi_1.metal") ++ finish_2 ++
+        @embedFile("kernels/prefill/gemm_dfin_load.metal") ++ fin4 ++ @embedFile("kernels/prefill/gemm_dfin_epi_2.metal");
+}
+pub const text_dfin: [:0]const u8 = sentinel(dfinBody(gemm_4, finish_4));
+/// `text_dfin` with `g4` in `gemm_4`'s place and `fin4` in `finish_4`'s (a test's planted fault; `dfin_gemm_4` and
+/// `dfin_finish_4` are the served pieces)
+pub fn dfinText(comptime g4: []const u8, comptime fin4: []const u8) [:0]const u8 {
+    return sentinel(dfinBody(g4, fin4));
+}
+/// The GEMM's K loop (`gemmText`'s and `text_dfin`'s)
+const gemm_4 = @embedFile("kernels/prefill/gemm_4.metal");
+pub const dfin_gemm_4 = gemm_4;
+pub const dfin_finish_4 = finish_4;
+/// The fused down GEMM's header: the NAX GEMM's and the finish's H128 (`turboexl3_h128x4`)
+pub const header_nax_dfin: [:0]const u8 = sentinel(steel_nax ++ using_steel ++ decode.header ++ metal_small_helpers ++ metal_gemm_helpers ++ metal_h128);
+/// The fused down GEMM's inputs: the two tables (`tiles2` read only with T2), the down GEMM's, then the finish's (each
+/// sorted position's slot, the scores, the down's svh); its output y OUT_T [S, hidden]
+pub const dfin_in = [_][*:0]const u8{ "tiles", "tiles2", "x0", "w0", "xs0", "order", "scores", "svh_d" };
+pub const dfin_out = [_][*:0]const u8{"y"};
 
 /// The GEMM's two halves of a K stage. `exl3pf_stage`: simdgroup sg decodes trellis tiles sg, sg + NSG, ... of the stage's
 /// 4 x 4 (lane L: its eight codewords at code positions 8L..8L+7, the tensor-core layout's rows 2q, 2q+1, 2q+8, 2q+9 of
@@ -259,9 +324,14 @@ fn gemmSmallText(comptime two: bool, comptime mixed: bool, comptime zb: bool) []
     const xsz2 = if (zb) @embedFile("kernels/prefill/gemm_small_op2_xsz_zb.metal") else @embedFile("kernels/prefill/gemm_small_op2_xsz.metal");
     const xsz1 = if (zb) @embedFile("kernels/prefill/gemm_small_op1_xsz_zb.metal") else @embedFile("kernels/prefill/gemm_small_op1_xsz.metal");
     const xsz = if (two) xsz2 else xsz1;
-    return @embedFile("kernels/prefill/gemm_small_1.metal") ++ items ++ @embedFile("kernels/prefill/gemm_small_3.metal") ++ wx ++ @embedFile("kernels/prefill/gemm_small_4.metal") ++
+    return @embedFile("kernels/prefill/gemm_small_1.metal") ++ items ++ gemm_small_3 ++ wx ++ @embedFile("kernels/prefill/gemm_small_4.metal") ++
         xsz ++ @embedFile("kernels/prefill/gemm_small_5.metal");
 }
+
+/// The register path's tile setup cut after its tile read (`gemm_small_3_1`: the tile's rows, expert and first row)
+const gemm_small_3 = gemm_small_3_1 ++ gemm_small_3_2;
+const gemm_small_3_1 = @embedFile("kernels/prefill/gemm_small_3_1.metal");
+const gemm_small_3_2 = @embedFile("kernels/prefill/gemm_small_3_2.metal");
 
 /// The register path's fragment fills: A from two natural-order rows (k 2q, 2q + 1, 2q + 8, 2q + 9 of each) or, with ALAY,
 /// from two rows in that slot order (`exl3pf_afrag2`: both 16-deep halves of a 32-deep step; `exl3pf_afrag4`: one slice),
@@ -359,11 +429,17 @@ pub const t128_cut: u8 = 64;
 /// xbase int32 [EXP] (each expert's first remainder position: its rows before it are the 128-row tiles', `text_mid_t128` /
 /// `text_finish_t128`); TBIG and TQ are `t128MixedRows`' and `t128TileRows`' expressions (bounds that hold for any routing);
 /// unused entries rows = 0.
-pub const text_froute_t128: [:0]const u8 = sentinel(@embedFile("kernels/prefill/froute_t128_1.metal") ++ froute_count ++
-    froute_t128_2 ++ froute_t128_3);
+pub const text_froute_t128: [:0]const u8 = sentinel(froute_t128_1 ++ froute_count ++ froute_t128_2 ++ froute_t128_3);
+const froute_t128_1 = @embedFile("kernels/prefill/froute_t128_1.metal");
+/// `text_froute_t128`'s tables' writes, cut at its two 128-row lines: each expert's full 128-row runs (`froute_t128_2_2`)
+/// and their table rows (`froute_t128_2_4`)
+const froute_t128_2 = froute_t128_2_1 ++ @embedFile("kernels/prefill/froute_t128_2_2.metal") ++ froute_t128_2_3 ++
+    @embedFile("kernels/prefill/froute_t128_2_4.metal") ++ froute_t128_2_5;
+const froute_t128_2_1 = @embedFile("kernels/prefill/froute_t128_2_1.metal");
+const froute_t128_2_3 = @embedFile("kernels/prefill/froute_t128_2_3.metal");
+const froute_t128_2_5 = @embedFile("kernels/prefill/froute_t128_2_5.metal");
 /// `text_froute_t128` cut after its tables' writes (`froute_t128_2`), before the spare rows' clear (`froute_t128_3`): the
 /// compact mixed outputs' bases go between (`text_froute_t128z`)
-const froute_t128_2 = @embedFile("kernels/prefill/froute_t128_2.metal");
 const froute_t128_3 = @embedFile("kernels/prefill/froute_t128_3.metal");
 
 /// The 128-row tiles' mid: `text_mid` with each position's gate and up rows from the launch that computed them (zgt / zut,
@@ -392,7 +468,7 @@ pub const text_finish_t128: [:0]const u8 = sentinel(finish_1 ++ finish_t128_pick
 /// `text_froute_t128` with `zmb` int32 [EXP] (each expert's first row in the compact mixed outputs: a prefix over the
 /// experts' remainder rows) and each mixed tile's first row there in its table row's fourth column, written after the
 /// tables (`froute_t128z_2`)
-pub const text_froute_t128z: [:0]const u8 = sentinel(@embedFile("kernels/prefill/froute_t128_1.metal") ++ froute_count ++
+pub const text_froute_t128z: [:0]const u8 = sentinel(froute_t128_1 ++ froute_count ++
     froute_t128_2 ++ @embedFile("kernels/prefill/froute_t128z_2.metal") ++ froute_t128_3);
 /// `text_mid_t128` and `text_mid_t128c` with the position's row (`mid_t128z_pick`: its sorted position in the 128-row
 /// tiles' z, its compact row in the mixed launch's) after the launch choice, and the loads at that row
@@ -466,6 +542,9 @@ pub const Geometry = struct {
     /// the SwiGLU's clamp (`root.moeClamped`: DeepSeek-V4's and GLM's `swiglu_limit`; 0 none): every mid is its clamped
     /// variant (`text_midc`, `text_mid_vc`, `text_mid_t128c`) with LIMIT = limit; nothing else changes
     limit: u32 = 0,
+    /// where a clamped geometry clamps (`format.ClampAt`): `gate_in` the clamped mids above, `silu_out` Ling-3.1's
+    /// (`text_midco`, `text_mid_vco`, `text_mid_t128co`); an unclamped geometry ignores it
+    clamp: format.ClampAt = .gate_in,
 
     pub fn admitted(g: Geometry) bool {
         return g.hidden % 128 == 0 and g.inter % 128 == 0 and g.hidden % BK == 0 and g.inter % BK == 0 and
@@ -491,6 +570,14 @@ pub const Operands = struct {
     down_suh: mlx.mlx_array,
     down_svh: mlx.mlx_array,
 };
+
+/// 64-wide output blocks per gate|up GEMM threadgroup: 1 (the down GEMM's are `Options.ncb`)
+pub const gu_ncb: u8 = 1;
+
+/// The fused finish's tile rows per staging round (`Options.dfin`, its DFR): 32, staged in the weight stage's buffer the
+/// round's block pair freed, so the launch holds no threadgroup memory of its own (`text_dfin` also takes 64, 16 KB of
+/// its own past the stage, which no engine launches)
+pub const dfr: u16 = 32;
 
 /// Build-time variants of the GEMM (the benchmark's arms): M tile rows (64, 128 or 256: 2, 4 or 8 simdgroup rows of 32, two
 /// simdgroups per row covering the 64-wide output tile) and a double-buffered weight stage (one barrier per K stage, the next
@@ -559,6 +646,11 @@ pub const Options = struct {
     /// launch of their own beside the mixed launch over the rest (`Prefill.moeT128`, the notes above `t128_cut`): `moe`'s
     /// bytes. Needs bm 64, the mixed table at split 1, froute's route and the strided mid and finish (aux 0)
     t128: bool = false,
+    /// the finish as the down GEMM's epilogue (`text_dfin`, `Prefill.gemmDFin`, the module notes): the down launch
+    /// writes y, zd and the finish launch are gone. Top-1 only (`Prefill.init` refuses another top-k); needs the
+    /// 128-row tiles (`t128`: one down launch over both tables), whole 128-column blocks a threadgroup (ncb 2 or 4),
+    /// every simdgroup a consumer (wsp 0) and its staging within 32 KB with the weight stage
+    dfin: bool = false,
     /// both GEMMs' 128-row tile launches (`t128`) in 128-deep K stages (`bk128`'s two 64-deep sub-stages per buffer between
     /// barriers, 32 KB double-buffered in fragment order), each mixed launch at its own depth (gate|up 64, down
     /// `downStage`): half the barriers where the bm-128 body runs, the mixed launch's 4-simdgroup threadgroups left at their
@@ -604,6 +696,9 @@ pub const Options = struct {
         // the bm-128 shared-decode body beside bm 64's
         if (o.t128 and (o.small != .mixed or o.split != 1 or !o.froute or o.aux != 0 or o.bm != 64)) return false;
         if (o.stageBytes(o.downStage()) > 32768) return false;
+        // the fused finish: the 128-row tiles (one down launch over both tables), whole 128-column blocks a threadgroup,
+        // every simdgroup a consumer, its staging within 32 KB beside the weight stage
+        if (o.dfin and (!o.t128 or (o.ncb != 2 and o.ncb != 4) or o.wsp != 0 or o.dfinBytes() > 32768)) return false;
         // the 128-row tile launches' 128-deep stages: where those launches run, within 32 KB
         if (o.t128_bk128 and (!o.t128 or o.stageBytes(128) > 32768)) return false;
         // the compact mixed outputs: the 128-row tiles' mixed launch
@@ -613,12 +708,21 @@ pub const Options = struct {
         // int8: the 128-row tiles' route and launches, the deferred map, outputs at the sorted positions
         if (o.int8 > 2 or (o.int8 != 0 and (!o.t128 or !o.defer_affine or o.t128_zfit))) return false;
         if (o.int8_c2 != 1020 and o.int8_c2 != 1019) return false;
+        // the fused finish runs its own down launch over the 128-row tiles' tables at their sorted positions: none of the
+        // other 128-row tile options (their 128-deep stages, the compact mixed outputs, the size classes, int8) beside it
+        if (o.dfin and (o.t128_bk128 or o.t128_zfit or o.size_class or o.int8 != 0)) return false;
         return (o.bm == 64 or o.bm == 128 or o.bm == 256) and (o.sgt == 1 or o.sgt == 2 or o.sgt == 4 or o.sgt == 8);
     }
 
     /// rows per M tile of the table
     pub fn tileRows(o: Options) u32 {
         return if (o.small == .all) 32 else o.bm;
+    }
+
+    /// threadgroup memory of the fused down GEMM (`dfin`): its weight stage (`dfr` 32 stages each round in the weight
+    /// stage's buffers)
+    pub fn dfinBytes(o: Options) u32 {
+        return o.stageBytes(o.downStage());
     }
 
     /// the down GEMM's K stage depth (gate|up's is BK)
@@ -638,6 +742,31 @@ pub const Options = struct {
         return (if (o.dbuf) @as(u32, 2) else 1) * (bk / BK) * sub * 2;
     }
 };
+
+/// A call's own choices on its engine (`Prefill.moeT128WithCall`; root's `moeSwigluWith`, `moeSwigluRowsWith`): the
+/// options an engine is built with say what it can run, a call which of it runs. `.{}` runs what the engine was built
+/// for (`moeT128With`). An engine without the 128-row tiles has no fused finish, so a call has no choice there
+/// (`moeWith`).
+pub const Call = struct {
+    /// the fused finish (`Options.dfin`) where the engine was built with it; false runs the served route, down launches
+    /// and finish: the served engine's launches and bytes (an engine without the fused finish runs those either way)
+    dfin: bool = true,
+};
+
+/// A call's ending, its down projection and finish (`endOf`): the served down launches and finish (`gemmD` + `finish`,
+/// or `gemmDT128` + `finishT128` after the served route), or the fused finish (`gemmDFin`)
+pub const End = enum { served, dfin };
+
+/// The ending a call `c` runs on an engine built with `o`: the fused finish only where both have it
+pub fn endOf(o: Options, c: Call) End {
+    if (!o.dfin or !c.dfin) return .served;
+    return .dfin;
+}
+
+/// The chain's steps an engine ran, a count each (`Prefill.steps`; the GPU tests' engagement check reads them around a
+/// call): the route (`route`, `routeT128`'s), the served down step (`gemmD`, or `gemmDT128`'s two launches) and finish
+/// (`finish`, `finishT128`), and the fused finish (`gemmDFin`). Plain wrapping counts.
+pub const Steps = struct { route: u32 = 0, down: u32 = 0, fin: u32 = 0, dfin: u32 = 0 };
 
 /// The routing of one call: sorted position -> slot (`order`), the M tiles (`tiles` int32 [tmax, 4]).
 pub const Route = struct {
@@ -782,7 +911,7 @@ pub const T128Kernels = struct {
         fin: mlx.mlx_fast_metal_kernel,
     };
 
-    fn init(limit: u32, zfit: bool) !T128Kernels {
+    fn init(limit: u32, clamp: format.ClampAt, zfit: bool) !T128Kernels {
         var k: T128Kernels = .{
             .route = ks.newKernel("turboexl3_pf_t128_route", &froute_in, &froute_t128_out, text_froute_t128, header_small, true) orelse return error.KernelCreateFailed,
             .gu_mixed = ks.newKernel("turboexl3_pf_t128_gum", &gemm2_in, &gemm2_out, gemm2m_text, header_nax, true) orelse return error.KernelCreateFailed,
@@ -791,8 +920,10 @@ pub const T128Kernels = struct {
             .dn_t128 = ks.newKernel("turboexl3_pf_t128_dnt", &gemm1_in, &gemm1_out, gemm1_text, header_nax, true) orelse return error.KernelCreateFailed,
             .mid = (if (limit == 0)
                 ks.newKernel("turboexl3_pf_t128_mid", &mid_t128_in, &mid_out, text_mid_t128, header_small, true)
+            else if (clamp == .gate_in)
+                ks.newKernel("turboexl3_pf_t128_midc", &mid_t128_in, &mid_out, text_mid_t128c, header_small, true)
             else
-                ks.newKernel("turboexl3_pf_t128_midc", &mid_t128_in, &mid_out, text_mid_t128c, header_small, true)) orelse return error.KernelCreateFailed,
+                ks.newKernel("turboexl3_pf_t128_midco", &mid_t128_in, &mid_out, text_mid_t128co, header_small, true)) orelse return error.KernelCreateFailed,
             .fin = ks.newKernel("turboexl3_pf_t128_fin", &fin_t128_in, &fin_out, text_finish_t128, header_small, true) orelse return error.KernelCreateFailed,
         };
         if (zfit) k.z = .{
@@ -886,14 +1017,21 @@ pub const Prefill = struct {
     t128_k: ?T128Kernels = null,
     /// the row-map prepare (`text_prep_rows`, `prepWith`), made at its first call
     prep_r: ?mlx.mlx_fast_metal_kernel = null,
+    /// the down GEMM with the finish as its epilogue (`text_dfin`, `gemmDFin`); made only with `opts.dfin`
+    dfin_k: ?mlx.mlx_fast_metal_kernel = null,
+    /// the chain's steps this engine ran (`Steps`): nothing reads them but the GPU tests' engagement check
+    steps: Steps = .{},
     /// the int8 chain's kernels (prep, gate|up, mid and down); made only with `opts.int8`
     i8_k: ?I8Kernels = null,
 
     pub fn init(geo: Geometry, opts: Options) !Prefill {
+        // the fused finish writes a row's one slot (top-1)
         if (!geo.admitted() or !opts.valid() or (opts.intr and geo.rate.n % 16 != 0) or (opts.defer_affine and geo.dec.codebook != .mul1) or
-            (geo.hidden / BN) % opts.ncb != 0) return error.BadExl3Shape;
+            (geo.hidden / BN) % opts.ncb != 0 or (opts.dfin and geo.topk != 1)) return error.BadExl3Shape;
         // `Options.int8` 2: a row of hidden and of inter in one threadgroup (32 threads a 128-block, at most 1024)
         if (opts.int8 == 2 and (geo.hidden / 128 > 32 or geo.inter / 128 > 32)) return error.BadExl3Shape;
+        // the compact mixed outputs' and int8's mids clamp the gate's input only (their clamped texts are gate_in's)
+        if (geo.limit != 0 and geo.clamp != .gate_in and (opts.t128_zfit or opts.int8 != 0)) return error.BadExl3Shape;
         return .{
             .geo = geo,
             .opts = opts,
@@ -904,8 +1042,10 @@ pub const Prefill = struct {
             // a clamped geometry's mids are the clamped variants (`Geometry.limit`)
             .mid_k = (if (geo.limit == 0)
                 ks.newKernel("turboexl3_pf_mid", &mid_in, &mid_out, text_mid, header_small, true)
+            else if (geo.clamp == .gate_in)
+                ks.newKernel("turboexl3_pf_midc", &mid_in, &mid_out, text_midc, header_small, true)
             else
-                ks.newKernel("turboexl3_pf_midc", &mid_in, &mid_out, text_midc, header_small, true)) orelse return error.KernelCreateFailed,
+                ks.newKernel("turboexl3_pf_midco", &mid_in, &mid_out, text_midco, header_small, true)) orelse return error.KernelCreateFailed,
             .fin = ks.newKernel("turboexl3_pf_fin", &fin_in, &fin_out, text_finish, header_small, true) orelse return error.KernelCreateFailed,
             .gemm2s = ks.newKernel("turboexl3_pf_gemm2s", &gemm2_in, &gemm2_out, gemm2s_text, header_nax_small, true) orelse return error.KernelCreateFailed,
             .gemm1s = ks.newKernel("turboexl3_pf_gemm1s", &gemm1_in, &gemm1_out, gemm1s_text, header_nax_small, true) orelse return error.KernelCreateFailed,
@@ -917,10 +1057,13 @@ pub const Prefill = struct {
             .prep_v = ks.newKernel("turboexl3_pf_prep_v", &prep_in, &prep_out, text_prep_v, header_small, true) orelse return error.KernelCreateFailed,
             .mid_v = (if (geo.limit == 0)
                 ks.newKernel("turboexl3_pf_mid_v", &mid_in, &mid_out, text_mid_v, header_small, true)
+            else if (geo.clamp == .gate_in)
+                ks.newKernel("turboexl3_pf_mid_vc", &mid_in, &mid_out, text_mid_vc, header_small, true)
             else
-                ks.newKernel("turboexl3_pf_mid_vc", &mid_in, &mid_out, text_mid_vc, header_small, true)) orelse return error.KernelCreateFailed,
+                ks.newKernel("turboexl3_pf_mid_vco", &mid_in, &mid_out, text_mid_vco, header_small, true)) orelse return error.KernelCreateFailed,
             .fin_v = ks.newKernel("turboexl3_pf_fin_v", &fin_in, &fin_out, text_finish_v, header_small, true) orelse return error.KernelCreateFailed,
-            .t128_k = if (!opts.t128) null else try T128Kernels.init(geo.limit, opts.t128_zfit),
+            .t128_k = if (!opts.t128) null else try T128Kernels.init(geo.limit, geo.clamp, opts.t128_zfit),
+            .dfin_k = if (!opts.dfin) null else ks.newKernel("turboexl3_pf_dfin", &dfin_in, &dfin_out, text_dfin, header_nax_dfin, true) orelse return error.KernelCreateFailed,
             .i8_k = if (opts.int8 == 0) null else try I8Kernels.init(geo.limit, opts.int8_c2),
         };
     }
@@ -929,6 +1072,7 @@ pub const Prefill = struct {
         inline for (.{ self.table, self.prep_k, self.gemm2, self.gemm1, self.mid_k, self.fin, self.gemm2s, self.gemm1s, self.table_m, self.gemm2m, self.gemm1m, self.froute, self.froute_m, self.prep_v, self.mid_v, self.fin_v }) |k| decode.freeKernel(k);
         if (self.t128_k) |k| k.deinit();
         if (self.prep_r) |k| decode.freeKernel(k);
+        if (self.dfin_k) |k| decode.freeKernel(k);
         if (self.i8_k) |k| k.deinit();
     }
 
@@ -957,6 +1101,7 @@ pub const Prefill = struct {
     /// argsort of the flat expert ids, then the M tile table (one threadgroup); `froute`: the one-launch route kernel.
     pub fn route(self: *Prefill, s: mlx.mlx_stream, inds: mlx.mlx_array, S: u32) !Route {
         const g = self.geo;
+        self.steps.route +%= 1;
         const tr = self.opts.tileRows();
         const tmax: u32 = (S + tr - 1) / tr + g.experts;
         const mixed = self.opts.small == .mixed;
@@ -1096,7 +1241,7 @@ pub const Prefill = struct {
     pub fn gemmGU(self: *Prefill, s: mlx.mlx_stream, r: Route, xg: mlx.mlx_array, xu: mlx.mlx_array, xsg: mlx.mlx_array, xsu: mlx.mlx_array, b: Operands, S: u32) ![2]mlx.mlx_array {
         const g = self.geo;
         var tmpl: [23]ks.TemplateArg = undefined;
-        var l = self.gemmCfg(&tmpl, r.tmax, g.hidden, g.inter, 2, BK, 1);
+        var l = self.gemmCfg(&tmpl, r.tmax, g.hidden, g.inter, 2, BK, gu_ncb);
         const I: c_int = @intCast(g.inter);
         const shape = [_]c_int{ @intCast(S), I };
         l.out_shapes = &.{ &shape, &shape };
@@ -1143,6 +1288,7 @@ pub const Prefill = struct {
     /// the down inner product, half [S, hidden] (sorted order); `Options.bk128` / `ncb` shape its shared-decode body
     pub fn gemmD(self: *Prefill, s: mlx.mlx_stream, r: Route, xd: mlx.mlx_array, xsd: mlx.mlx_array, b: Operands, S: u32) !mlx.mlx_array {
         const g = self.geo;
+        self.steps.down +%= 1;
         var tmpl: [23]ks.TemplateArg = undefined;
         var l = self.gemmCfg(&tmpl, r.tmax, g.inter, g.hidden, 1, self.opts.downStage(), self.opts.ncb);
         const shape = [_]c_int{ @intCast(S), @intCast(g.hidden) };
@@ -1156,6 +1302,7 @@ pub const Prefill = struct {
     /// the down finish and the slot reduce: y [rows, hidden] in `out_dtype`
     pub fn finish(self: *Prefill, s: mlx.mlx_stream, zd: mlx.mlx_array, inds: mlx.mlx_array, inv: mlx.mlx_array, scores: mlx.mlx_array, b: Operands, rows: usize, out_dtype: mlx.mlx_dtype) !mlx.mlx_array {
         const g = self.geo;
+        self.steps.fin +%= 1;
         const H: c_int = @intCast(g.hidden);
         const bpt = bptFor(g.hidden / 128);
         var y: [1]mlx.mlx_array = undefined;
@@ -1208,6 +1355,38 @@ pub const Prefill = struct {
         return self.finish(s, zd, inds, po[2], scores, b, rows, out_dtype);
     }
 
+    /// The down GEMM with the finish as its epilogue (`Options.dfin`, `text_dfin`): y [S, hidden] in `out_dtype`, the
+    /// finish's y at top-1 (S slots, each its own row), in one launch over `ta`'s tiles (the 128-row tiles) and, past
+    /// them, `tb`'s (the mixed table, each of whose tiles runs as a part-full tile on the same body), on the 128-row
+    /// tiles' shared-decode body (bm 128; T2 1, as the text also takes one table, which no engine launches). `order` is
+    /// the route's (sorted position -> slot), `scores` the call's.
+    pub fn gemmDFin(self: *Prefill, s: mlx.mlx_stream, ta: mlx.mlx_array, tb: mlx.mlx_array, xd: mlx.mlx_array, xsd: mlx.mlx_array, order: mlx.mlx_array, scores: mlx.mlx_array, b: Operands, S: u32, out_dtype: mlx.mlx_dtype) !mlx.mlx_array {
+        const k = self.dfin_k orelse return error.Exl3EngineNotImplemented;
+        const g = self.geo;
+        self.steps.dfin +%= 1;
+        const na: u32 = @intCast(mlx.getShape(ta)[0]);
+        const nb: u32 = @intCast(mlx.getShape(tb)[0]);
+        var p = self.*;
+        p.opts.bm = 128;
+        p.opts.small = .off;
+        var tg: [23]ks.TemplateArg = undefined;
+        var l = p.gemmCfg(&tg, na + nb, g.inter, g.hidden, 1, self.opts.downStage(), self.opts.ncb);
+        var tmpl: [26]ks.TemplateArg = undefined;
+        @memcpy(tmpl[0..23], &tg);
+        tmpl[23] = .{ .name = "DFR", .value = .{ .int = dfr } };
+        tmpl[24] = .{ .name = "T2", .value = .{ .int = 1 } };
+        tmpl[25] = .{ .name = "OUT_T", .value = .{ .dtype = out_dtype } };
+        l.template = &tmpl;
+        const shape = [_]c_int{ @intCast(S), @intCast(g.hidden) };
+        const shapes = [_][]const c_int{&shape};
+        const dtypes = [_]mlx.mlx_dtype{out_dtype};
+        l.out_shapes = &shapes;
+        l.out_dtypes = &dtypes;
+        var y: [1]mlx.mlx_array = undefined;
+        try run(k, l, &.{ ta, tb, xd, b.down_t, xsd, order, scores, b.down_svh }, &y, s);
+        return y[0];
+    }
+
     /// The 128-row tiles' route: `froute`'s count and scatter (the same `order`), then the 128-row tiles, the mixed table over
     /// the remainders and each expert's first remainder position (`text_froute_t128`), one launch.
     pub fn routeT128(self: *Prefill, s: mlx.mlx_stream, inds: mlx.mlx_array, S: u32) !RouteT128 {
@@ -1224,6 +1403,7 @@ pub const Prefill = struct {
             .{ .name = "CUT", .value = .{ .int = t128_cut } },
             .{ .name = "T128", .value = .{ .int = 1 } },
         };
+        self.steps.route +%= 1;
         // t128_zfit: the compact bases (zmb [experts]) too
         var outs: [5]mlx.mlx_array = undefined;
         const nout: usize = if (k.z != null) 5 else 4;
@@ -1286,7 +1466,7 @@ pub const Prefill = struct {
     fn gemmGUT128Cap(self: *Prefill, s: mlx.mlx_stream, rt: RouteT128, xg: mlx.mlx_array, xu: mlx.mlx_array, xsg: mlx.mlx_array, xsu: mlx.mlx_array, b: Operands, cap: u32) !ZT128 {
         const k = self.t128_k orelse return error.Exl3EngineNotImplemented;
         const g = self.geo;
-        return self.t128Gemm(s, rt, if (k.z) |z| z.gu_mixed else k.gu_mixed, k.gu_t128, 2, g.hidden, g.inter, BK, 1, &.{ rt.tiles, xg, xu, b.gate_t, b.up_t, xsg, xsu }, &.{ rt.tiles128, xg, xu, b.gate_t, b.up_t, xsg, xsu }, cap);
+        return self.t128Gemm(s, rt, if (k.z) |z| z.gu_mixed else k.gu_mixed, k.gu_t128, 2, g.hidden, g.inter, BK, gu_ncb, &.{ rt.tiles, xg, xu, b.gate_t, b.up_t, xsg, xsu }, &.{ rt.tiles128, xg, xu, b.gate_t, b.up_t, xsg, xsu }, cap);
     }
 
     /// The int8 prepare (`text_prep_i8`, or `text_prep_i8_rows` with `rmap` as `prepWith`'s; with `Options.int8` 2 their
@@ -1466,6 +1646,7 @@ pub const Prefill = struct {
     fn gemmDT128Cap(self: *Prefill, s: mlx.mlx_stream, rt: RouteT128, xd: mlx.mlx_array, xsd: mlx.mlx_array, b: Operands, cap: u32) !ZT128 {
         const k = self.t128_k orelse return error.Exl3EngineNotImplemented;
         const g = self.geo;
+        self.steps.down +%= 1;
         return self.t128Gemm(s, rt, if (k.z) |z| z.dn_mixed else k.dn_mixed, k.dn_t128, 1, g.inter, g.hidden, self.opts.downStage(), self.opts.ncb, &.{ rt.tiles, xd, b.down_t, xsd }, &.{ rt.tiles128, xd, b.down_t, xsd }, cap);
     }
 
@@ -1479,6 +1660,7 @@ pub const Prefill = struct {
     fn finishT128Cap(self: *Prefill, s: mlx.mlx_stream, zt: ZT128, xbase: mlx.mlx_array, inds: mlx.mlx_array, inv: mlx.mlx_array, scores: mlx.mlx_array, b: Operands, rows: usize, cap: usize, out_dtype: mlx.mlx_dtype) !mlx.mlx_array {
         const k = self.t128_k orelse return error.Exl3EngineNotImplemented;
         const g = self.geo;
+        self.steps.fin +%= 1;
         const H: c_int = @intCast(g.hidden);
         const bpt = bptFor(g.hidden / 128);
         var y: [1]mlx.mlx_array = undefined;
@@ -1502,7 +1684,16 @@ pub const Prefill = struct {
     /// outputs take `t128ZCap` rows; null: S rows (or the sorted positions without t128_zfit). `Options.int8`: the int8
     /// chain (`moeI8Cap`: the prepare, the gate|up GEMMs, mid and the down GEMM on int8, the exact chain's finish).
     pub fn moeT128With(self: *Prefill, s: mlx.mlx_stream, x: mlx.mlx_array, inds: mlx.mlx_array, scores: mlx.mlx_array, b: Operands, rows: usize, out_dtype: mlx.mlx_dtype, rmap: ?mlx.mlx_array, call_experts: ?u32) !mlx.mlx_array {
+        return self.moeT128WithCall(s, x, inds, scores, b, rows, out_dtype, rmap, call_experts, .{});
+    }
+
+    /// `moeT128With` with the call's own choices (`Call`): the ending `endOf` gives, after the served route. A call
+    /// that declines the fused finish runs `gemmDT128` and `finishT128`: the served engine's launches. `.{}`:
+    /// `moeT128With` itself. The fused finish (`Options.dfin`) never runs beside the size classes or int8
+    /// (`Options.valid`), so its call is at the call's own rows.
+    pub fn moeT128WithCall(self: *Prefill, s: mlx.mlx_stream, x: mlx.mlx_array, inds: mlx.mlx_array, scores: mlx.mlx_array, b: Operands, rows: usize, out_dtype: mlx.mlx_dtype, rmap: ?mlx.mlx_array, call_experts: ?u32, call: Call) !mlx.mlx_array {
         if (self.t128_k == null) return error.Exl3EngineNotImplemented;
+        const ending = endOf(self.opts, call);
         const S: u32 = @intCast(rows * self.geo.topk);
         var rt = try self.routeT128(s, inds, S);
         defer rt.deinit();
@@ -1522,9 +1713,16 @@ pub const Prefill = struct {
             defer for (xd) |a| {
                 _ = mlx.mlx_array_free(a);
             };
-            const zd = try self.gemmDT128Cap(s, rt, xd[0], xd[1], b, cap);
-            defer zd.deinit();
-            break :blk try self.finishT128Cap(s, zd, rt.xbase, inds, po[2], scores, b, rows, rows_cap, out_dtype);
+            // the ending: the fused finish (`Options.dfin`), one down launch over both tables writing y; else the served
+            // down launches and finish
+            switch (ending) {
+                .dfin => break :blk try self.gemmDFin(s, rt.tiles128, rt.tiles, xd[0], xd[1], rt.order, scores, b, S, out_dtype),
+                .served => {
+                    const zd = try self.gemmDT128Cap(s, rt, xd[0], xd[1], b, cap);
+                    defer zd.deinit();
+                    break :blk try self.finishT128Cap(s, zd, rt.xbase, inds, po[2], scores, b, rows, rows_cap, out_dtype);
+                },
+            }
         };
         if (rows_cap == rows) return y;
         defer _ = mlx.mlx_array_free(y);
@@ -2021,4 +2219,93 @@ test "turboexl3 prefill 128-row tiles metal sources: the route, both GEMMs' laun
     printMetal("turboexl3_pf_t128_mid", header_small, pin[9], mid, text_mid_t128);
     const fin = pin[10];
     printMetal("turboexl3_pf_t128_fin", header_small, pin[11], fin, text_finish_t128);
+}
+
+test "turboexl3 prefill variant texts: the fused down GEMM is gemm1_text with its tile read and its store swapped for the two-table read and the finish's own statements" {
+    const pin = comptime @import("test_support.zig").pins(@embedFile("kernels/test/pins/prefill_v1.metal"));
+    const t = std.testing;
+    // the fused down GEMM: gemm1_text with its declarations inserted, its tile read from one of two tables and its store
+    // replaced by the finish; swapped back, gemm1_text (the GEMM, its K loop and its deferred map verbatim)
+    const epi = @embedFile("kernels/prefill/gemm_dfin_epi_1.metal") ++ finish_2 ++ @embedFile("kernels/prefill/gemm_dfin_load.metal") ++ finish_4 ++
+        @embedFile("kernels/prefill/gemm_dfin_epi_2.metal");
+    {
+        const no_decl = comptime replace(text_dfin, @embedFile("kernels/prefill/gemm_dfin_decl.metal"), "");
+        const bs_back = comptime replace(no_decl, @embedFile("kernels/prefill/gemm_dfin_bs.metal"), @embedFile("kernels/prefill/gemm_2.metal"));
+        const tile_back = comptime replace(bs_back, @embedFile("kernels/prefill/gemm_dfin_tile.metal"), @embedFile("kernels/prefill/gemm_3_2.metal"));
+        const back = comptime replace(tile_back, epi, @embedFile("kernels/prefill/gemm_op1_xsz_2.metal") ++ @embedFile("kernels/prefill/gemm_5.metal"));
+        try t.expectEqualStrings(gemm1_text, back);
+    }
+    try t.expectEqualStrings(text_dfin, comptime dfinText(dfin_gemm_4, dfin_finish_4));
+    // the finish's statements read a row's halves where the finish reads zd: the same element of the 128-block (L + 32 j)
+    try t.expectEqualStrings(@embedFile("kernels/prefill/gemm_dfin_load.metal"), comptime replace(finish_3, pin[0], pin[1]));
+    // the kept even block takes the store's rounding (NAXFrag::store: static_cast<U> of each element), as the odd one
+    // (stored through NAXTile::store) does
+    try t.expect(std.mem.indexOf(u8, steel_nax, pin[2]) != null);
+    try t.expectEqual(@as(usize, 1), std.mem.count(u8, text_dfin, pin[3]));
+    // no z store; the finish's y store, once; the round's two barriers and the single-buffered staging's one beside the
+    // GEMM's
+    try t.expect(std.mem.indexOf(u8, gemm1_text, pin[4]) != null and std.mem.indexOf(u8, text_dfin, pin[4]) == null);
+    try t.expectEqual(@as(usize, 1), std.mem.count(u8, text_dfin, pin[5]));
+    try t.expectEqual(std.mem.count(u8, gemm1_text, pin[6]) + 3, std.mem.count(u8, text_dfin, pin[6]));
+    // the header: the NAX GEMM's, then the finish's H128
+    try t.expect(std.mem.startsWith(u8, header_nax_dfin, header_nax) and std.mem.endsWith(u8, header_nax_dfin, metal_h128));
+    try t.expect(dfin_in.len == 8 and dfin_out.len == 1);
+}
+
+test "turboexl3 prefill variant options: the fused finish needs the 128-row tiles, whole 128-column blocks and its staging within 32 KB" {
+    const t = std.testing;
+    const served: Options = .{ .bm = 64, .small = .mixed, .dbuf = true, .unroll = true, .fragb = true, .intr = true, .defer_affine = true, .ncb = 4, .sintr = true, .froute = true, .alay = 2, .t128 = true };
+    try t.expect(served.valid());
+    // the fused finish: over both of the 128-row tiles' tables, never over the mixed launch alone nor small .off's one
+    // table; its 32-row rounds (`dfr`) in the weight stage's buffers
+    var o = served;
+    o.dfin = true;
+    try t.expect(o.valid() and o.dfinBytes() == 16384);
+    o = served;
+    o.dfin = true;
+    o.ncb = 1;
+    try t.expect(!o.valid());
+    o = served;
+    o.dfin = true;
+    o.t128 = false;
+    try t.expect(!o.valid());
+    o.small = .off;
+    o.sintr = false;
+    try t.expect(!o.valid());
+    // (that engine without the fused finish is valid: the fused finish alone needs the 128-row tiles)
+    o.dfin = false;
+    try t.expect(o.valid());
+    // 32-row rounds stage in the 32 KB stage of 128-deep fragment-order stages too
+    o = served;
+    o.dfin = true;
+    o.bk128 = true;
+    try t.expect(o.valid() and o.dfinBytes() == 32768);
+}
+
+test "turboexl3 prefill variant metal sources: the fused down GEMM over the two tables, as standalone translation units (TURBOEXL3_METAL_DUMP=1)" {
+    const pin = comptime @import("test_support.zig").pins(@embedFile("kernels/test/dump/prefill_t128.metal"));
+    const v1 = comptime @import("test_support.zig").pins(@embedFile("kernels/test/dump/prefill_v1.metal"));
+    _ = std.c.getenv("TURBOEXL3_METAL_DUMP") orelse return error.SkipZigTest;
+    // the fused down GEMM: the 128-row tiles' two tables at bm 128 (64-row rounds), and the same with the first in the
+    // constant address space (MLX binds an input of fewer than 8 words there: a call whose 128-row table has one row)
+    printMetal("turboexl3_pf_dfin_t2", header_nax_dfin, pin[3] ++ pin[5] ++ v1[1], v1[0], text_dfin);
+    printMetal("turboexl3_pf_dfin_t2c", header_nax_dfin, pin[3] ++ pin[5] ++ v1[1], v1[2], text_dfin);
+}
+
+test "turboexl3 prefill call: a call runs the fused finish only where its engine was built with it and the call keeps it; .{} is the engine's own ending, .{ .dfin = false } the served one" {
+    const t = std.testing;
+    const base: Options = .{ .bm = 64, .small = .mixed, .dbuf = true, .unroll = true, .fragb = true, .intr = true, .defer_affine = true, .ncb = 4, .sintr = true, .froute = true, .alay = 2, .t128 = true };
+    // the 128-row tiles' engine with the fused finish
+    var fused = base;
+    fused.dfin = true;
+    const engines = [_]Options{ base, fused };
+    for (engines) |o| try t.expect(o.valid());
+    // the default call runs what its engine was built for
+    try t.expect((Call{}).dfin);
+    try t.expectEqual(End.served, endOf(base, .{}));
+    try t.expectEqual(End.dfin, endOf(fused, .{}));
+    // a call that declines the fused finish runs the served ending on every engine; one that keeps it changes nothing on
+    // an engine built without it
+    for (engines) |o| try t.expectEqual(End.served, endOf(o, .{ .dfin = false }));
+    try t.expectEqual(End.served, endOf(base, .{ .dfin = true }));
 }

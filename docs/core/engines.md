@@ -291,6 +291,20 @@ With `froute` and without `t128`, the chain is 6 launches in 6 levels. `root.pfO
 constants, except `alay` and `t128`: the fields `pf_alay` and `pf_t128` of `Config` set those two. With `prefill` or
 `nax` false, `moe` refuses prefill rows. The third column below compares each kernel with the base chain.
 
+One more option reshapes the chain's launches, off by default and held to the served chain's bytes: `dfin` (the finish
+as the down GEMM's epilogue at top-1: `turboexl3_pf_dfin`, one launch over every row in place of the down GEMM's
+launches and `fin`, so 6 launches in 5 levels; it needs `t128`), which `Config.pf_dfin` sets. The remainder rule's cutoff
+(`prefill.t128_cut`, 64), the gate and up GEMM's output blocks per threadgroup (`prefill.gu_ncb`, 1) and the fused
+finish's tile rows per staging round (`prefill.dfr`, 32) are constants.
+
+A call can decline the fused finish (`prefill.Call`; `Prefill.moeT128WithCall`, root's `moeSwigluWith` and
+`moeSwigluRowsWith`): on an engine built with `dfin`, a call with `.dfin = false` runs the served route
+(`turboexl3_pf_t128_route`), `turboexl3_pf_t128_dnm`, `_t128_dnt` and `_t128_fin`, which every such engine builds as
+the served engine does, at the served launch
+shapes, so the call's launches and bytes are the served engine's. `prefill.endOf` gives a call's ending, and
+`Prefill.steps` counts the steps an engine ran (its route and its ending). One engine a geometry runs both endings.
+turboexl3_ling's PF_DFIN decides it once a wide prompt call, from the call's rows alone.
+
 | kernel | what it computes | launches it replaces |
 |---|---|---|
 | `turboexl3_pf_table`, `turboexl3_pf_table_m` | after MLX's argsort: each expert's run by binary search, an exclusive scan, then the tile table (`_m`: remainders of at most 32 rows as register-path tiles) | — |
@@ -302,6 +316,7 @@ constants, except `alay` and `t128`: the fields `pf_alay` and `pf_t128` of `Conf
 | `turboexl3_pf_gemm2m`, `turboexl3_pf_gemm1m` | the mixed launch: the table's large tiles through the shared-decode body, and its tiles of at most 32 rows through the register path | `_gemm2` and `_gemm2s` (`_gemm1` and `_gemm1s`) as one launch |
 | `turboexl3_pf_t128_gum`, `turboexl3_pf_t128_dnm` | the mixed launch over the remainder table | `_gemm2m` (`_gemm1m`), with `_gut` (`_dnt`) beside it |
 | `turboexl3_pf_t128_gut`, `turboexl3_pf_t128_dnt` | the shared-decode body at 128 rows over the 128-row tiles, beside the mixed launch; each launch writes its own output | as above |
+| `turboexl3_pf_dfin` | `dfin`: the down GEMM (`_gemm1`'s body) with the finish's statements as its epilogue, over both of the 128-row tiles' tables (`t128`); y written, zd never | `_t128_dnm`, `_t128_dnt` and `_t128_fin` |
 | `turboexl3_pf_mid`, `turboexl3_pf_t128_mid` | the gate and up finishes, SwiGLU in `f32`, the down input prepared, and its block sums (`t128`: each row from the launch that computed it) | — |
 | `turboexl3_pf_fin`, `turboexl3_pf_t128_fin` | the down finish and the score-weighted sum of the slots, in slot order, through `inv` (`t128`: each row from the launch that computed it) | — |
 | `turboexl3_pf_prep_v`, `turboexl3_pf_mid_v`, `turboexl3_pf_fin_v` | `aux`: prep, mid and finish with four consecutive elements per lane and several simdgroups per threadgroup | `_prep`, `_mid`, `_fin` |
@@ -350,7 +365,7 @@ The A layouts (`alay`):
 
 | rows | path | launches | levels |
 |---|---|---|---|
-| 1–4 (DEC-ONE's row cap) | DEC-ONE: one GEMV launch; the threadgroup that arrives last at its (output block, [row chunk](glossary.md#row-chunk)) runs the finish. The prepare runs inside that launch at 1 row, or at up to 1024 outputs, where its buffer fits; otherwise `prep_sc` runs it in a launch of its own (both thresholds are constants) | 2 | 1 with the prepare inside, else 2 |
+| 1–4 (DEC-ONE's row cap) | DEC-ONE: one GEMV launch; the threadgroup that arrives last at its (output block, [row chunk](glossary.md#row-chunk)) runs the finish. The prepare runs inside that launch at 1 row, or at up to 1024 outputs, where its buffer fits; otherwise `prep_sc` runs it in a launch of its own (both thresholds are constants; `dec_one_row_table` gives a 1-row call at a shape `dense.one_row_table` names that entry's tiles and prepare placement) | 2 | 1 with the prepare inside, else 2 |
 | 5–16, or `dec_one` false | `prep_s` → multi-row `dgemv` (`dgemv_lean` for chunks of 6 to 8 rows) → `dfinish` | 3 | 3 |
 | 17–32 (`small_rows`; 0 when `nax` is false) | `prep` → register-path GEMM `rs_gemm` → `finish` | 3 | 3 |
 | 33+ | `prep` and `dequant` → MLX matmul → `finish` | 4 | 3 |

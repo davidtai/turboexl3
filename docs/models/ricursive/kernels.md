@@ -16,10 +16,10 @@ The joined launches, the value residual's prepare and the MLP's clamped SwiGLU i
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/ricursive/ricursive.zig:103` (`fn kernelOf`) |
+| made at | `src/models/ricursive/ricursive.zig:104` (`fn kernelOf`) |
 | inputs | `xa`, `x0`, `blend`, `suh` |
 | outputs | `xp` |
-| source | `text_blend_prep` = `ricursive:ricursive/blend_struct` ++ `ricursive:ricursive/blend_all` ++ `dense/prep` (1795 B, `8f18f915cffe`) |
+| source | `text_blend_prep` = `ricursive:ricursive/blend_struct` ++ `ricursive:ricursive/blend_all` ++ `dense/prep_1` ++ `dense/prep_2_1` ++ `dense/prep_2_2` ++ `dense/prep_3` (1795 B, `8f18f915cffe`) |
 | header | `decode.header` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` (18000 B, `771237d24284`) |
 
 <!-- /kernel-facts -->
@@ -45,10 +45,10 @@ The joined launches, the value residual's prepare and the MLP's clamped SwiGLU i
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/ricursive/ricursive.zig:101` (`fn kernelOf`) |
+| made at | `src/models/ricursive/ricursive.zig:102` (`fn kernelOf`) |
 | inputs | `x`, `suh0`, `suh1`, `w`, `svh`, `cnt` |
 | outputs | `y`, `z`, `xsx` |
-| source | `text_jdec1` = `dense/dec_head` ++ `ricursive:ricursive/jsel` ++ `dense/dec_prep1` ++ `dense/dec_gemv1` ++ `dense/dec_gemv_arrive_1` ++ `ricursive:ricursive/jtile` ++ `dense/dec_gemv_arrive_2` ++ `dense/dec_xsum1` ++ `dense/dec_finish_v` ++ `dense/dec_finish_store` (8458 B, `6cf365048c9d`) |
+| source | `text_jdec1` = `dense/dec_head` ++ `ricursive:ricursive/jsel` ++ `dense/dec_prep1_1` ++ `dense/dec_prep1_2` ++ `dense/dec_prep1_3` ++ `dense/dec_gemv1_head` ++ `dense/dec_gemv_loop` ++ `dense/dec_gemv1_x` ++ `dense/dec_gemv_arrive_1` ++ `ricursive:ricursive/jtile` ++ `dense/dec_gemv_arrive_2a` ++ `dense/dec_gemv_arrive_2b` ++ `dense/dec_gemv_arrive_2c` ++ `dense/dec_xsum1` ++ `dense/dec_finish_v` ++ `dense/dec_finish_store` (8458 B, `6cf365048c9d`) |
 | header | `decode.header5` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` (26594 B, `41efbbbbd943`) |
 
 <!-- /kernel-facts -->
@@ -90,10 +90,10 @@ The joined launches, the value residual's prepare and the MLP's clamped SwiGLU i
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/ricursive/ricursive.zig:102` (`fn kernelOf`) |
+| made at | `src/models/ricursive/ricursive.zig:103` (`fn kernelOf`) |
 | inputs | `xa`, `x0`, `blend`, `suh0`, `suh1`, `w`, `svh`, `cnt` |
 | outputs | `y`, `z`, `xsx` |
-| source | `text_jdec1_blend` = `dense/dec_head` ++ `ricursive:ricursive/jsel` ++ `ricursive:ricursive/blend_struct` ++ `ricursive:ricursive/blend_member` ++ `dense/dec_prep1` ++ `dense/dec_gemv1` ++ `dense/dec_gemv_arrive_1` ++ `ricursive:ricursive/jtile` ++ `dense/dec_gemv_arrive_2` ++ `dense/dec_xsum1` ++ `dense/dec_finish_v` ++ `dense/dec_finish_store` (9232 B, `81e42a4dcefc`) |
+| source | `text_jdec1_blend` = `dense/dec_head` ++ `ricursive:ricursive/jsel` ++ `ricursive:ricursive/blend_struct` ++ `ricursive:ricursive/blend_member` ++ `dense/dec_prep1_1` ++ `dense/dec_prep1_2` ++ `dense/dec_prep1_3` ++ `dense/dec_gemv1_head` ++ `dense/dec_gemv_loop` ++ `dense/dec_gemv1_x` ++ `dense/dec_gemv_arrive_1` ++ `ricursive:ricursive/jtile` ++ `dense/dec_gemv_arrive_2a` ++ `dense/dec_gemv_arrive_2b` ++ `dense/dec_gemv_arrive_2c` ++ `dense/dec_xsum1` ++ `dense/dec_finish_v` ++ `dense/dec_finish_store` (9232 B, `81e42a4dcefc`) |
 | header | `decode.header5` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` (26594 B, `41efbbbbd943`) |
 
 <!-- /kernel-facts -->
@@ -128,10 +128,10 @@ The joined launches, the value residual's prepare and the MLP's clamped SwiGLU i
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/ricursive/ricursive.zig:105` (`fn kernelOf`) |
+| made at | `src/models/ricursive/ricursive.zig:106` (`fn kernelOf`) |
 | inputs | `gate`, `up`, `sigtab`, `lim`, `suh` |
 | outputs | `xp` |
-| source | `text_swiglu_prep` = `ricursive:ricursive/swiglu_x` ++ `dense/prep` (2402 B, `a7d5131c1474`) |
+| source | `text_swiglu_prep` = `ricursive:ricursive/swiglu_x` ++ `dense/prep_1` ++ `dense/prep_2_1` ++ `dense/prep_2_2` ++ `dense/prep_3` (2402 B, `a7d5131c1474`) |
 | header | `decode.header` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` (18000 B, `771237d24284`) |
 
 <!-- /kernel-facts -->
@@ -157,7 +157,7 @@ The joined launches, the value residual's prepare and the MLP's clamped SwiGLU i
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/ricursive/ricursive.zig:104` (`fn kernelOf`) |
+| made at | `src/models/ricursive/ricursive.zig:105` (`fn kernelOf`) |
 | inputs | `gate`, `up`, `sigtab`, `lim`, `suh` |
 | outputs | `xp`, `xs`, `cnt` |
 | source | `text_swiglu_prep_sc` = `ricursive:ricursive/swiglu_x` ++ `dense/prep_s` ++ `dense/prep_sc` (2746 B, `59befcf1aeb4`) |
@@ -199,7 +199,7 @@ The joint layout test's references: the joined launches as they read the joint b
 | made at | `src/models/ricursive/ricursive_test.zig:375` (`test turboexl3 gpu ricursive joint layout: the end-to-end joint gives the interleaved joint's words, each member's view gives its own linear's words, and the views copy nothing (TURBOEXL3_GPU=1)`) |
 | inputs | `xa`, `x0`, `blend`, `suh0`, `suh1`, `w`, `svh`, `cnt` |
 | outputs | `y`, `z`, `xsx` |
-| source | `text_interleaved_blend` = `dense/dec_head` ++ `ricursive:test/jsel_interleaved` ++ `ricursive:ricursive/blend_struct` ++ `ricursive:ricursive/blend_member` ++ `dense/dec_prep1` ++ `dense/dec_gemv1` ++ `dense/dec_gemv_arrive_1` ++ `dense/dec_tile` ++ `dense/dec_gemv_arrive_2` ++ `dense/dec_xsum1` ++ `dense/dec_finish_v` ++ `dense/dec_finish_store` (8787 B, `0beac76a58ee`) |
+| source | `text_interleaved_blend` = `dense/dec_head` ++ `ricursive:test/jsel_interleaved` ++ `ricursive:ricursive/blend_struct` ++ `ricursive:ricursive/blend_member` ++ `dense/dec_prep1_1` ++ `dense/dec_prep1_2` ++ `dense/dec_prep1_3` ++ `dense/dec_gemv1_head` ++ `dense/dec_gemv_loop` ++ `dense/dec_gemv1_x` ++ `dense/dec_gemv_arrive_1` ++ `dense/dec_tile` ++ `dense/dec_gemv_arrive_2a` ++ `dense/dec_gemv_arrive_2b` ++ `dense/dec_gemv_arrive_2c` ++ `dense/dec_xsum1` ++ `dense/dec_finish_v` ++ `dense/dec_finish_store` (8787 B, `0beac76a58ee`) |
 | header | `decode.header5` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` (26594 B, `41efbbbbd943`) |
 
 <!-- /kernel-facts -->
@@ -225,7 +225,7 @@ The joint layout test's references: the joined launches as they read the joint b
 | made at | `src/models/ricursive/ricursive_test.zig:373` (`test turboexl3 gpu ricursive joint layout: the end-to-end joint gives the interleaved joint's words, each member's view gives its own linear's words, and the views copy nothing (TURBOEXL3_GPU=1)`) |
 | inputs | `x`, `suh0`, `suh1`, `w`, `svh`, `cnt` |
 | outputs | `y`, `z`, `xsx` |
-| source | `text_interleaved` = `dense/dec_head` ++ `ricursive:test/jsel_interleaved` ++ `dense/dec_prep1` ++ `dense/dec_gemv1` ++ `dense/dec_gemv_arrive_1` ++ `dense/dec_tile` ++ `dense/dec_gemv_arrive_2` ++ `dense/dec_xsum1` ++ `dense/dec_finish_v` ++ `dense/dec_finish_store` (8013 B, `e308f7a1851d`) |
+| source | `text_interleaved` = `dense/dec_head` ++ `ricursive:test/jsel_interleaved` ++ `dense/dec_prep1_1` ++ `dense/dec_prep1_2` ++ `dense/dec_prep1_3` ++ `dense/dec_gemv1_head` ++ `dense/dec_gemv_loop` ++ `dense/dec_gemv1_x` ++ `dense/dec_gemv_arrive_1` ++ `dense/dec_tile` ++ `dense/dec_gemv_arrive_2a` ++ `dense/dec_gemv_arrive_2b` ++ `dense/dec_gemv_arrive_2c` ++ `dense/dec_xsum1` ++ `dense/dec_finish_v` ++ `dense/dec_finish_store` (8013 B, `e308f7a1851d`) |
 | header | `decode.header5` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` (26594 B, `41efbbbbd943`) |
 
 <!-- /kernel-facts -->
