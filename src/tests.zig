@@ -15,6 +15,7 @@ comptime {
     _ = @import("core/dense.zig");
     _ = @import("core/pgemm.zig");
     _ = @import("core/trunk_q8.zig");
+    _ = @import("core/int8_center.zig");
     _ = @import("core/prefill.zig");
     _ = @import("models/qwen38/decb.zig");
     _ = @import("models/qwen38/attn_io.zig");
@@ -57,6 +58,9 @@ comptime {
     _ = @import("models/glm53f/pair_ks_test.zig");
     _ = @import("models/glm53f/size_class_test.zig");
     _ = @import("models/glm53f/chain_time_test.zig");
+    _ = @import("core/trunk_q8_test.zig");
+    _ = @import("models/qwen38/qwen38_int8_test.zig");
+    _ = @import("models/deepseek_v41/deepseek_int8_test.zig");
 }
 
 

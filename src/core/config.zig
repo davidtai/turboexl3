@@ -41,10 +41,25 @@ pub const Config = struct {
     /// The routed prefill's gate|up and down GEMMs on int8 (`prefill.Options.int8`, with `pf_t128` and without
     /// `pf_t128_zfit`; lossy): 1 each activation 128-block at its own scale, 2 one scale a row (per token); 0 the exact chain.
     pf_int8: u8 = 0,
+    /// The int8 GEMMs' weight center, doubled (`prefill.Options.int8_c2`, trunk_q8.zig's GEMMs): a MUL1 weight is int8
+    /// q = round((t - 510) / 4) of its byte sum t, halves rounded up, and each epilogue rebuilds it as 4 A q + (c A + C).
+    /// 1020 (c = 510: the texts GLM-5.3-Flash serves, half a unit of t high on average) or 1019 (c = 509.5, centered: the
+    /// texts' `_c` variants, the center a template argument). int8_center.zig pins both over every codeword.
+    pf_int8_c2: u16 = 1020,
     /// A dense linear's prefill rows on int8 at the host's shapes (`trunk_q8.shapes`; lossy): `Dense.linearOn`'s matmul
     /// path as trunk_q8.zig's int8 prepare (one scale a row), int8 decode and int8 GEMM with the finish, on MUL1 packs on the
     /// NAX path; false (or a shape the host did not name) the chain.
     pf_trunk_int8: bool = false,
+    /// With `pf_trunk_int8`, at its shapes: also the inner products a host splits off `linear` at prefill rows (lossy):
+    /// `Dense.innerOf` and `innerOn` on the matmul path, the row pieces (`root.linearPiecesBegin` hands them int8 wq), and
+    /// ATTN-IN's and ATTN-OUT's GEMMs (`attn_io.prefillInner`) on trunk int8's launches up to z, the host's finish after
+    /// (trunk_q8.zig's module comment). False keeps them on the chain.
+    pf_trunk_int8_inner: bool = false,
+    /// The routed prefill's deferred MUL1 map (`prefill.Options.defer_affine`): its GEMMs sum each input times a codeword's
+    /// byte sum and apply the affine map once per output. False decodes every weight to its f16 value first (the reference's
+    /// rounding, the dense prefill's): exact either way, a rounding apart, the floor arm beside an int8 arm's NLL. The routed
+    /// int8 GEMMs need the map (`pf_int8` is refused without it).
+    pf_defer_affine: bool = true,
     /// Routed prefill rows on the fused GEMM chain; false refuses them (`error.Exl3EngineNotImplemented`).
     prefill: bool = true,
     /// The device passes MLX's NAX gate (an M5-class GPU and macOS 26.2 or later), the consumer's to say. False keeps
@@ -101,6 +116,8 @@ pub const Config = struct {
         const spts = [_]u32{ 1, 2, 4, 5, 10, 20 };
         return std.mem.indexOfScalar(u8, &forms, c.decode_form) != null and
             std.mem.indexOfScalar(u32, &spts, c.shared_spt) != null and c.pf_alay <= 2 and c.pf_int8 <= 2 and
+            (c.pf_int8_c2 == 1020 or c.pf_int8_c2 == 1019) and (!c.pf_trunk_int8_inner or c.pf_trunk_int8) and
+            (c.pf_defer_affine or c.pf_int8 == 0) and
             (c.banked_group == 2 or c.banked_group == 4) and (!c.banked_m3 or c.banked_group == 4) and
             (!c.banked_ptg or c.banked_group == 4) and
             c.banked_variant_gu < banked_variants and c.banked_variant_dn < banked_variants and
@@ -150,6 +167,16 @@ test "turboexl3 config: the defaults are valid and served; an unserved form, sli
     for ([_]u8{ 0, 4, 10 }) |f| try t.expect(!(Config{ .decode_form = f }).valid());
     try t.expect(!(Config{ .shared_spt = 3 }).valid());
     try t.expect(!(Config{ .pf_alay = 3 }).valid());
+    // the int8 center: 510 (today's texts) by default, 509.5 served, any other refused
+    try t.expectEqual(@as(u16, 1020), d.pf_int8_c2);
+    try t.expect((Config{ .pf_int8 = 1, .pf_int8_c2 = 1019 }).valid());
+    for ([_]u16{ 0, 1018, 1021, 510 }) |c2| try t.expect(!(Config{ .pf_int8_c2 = c2 }).valid());
+    // trunk int8's inner products ride trunk int8; the routed int8 rides the deferred map
+    try t.expect(!d.pf_trunk_int8_inner and d.pf_defer_affine);
+    try t.expect((Config{ .pf_trunk_int8 = true, .pf_trunk_int8_inner = true }).valid());
+    try t.expect(!(Config{ .pf_trunk_int8_inner = true }).valid());
+    try t.expect((Config{ .pf_defer_affine = false }).valid());
+    try t.expect(!(Config{ .pf_defer_affine = false, .pf_int8 = 1 }).valid());
     try t.expectEqual(@as(u32, 2), d.banked_group);
     try t.expect((Config{ .banked_group = 4 }).valid());
     for ([_]u32{ 0, 1, 3, 8 }) |g| try t.expect(!(Config{ .banked_group = g }).valid());

@@ -16,6 +16,7 @@ const bf16Bits = support.bf16Bits;
 const format = @import("../../core/format.zig");
 const root = @import("../../root.zig");
 const dense = @import("../../core/dense.zig");
+const t8 = @import("../../core/trunk_q8_test.zig");
 
 const testing = std.testing;
 
@@ -390,6 +391,124 @@ test "turboexl3 gpu attn_io: the four-member prepare writes each member's own pr
         try testing.expectError(error.BadExl3Shape, root.attnPrep4(s, x64, q, k, v, ix_narrow, .mul1));
         try testing.expectEqual(before, root.attn_io.prep4_calls.get().*);
         std.debug.print("TURBOEXL3_IDXPREP_REFUSALS PASS\n", .{});
+    }
+    try testing.expect(!failed);
+}
+
+// ---- trunk int8 (Config.pf_trunk_int8 with its inner products, the outside plugin turboexl3_qwen38's PF_INT8 3 and 4) ----
+
+/// The attention projections named for trunk int8, at the full pack's rates: q|gate, k and v, o (all K7) and the
+/// indexer (K5)
+const int8_shapes = [_]root.trunk_q8.Shape{
+    .{ .k = HIDDEN, .n = 2 * HQ * HD },
+    .{ .k = HIDDEN, .n = HK * HD },
+    .{ .k = HQ * HD, .n = HIDDEN },
+    .{ .k = HIDDEN, .n = IDX_OUT, .rate_n = 80 },
+};
+
+/// Dequantize + matmul's rows (int8's: a prompt's chunks and the first row count past the register path), and the
+/// register path's last (exact on both sides)
+const int8_cells = [_]Cell{
+    .{ .rows = 8192, .offset = 0 },
+    .{ .rows = 1328, .offset = 16384 },
+    .{ .rows = 33, .offset = 1000 },
+    .{ .rows = 32, .offset = 77 },
+};
+
+/// `got` against `want` (one shape, any float dtype): trunk_q8_test's cosine and error rms
+fn agreeArr(a: std.mem.Allocator, g: *G, want: mlx.mlx_array, got: mlx.mlx_array) !t8.Agree {
+    const n = mlx.mlx_array_size(want);
+    if (mlx.mlx_array_size(got) != n) return error.HostReadSize;
+    const wb = try a.alloc(f32, n);
+    defer a.free(wb);
+    const gb = try a.alloc(f32, n);
+    defer a.free(gb);
+    _ = try g.hostF32(try g.astype(want, .float32), wb);
+    _ = try g.hostF32(try g.astype(got, .float32), gb);
+    return t8.agreeOf(gb, wb);
+}
+
+test "turboexl3 gpu attn_io trunk int8: with q|gate, k, v, o and the indexer on trunk int8 and its inner products (the 509.5 center), ATTN-IN, ATTN-OUT and the indexer over the four-member prepare equal the host's chain over linear's int8 byte for byte, and agree with the exact ones (TURBOEXL3_GPU=1)" {
+    _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    const s = mlx.mlx_default_gpu_stream_new();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    const a = std.heap.page_allocator;
+    var g = try G.init(a, s);
+    defer g.deinit();
+    defer _ = mlx.mlx_clear_cache();
+    defer root.releaseEngines();
+    const sv = t8.save();
+    defer t8.restore(sv);
+    var failed = false;
+    const eps = mlx.mlx_array_new_float(EPS);
+    defer _ = mlx.mlx_array_free(eps);
+    const top = g.mark();
+    defer g.resetTo(top);
+    const sigtab = try sigTable(a, &g, s);
+    var prng = std.Random.DefaultPrng.init(0xA77E18);
+    const rnd = prng.random();
+    const q = try synthProj(a, &g, rnd, HIDDEN, 2 * HQ * HD, 112);
+    const k = try synthProj(a, &g, rnd, HIDDEN, HK * HD, 112);
+    const v = try synthProj(a, &g, rnd, HIDDEN, HK * HD, 112);
+    const o = try synthProj(a, &g, rnd, HQ * HD, HIDDEN, 112);
+    const ix = try synthProj(a, &g, rnd, HIDDEN, IDX_OUT, 80);
+    const qw = try randBf16(a, &g, rnd, &.{ci(HD)}, 0.5, 1.0, true);
+    const kw = try randBf16(a, &g, rnd, &.{ci(HD)}, 0.5, 1.0, true);
+    for (int8_cells) |c| {
+        if (!rowsWanted(c.rows)) continue;
+        const mark = g.mark();
+        defer g.resetTo(mark);
+        const int8_rows = c.rows > 32;
+        const x = try randBf16(a, &g, rnd, &.{ 1, ci(c.rows), ci(HIDDEN) }, 0.0, 1.0, false);
+        const attn = try randBf16(a, &g, rnd, &.{ 1, ci(HQ), ci(c.rows), ci(HD) }, 0.0, 1.0, false);
+        const angles = try angleRows(a, &g, s, c.rows, c.offset);
+        var ep: root.attn_io.Epilogue = .{ .heads = HQ, .kv_heads = HK, .rope_dims = @intCast(RD), .q_norm = qw, .k_norm = kw, .eps = eps, .angles = angles };
+        // the exact fused paths (trunk int8 off)
+        try t8.setTrunk(sv.cfg, false, false, 1019, null);
+        var ex = try root.attnIn(s, x, q, k, v, ep, .mul1);
+        defer ex.deinit();
+        const ex_gate: root.attn_io.Gate = .{ .base = ex.gate, .row_stride = HQ * HD, .head_stride = HD, .off = 0 };
+        const y_ex = try g.adopt(try root.linearGated(s, attn, ex_gate, sigtab, o, .mul1));
+        // the host's chain over linear on trunk int8 (its inner products off)
+        try t8.setTrunk(sv.cfg, true, false, 1019, &int8_shapes);
+        var before = t8.int8Calls();
+        const want = try chainIn(&g, s, x, q, k, v, qw, kw, c.rows, c.offset);
+        const y_want = try chainOut(&g, s, attn, want.gate, o, c.rows);
+        const qk_want = try g.adopt(try root.linear(s, x, ix.trellis, ix.suh, ix.svh, .mul1));
+        try g.evalAll(&.{ want.q, want.gate, want.k, want.v, y_want, qk_want });
+        const chain_int8 = t8.int8Calls() != before;
+        // the fused paths with the inner products on trunk int8: ATTN-IN, ATTN-OUT over q_proj's gate (the chain's), the
+        // four-member prepare with the indexer over its copy and ATTN-IN over the other three
+        try t8.setTrunk(sv.cfg, true, true, 1019, &int8_shapes);
+        before = t8.int8Calls();
+        var got = try root.attnIn(s, x, q, k, v, ep, .mul1);
+        defer got.deinit();
+        const qp_gate: root.attn_io.Gate = .{ .base = want.qp, .row_stride = 2 * HQ * HD, .head_stride = 2 * HD, .off = HD };
+        const y_got = try g.adopt(try root.linearGated(s, attn, qp_gate, sigtab, o, .mul1));
+        const xp = try root.attnPrep4(s, x, q, k, v, ix, .mul1);
+        for (xp) |arr| _ = try g.adopt(arr);
+        const qk_got = try g.reshape(try g.adopt(try root.linearPreparedIdx(s, xp[3], ix, .bfloat16, .mul1)), &.{ 1, ci(c.rows), ci(IDX_OUT) });
+        ep.prep = .{ xp[0], xp[1], xp[2] };
+        var got4 = try root.attnIn(s, x, q, k, v, ep, .mul1);
+        defer got4.deinit();
+        try g.evalAll(&.{ got.q, got.gate, got.k, got.v, y_got, qk_got, got4.q, got4.gate, got4.k, got4.v });
+        const fused_int8 = t8.int8Calls() != before;
+        const d = [_]usize{
+            try bitsDiff(a, &g, want.q, got.q),       try bitsDiff(a, &g, want.gate, got.gate), try bitsDiff(a, &g, want.k, got.k),
+            try bitsDiff(a, &g, want.v, got.v),       try bitsDiff(a, &g, y_want, y_got),       try bitsDiff(a, &g, qk_want, qk_got),
+            try bitsDiff(a, &g, want.q, got4.q),      try bitsDiff(a, &g, want.gate, got4.gate), try bitsDiff(a, &g, want.k, got4.k),
+            try bitsDiff(a, &g, want.v, got4.v),
+        };
+        var same = chain_int8 == int8_rows and fused_int8 == int8_rows;
+        for (d) |n| same = same and n == 0;
+        std.debug.print("TURBOEXL3_ATTN_INT8_SAME rows={d} offset={d} path={s} int8={} q={d} gate={d} k={d} v={d} y={d} qk={d} prep4_q={d} prep4_gate={d} prep4_k={d} prep4_v={d} {s}\n", .{ c.rows, c.offset, pathOf(c.rows), fused_int8, d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], d[8], d[9], if (same) "PASS" else "FAIL" });
+        if (!same) failed = true;
+        // against the exact fused paths: int8's error
+        const ags = [_]t8.Agree{ try agreeArr(a, &g, ex.q, got.q), try agreeArr(a, &g, ex.gate, got.gate), try agreeArr(a, &g, ex.k, got.k), try agreeArr(a, &g, ex.v, got.v), try agreeArr(a, &g, y_ex, y_got) };
+        var agree = true;
+        for (ags) |ag| agree = agree and ag.ok();
+        std.debug.print("TURBOEXL3_ATTN_INT8_AGREE rows={d} q_cos={d:.6} gate_cos={d:.6} k_cos={d:.6} v_cos={d:.6} y_cos={d:.6} q_rms={d:.5} gate_rms={d:.5} k_rms={d:.5} v_rms={d:.5} y_rms={d:.5} {s}\n", .{ c.rows, ags[0].cos, ags[1].cos, ags[2].cos, ags[3].cos, ags[4].cos, ags[0].rms, ags[1].rms, ags[2].rms, ags[3].rms, ags[4].rms, if (agree) "PASS" else "FAIL" });
+        if (!agree) failed = true;
     }
     try testing.expect(!failed);
 }

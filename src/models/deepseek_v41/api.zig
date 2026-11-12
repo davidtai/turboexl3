@@ -19,6 +19,42 @@ const freeArr = root.freeArr;
 const kernels = root.kernels;
 const kernelsFor = root.kernelsFor;
 const linearOn = root.linearOn;
+const trunk_q8 = root.trunk_q8;
+
+// ── The trunk linears at prefill rows: the shapes a host names for trunk int8 (`trunk_q8.shapes`) ──
+
+/// One trunk linear at prefill rows: its name, in (K) and out (N); `attn` an attention projection (the int8 levels'
+/// split). No two of DeepSeek-V4.1's share a (K, N) across the split, so none names a rate.
+pub const Linear = struct { name: []const u8, k: u32, n: u32, attn: bool };
+
+/// DeepSeek-V4.1's EXL3 trunk linears that run at prefill rows (the 2.25 pack's K6 trunk, DSpark's main_proj K4), each
+/// (K, N) once: the 40 layers' attention (the three DSpark stages' share its shapes) wq_a, wkv (a compressor's wkv and
+/// wgate share it), wq_b, wo_a (one group of `linearGrouped`'s eight, at 4096 -> 1024), wo_b and the indexer's wq_b; the
+/// shared expert's w1|w3 and w2; DSpark's main_proj. The head is not here.
+pub const trunk = [_]Linear{
+    .{ .name = "attn.wq_a", .k = 5120, .n = 1280, .attn = true },
+    .{ .name = "attn.wkv|compressor.wkv|compressor.wgate", .k = 5120, .n = 512, .attn = true },
+    .{ .name = "attn.wq_b", .k = 1280, .n = 32768, .attn = true },
+    .{ .name = "attn.wo_a (a group)", .k = 4096, .n = 1024, .attn = true },
+    .{ .name = "attn.wo_b", .k = 8192, .n = 5120, .attn = true },
+    .{ .name = "attn.indexer.wq_b", .k = 1280, .n = 4096, .attn = true },
+    .{ .name = "ffn.shared_experts.w1|w3", .k = 5120, .n = 2304, .attn = false },
+    .{ .name = "ffn.shared_experts.w2", .k = 2304, .n = 5120, .attn = false },
+    .{ .name = "mtp.main_proj", .k = 15360, .n = 5120, .attn = false },
+};
+
+/// The trunk int8 shapes of int8 level `level` (3: the attention projections; 4: every linear of `trunk`; else none),
+/// written to `out` (the caller keeps it while the shapes are in force)
+pub fn trunkShapes(level: u8, out: *[trunk.len]trunk_q8.Shape) []const trunk_q8.Shape {
+    var n: usize = 0;
+    for (trunk) |l| {
+        if (level == 4 or (level == 3 and l.attn)) {
+            out[n] = .{ .k = l.k, .n = l.n };
+            n += 1;
+        }
+    }
+    return out[0..n];
+}
 
 // ── The grouped linear ──
 

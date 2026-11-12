@@ -651,13 +651,15 @@ pub const gdnOutPrep = qwen38.gdnOutPrep;
 
 /// The dequantized f16 W [in, out] of linear `p` for a call of x's dtype `xd` split into pieces of `rows` rows
 /// (2..`dense.Dense.max_pieces`), made on `ws`, or error.Exl3EngineNotImplemented (nothing launched) where the call or a
-/// piece leaves the matmul path.
+/// piece leaves the matmul path. Where trunk int8 takes the linear's inner products (`trunk_q8.innerTakes`), its int8
+/// wq [out, in] instead (`trunk_q8.decodeW`): the pieces then run its inner launches (lossy).
 pub fn linearPiecesBegin(ws: mlx.mlx_stream, p: Proj, rows: []const usize, xd: mlx.mlx_dtype, dec: format.Decode) !mlx.mlx_array {
     const tsh = mlx.getShape(p.trellis);
     if (tsh.len != 3) return error.BadExl3Shape;
     if (xd != .bfloat16 and xd != .float32 and xd != .float16) return error.BadExl3Dtype;
     const d = try denseOf(p, @intCast(tsh[0] * 16), xd, dec);
     if (!d.piecesServe(rows)) return error.Exl3EngineNotImplemented;
+    if (trunk_q8.innerTakes(d)) return trunk_q8.decodeW(ws, d, p.trellis);
     return d.dequantize(ws, p.trellis);
 }
 
@@ -727,6 +729,8 @@ fn pfOptions() prefill.Options {
     o.t128_zfit = config.get().pf_t128_zfit;
     o.size_class = config.get().pf_size_class;
     o.int8 = config.get().pf_int8;
+    o.int8_c2 = config.get().pf_int8_c2;
+    o.defer_affine = config.get().pf_defer_affine;
     return o;
 }
 
@@ -778,7 +782,7 @@ fn prefillFor(geo: prefill.Geometry) !*prefill.Prefill {
     }
     if (o.int8 != 0 and !pf_i8_logged.get().*) {
         pf_i8_logged.get().* = true;
-        std.debug.print("[turboexl3] prefill int8 engaged: the routed gate|up and down GEMMs on int8 ({s})\n", .{if (o.int8 == 2) "per-token scales" else "per-block scales"});
+        std.debug.print("[turboexl3] prefill int8 engaged: the routed gate|up and down GEMMs on int8 ({s}{s})\n", .{ if (o.int8 == 2) "per-token scales" else "per-block scales", if (o.int8_c2 == 1020) "" else ", weights centered at 509.5" });
     }
     return &pf_cache.get().*[i].?;
 }

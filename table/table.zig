@@ -102,14 +102,17 @@ fn close(ctx: *abi.LoadCtx) callconv(.c) void {
     ctx.state = null;
 }
 
-/// turboexl3's configuration, once per process: the served defaults and this machine's NAX gate.
+/// turboexl3's configuration, once per process: this machine's NAX gate over the configuration in force (the served
+/// defaults, or the options a model plugin set before its table's first open: its int8 prefill levels).
 const configured = Global(bool, "table_table_configured", false);
 
 fn configureOnce(h: kit.host.Host) void {
     if (configured.get().*) return;
     configured.get().* = true;
     const on = nax.available();
-    t3.configure(.{ .nax = on }) catch {};
+    var c = t3.config.get().*;
+    c.nax = on;
+    t3.configure(c) catch {};
     if (!on) h.log(.info, "[turboexl3] MLX's NAX gate is off here (an M5-class GPU and macOS 26.2+): dense prefill rows dequantize + run MLX's matmul, and the routed banks stay the built-in table's\n", .{});
 }
 

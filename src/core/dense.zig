@@ -914,11 +914,13 @@ pub const Dense = struct {
 
     /// `linear`'s inner product on `path` (.small or .matmul) of prepared rows xp half [rows, in] (natural order: `text_prep`
     /// with LANE_ORDER 0, what both paths read): z half [rows, out] by the launches `linear` makes there (the register path's
-    /// cached config and tile table; the dequantized W_hat and MLX's matmul), so the same bytes. Other paths refuse.
+    /// cached config and tile table; the dequantized W_hat and MLX's matmul), so the same bytes. Other paths refuse. The
+    /// matmul path on trunk int8's inner launches where they take this linear (`trunk_q8.innerTakes`; lossy).
     pub fn innerOf(self: *Dense, s: mlx.mlx_stream, xp: mlx.mlx_array, trellis: mlx.mlx_array, rows: usize, path: Path) !mlx.mlx_array {
         switch (path) {
             .small => return self.smallInner(s, xp, trellis, rows),
             .matmul => {
+                if (trunk_q8.innerTakes(self)) return trunk_q8.innerOf(self, s, xp, trellis, rows);
                 const W = try self.dequantize(s, trellis);
                 defer _ = mlx.mlx_array_free(W);
                 var inner = mlx.mlx_array_new();
@@ -950,7 +952,8 @@ pub const Dense = struct {
     /// `linearOn`'s launches up to its finish (the host's fused GDN norm-gate runs from there): the inner product z half
     /// [rows, out] of x [rows, in] its finish would read, the register path's prepare and GEMM on `s`; on the matmul path
     /// the prepare on `s`, the dequantize and the matmul on `rs`. The same configs and operands as `linearOn`, so the same
-    /// bytes. The GEMV's rows and the fused-GEMM option refuse (error.Exl3EngineNotImplemented) before any launch.
+    /// bytes. The GEMV's rows and the fused-GEMM option refuse (error.Exl3EngineNotImplemented) before any launch. The
+    /// matmul path on trunk int8's inner launches where they take this linear (`trunk_q8.innerTakes`; lossy).
     pub fn innerOn(self: *Dense, s: mlx.mlx_stream, rs: mlx.mlx_stream, x: mlx.mlx_array, trellis: mlx.mlx_array, suh: mlx.mlx_array, rows: usize) !mlx.mlx_array {
         switch (self.pathFor(rows)) {
             .small => {
@@ -960,6 +963,7 @@ pub const Dense = struct {
                 return one(self.gemm_rs, c.gemm, &.{ c.tiles, xp, trellis, self.xs_dummy }, s);
             },
             .matmul => {
+                if (trunk_q8.innerTakes(self)) return trunk_q8.innerOn(self, s, rs, x, trellis, suh, rows);
                 const c = try self.buildCfg(rows, false);
                 defer _ = mlx.mlx_fast_metal_kernel_config_free(c.prep);
                 defer _ = mlx.mlx_fast_metal_kernel_config_free(c.finish);
@@ -992,9 +996,11 @@ pub const Dense = struct {
     }
 
     /// One piece's inner product z half [rows, out]: `linearOn`'s prepare of x [rows, in] (its config at these rows)
-    /// and its matmul against W (`dequantize`'s, made once for every piece of the call), both on `s`
+    /// and its matmul against W (`dequantize`'s, made once for every piece of the call), both on `s`. A W of int8 is trunk
+    /// int8's (`trunk_q8.decodeW`, what `root.linearPiecesBegin` makes where `trunk_q8.innerTakes`): its inner launches.
     pub fn pieceInner(self: *Dense, s: mlx.mlx_stream, x: mlx.mlx_array, W: mlx.mlx_array, suh: mlx.mlx_array, rows: usize) !mlx.mlx_array {
         if (self.pathFor(rows) != .matmul) return error.Exl3EngineNotImplemented;
+        if (mlx.mlx_array_dtype(W) == .int8) return trunk_q8.pieceInner(self, s, x, W, suh, rows);
         const c = try self.buildCfg(rows, false);
         defer _ = mlx.mlx_fast_metal_kernel_config_free(c.prep);
         defer _ = mlx.mlx_fast_metal_kernel_config_free(c.finish);
@@ -1011,6 +1017,7 @@ pub const Dense = struct {
     /// without its prepare, on `s`
     pub fn piecePrepared(self: *const Dense, s: mlx.mlx_stream, xp: mlx.mlx_array, W: mlx.mlx_array, rows: usize) !mlx.mlx_array {
         if (self.pathFor(rows) != .matmul) return error.Exl3EngineNotImplemented;
+        if (mlx.mlx_array_dtype(W) == .int8) return trunk_q8.piecePrepared(self, s, xp, W, rows);
         var inner = mlx.mlx_array_new();
         errdefer _ = mlx.mlx_array_free(inner);
         try mlx.check(mlx.mlx_matmul(&inner, xp, W, s));

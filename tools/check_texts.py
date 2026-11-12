@@ -1593,6 +1593,94 @@ ADDED[('fused_test.zig', 'test turboexl3 gpu glm53f trunk int8: every trunk line
 ADDED[('fused_test.zig', 'test turboexl3 gpu glm53f trunk int8 timing: every trunk linear on int8 against the linear as the control serves it (pg2 at its codes), at 2048 to 16384 rows, and the int8 prepare, decode and GEMM alone beside the exact decode (TURBOEXL3_GLM_TIME=1)')] = 'trunk int8\'s timing against the linear as the control serves it (TURBOEXL3_GLM_TIME)'
 
 
+# int8 for the other EXL3 plugins (Qwen3.8, DeepSeek-V4.1), model-neutral; every kernel GLM-5.3-Flash serves unchanged:
+# - the int8 weights' center (Config.pf_int8_c2, prefill.Options.int8_c2; 1020 by default, today's texts): the routed int8
+#   GEMM's tail (gemm_i8_2) cut at its epilogue's store into gemm_i8_2_1, gemm_i8_2_2 and gemm_i8_2_3, and trunk int8's
+#   GEMM head (gemm_1) at its halves' store into gemm_1_1, gemm_1_2 and gemm_1_3: the same bytes. The center's variants put
+#   gemm_i8_epc / gemm_1_epc (the rebuild at QC2 / 2, a template argument) in the store's place under new names;
+#   int8_center.zig pins both centers over every MUL1 codeword (CPU);
+# - trunk int8's inner products (Config.pf_trunk_int8_inner): trunk_q8's prep_2 cut at its halves' store (prep_2_1, prep_2_2,
+#   prep_2_3), so the prepare from prepared rows (prep_p_h in its place) is a composition, and the GEMM storing z (gemm_1,
+#   then inner_2) beside the finished one; Dense.innerOf / innerOn / pieceInner / piecePrepared, root.linearPiecesBegin and
+#   attn_io.prefillInner take them where trunk_q8.innerTakes; trunk_q8.Shape.rate_n names a rate;
+# - Config.pf_defer_affine: the routed prefill's deferred MUL1 map, true by default (today's).
+ADDED_FILES['int8_center.zig'] = ('the int8 weights\' center: exl3pf_q8\'s rounding and the epilogue\'s rebuild on the host, both '
+                                  'centers\' error pinned over every MUL1 codeword (CPU, std and format.zig only)')
+ADDED_KERNELS[('prefill.zig', 'turboexl3_pf_gemm_i8c')] = ('turboexl3_pf_gemm_i8 with the rebuild at QC2 / 2 (gemm_i8_epc in '
+                                                           'gemm_i8_2_2\'s place)')
+ADDED_KERNELS[('prefill.zig', 'turboexl3_pf_gemm_i8dc')] = ('turboexl3_pf_gemm_i8d with the rebuild at QC2 / 2 (gemm_i8_epc in '
+                                                            'gemm_i8_2_2\'s place)')
+ADDED_KERNELS[('trunk_q8.zig', 'turboexl3_trunk_q8_gemm_c')] = ('turboexl3_trunk_q8_gemm with the rebuild at QC2 / 2 (gemm_1_epc in '
+                                                                'gemm_1_2\'s place)')
+ADDED_KERNELS[('trunk_q8.zig', 'turboexl3_trunk_q8_prep_p')] = ('the int8 prepare from prepared rows xp (prep_1, prep_2_1, prep_p_h, '
+                                                                'prep_2_3): turboexl3_trunk_q8_prep\'s statements from the halves on')
+ADDED_KERNELS[('trunk_q8.zig', 'turboexl3_trunk_q8_inner')] = 'the int8 GEMM storing z\'s halves (gemm_1, then inner_2), no finish'
+ADDED_KERNELS[('trunk_q8.zig', 'turboexl3_trunk_q8_inner_c')] = 'turboexl3_trunk_q8_inner at QC2 / 2 (gemm_1c, then inner_2)'
+CHANGED[('config.zig', 'const Config')] += ('; pf_int8_c2 (1020 or 1019), pf_trunk_int8_inner (with pf_trunk_int8) and '
+                                            'pf_defer_affine (pf_int8 needs it), each today\'s by default')
+CHANGED[('prefill.zig', 'const Options')] += '; int8_c2 (1020 or 1019)'
+CHANGED[('prefill.zig', 'const I8Kernels')] = ('init takes the center: 1020 turboexl3_pf_gemm_i8 / _i8d (today\'s), else '
+                                               'turboexl3_pf_gemm_i8c / _i8dc')
+CHANGED[('prefill.zig', 'const Prefill')] += ('; init passes Options.int8_c2 to I8Kernels.init; i8Cfg appends QC2 for the center\'s '
+                                            'GEMMs (nine template slots, eight passed at 1020)')
+CHANGED[('root.zig', 'fn pfOptions')] += '; int8_c2 and defer_affine from Config.pf_int8_c2 and pf_defer_affine'
+CHANGED[('root.zig', 'fn prefillFor')] += '; the int8 engage line names a 509.5 center (unchanged at 510)'
+CHANGED[('root.zig', 'fn linearPiecesBegin')] = 'trunk int8\'s wq where trunk_q8.innerTakes (the pieces then run its inner launches)'
+CHANGED[('trunk_q8.zig', 'const Shape')] = 'rate_n: the rate a shape takes int8 at (0 any, the default)'
+CHANGED[('trunk_q8.zig', 'const Kernels')] = 'gemm_c, prep_p, inner and inner_c beside the three'
+CHANGED[('trunk_q8.zig', 'fn kernels')] = 'also makes turboexl3_trunk_q8_gemm_c, _prep_p, _inner and _inner_c'
+CHANGED[('trunk_q8.zig', 'fn takes')] = 'a shape matches through names (its rate_n)'
+CHANGED[('trunk_q8.zig', 'fn gemm')] = ('at Config.pf_int8_c2: 1020 turboexl3_trunk_q8_gemm with today\'s template, else _gemm_c '
+                                        'with QC2')
+CHANGED[('trunk_q8.zig', 'fn engaged')] = 'the engage line names a 509.5 center (unchanged at 510)'
+ADDED[('trunk_q8.zig', 'const prep_p_in')] = 'the prepare from prepared rows\' input (xp)'
+ADDED[('trunk_q8.zig', 'const inner_in')] = 'the inner GEMM\'s inputs (xq, wq, sx, xsum)'
+ADDED[('trunk_q8.zig', 'const inner_out')] = 'the inner GEMM\'s output (z)'
+ADDED[('trunk_q8.zig', 'fn names')] = 'whether a shape names a linear of (in, out) at a rate'
+ADDED[('trunk_q8.zig', 'fn innerTakes')] = 'Config.pf_trunk_int8_inner beside takes'
+ADDED[('trunk_q8.zig', 'fn preparePrepared')] = 'the int8 prepare of prepared rows xp (turboexl3_trunk_q8_prep_p)'
+ADDED[('trunk_q8.zig', 'fn gemmInner')] = 'the int8 GEMM to z half (turboexl3_trunk_q8_inner / _inner_c), no finish'
+ADDED[('trunk_q8.zig', 'fn innerOn')] = 'Dense.innerOn\'s matmul path on int8: the prepare on s, the decode and the inner GEMM on rs'
+ADDED[('trunk_q8.zig', 'fn innerOf')] = 'Dense.innerOf\'s matmul path on int8: the prepare from xp, the decode and the inner GEMM'
+ADDED[('trunk_q8.zig', 'fn pieceInner')] = 'one row piece on int8 against the pieces\' wq: the prepare and the inner GEMM'
+ADDED[('trunk_q8.zig', 'fn piecePrepared')] = 'one row piece from prepared rows on int8: the prepare from xp and the inner GEMM'
+ADDED[('trunk_q8.zig', 'const inner_said')] = 'the inner path\'s engage line, once a process'
+ADDED[('trunk_q8.zig', 'fn innerEngaged')] = 'the inner path\'s engage line'
+ADDED[('trunk_q8.zig', 'fn centerNote')] = 'the engage lines\' word on a 509.5 center (nothing at 510)'
+CHANGED[('dense.zig', 'const Dense')] += ('; innerOf and innerOn take trunk int8\'s inner launches on the matmul path where '
+                                          'trunk_q8.innerTakes, pieceInner and piecePrepared where W is int8 (its wq)')
+CHANGED[('attn_io.zig', 'fn prefillInner')] = 'past small_rows, trunk int8\'s inner launches where trunk_q8.innerTakes'
+ADDED[('attn_io.zig', 'const trunk_q8')] = 'trunk_q8.zig, the inner path prefillInner takes'
+EDITED_TESTS[('config.zig', 'turboexl3 config: the defaults are valid and served; an unserved form, slice count or layout is '
+              'refused')] += '; the int8 center (1020 by default, 1019 served), pf_trunk_int8_inner and pf_defer_affine\'s rules'
+EDITED_TESTS[('trunk_q8.zig', 'turboexl3 trunk int8 texts: the prepare runs text_prep\'s block statements, the decode '
+              'dequantize\'s tile load, the GEMM pg2\'s epilogue; the cut texts are their pieces')] = (
+    'the center\'s GEMM, the inner path\'s prepare and GEMM as compositions, and a shape\'s rate (names)')
+# the int8 options at Qwen3.8's and DeepSeek-V4.1's shapes: each model's trunk linears at prefill rows (api.zig's `trunk`,
+# and `trunkShapes`, the int8 levels' shape lists), the checks the model files run (trunk_q8_test.zig's batteries: trunk
+# int8's OFF / AGREE / SPLIT, its inner products, the routed int8 at both centers), ATTN-IN's and ATTN-OUT's int8 paths
+ADDED_FILES['trunk_q8_test.zig'] = ('the int8 options\' checks the model files run: a trunk linear\'s battery (OFF, AGREE, SPLIT, '
+                                    'INNER, INNER_OFF) and the routed int8\'s agreement at both centers, on synthetic weights')
+ADDED_FILES['qwen38_int8_test.zig'] = ('the int8 options at Qwen3.8\'s shapes: the levels\' shape lists (CPU), the routed int8 at its '
+                                       'geometry and trunk int8 at every trunk linear (GPU)')
+ADDED_FILES['deepseek_int8_test.zig'] = ('the int8 options at DeepSeek-V4.1\'s shapes: the levels\' shape lists (CPU), the routed int8 '
+                                         'at its clamped geometry (one scale a row refused), trunk int8 at every trunk linear and '
+                                         'the grouped wo_a (GPU)')
+for _api, _what in (('models/qwen38/api.zig', 'Qwen3.8-Flash-Next\'s'), ('models/deepseek_v41/api.zig', 'DeepSeek-V4.1\'s')):
+    ADDED[(_api, 'const trunk_q8')] = 'trunk_q8.zig, whose shapes trunkShapes writes'
+    ADDED[(_api, 'const Linear')] = 'one trunk linear at prefill rows: name, K, N (a rate where a shape is shared), attention or not'
+    ADDED[(_api, 'const trunk')] = _what + ' trunk linears at prefill rows, each (K, N) once'
+    ADDED[(_api, 'fn trunkShapes')] = 'the trunk int8 shapes of an int8 level (3: the attention projections; 4: every linear)'
+ADDED[('attn_io_test.zig', 'const t8')] = 'trunk_q8_test.zig, the int8 checks\' helpers'
+ADDED[('attn_io_test.zig', 'const int8_shapes')] = 'the attention projections named for trunk int8 (the indexer at K5)'
+ADDED[('attn_io_test.zig', 'const int8_cells')] = 'the int8 test\'s rows: dequantize + matmul\'s and the register path\'s last'
+ADDED[('attn_io_test.zig', 'fn agreeArr')] = 'two arrays\' cosine and error rms (trunk_q8_test.agreeOf)'
+ADDED[('attn_io_test.zig', 'test turboexl3 gpu attn_io trunk int8: with q|gate, k, v, o and the indexer on trunk int8 and its '
+       'inner products (the 509.5 center), ATTN-IN, ATTN-OUT and the indexer over the four-member prepare equal the host\'s '
+       'chain over linear\'s int8 byte for byte, and agree with the exact ones (TURBOEXL3_GPU=1)')] = (
+    'ATTN-IN\'s, ATTN-OUT\'s and the indexer\'s int8 paths against the chain over linear\'s int8 (GPU)')
+
+
 def metal_strings(fn, toks, corpus):
     """(line, kind, value) of every literal in a .zig file that holds Metal"""
     out = []

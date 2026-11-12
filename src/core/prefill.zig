@@ -107,7 +107,9 @@ pub const prep_rmap = @embedFile("kernels/prefill/prep_rmap.metal");
 // int32 products into f32 at the row's block scale. 2 gives the row one scale (its amax over every block, one threadgroup
 // a row): the GEMM accumulates over K in int32 and folds once. A MUL1 weight w = A t + C (t the codeword's byte sum,
 // 0..1005) becomes q = round((t - 510) / 4) in int8, so w ~ 4 A q + (510 A + C): each GEMM's epilogue applies 4 A and
-// (510 A + C) times the row's input sum. Lossy: the exact chain is `Options.int8` 0.
+// (510 A + C) times the row's input sum. Lossy: the exact chain is `Options.int8` 0. The rebuild's center is
+// `Options.int8_c2` / 2: q rounds halves up, so 4 q + 510 sits half a unit above t on average; 1020 (510) is the texts
+// GLM-5.3-Flash serves, 1019 (509.5, the unbiased center) their `_c` variants with the center a template argument (QC2).
 
 /// The int8 prepare: `text_prep` to its f16 inputs (prep_2_1), then `prep_i8` in its store's place. Outputs xqg, xqu int8
 /// [S + 128, HID] (128 spare rows a GEMM tile reads past S, never stored), inv u32 [S], xsg, xsu f32 [S, HID / 128] (the
@@ -128,10 +130,21 @@ pub const prep_i8t = @embedFile("kernels/prefill/prep_i8t.metal");
 /// outputs z0, z1 half [S, ND] at sorted positions; the down GEMM (NOPS 1): inputs tiles, xq0, w0, sx0, xs0, output z0.
 pub const text_gemm_i8: [:0]const u8 = sentinel(gemm_i8_1 ++ gemm_i8_sel2 ++ gemm_i8_2);
 pub const text_gemm_i8d: [:0]const u8 = sentinel(gemm_i8_1 ++ gemm_i8_sel1 ++ gemm_i8_2);
+/// Both GEMMs with the rebuild's center a template argument (`Options.int8_c2` other than 1020: QC2, the center doubled):
+/// gemm_i8_2 with gemm_i8_epc in its epilogue line's place
+pub const text_gemm_i8c: [:0]const u8 = sentinel(gemm_i8_1 ++ gemm_i8_sel2 ++ gemm_i8_2c);
+pub const text_gemm_i8dc: [:0]const u8 = sentinel(gemm_i8_1 ++ gemm_i8_sel1 ++ gemm_i8_2c);
 const gemm_i8_1 = @embedFile("kernels/prefill/gemm_i8_1.metal");
 const gemm_i8_sel2 = @embedFile("kernels/prefill/gemm_i8_sel2.metal");
 const gemm_i8_sel1 = @embedFile("kernels/prefill/gemm_i8_sel1.metal");
-const gemm_i8_2 = @embedFile("kernels/prefill/gemm_i8_2.metal");
+/// gemm_i8_2 cut at its epilogue's store (gemm_i8_2_2: z = 4 A v + (510 A + C) xsum), so the center's variant
+/// (gemm_i8_epc in its place) is a composition
+const gemm_i8_2 = gemm_i8_2_1 ++ gemm_i8_2_2 ++ gemm_i8_2_3;
+const gemm_i8_2c = gemm_i8_2_1 ++ gemm_i8_epc ++ gemm_i8_2_3;
+const gemm_i8_2_1 = @embedFile("kernels/prefill/gemm_i8_2_1.metal");
+const gemm_i8_2_2 = @embedFile("kernels/prefill/gemm_i8_2_2.metal");
+const gemm_i8_2_3 = @embedFile("kernels/prefill/gemm_i8_2_3.metal");
+const gemm_i8_epc = @embedFile("kernels/prefill/gemm_i8_epc.metal");
 /// Its header: the register path's (steel's NAX tiles with MPP, the decoders, `exl3pf_cw`), then the int8 decode
 pub const header_i8: [:0]const u8 = sentinel(steel_nax ++ using_steel ++ decode.header ++ metal_small_helpers ++ @embedFile("kernels/prefill/i8_helpers.metal"));
 
@@ -566,6 +579,9 @@ pub const Options = struct {
     /// scale, 2 one scale a row (per token). Needs `t128`, the deferred MUL1 map and the mixed outputs at their sorted
     /// positions (no `t128_zfit`); 2 also needs a row of hidden and inter in one threadgroup (at most 32 blocks each)
     int8: u8 = 0,
+    /// the int8 GEMMs' rebuild center, doubled (the notes above `text_prep_i8`): 1020 (510, `text_gemm_i8` and
+    /// `text_gemm_i8d`) or 1019 (509.5, their `_c` variants at QC2 1019)
+    int8_c2: u16 = 1020,
 
     pub const Small = enum { off, all, mixed };
 
@@ -596,6 +612,7 @@ pub const Options = struct {
         if (o.size_class and (!o.t128 or o.t128_zfit)) return false;
         // int8: the 128-row tiles' route and launches, the deferred map, outputs at the sorted positions
         if (o.int8 > 2 or (o.int8 != 0 and (!o.t128 or !o.defer_affine or o.t128_zfit))) return false;
+        if (o.int8_c2 != 1020 and o.int8_c2 != 1019) return false;
         return (o.bm == 64 or o.bm == 128 or o.bm == 256) and (o.sgt == 1 or o.sgt == 2 or o.sgt == 4 or o.sgt == 8);
     }
 
@@ -801,7 +818,8 @@ pub const T128Kernels = struct {
 
 /// `Options.int8`'s kernels, both scale schemes (an engine's `opts.int8` picks; the timing test moves it): the prepare and
 /// its row-map variant and mid (a scale each 128-block: prep, prep_r, mid; one scale a row: prep_t, prep_tr, mid_t; mid
-/// clamped with `Geometry.limit`), and the gate|up and down GEMMs (both launches: BMR a template; ROWSCALE the scheme's)
+/// clamped with `Geometry.limit`), and the gate|up and down GEMMs (both launches: BMR a template; ROWSCALE the scheme's) at
+/// the engine's center (`Options.int8_c2`: 1020 `text_gemm_i8` / `text_gemm_i8d`, else their `_c` variants)
 pub const I8Kernels = struct {
     prep: mlx.mlx_fast_metal_kernel,
     prep_r: mlx.mlx_fast_metal_kernel,
@@ -812,7 +830,7 @@ pub const I8Kernels = struct {
     gemm: mlx.mlx_fast_metal_kernel,
     gemm_d: mlx.mlx_fast_metal_kernel,
 
-    fn init(limit: u32) !I8Kernels {
+    fn init(limit: u32, c2: u16) !I8Kernels {
         return .{
             .prep = ks.newKernel("turboexl3_pf_prep_i8", &prep_in, &prep_i8_out, text_prep_i8, header_small, true) orelse return error.KernelCreateFailed,
             .prep_r = ks.newKernel("turboexl3_pf_prep_i8r", &prep_rows_in, &prep_i8_out, text_prep_i8_rows, header_small, true) orelse return error.KernelCreateFailed,
@@ -826,8 +844,14 @@ pub const I8Kernels = struct {
                 ks.newKernel("turboexl3_pf_t128_mid_i8t", &mid_t128_in, &mid_i8_out, text_mid_t128_i8t, header_small, true)
             else
                 ks.newKernel("turboexl3_pf_t128_mid_i8tc", &mid_t128_in, &mid_i8_out, text_mid_t128_i8tc, header_small, true)) orelse return error.KernelCreateFailed,
-            .gemm = ks.newKernel("turboexl3_pf_gemm_i8", &gemm_i8_in, &gemm2_out, text_gemm_i8, header_i8, true) orelse return error.KernelCreateFailed,
-            .gemm_d = ks.newKernel("turboexl3_pf_gemm_i8d", &gemm_i8d_in, &gemm1_out, text_gemm_i8d, header_i8, true) orelse return error.KernelCreateFailed,
+            .gemm = (if (c2 == 1020)
+                ks.newKernel("turboexl3_pf_gemm_i8", &gemm_i8_in, &gemm2_out, text_gemm_i8, header_i8, true)
+            else
+                ks.newKernel("turboexl3_pf_gemm_i8c", &gemm_i8_in, &gemm2_out, text_gemm_i8c, header_i8, true)) orelse return error.KernelCreateFailed,
+            .gemm_d = (if (c2 == 1020)
+                ks.newKernel("turboexl3_pf_gemm_i8d", &gemm_i8d_in, &gemm1_out, text_gemm_i8d, header_i8, true)
+            else
+                ks.newKernel("turboexl3_pf_gemm_i8dc", &gemm_i8d_in, &gemm1_out, text_gemm_i8dc, header_i8, true)) orelse return error.KernelCreateFailed,
         };
     }
 
@@ -897,7 +921,7 @@ pub const Prefill = struct {
                 ks.newKernel("turboexl3_pf_mid_vc", &mid_in, &mid_out, text_mid_vc, header_small, true)) orelse return error.KernelCreateFailed,
             .fin_v = ks.newKernel("turboexl3_pf_fin_v", &fin_in, &fin_out, text_finish_v, header_small, true) orelse return error.KernelCreateFailed,
             .t128_k = if (!opts.t128) null else try T128Kernels.init(geo.limit, opts.t128_zfit),
-            .i8_k = if (opts.int8 == 0) null else try I8Kernels.init(geo.limit),
+            .i8_k = if (opts.int8 == 0) null else try I8Kernels.init(geo.limit, opts.int8_c2),
         };
     }
 
@@ -1316,12 +1340,12 @@ pub const Prefill = struct {
         // threadgroups a table row: two ops of inter / 64 output blocks
         const per_row = 2 * (g.inter / BN);
         var x: ZT128 = .{ .m = undefined, .t = undefined, .n = 2 };
-        var tm: [8]ks.TemplateArg = undefined;
+        var tm: [9]ks.TemplateArg = undefined;
         try run(k.gemm, self.i8Cfg(&tm, (rt.tmax + self.opts.split * g.experts) * per_row, 64, g.hidden, g.inter, 2, &shapes, &dtypes), &.{ rt.tiles, xqg, xqu, b.gate_t, b.up_t, sxg, sxu, xsg, xsu }, &x.m, s);
         errdefer for (x.m) |a| {
             _ = mlx.mlx_array_free(a);
         };
-        var tt: [8]ks.TemplateArg = undefined;
+        var tt: [9]ks.TemplateArg = undefined;
         try run(k.gemm, self.i8Cfg(&tt, rt.tq * per_row, 128, g.hidden, g.inter, 2, &shapes, &dtypes), &.{ rt.tiles128, xqg, xqu, b.gate_t, b.up_t, sxg, sxu, xsg, xsu }, &x.t, s);
         return x;
     }
@@ -1366,17 +1390,18 @@ pub const Prefill = struct {
         // threadgroups a table row: one op of hidden / 64 output blocks
         const per_row = g.hidden / BN;
         var x: ZT128 = .{ .m = undefined, .t = undefined, .n = 1 };
-        var tm: [8]ks.TemplateArg = undefined;
+        var tm: [9]ks.TemplateArg = undefined;
         try run(k.gemm_d, self.i8Cfg(&tm, (rt.tmax + self.opts.split * g.experts) * per_row, 64, g.inter, g.hidden, 1, &shapes, &dtypes), &.{ rt.tiles, xdq, b.down_t, sxd, xsd }, x.m[0..1], s);
         errdefer _ = mlx.mlx_array_free(x.m[0]);
-        var tt: [8]ks.TemplateArg = undefined;
+        var tt: [9]ks.TemplateArg = undefined;
         try run(k.gemm_d, self.i8Cfg(&tt, rt.tq * per_row, 128, g.inter, g.hidden, 1, &shapes, &dtypes), &.{ rt.tiles128, xdq, b.down_t, sxd, xsd }, x.t[0..1], s);
         return x;
     }
 
     /// An int8 GEMM launch of `tgs` threadgroups of 2 bm / 32 simdgroups over `nops` ops of K `kd` and N `nd`; the template
-    /// arguments live in the caller's `tmpl` (the launch only points at them)
-    fn i8Cfg(self: *const Prefill, tmpl: *[8]ks.TemplateArg, tgs: u32, bm: u32, kd: u32, nd: u32, nops: u32, shapes: []const []const c_int, dtypes: []const mlx.mlx_dtype) ks.Launch {
+    /// arguments live in the caller's `tmpl` (the launch only points at them): QC2 (`Options.int8_c2`) after the eight
+    /// where the engine's GEMMs are the center's `_c` variants
+    fn i8Cfg(self: *const Prefill, tmpl: *[9]ks.TemplateArg, tgs: u32, bm: u32, kd: u32, nd: u32, nops: u32, shapes: []const []const c_int, dtypes: []const mlx.mlx_dtype) ks.Launch {
         const t = self.decTempl();
         tmpl.* = .{
             t[0],
@@ -1387,8 +1412,10 @@ pub const Prefill = struct {
             .{ .name = "NOPS", .value = .{ .int = @intCast(nops) } },
             .{ .name = "INTR", .value = .{ .int = @intFromBool(self.opts.intr) } },
             .{ .name = "ROWSCALE", .value = .{ .int = @intFromBool(self.opts.int8 == 2) } },
+            .{ .name = "QC2", .value = .{ .int = @intCast(self.opts.int8_c2) } },
         };
-        return .{ .grid = .{ tgs * 2 * bm, 1, 1 }, .threadgroup = .{ 2 * bm, 1, 1 }, .out_shapes = shapes, .out_dtypes = dtypes, .template = tmpl };
+        const n: usize = if (self.opts.int8_c2 == 1020) 8 else 9;
+        return .{ .grid = .{ tgs * 2 * bm, 1, 1 }, .threadgroup = .{ 2 * bm, 1, 1 }, .out_shapes = shapes, .out_dtypes = dtypes, .template = tmpl[0..n] };
     }
 
     /// `moeT128With`'s int8 chain at `cap` rows: `prepI8Cap`, `gemmGUI8Cap`, `midI8Cap`, `gemmDI8Cap`, then the exact

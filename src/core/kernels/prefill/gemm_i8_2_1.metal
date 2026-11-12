@@ -50,6 +50,3 @@
             const auto ids = ct.get_multidimensional_index(i);
             const int m = tm + int(ids[1]);
             const float v = (ROWSCALE != 0) ? float(ct[i]) * sxr[ulong(m) * ulong(NBK)] : acc[i];
-            if (m < rows) z[ulong(row0 + m) * ulong(NDC) + ulong(n0 + tn + int(ids[0]))] = half(fma(v, 4.0f * MA, (510.0f * MA + MC) * xsum[m]));
-        }
-    }

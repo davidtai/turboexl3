@@ -33,6 +33,3 @@
     for (uint16_t i = 0; i < ct.get_capacity(); ++i) {
         const auto ids = ct.get_multidimensional_index(i);
         const int m = min(c_row + int(ids[1]), M - 1);
-        zt[int(ids[1]) * BN + int(ids[0])] = half(fma(float(ct[i]) * sx[m], 4.0f * MA, (510.0f * MA + MC) * xsum[m]));
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);

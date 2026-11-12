@@ -40,6 +40,7 @@ const mlx = @import("sdk").mlx;
 const ks = @import("sdk").kernel_launch;
 const decode = @import("../../core/decode.zig");
 const dense = @import("../../core/dense.zig");
+const trunk_q8 = @import("../../core/trunk_q8.zig");
 
 /// One prepare for three members: xp_m half [rows, DIM] = H128(f16(x[row]) * suh_m) per 128-block, natural order (dense
 /// `text_prep` at LANE_ORDER 0, member by member on the one f16 value of x); one simdgroup per (block, row).
@@ -224,10 +225,12 @@ pub fn innerServes(d: *const dense.Dense, rows: usize) bool {
 }
 
 /// The inner product `Dense.linear` computes for `rows` prepared rows (natural order) where `innerServes`: z half
-/// [rows, out], the register-path GEMM up to `small_rows`, dequantize + MLX's matmul above (the same calls `linear` makes).
+/// [rows, out], the register-path GEMM up to `small_rows`, dequantize + MLX's matmul above (the same calls `linear` makes),
+/// or above `small_rows` trunk int8's inner launches where they take the linear (`trunk_q8.innerTakes`; lossy).
 pub fn prefillInner(d: *dense.Dense, s: mlx.mlx_stream, xp: mlx.mlx_array, trellis: mlx.mlx_array, rows: usize) !mlx.mlx_array {
     if (!innerServes(d, rows)) return error.Exl3EngineNotImplemented;
     if (rows <= d.small_rows) return d.smallInner(s, xp, trellis, rows);
+    if (trunk_q8.innerTakes(d)) return trunk_q8.innerOf(d, s, xp, trellis, rows);
     const W = try d.dequantize(s, trellis);
     defer _ = mlx.mlx_array_free(W);
     var inner = mlx.mlx_array_new();

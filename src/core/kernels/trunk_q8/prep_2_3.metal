@@ -1,6 +1,3 @@
-    float sum = 0.0f;
-    for (uint j = 0; j < 4u; ++j) {
-        h[k][j] = half(v[j] * HAD_SCALE);
         sum += float(h[k][j]);
         am = max(am, abs(float(h[k][j])));
     }
