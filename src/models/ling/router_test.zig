@@ -22,6 +22,7 @@ const sdk = @import("sdk");
 const mlx = sdk.mlx;
 const ks = sdk.kernel_launch;
 const support = @import("../../core/test_support.zig");
+const root = @import("../../root.zig");
 const decode = @import("../../core/decode.zig");
 const G = support.Graph;
 const T = mlx.mlx_array;
@@ -194,6 +195,9 @@ fn tableIsColumnMajor(t: T) bool {
 
 test "turboexl3 gpu ling router: routerLogits, select and route over the loader's table (f32, transposed back) and over the loaded f16 weight give the served logits (one-row gemv over the column-major table, denseRows at 2 to 8), predictor scores (DeepSeek's and Ling's, gemv at one row and gemv_wide at 2 to 8) and ids and bf16 weights word for word at rows 1 to 8 (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    // a GPU test past others in one process starts and ends with no engine cached (`root.releaseEngines`)
+    root.releaseEngines();
+    defer root.releaseEngines();
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
     const a = std.heap.page_allocator;
@@ -326,6 +330,9 @@ fn fillAllWords(rnd: std.Random, words: []u16, adv: usize) void {
 
 test "turboexl3 gpu ling router f16 words: over a loaded f16 weight holding every finite f16 word (-0.0 and every subnormal among them), routerLogits gives the loader's table's words at rows 1 to 8, the f16 word widened then + 0, as the loader's x + 0 turns -0.0 into +0.0; an adversarial expert shows where a -0.0 would differ (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    // a GPU test past others in one process starts and ends with no engine cached (`root.releaseEngines`)
+    root.releaseEngines();
+    defer root.releaseEngines();
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
     const a = std.heap.page_allocator;
@@ -384,6 +391,9 @@ test "turboexl3 gpu ling router f16 words: over a loaded f16 weight holding ever
 
 test "turboexl3 gpu ling router stock table: tableF32 rebuilds the loader's table from the f16 weight's view word for word and stride for stride, and MLX's matmul over it gives the table's words at the stock widths (rows 1 to 8, denseRows at 2 to 8, prompt chunks of 1996 and 4096 rows) (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    // a GPU test past others in one process starts and ends with no engine cached (`root.releaseEngines`)
+    root.releaseEngines();
+    defer root.releaseEngines();
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
     const a = std.heap.page_allocator;
@@ -499,6 +509,9 @@ fn shardWords(a: std.mem.Allocator, path: [*:0]const u8, name: []const u8, out: 
 
 test "turboexl3 gpu ling router pack weights: over every routed layer's router weight of a Ling-3.1-flash pack (TURBOEXL3_LING_PACK=<pack dir>: the MoE layers' and the NextN layer's, -0.0 words and subnormal words among them), read from its shard as the loader reads it, tableF32 rebuilds the loader's table word for word and routerLogits over the table and over the f16 weight gives the served logits at rows 1 to 8, x's rows down to f32 subnormal products (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    // a GPU test past others in one process starts and ends with no engine cached (`root.releaseEngines`)
+    root.releaseEngines();
+    defer root.releaseEngines();
     const dir_c = std.c.getenv("TURBOEXL3_LING_PACK") orelse return error.SkipZigTest;
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
@@ -602,6 +615,9 @@ test "turboexl3 gpu ling router pack weights: over every routed layer's router w
 
 test "turboexl3 gpu ling router refusals: rows past 8, a hidden size off the texts' tiles, a shape or dtype off (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    // a GPU test past others in one process starts and ends with no engine cached (`root.releaseEngines`)
+    root.releaseEngines();
+    defer root.releaseEngines();
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
     var g = try G.init(std.heap.page_allocator, s);
@@ -643,6 +659,9 @@ const ds_test = @import("../deepseek_v41/deepseek_test.zig");
 // TURBOEXL3_LING_ROUTER_ROWS (96), TURBOEXL3_LING_ROUTER_ROWS_RED (5), TURBOEXL3_LING_ROUTER_ROWS_DONE.
 test "turboexl3 gpu ling router rows: the rows launch (each router threadgroup 16 logits of up to 4 rows, the f16 weight read once for them) gives the served launch's logits and predictor scores (none, DeepSeek's, Ling's) word for word at rows 1 to 8, and runs only over the f16 weight at 2 rows or more; red checks: a flipped word, MLX's several-row matmul, a weight word (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    // a GPU test past others in one process starts and ends with no engine cached (`root.releaseEngines`)
+    root.releaseEngines();
+    defer root.releaseEngines();
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
     const a = std.heap.page_allocator;

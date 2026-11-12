@@ -34,6 +34,7 @@ const std = @import("std");
 const sdk = @import("sdk");
 const mlx = sdk.mlx;
 const support = @import("../../core/test_support.zig");
+const root = @import("../../root.zig");
 const G = support.Graph;
 const ref = @import("../../core/ref.zig");
 const ml = @import("mla_latent.zig");
@@ -273,6 +274,9 @@ fn rmsRatio(got: []const f32, want: []const f32, rms_ref: f64) f64 {
 
 test "turboexl3 gpu ling mla latent: decodeLatent at Ling's widths is within tolerance of the host's f64 absorbed attention, f32 and bf16, rows 1 to 16, keys across the sub-chunk and key-group edges (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    // a GPU test past others in one process starts and ends with no engine cached (`root.releaseEngines`)
+    root.releaseEngines();
+    defer root.releaseEngines();
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
     const a = std.heap.page_allocator;
@@ -313,6 +317,9 @@ test "turboexl3 gpu ling mla latent: decodeLatent at Ling's widths is within tol
 
 test "turboexl3 gpu ling mla latent: a call's every row has the bits of a one-row call at its position, and strided cache views the bits of contiguous ones (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    // a GPU test past others in one process starts and ends with no engine cached (`root.releaseEngines`)
+    root.releaseEngines();
+    defer root.releaseEngines();
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
     const a = std.heap.page_allocator;
@@ -368,6 +375,9 @@ test "turboexl3 gpu ling mla latent: a call's every row has the bits of a one-ro
 
 test "turboexl3 gpu ling mla latent: no worse than the served expanded attention against the same f64 reference, bf16, the exact verify's rows 1 to 4 at keys to 18,480 (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    // a GPU test past others in one process starts and ends with no engine cached (`root.releaseEngines`)
+    root.releaseEngines();
+    defer root.releaseEngines();
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
     const a = std.heap.page_allocator;
@@ -505,6 +515,9 @@ fn relErr(got: []const f32, want: []const f32) [2]f64 {
 
 test "turboexl3 gpu ling mla latent: the outside plugin's served operand, kv_b as its loader holds it (the f16 checkpoint's [in, out] view cast to bf16) transposed back to its stored rows, row-contiguous over the loaded buffer, taken by the plan, and decodeLatent over a wider buffer's first rows within 2 % of the plugin's expanded attention: 18,380 keys at 1 row, 18,383 at 4, an 18,381 rollback at 2 (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    // a GPU test past others in one process starts and ends with no engine cached (`root.releaseEngines`)
+    root.releaseEngines();
+    defer root.releaseEngines();
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
     const a = std.heap.page_allocator;
@@ -671,6 +684,9 @@ const CacheView = enum { plugin, interleaved, transposed };
 
 test "turboexl3 gpu ling mla latent variants: stage gives launch 2's words, the output and launch 2's partials word for word, at rows 1 to 4 and keys 1 to 19,404, on the plugin's operands (kv_b through the loader's rows view, the head's cache as a wider buffer's first rows, the query halves as views) and two strided caches; a planted fault differs (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    // a GPU test past others in one process starts and ends with no engine cached (`root.releaseEngines`)
+    root.releaseEngines();
+    defer root.releaseEngines();
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
     const a = std.heap.page_allocator;
@@ -944,6 +960,9 @@ fn naxWithin(e: NaxErr, bound: f64) bool {
 
 test "turboexl3 gpu ling mla latent nax: the NAX shape and the m2_k64 fixture within naxBound of the host's f64 absorbed attention on the plugin's operands at rows 1 to 5 and keys 1 to 19,404, beside the served stage form's error; the strided caches; a planted fault breaks the bound; a refused call falls back to the served text (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    // a GPU test past others in one process starts and ends with no engine cached (`root.releaseEngines`)
+    root.releaseEngines();
+    defer root.releaseEngines();
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
     const a = std.heap.page_allocator;

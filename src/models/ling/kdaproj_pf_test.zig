@@ -81,6 +81,9 @@ fn sameShape(x: T, y: T) bool {
 
 test "turboexl3 gpu ling kdaproj prompt: kdaProjPrompt's q|k|v, f and g are each member's `linear` word for word at prompt rows, operands as the loader keeps them (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    // a GPU test past others in one process starts and ends with no engine cached (`root.releaseEngines`)
+    root.releaseEngines();
+    defer root.releaseEngines();
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s) or !config.get().nax) return error.SkipZigTest;
     const a = std.heap.page_allocator;
@@ -125,6 +128,9 @@ test "turboexl3 gpu ling kdaproj prompt: kdaProjPrompt's q|k|v, f and g are each
 
 test "turboexl3 gpu ling kdaproj prompt over given W_hats: kdaProjPromptW over each member's W_hat, decoded once by Dense.dequantize and read by every call, gives kdaProjPrompt's words at prompt rows 33, 1965 and 4096, operands as the loader keeps them; its declines at 16, 17 and 32 rows, its refusal, and a swapped W_hat caught (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    // a GPU test past others in one process starts and ends with no engine cached (`root.releaseEngines`)
+    root.releaseEngines();
+    defer root.releaseEngines();
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s) or !config.get().nax) return error.SkipZigTest;
     const a = std.heap.page_allocator;
@@ -245,6 +251,9 @@ const Arms = struct {
 
 test "turboexl3 gpu ling timing: kdaProjPrompt against the served chain's three linear calls at prompt rows, a short tile sweep (TURBOEXL3_LING_TIME=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    // a GPU test past others in one process starts and ends with no engine cached (`root.releaseEngines`)
+    root.releaseEngines();
+    defer root.releaseEngines();
     _ = std.c.getenv("TURBOEXL3_LING_TIME") orelse return error.SkipZigTest;
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s) or !config.get().nax) return error.SkipZigTest;

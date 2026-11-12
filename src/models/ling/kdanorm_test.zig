@@ -155,11 +155,14 @@ fn sentinel(comptime s: []const u8) [:0]const u8 {
 
 /// The fused launch's text with `piece` in the gate's place (a planted fault's)
 fn faultText(comptime piece: []const u8) [:0]const u8 {
-    return sentinel(dense.prep_1 ++ piece ++ dense.prep_3);
+    return sentinel(dense.prep_1 ++ piece ++ dense.prep_2_2 ++ dense.prep_3);
 }
 
 test "turboexl3 gpu ling kdanorm: kdaNormGatePrep's xp is o_proj's prepare of the served norm-gate's output and o_proj's y over it is linear's, word for word, at prompt rows 33 to 16384; its refusals before any launch; planted faults caught (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    // a GPU test past others in one process starts and ends with no engine cached (`root.releaseEngines`)
+    root.releaseEngines();
+    defer root.releaseEngines();
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s) or !config.get().nax) return error.SkipZigTest;
     const a = std.heap.page_allocator;
@@ -328,6 +331,9 @@ fn timeRows(a: std.mem.Allocator, g: *G, rnd: std.Random, cx0: Arms, sq: u32, la
 
 test "turboexl3 gpu ling timing: kdanorm: the served pair (the host's norm-gate, then o_proj's prepare) against kdaNormGatePrep at prompt rows, and o_proj's chain at 4096 (TURBOEXL3_LING_TIME=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    // a GPU test past others in one process starts and ends with no engine cached (`root.releaseEngines`)
+    root.releaseEngines();
+    defer root.releaseEngines();
     _ = std.c.getenv("TURBOEXL3_LING_TIME") orelse return error.SkipZigTest;
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s) or !config.get().nax) return error.SkipZigTest;

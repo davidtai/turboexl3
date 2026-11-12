@@ -26,7 +26,7 @@ The grouped linear `wo_a` at decode rows.
 | made at | `src/models/deepseek_v41/grouped.zig:130` (`const Grouped`) |
 | inputs | `zd`, `slots`, `scores`, `down_svh`, `hsx` |
 | outputs | `y` |
-| source | `decode.text_dfin3` = `decode/dfin3_1` ++ `decode/dfin3_expert` ++ `decode/dfin3_2` (1324 B, `f7c3494d91f8`) |
+| source | `decode.text_dfin3` = `decode/dfin3_1a` ++ `decode/dfin3_1b` ++ `decode/dfin3_1c` ++ `decode/dfin3_expert` ++ `decode/dfin3_2` (1324 B, `f7c3494d91f8`) |
 | header | `decode.header` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` (18000 B, `771237d24284`) |
 
 <!-- /kernel-facts -->
@@ -229,10 +229,10 @@ decode among the row-slots of one id (`Config.banked_group`). `Banked` keeps the
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/deepseek_v41/banked.zig:264` (`const Banked`) |
+| made at | `src/models/deepseek_v41/banked.zig:282` (`const Banked`) |
 | inputs | `zd`, `slots`, `scores`, `down_svh0`, `down_svh1`, `down_svh2`, `hsx` |
 | outputs | `y` |
-| source | `text_dfin3b` = `decode/dfin3_1` ++ `deepseek_v41:banked/dfin3b_expert` ++ `decode/dfin3_2` (1610 B, `7274aee7befe`) |
+| source | `text_dfin3b` = `decode/dfin3_1a` ++ `decode/dfin3_1b` ++ `decode/dfin3_1c` ++ `deepseek_v41:banked/dfin3b_expert` ++ `decode/dfin3_2` (1610 B, `7274aee7befe`) |
 | header | `header` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` (18000 B, `771237d24284`) |
 
 <!-- /kernel-facts -->
@@ -240,13 +240,15 @@ decode among the row-slots of one id (`Config.banked_group`). `Banked` keeps the
 - **Used by:** DeepSeek-V4.1: launch 5, the last, of `root.moeClampedBanked` (DeepSeek-V4.1's streamed routed experts:
   each row-slot one routed pair at top-1 over an expert streamer's three slot banks, base, ext and transient; 1 to
   `banked_rows_max` (64) row-slots), in its down half. Served by default: `Config.banked_group` 2 runs the banked texts.
+  GLM-5.3-Flash: `root.moeClampedBankedAs` at bf16 (turboexl3_glm53f's opt-in `TURBOEXL3_GLM53F_DEC_BF16=1`) runs it on
+  the banked `Kernels3` of out_dtype bf16, its store the one change.
 - **Shapes and dtypes:** zd f32 [KS_dn, rows, hidden] (`turboexl3_down3b`'s planes); slots the ids u32 or i32 [rows],
   each packed (bank << 24 | slot row); scores f32 [64] (`bankedOnes`: every score 1); down_svh0/1/2 f16 [E_b, hidden];
   hsx f32 [rows, inter/128] (`turboexl3_fin7cb`'s hs). Out: y f32 [rows, hidden], each pair's expert output at weight 1
   (the caller weighs and sums them).
 - **Grid and threadgroup:** `((hidden/128)·128, rows, 1)` / `(128, 1, 1)`.
 - **Template args:** HID (hidden), TOPK (1), RKC (rows), KS (KS_dn), OUT_T (f32: `root` builds the banked `Kernels3` at
-  out_dtype f32), DEFER (1 for MUL1), NBI (inter/128). KS_dn is the down's K slices, the largest of 4, 2, 1 with
+  out_dtype f32; `moeClampedBankedAs` at its out dtype, bf16 for GLM-5.3-Flash), DEFER (1 for MUL1), NBI (inter/128). KS_dn is the down's K slices, the largest of 4, 2, 1 with
   (inter/16) % (4·KS) = 0 and at least 2 tiles per part.
 - **Replaces:** `turboexl3_dfin3` (the top-1 down finish: form 9 runs `dfin3` below top-k 4), launched once per bank by
   each bank's own `moeClamped` call: one launch over the three banks.
@@ -261,7 +263,9 @@ decode among the row-slots of one id (`Config.banked_group`). `Banked` keeps the
   `src/models/deepseek_v41/banked_test.zig` "turboexl3 gpu banked decode: every pair of moeClampedBanked over three
   banks is moeClamped's ..." (GPU: every pair byte for byte against `moeClamped` at rows 1, 2, 6, 7, 16, 36 and 48, x
   bf16 and f32, trellis U16 and I16, at DeepSeek-V4.1's routed geometry (hidden 5120, width 2304, limit 10, MUL1) over
-  synthetic banks of 20, 12 and 8 experts, K3 and K2 (n 48, 32); sampled token sums to the reference by 5e-3).
+  synthetic banks of 20, 12 and 8 experts, K3 and K2 (n 48, 32); sampled token sums to the reference by 5e-3);
+  `src/models/glm53f/fused_test.zig` "turboexl3 gpu glm53f fused banked: root.moeClampedBankedAs at bf16 is ..." (GPU,
+  bytes: its bf16 store against the f32 call cast to bf16, GLM-5.3-Flash's geometry, every SC rate, 1 to 64 pairs).
 
 ### `turboexl3_dfin3bg`
 
@@ -269,12 +273,12 @@ decode among the row-slots of one id (`Config.banked_group`). `Banked` keeps the
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/deepseek_v41/banked.zig:299` (`const Banked`) |
+| made at | `src/models/deepseek_v41/banked.zig:317` (`const Banked`) |
 | inputs | `zd`, `slots`, `scores`, `down_svh0`, `down_svh1`, `down_svh2`, `hsx` |
 | outputs | `y` |
-| source | `text_dfin3bg` = `decode/dfin3_1` ++ `deepseek_v41:banked/skip_rk_next` ++ `deepseek_v41:banked/dfin3b_expert` ++ `decode/dfin3_2` (1701 B, `f4c14dd1211a`) |
+| source | `text_dfin3bg` = `decode/dfin3_1a` ++ `decode/dfin3_1b` ++ `decode/dfin3_1c` ++ `deepseek_v41:banked/skip_rk_next` ++ `deepseek_v41:banked/dfin3b_expert` ++ `decode/dfin3_2` (1701 B, `f4c14dd1211a`) |
 | header | `header` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` (18000 B, `771237d24284`) |
-| made at | `src/models/deepseek_v41/banked.zig:333` (`const Banked`) (the same text) |
+| made at | `src/models/deepseek_v41/banked.zig:351` (`const Banked`) (the same text) |
 
 <!-- /kernel-facts -->
 
@@ -308,7 +312,7 @@ decode among the row-slots of one id (`Config.banked_group`). `Banked` keeps the
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/deepseek_v41/banked.zig:262` (`const Banked`) |
+| made at | `src/models/deepseek_v41/banked.zig:280` (`const Banked`) |
 | inputs | `hdp`, `slots`, `down_t0`, `down_t1`, `down_t2` |
 | outputs | `zd` |
 | source | `text_down3b` = `decode/down3_1` ++ `decode/rk_line` ++ `decode/down3_2` ++ `deepseek_v41:banked/down3b_w` ++ `decode/down3_3` (2506 B, `67a8776af847`) |
@@ -353,12 +357,12 @@ decode among the row-slots of one id (`Config.banked_group`). `Banked` keeps the
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/deepseek_v41/banked.zig:297` (`const Banked`) |
+| made at | `src/models/deepseek_v41/banked.zig:315` (`const Banked`) |
 | inputs | `hdp`, `slots`, `down_t0`, `down_t1`, `down_t2` |
 | outputs | `zd` |
 | source | `text_down3bg` = `decode/down3_1` ++ `decode/rk_line` ++ `deepseek_v41:banked/down3g_2` ++ `deepseek_v41:banked/down3b_w` ++ `deepseek_v41:banked/down3g_3` (2585 B, `b9686e67ab4a`) |
 | header | `header_group` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26373 B, `b7023ef0567c`) |
-| made at | `src/models/deepseek_v41/banked.zig:424` (`const Banked`) |
+| made at | `src/models/deepseek_v41/banked.zig:459` (`const Banked`) |
 | inputs | `hdp`, `slots`, `down_t0`, `down_t1`, `down_t2` |
 | outputs | `zd` |
 | source | `text_down3bg` = `decode/down3_1` ++ `decode/rk_line` ++ `deepseek_v41:banked/down3g_2` ++ `deepseek_v41:banked/down3b_w` ++ `deepseek_v41:banked/down3g_3` (2585 B, `b9686e67ab4a`) |
@@ -406,7 +410,7 @@ decode among the row-slots of one id (`Config.banked_group`). `Banked` keeps the
 | fact | from the code |
 |---|---|
 | names | `turboexl3_down3bg_ku`, `turboexl3_down3bg_pf`, `turboexl3_down3bg_xh`, `turboexl3_down3bg_m2`, `turboexl3_down3bg_sh`, `turboexl3_down3bg_t4`, `turboexl3_down3bg_t1`, `turboexl3_down3bg_t0`, `turboexl3_down3bg_pfxh`, `turboexl3_down3bg_pfsh`, `turboexl3_down3bg_xhm2` |
-| made at | `src/models/deepseek_v41/banked.zig:424` (`const Banked`) |
+| made at | `src/models/deepseek_v41/banked.zig:459` (`const Banked`) |
 | inputs | `hdp`, `slots`, `down_t0`, `down_t1`, `down_t2` |
 | outputs | `zd` |
 | source | `text_down3bg` = `decode/down3_1` ++ `decode/rk_line` ++ `deepseek_v41:banked/down3g_2` ++ `deepseek_v41:banked/down3b_w` ++ `deepseek_v41:banked/down3g_3` (2585 B, `b9686e67ab4a`) |
@@ -462,12 +466,12 @@ decode among the row-slots of one id (`Config.banked_group`). `Banked` keeps the
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/deepseek_v41/banked.zig:331` (`const Banked`) |
+| made at | `src/models/deepseek_v41/banked.zig:349` (`const Banked`) |
 | inputs | `hdp`, `slots`, `down_t0`, `down_t1`, `down_t2` |
 | outputs | `zd` |
 | source | `text_down3bgm3` = `decode/down3_1` ++ `decode/rk_line` ++ `deepseek_v41:banked/down3g_2` ++ `deepseek_v41:banked/down3b_w` ++ `deepseek_v41:banked/down3g_3m3` (2756 B, `3274179feb75`) |
 | header | `header_group` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26373 B, `b7023ef0567c`) |
-| made at | `src/models/deepseek_v41/banked.zig:422` (`const Banked`) |
+| made at | `src/models/deepseek_v41/banked.zig:457` (`const Banked`) |
 | inputs | `hdp`, `slots`, `down_t0`, `down_t1`, `down_t2` |
 | outputs | `zd` |
 | source | `text_down3bgm3` = `decode/down3_1` ++ `decode/rk_line` ++ `deepseek_v41:banked/down3g_2` ++ `deepseek_v41:banked/down3b_w` ++ `deepseek_v41:banked/down3g_3m3` (2756 B, `3274179feb75`) |
@@ -515,7 +519,7 @@ decode among the row-slots of one id (`Config.banked_group`). `Banked` keeps the
 | fact | from the code |
 |---|---|
 | names | `turboexl3_down3bgm3_ku`, `turboexl3_down3bgm3_pf`, `turboexl3_down3bgm3_xh`, `turboexl3_down3bgm3_m2`, `turboexl3_down3bgm3_sh`, `turboexl3_down3bgm3_t4`, `turboexl3_down3bgm3_t1`, `turboexl3_down3bgm3_t0`, `turboexl3_down3bgm3_pfxh`, `turboexl3_down3bgm3_pfsh`, `turboexl3_down3bgm3_xhm2` |
-| made at | `src/models/deepseek_v41/banked.zig:422` (`const Banked`) |
+| made at | `src/models/deepseek_v41/banked.zig:457` (`const Banked`) |
 | inputs | `hdp`, `slots`, `down_t0`, `down_t1`, `down_t2` |
 | outputs | `zd` |
 | source | `text_down3bgm3` = `decode/down3_1` ++ `decode/rk_line` ++ `deepseek_v41:banked/down3g_2` ++ `deepseek_v41:banked/down3b_w` ++ `deepseek_v41:banked/down3g_3m3` (2756 B, `3274179feb75`) |
@@ -571,10 +575,10 @@ decode among the row-slots of one id (`Config.banked_group`). `Banked` keeps the
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/deepseek_v41/banked.zig:256` (`const Banked`) |
+| made at | `src/models/deepseek_v41/banked.zig:274` (`const Banked`) |
 | inputs | `zg`, `zu`, `slots`, `gate_svh0`, `gate_svh1`, `gate_svh2`, `up_svh0`, `up_svh1`, `up_svh2`, `down_suh0`, `down_suh1`, `down_suh2`, `xsg`, `xsu` |
 | outputs | `hd`, `hs` |
-| source | `text_fin7cb` = `decode/fin7_1` ++ `deepseek_v41:banked/fin7b_expert` ++ `decode/fin7_2` ++ `decode/fin7_planes` ++ `decode/fin7_3` ++ `decode/fin7_sums` ++ `decode/fin7_4` ++ `decode/fin7_swiglu_clamp` ++ `decode/fin7_5` (2959 B, `68747f002dd1`) |
+| source | `text_fin7cb` = `decode/fin7_1a` ++ `decode/fin7_1b` ++ `deepseek_v41:banked/fin7b_expert` ++ `decode/fin7_2` ++ `decode/fin7_planes` ++ `decode/fin7_3` ++ `decode/fin7_sums` ++ `decode/fin7_4` ++ `decode/fin7_swiglu_clamp` ++ `decode/fin7_5` (2959 B, `68747f002dd1`) |
 | header | `header5` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` (26594 B, `41efbbbbd943`) |
 
 <!-- /kernel-facts -->
@@ -612,12 +616,12 @@ decode among the row-slots of one id (`Config.banked_group`). `Banked` keeps the
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/deepseek_v41/banked.zig:291` (`const Banked`) |
+| made at | `src/models/deepseek_v41/banked.zig:309` (`const Banked`) |
 | inputs | `zg`, `zu`, `slots`, `gate_svh0`, `gate_svh1`, `gate_svh2`, `up_svh0`, `up_svh1`, `up_svh2`, `down_suh0`, `down_suh1`, `down_suh2`, `xsg`, `xsu` |
 | outputs | `hd`, `hs` |
-| source | `text_fin7cbg` = `decode/fin7_1` ++ `deepseek_v41:banked/skip_rk` ++ `deepseek_v41:banked/fin7b_expert` ++ `decode/fin7_2` ++ `decode/fin7_planes` ++ `decode/fin7_3` ++ `decode/fin7_sums` ++ `decode/fin7_4` ++ `decode/fin7_swiglu_clamp` ++ `decode/fin7_5` (3076 B, `25e578bf80c8`) |
+| source | `text_fin7cbg` = `decode/fin7_1a` ++ `decode/fin7_1b` ++ `deepseek_v41:banked/skip_rk` ++ `deepseek_v41:banked/fin7b_expert` ++ `decode/fin7_2` ++ `decode/fin7_planes` ++ `decode/fin7_3` ++ `decode/fin7_sums` ++ `decode/fin7_4` ++ `decode/fin7_swiglu_clamp` ++ `decode/fin7_5` (3076 B, `25e578bf80c8`) |
 | header | `header5` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` (26594 B, `41efbbbbd943`) |
-| made at | `src/models/deepseek_v41/banked.zig:325` (`const Banked`) (the same text) |
+| made at | `src/models/deepseek_v41/banked.zig:343` (`const Banked`) (the same text) |
 
 <!-- /kernel-facts -->
 
@@ -648,7 +652,7 @@ decode among the row-slots of one id (`Config.banked_group`). `Banked` keeps the
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/deepseek_v41/banked.zig:252` (`const Banked`) |
+| made at | `src/models/deepseek_v41/banked.zig:270` (`const Banked`) |
 | inputs | `xgp`, `xup`, `slots`, `gate_t0`, `gate_t1`, `gate_t2`, `up_t0`, `up_t1`, `up_t2` |
 | outputs | `zg`, `zu` |
 | source | `text_gu3b` = `decode/gu3_1` ++ `decode/rk_line` ++ `decode/gu3_2` ++ `deepseek_v41:banked/gu3b_w` ++ `decode/gu3_3` ++ `decode/gu3_stores` ++ `decode/gu3_4` (2717 B, `cf09a195e002`) |
@@ -694,12 +698,12 @@ decode among the row-slots of one id (`Config.banked_group`). `Banked` keeps the
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/deepseek_v41/banked.zig:287` (`const Banked`) |
+| made at | `src/models/deepseek_v41/banked.zig:305` (`const Banked`) |
 | inputs | `xgp`, `xup`, `slots`, `gate_t0`, `gate_t1`, `gate_t2`, `up_t0`, `up_t1`, `up_t2` |
 | outputs | `zg`, `zu` |
 | source | `text_gu3bg` = `decode/gu3_1` ++ `decode/rk_line` ++ `deepseek_v41:banked/gu3g_2` ++ `deepseek_v41:banked/gu3b_w` ++ `deepseek_v41:banked/gu3g_3` (2796 B, `e427ea27f330`) |
 | header | `header_group` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26373 B, `b7023ef0567c`) |
-| made at | `src/models/deepseek_v41/banked.zig:419` (`const Banked`) |
+| made at | `src/models/deepseek_v41/banked.zig:454` (`const Banked`) |
 | inputs | `xgp`, `xup`, `slots`, `gate_t0`, `gate_t1`, `gate_t2`, `up_t0`, `up_t1`, `up_t2` |
 | outputs | `zg`, `zu` |
 | source | `text_gu3bg` = `decode/gu3_1` ++ `decode/rk_line` ++ `deepseek_v41:banked/gu3g_2` ++ `deepseek_v41:banked/gu3b_w` ++ `deepseek_v41:banked/gu3g_3` (2796 B, `e427ea27f330`) |
@@ -747,7 +751,7 @@ decode among the row-slots of one id (`Config.banked_group`). `Banked` keeps the
 | fact | from the code |
 |---|---|
 | names | `turboexl3_gu3bg_ku`, `turboexl3_gu3bg_pf`, `turboexl3_gu3bg_xh`, `turboexl3_gu3bg_m2`, `turboexl3_gu3bg_sh`, `turboexl3_gu3bg_t4`, `turboexl3_gu3bg_t1`, `turboexl3_gu3bg_t0`, `turboexl3_gu3bg_pfxh`, `turboexl3_gu3bg_pfsh`, `turboexl3_gu3bg_xhm2` |
-| made at | `src/models/deepseek_v41/banked.zig:419` (`const Banked`) |
+| made at | `src/models/deepseek_v41/banked.zig:454` (`const Banked`) |
 | inputs | `xgp`, `xup`, `slots`, `gate_t0`, `gate_t1`, `gate_t2`, `up_t0`, `up_t1`, `up_t2` |
 | outputs | `zg`, `zu` |
 | source | `text_gu3bg` = `decode/gu3_1` ++ `decode/rk_line` ++ `deepseek_v41:banked/gu3g_2` ++ `deepseek_v41:banked/gu3b_w` ++ `deepseek_v41:banked/gu3g_3` (2796 B, `e427ea27f330`) |
@@ -804,12 +808,12 @@ decode among the row-slots of one id (`Config.banked_group`). `Banked` keeps the
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/deepseek_v41/banked.zig:321` (`const Banked`) |
+| made at | `src/models/deepseek_v41/banked.zig:339` (`const Banked`) |
 | inputs | `xgp`, `xup`, `slots`, `gate_t0`, `gate_t1`, `gate_t2`, `up_t0`, `up_t1`, `up_t2` |
 | outputs | `zg`, `zu` |
 | source | `text_gu3bgm3` = `decode/gu3_1` ++ `decode/rk_line` ++ `deepseek_v41:banked/gu3g_2` ++ `deepseek_v41:banked/gu3b_w` ++ `deepseek_v41:banked/gu3g_3m3` (2967 B, `5d637580686f`) |
 | header | `header_group` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26373 B, `b7023ef0567c`) |
-| made at | `src/models/deepseek_v41/banked.zig:417` (`const Banked`) |
+| made at | `src/models/deepseek_v41/banked.zig:452` (`const Banked`) |
 | inputs | `xgp`, `xup`, `slots`, `gate_t0`, `gate_t1`, `gate_t2`, `up_t0`, `up_t1`, `up_t2` |
 | outputs | `zg`, `zu` |
 | source | `text_gu3bgm3` = `decode/gu3_1` ++ `decode/rk_line` ++ `deepseek_v41:banked/gu3g_2` ++ `deepseek_v41:banked/gu3b_w` ++ `deepseek_v41:banked/gu3g_3m3` (2967 B, `5d637580686f`) |
@@ -856,7 +860,7 @@ decode among the row-slots of one id (`Config.banked_group`). `Banked` keeps the
 | fact | from the code |
 |---|---|
 | names | `turboexl3_gu3bgm3_ku`, `turboexl3_gu3bgm3_pf`, `turboexl3_gu3bgm3_xh`, `turboexl3_gu3bgm3_m2`, `turboexl3_gu3bgm3_sh`, `turboexl3_gu3bgm3_t4`, `turboexl3_gu3bgm3_t1`, `turboexl3_gu3bgm3_t0`, `turboexl3_gu3bgm3_pfxh`, `turboexl3_gu3bgm3_pfsh`, `turboexl3_gu3bgm3_xhm2` |
-| made at | `src/models/deepseek_v41/banked.zig:417` (`const Banked`) |
+| made at | `src/models/deepseek_v41/banked.zig:452` (`const Banked`) |
 | inputs | `xgp`, `xup`, `slots`, `gate_t0`, `gate_t1`, `gate_t2`, `up_t0`, `up_t1`, `up_t2` |
 | outputs | `zg`, `zu` |
 | source | `text_gu3bgm3` = `decode/gu3_1` ++ `decode/rk_line` ++ `deepseek_v41:banked/gu3g_2` ++ `deepseek_v41:banked/gu3b_w` ++ `deepseek_v41:banked/gu3g_3m3` (2967 B, `5d637580686f`) |
@@ -912,7 +916,7 @@ decode among the row-slots of one id (`Config.banked_group`). `Banked` keeps the
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/deepseek_v41/banked.zig:250` (`const Banked`) |
+| made at | `src/models/deepseek_v41/banked.zig:268` (`const Banked`) |
 | inputs | `x`, `slots`, `gate_suh0`, `gate_suh1`, `gate_suh2`, `up_suh0`, `up_suh1`, `up_suh2` |
 | outputs | `xg`, `xu`, `sg`, `su` |
 | source | `text_prep2b` = `decode/prep2_1` ++ `deepseek_v41:banked/prep2b_expert` ++ `decode/prep2_row` ++ `decode/prep2_2` (2352 B, `affd7b64e88f`) |
@@ -952,12 +956,12 @@ decode among the row-slots of one id (`Config.banked_group`). `Banked` keeps the
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/deepseek_v41/banked.zig:285` (`const Banked`) |
+| made at | `src/models/deepseek_v41/banked.zig:303` (`const Banked`) |
 | inputs | `x`, `slots`, `gate_suh0`, `gate_suh1`, `gate_suh2`, `up_suh0`, `up_suh1`, `up_suh2` |
 | outputs | `xg`, `xu`, `sg`, `su` |
 | source | `text_prep2bg` = `decode/prep2_1` ++ `deepseek_v41:banked/skip_rk` ++ `deepseek_v41:banked/prep2b_expert` ++ `decode/prep2_row` ++ `decode/prep2_2` (2469 B, `110fd5d50005`) |
 | header | `header` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` (18000 B, `771237d24284`) |
-| made at | `src/models/deepseek_v41/banked.zig:319` (`const Banked`) (the same text) |
+| made at | `src/models/deepseek_v41/banked.zig:337` (`const Banked`) (the same text) |
 
 <!-- /kernel-facts -->
 
@@ -990,10 +994,10 @@ decode among the row-slots of one id (`Config.banked_group`). `Banked` keeps the
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/deepseek_v41/banked.zig:258` (`const Banked`) |
+| made at | `src/models/deepseek_v41/banked.zig:276` (`const Banked`) |
 | inputs | `zg`, `zu`, `slots`, `gate_svh0`, `gate_svh1`, `gate_svh2`, `up_svh0`, `up_svh1`, `up_svh2`, `down_suh0`, `down_suh1`, `down_suh2`, `xsg`, `xsu` |
 | outputs | `hd`, `hs` |
-| source | `text_fin7b` = `decode/fin7_1` ++ `deepseek_v41:banked/fin7b_expert` ++ `decode/fin7_2` ++ `decode/fin7_planes` ++ `decode/fin7_3` ++ `decode/fin7_sums` ++ `decode/fin7_4` ++ `decode/fin7_swiglu` ++ `decode/fin7_5` (2606 B, `972e3be9c60d`) |
+| source | `text_fin7b` = `decode/fin7_1a` ++ `decode/fin7_1b` ++ `deepseek_v41:banked/fin7b_expert` ++ `decode/fin7_2` ++ `decode/fin7_planes` ++ `decode/fin7_3` ++ `decode/fin7_sums` ++ `decode/fin7_4` ++ `decode/fin7_swiglu` ++ `decode/fin7_5` (2606 B, `972e3be9c60d`) |
 | header | `header5` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` (26594 B, `41efbbbbd943`) |
 
 <!-- /kernel-facts -->
@@ -1020,12 +1024,12 @@ decode among the row-slots of one id (`Config.banked_group`). `Banked` keeps the
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/deepseek_v41/banked.zig:293` (`const Banked`) |
+| made at | `src/models/deepseek_v41/banked.zig:311` (`const Banked`) |
 | inputs | `zg`, `zu`, `slots`, `gate_svh0`, `gate_svh1`, `gate_svh2`, `up_svh0`, `up_svh1`, `up_svh2`, `down_suh0`, `down_suh1`, `down_suh2`, `xsg`, `xsu` |
 | outputs | `hd`, `hs` |
-| source | `text_fin7bg` = `decode/fin7_1` ++ `deepseek_v41:banked/skip_rk` ++ `deepseek_v41:banked/fin7b_expert` ++ `decode/fin7_2` ++ `decode/fin7_planes` ++ `decode/fin7_3` ++ `decode/fin7_sums` ++ `decode/fin7_4` ++ `decode/fin7_swiglu` ++ `decode/fin7_5` (2723 B, `3f74ff0e778e`) |
+| source | `text_fin7bg` = `decode/fin7_1a` ++ `decode/fin7_1b` ++ `deepseek_v41:banked/skip_rk` ++ `deepseek_v41:banked/fin7b_expert` ++ `decode/fin7_2` ++ `decode/fin7_planes` ++ `decode/fin7_3` ++ `decode/fin7_sums` ++ `decode/fin7_4` ++ `decode/fin7_swiglu` ++ `decode/fin7_5` (2723 B, `3f74ff0e778e`) |
 | header | `header5` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` (26594 B, `41efbbbbd943`) |
-| made at | `src/models/deepseek_v41/banked.zig:327` (`const Banked`) (the same text) |
+| made at | `src/models/deepseek_v41/banked.zig:345` (`const Banked`) (the same text) |
 
 <!-- /kernel-facts -->
 
@@ -1050,10 +1054,10 @@ decode among the row-slots of one id (`Config.banked_group`). `Banked` keeps the
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/deepseek_v41/banked.zig:260` (`const Banked`) |
+| made at | `src/models/deepseek_v41/banked.zig:278` (`const Banked`) |
 | inputs | `zg`, `zu`, `slots`, `gate_svh0`, `gate_svh1`, `gate_svh2`, `up_svh0`, `up_svh1`, `up_svh2`, `down_suh0`, `down_suh1`, `down_suh2`, `xsg`, `xsu` |
 | outputs | `hd`, `hs` |
-| source | `text_fin7cob` = `decode/fin7_1` ++ `deepseek_v41:banked/fin7b_expert` ++ `decode/fin7_2` ++ `decode/fin7_planes` ++ `decode/fin7_3` ++ `decode/fin7_sums` ++ `decode/fin7_4` ++ `decode/fin7_swiglu_clamp_out` ++ `decode/fin7_5` (3015 B, `8b48ab86e9ab`) |
+| source | `text_fin7cob` = `decode/fin7_1a` ++ `decode/fin7_1b` ++ `deepseek_v41:banked/fin7b_expert` ++ `decode/fin7_2` ++ `decode/fin7_planes` ++ `decode/fin7_3` ++ `decode/fin7_sums` ++ `decode/fin7_4` ++ `decode/fin7_swiglu_clamp_out` ++ `decode/fin7_5` (3015 B, `8b48ab86e9ab`) |
 | header | `header5` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` (26594 B, `41efbbbbd943`) |
 
 <!-- /kernel-facts -->
@@ -1081,12 +1085,12 @@ decode among the row-slots of one id (`Config.banked_group`). `Banked` keeps the
 
 | fact | from the code |
 |---|---|
-| made at | `src/models/deepseek_v41/banked.zig:295` (`const Banked`) |
+| made at | `src/models/deepseek_v41/banked.zig:313` (`const Banked`) |
 | inputs | `zg`, `zu`, `slots`, `gate_svh0`, `gate_svh1`, `gate_svh2`, `up_svh0`, `up_svh1`, `up_svh2`, `down_suh0`, `down_suh1`, `down_suh2`, `xsg`, `xsu` |
 | outputs | `hd`, `hs` |
-| source | `text_fin7cobg` = `decode/fin7_1` ++ `deepseek_v41:banked/skip_rk` ++ `deepseek_v41:banked/fin7b_expert` ++ `decode/fin7_2` ++ `decode/fin7_planes` ++ `decode/fin7_3` ++ `decode/fin7_sums` ++ `decode/fin7_4` ++ `decode/fin7_swiglu_clamp_out` ++ `decode/fin7_5` (3132 B, `02a993e5f353`) |
+| source | `text_fin7cobg` = `decode/fin7_1a` ++ `decode/fin7_1b` ++ `deepseek_v41:banked/skip_rk` ++ `deepseek_v41:banked/fin7b_expert` ++ `decode/fin7_2` ++ `decode/fin7_planes` ++ `decode/fin7_3` ++ `decode/fin7_sums` ++ `decode/fin7_4` ++ `decode/fin7_swiglu_clamp_out` ++ `decode/fin7_5` (3132 B, `02a993e5f353`) |
 | header | `header5` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` (26594 B, `41efbbbbd943`) |
-| made at | `src/models/deepseek_v41/banked.zig:329` (`const Banked`) (the same text) |
+| made at | `src/models/deepseek_v41/banked.zig:347` (`const Banked`) (the same text) |
 
 <!-- /kernel-facts -->
 
@@ -1220,3 +1224,226 @@ The probes of the banked GEMVs' t routes (test only).
   0), for all 65536 states read from I16 and from U16 words.
 - **Pinned by:** `src/models/deepseek_v41/banked_ilp_test.zig` "turboexl3 gpu banked ilp t routes: every EXL3_T1V route
   gives today's route's t, ..." (GPU: each route against route 3 and the host byte sum).
+
+## `src/models/deepseek_v41/banked_ptg.zig`
+
+The persistent grouped GEMVs (`Config.banked_ptg`, at `banked_group` 4; `Banked.ptg`): the grouped gate|up and down
+GEMVs as at most `banked_ptg.threadgroups` (640) threadgroups. A threadgroup builds the call's lead list once (every
+row-slot's `turboexl3_members_g`, the grouped GEMVs' own scan), then runs the grouped GEMV's work items (a lead, an
+output tile block and a K threadgroup each) at its index, its index + NPT, and so on, each on the grouped texts' own
+body. prep2bg, fin7cbg and dfin3bg are the grouped texts' kernels unchanged.
+
+### `turboexl3_down3bgm3p_<variant>`
+
+<!-- kernel-facts: turboexl3_down3bgm3p_<variant> -->
+
+| fact | from the code |
+|---|---|
+| names | `turboexl3_down3bgm3p`, `turboexl3_down3bgm3p_ku`, `turboexl3_down3bgm3p_pf`, `turboexl3_down3bgm3p_xh`, `turboexl3_down3bgm3p_m2`, `turboexl3_down3bgm3p_sh`, `turboexl3_down3bgm3p_t4`, `turboexl3_down3bgm3p_t1`, `turboexl3_down3bgm3p_t0`, `turboexl3_down3bgm3p_pfxh`, `turboexl3_down3bgm3p_pfsh`, `turboexl3_down3bgm3p_xhm2` |
+| made at | `src/models/deepseek_v41/banked_ptg.zig:119` (`const Ptg`) |
+| inputs | `hdp`, `slots`, `down_t0`, `down_t1`, `down_t2` |
+| outputs | `zd` |
+| source | `text_down3bgm3p` = `decode/down3_1` ++ `deepseek_v41:banked/ptg_1` ++ `deepseek_v41:banked/ptg_2` ++ `deepseek_v41:banked/down3b_w` ++ `deepseek_v41:banked/down3g_3m3` ++ `deepseek_v41:banked/ptg_3` (4739 B, `0b14334ccbbf`) |
+| header | `headers[v].ptr`: a variant's defines ++ the base header, one per name |
+| header of `turboexl3_down3bgm3p` | `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26373 B, `b7023ef0567c`) |
+| header of `turboexl3_down3bgm3p_ku` | text '#define EXL3_KU 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26391 B, `893d0732e30e`) |
+| header of `turboexl3_down3bgm3p_pf` | text '#define EXL3_GPF 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26392 B, `719802404fb5`) |
+| header of `turboexl3_down3bgm3p_xh` | text '#define EXL3_GXH 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26392 B, `35cacdcfb1d7`) |
+| header of `turboexl3_down3bgm3p_m2` | text '#define EXL3_GM2 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26392 B, `d28773b43d18`) |
+| header of `turboexl3_down3bgm3p_sh` | text '#define EXL3_GSH 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26392 B, `1eaa64821218`) |
+| header of `turboexl3_down3bgm3p_t4` | text '#define EXL3_T1V 4\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26392 B, `acaeb8fa61e1`) |
+| header of `turboexl3_down3bgm3p_t1` | text '#define EXL3_T1V 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26392 B, `b0622147baad`) |
+| header of `turboexl3_down3bgm3p_t0` | text '#define EXL3_T1V 0\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26392 B, `9be4db5164be`) |
+| header of `turboexl3_down3bgm3p_pfxh` | text '#define EXL3_GPF 1\n#define EXL3_GXH 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26411 B, `c5b9183f1adc`) |
+| header of `turboexl3_down3bgm3p_pfsh` | text '#define EXL3_GPF 1\n#define EXL3_GSH 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26411 B, `2478957c5a9f`) |
+| header of `turboexl3_down3bgm3p_xhm2` | text '#define EXL3_GXH 1\n#define EXL3_GM2 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26411 B, `a43b1425ae6c`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** DeepSeek-V4.1's and GLM-5.3-Flash's banked decode: launch 4 of `root.moeClampedBanked` at
+  `Config.banked_group` 4 with `Config.banked_ptg` on hw4b's texts (`banked_m3` true; the plugin's
+  TURBOEXL3_GLM53F_BANKED g4m3p), variant `Config.banked_variant_dn` (0: `turboexl3_down3bgm3p`), or `BankedSel` g4m3p
+  with any variant; `Ptg.gemvs` makes each on first use (`gvm3`). Not served by default.
+- **Shapes and dtypes:** As `turboexl3_down3bgp_<variant>`.
+- **Grid and threadgroup:** As `turboexl3_down3bgp_<variant>`.
+- **Template args:** As `turboexl3_down3bgp_<variant>`. Inside: the member paths M 1, 2, 3 and 4 (`down3g_3m3`).
+- **Replaces:** `turboexl3_down3bgm3` (variant 0) or `turboexl3_down3bgm3_<variant>` in the same launch: the same work
+  items on down3g_3m3's body.
+- **Bits:** byte-identical to `turboexl3_down3bgm3` (each variant to `turboexl3_down3bgm3_<variant>`), so to
+  `turboexl3_down3bg`.
+- **Pinned by:** `src/models/glm53f/ptg_test.zig` "turboexl3 glm53f banked ptg: the persistent grouped GEMVs need
+  banked_group 4 and are off by default, ..." (CPU: `banked_ptg` needs `banked_group` 4, the four texts' variant 0
+  names and every persistent name distinct from the grouped texts' own); `src/models/glm53f/ptg_test.zig` "turboexl3
+  gpu glm53f banked ptg: the persistent grouped GEMVs (g4p, g4m3p) at every grouped GEMV variant the plugin takes, ..."
+  (GPU: g4p and g4m3p selected per call at every variant but `sh` and `pfsh` on each GEMV, and configured as the
+  plugin sets them (g4m3p and g4p at t4.t4, y f32 and bf16), against the served banked call (`banked_group` 2), y word
+  for word, at GLM-5.3-Flash's routed geometry (hidden 4096, inter 2048, limit 10, MUL1) over synthetic banks of 20, 12
+  and 8 experts, every SC rate (n 32, 40, 48, 56, 64, 80) and 1, 2, 7, 8, 16, 24, 32, 48 and 64 pairs drawn as a
+  verify's waves); `src/models/deepseek_v41/banked_ptg.zig` "turboexl3 banked ptg: the persistent texts are the grouped
+  GEMVs' first pieces, ..." (CPU: each text's pieces, the names distinct); `src/models/glm53f/fused_test.zig`
+  "turboexl3 gpu glm53f schedule timing: ..." (timing only: g4p and g4m3p beside g4 and g4m3 at a verify's waves).
+
+### `turboexl3_down3bgp_<variant>`
+
+<!-- kernel-facts: turboexl3_down3bgp_<variant> -->
+
+| fact | from the code |
+|---|---|
+| names | `turboexl3_down3bgp`, `turboexl3_down3bgp_ku`, `turboexl3_down3bgp_pf`, `turboexl3_down3bgp_xh`, `turboexl3_down3bgp_m2`, `turboexl3_down3bgp_sh`, `turboexl3_down3bgp_t4`, `turboexl3_down3bgp_t1`, `turboexl3_down3bgp_t0`, `turboexl3_down3bgp_pfxh`, `turboexl3_down3bgp_pfsh`, `turboexl3_down3bgp_xhm2` |
+| made at | `src/models/deepseek_v41/banked_ptg.zig:121` (`const Ptg`) |
+| inputs | `hdp`, `slots`, `down_t0`, `down_t1`, `down_t2` |
+| outputs | `zd` |
+| source | `text_down3bgp` = `decode/down3_1` ++ `deepseek_v41:banked/ptg_1` ++ `deepseek_v41:banked/ptg_2` ++ `deepseek_v41:banked/down3b_w` ++ `deepseek_v41:banked/down3g_3` ++ `deepseek_v41:banked/ptg_3` (4568 B, `f41c1a190140`) |
+| header | `headers[v].ptr`: a variant's defines ++ the base header, one per name |
+| header of `turboexl3_down3bgp` | `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26373 B, `b7023ef0567c`) |
+| header of `turboexl3_down3bgp_ku` | text '#define EXL3_KU 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26391 B, `893d0732e30e`) |
+| header of `turboexl3_down3bgp_pf` | text '#define EXL3_GPF 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26392 B, `719802404fb5`) |
+| header of `turboexl3_down3bgp_xh` | text '#define EXL3_GXH 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26392 B, `35cacdcfb1d7`) |
+| header of `turboexl3_down3bgp_m2` | text '#define EXL3_GM2 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26392 B, `d28773b43d18`) |
+| header of `turboexl3_down3bgp_sh` | text '#define EXL3_GSH 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26392 B, `1eaa64821218`) |
+| header of `turboexl3_down3bgp_t4` | text '#define EXL3_T1V 4\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26392 B, `acaeb8fa61e1`) |
+| header of `turboexl3_down3bgp_t1` | text '#define EXL3_T1V 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26392 B, `b0622147baad`) |
+| header of `turboexl3_down3bgp_t0` | text '#define EXL3_T1V 0\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26392 B, `9be4db5164be`) |
+| header of `turboexl3_down3bgp_pfxh` | text '#define EXL3_GPF 1\n#define EXL3_GXH 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26411 B, `c5b9183f1adc`) |
+| header of `turboexl3_down3bgp_pfsh` | text '#define EXL3_GPF 1\n#define EXL3_GSH 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26411 B, `2478957c5a9f`) |
+| header of `turboexl3_down3bgp_xhm2` | text '#define EXL3_GXH 1\n#define EXL3_GM2 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26411 B, `a43b1425ae6c`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** DeepSeek-V4.1's and GLM-5.3-Flash's banked decode: launch 4 of `root.moeClampedBanked` at
+  `Config.banked_group` 4 with `Config.banked_ptg` on today's grouped texts (`banked_m3` false; the plugin's
+  TURBOEXL3_GLM53F_BANKED g4p), variant `Config.banked_variant_dn` (0: `turboexl3_down3bgp`), or `BankedSel` g4p with
+  any variant; `Ptg.gemvs` makes each on first use (`gv`). Not served by default.
+- **Shapes and dtypes:** As `turboexl3_down3bg`: hdp f16 [rows, inter]; slots the packed ids u32 or i32 [rows], a
+  skipped row-slot no lead and no member; down_t0/1/2 U16 or I16 [E_b, inter/16, hidden/16, n]. Out: zd f32 [KS_dn,
+  rows, hidden], only the leads' and members' rows written.
+- **Grid and threadgroup:** `(NPT·128, 1, 1)` / `(128, 1, 1)` (`Ptg.cfgs`, `threadgroupsFor`): NPT rows ·
+  hidden/(16·BT) · z, at most 640. At GLM-5.3-Flash's routed shape (hidden 4096, BT 2, z 4): 512 work items a lead,
+  NPT 512 at one row-slot and 640 from two.
+- **Template args:** As `turboexl3_down3bg`, and NPT. The variant is the header, as `turboexl3_down3bg_<variant>`'s.
+- **Replaces:** `turboexl3_down3bg` (variant 0) or `turboexl3_down3bg_<variant>` in the same launch: the same work items
+  on down3g_3's body, run by NPT threadgroups in turn from one lead list.
+- **Bits:** byte-identical to `turboexl3_down3bg` (each variant to `turboexl3_down3bg_<variant>`): the same leads,
+  members and work items, each the grouped GEMV's lead threadgroup's reads, decodes and sums.
+- **Pinned by:** `src/models/glm53f/ptg_test.zig` "turboexl3 glm53f banked ptg: the persistent grouped GEMVs need
+  banked_group 4 and are off by default, ..." (CPU: `banked_ptg` needs `banked_group` 4, the four texts' variant 0
+  names and every persistent name distinct from the grouped texts' own); `src/models/glm53f/ptg_test.zig` "turboexl3
+  gpu glm53f banked ptg: the persistent grouped GEMVs (g4p, g4m3p) at every grouped GEMV variant the plugin takes, ..."
+  (GPU: g4p and g4m3p selected per call at every variant but `sh` and `pfsh` on each GEMV, and configured as the
+  plugin sets them (g4m3p and g4p at t4.t4, y f32 and bf16), against the served banked call (`banked_group` 2), y word
+  for word, at GLM-5.3-Flash's routed geometry (hidden 4096, inter 2048, limit 10, MUL1) over synthetic banks of 20, 12
+  and 8 experts, every SC rate (n 32, 40, 48, 56, 64, 80) and 1, 2, 7, 8, 16, 24, 32, 48 and 64 pairs drawn as a
+  verify's waves); `src/models/deepseek_v41/banked_ptg.zig` "turboexl3 banked ptg: the persistent texts are the grouped
+  GEMVs' first pieces, ..." (CPU: each text's pieces, the names distinct); `src/models/glm53f/fused_test.zig`
+  "turboexl3 gpu glm53f schedule timing: ..." (timing only: g4p and g4m3p beside g4 and g4m3 at a verify's waves).
+
+### `turboexl3_gu3bgm3p_<variant>`
+
+<!-- kernel-facts: turboexl3_gu3bgm3p_<variant> -->
+
+| fact | from the code |
+|---|---|
+| names | `turboexl3_gu3bgm3p`, `turboexl3_gu3bgm3p_ku`, `turboexl3_gu3bgm3p_pf`, `turboexl3_gu3bgm3p_xh`, `turboexl3_gu3bgm3p_m2`, `turboexl3_gu3bgm3p_sh`, `turboexl3_gu3bgm3p_t4`, `turboexl3_gu3bgm3p_t1`, `turboexl3_gu3bgm3p_t0`, `turboexl3_gu3bgm3p_pfxh`, `turboexl3_gu3bgm3p_pfsh`, `turboexl3_gu3bgm3p_xhm2` |
+| made at | `src/models/deepseek_v41/banked_ptg.zig:114` (`const Ptg`) |
+| inputs | `xgp`, `xup`, `slots`, `gate_t0`, `gate_t1`, `gate_t2`, `up_t0`, `up_t1`, `up_t2` |
+| outputs | `zg`, `zu` |
+| source | `text_gu3bgm3p` = `decode/gu3_1` ++ `deepseek_v41:banked/ptg_1` ++ `deepseek_v41:banked/ptg_gu` ++ `deepseek_v41:banked/ptg_2` ++ `deepseek_v41:banked/gu3b_w` ++ `deepseek_v41:banked/gu3g_3m3` ++ `deepseek_v41:banked/ptg_3` (4950 B, `273ed0054f13`) |
+| header | `headers[v].ptr`: a variant's defines ++ the base header, one per name |
+| header of `turboexl3_gu3bgm3p` | `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26373 B, `b7023ef0567c`) |
+| header of `turboexl3_gu3bgm3p_ku` | text '#define EXL3_KU 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26391 B, `893d0732e30e`) |
+| header of `turboexl3_gu3bgm3p_pf` | text '#define EXL3_GPF 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26392 B, `719802404fb5`) |
+| header of `turboexl3_gu3bgm3p_xh` | text '#define EXL3_GXH 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26392 B, `35cacdcfb1d7`) |
+| header of `turboexl3_gu3bgm3p_m2` | text '#define EXL3_GM2 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26392 B, `d28773b43d18`) |
+| header of `turboexl3_gu3bgm3p_sh` | text '#define EXL3_GSH 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26392 B, `1eaa64821218`) |
+| header of `turboexl3_gu3bgm3p_t4` | text '#define EXL3_T1V 4\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26392 B, `acaeb8fa61e1`) |
+| header of `turboexl3_gu3bgm3p_t1` | text '#define EXL3_T1V 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26392 B, `b0622147baad`) |
+| header of `turboexl3_gu3bgm3p_t0` | text '#define EXL3_T1V 0\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26392 B, `9be4db5164be`) |
+| header of `turboexl3_gu3bgm3p_pfxh` | text '#define EXL3_GPF 1\n#define EXL3_GXH 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26411 B, `c5b9183f1adc`) |
+| header of `turboexl3_gu3bgm3p_pfsh` | text '#define EXL3_GPF 1\n#define EXL3_GSH 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26411 B, `2478957c5a9f`) |
+| header of `turboexl3_gu3bgm3p_xhm2` | text '#define EXL3_GXH 1\n#define EXL3_GM2 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26411 B, `a43b1425ae6c`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** DeepSeek-V4.1's and GLM-5.3-Flash's banked decode: launch 2 of `root.moeClampedBanked` at
+  `Config.banked_group` 4 with `Config.banked_ptg` on hw4b's texts (`banked_m3` true; the plugin's
+  TURBOEXL3_GLM53F_BANKED g4m3p, `g4m3p.t4.t4` the served schedule's persistent form), variant
+  `Config.banked_variant_gu` (0: `turboexl3_gu3bgm3p`), or `BankedSel` g4m3p with any variant; `Ptg.gemvs` makes each
+  on first use (`gvm3`). Not served by default.
+- **Shapes and dtypes:** As `turboexl3_gu3bgp_<variant>`.
+- **Grid and threadgroup:** As `turboexl3_gu3bgp_<variant>`.
+- **Template args:** As `turboexl3_gu3bgp_<variant>`. Inside: the member paths M 1, 2, 3 and 4 (`gu3g_3m3`).
+- **Replaces:** `turboexl3_gu3bgm3` (variant 0) or `turboexl3_gu3bgm3_<variant>` in the same launch: the same work
+  items on gu3g_3m3's body, run as `turboexl3_gu3bgp_<variant>` runs gu3g_3's.
+- **Bits:** byte-identical to `turboexl3_gu3bgm3` (each variant to `turboexl3_gu3bgm3_<variant>`), so to
+  `turboexl3_gu3bg`: the same leads, members and work items.
+- **Pinned by:** `src/models/glm53f/ptg_test.zig` "turboexl3 glm53f banked ptg: the persistent grouped GEMVs need
+  banked_group 4 and are off by default, ..." (CPU: `banked_ptg` needs `banked_group` 4, the four texts' variant 0
+  names and every persistent name distinct from the grouped texts' own); `src/models/glm53f/ptg_test.zig` "turboexl3
+  gpu glm53f banked ptg: the persistent grouped GEMVs (g4p, g4m3p) at every grouped GEMV variant the plugin takes, ..."
+  (GPU: g4p and g4m3p selected per call at every variant but `sh` and `pfsh` on each GEMV, and configured as the
+  plugin sets them (g4m3p and g4p at t4.t4, y f32 and bf16), against the served banked call (`banked_group` 2), y word
+  for word, at GLM-5.3-Flash's routed geometry (hidden 4096, inter 2048, limit 10, MUL1) over synthetic banks of 20, 12
+  and 8 experts, every SC rate (n 32, 40, 48, 56, 64, 80) and 1, 2, 7, 8, 16, 24, 32, 48 and 64 pairs drawn as a
+  verify's waves); `src/models/deepseek_v41/banked_ptg.zig` "turboexl3 banked ptg: the persistent texts are the grouped
+  GEMVs' first pieces, ..." (CPU: each text's pieces, the names distinct); `src/models/glm53f/fused_test.zig`
+  "turboexl3 gpu glm53f schedule timing: ..." (timing only: g4p and g4m3p beside g4 and g4m3 at a verify's waves).
+
+### `turboexl3_gu3bgp_<variant>`
+
+<!-- kernel-facts: turboexl3_gu3bgp_<variant> -->
+
+| fact | from the code |
+|---|---|
+| names | `turboexl3_gu3bgp`, `turboexl3_gu3bgp_ku`, `turboexl3_gu3bgp_pf`, `turboexl3_gu3bgp_xh`, `turboexl3_gu3bgp_m2`, `turboexl3_gu3bgp_sh`, `turboexl3_gu3bgp_t4`, `turboexl3_gu3bgp_t1`, `turboexl3_gu3bgp_t0`, `turboexl3_gu3bgp_pfxh`, `turboexl3_gu3bgp_pfsh`, `turboexl3_gu3bgp_xhm2` |
+| made at | `src/models/deepseek_v41/banked_ptg.zig:116` (`const Ptg`) |
+| inputs | `xgp`, `xup`, `slots`, `gate_t0`, `gate_t1`, `gate_t2`, `up_t0`, `up_t1`, `up_t2` |
+| outputs | `zg`, `zu` |
+| source | `text_gu3bgp` = `decode/gu3_1` ++ `deepseek_v41:banked/ptg_1` ++ `deepseek_v41:banked/ptg_gu` ++ `deepseek_v41:banked/ptg_2` ++ `deepseek_v41:banked/gu3b_w` ++ `deepseek_v41:banked/gu3g_3` ++ `deepseek_v41:banked/ptg_3` (4779 B, `daddd90d2f01`) |
+| header | `headers[v].ptr`: a variant's defines ++ the base header, one per name |
+| header of `turboexl3_gu3bgp` | `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26373 B, `b7023ef0567c`) |
+| header of `turboexl3_gu3bgp_ku` | text '#define EXL3_KU 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26391 B, `893d0732e30e`) |
+| header of `turboexl3_gu3bgp_pf` | text '#define EXL3_GPF 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26392 B, `719802404fb5`) |
+| header of `turboexl3_gu3bgp_xh` | text '#define EXL3_GXH 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26392 B, `35cacdcfb1d7`) |
+| header of `turboexl3_gu3bgp_m2` | text '#define EXL3_GM2 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26392 B, `d28773b43d18`) |
+| header of `turboexl3_gu3bgp_sh` | text '#define EXL3_GSH 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26392 B, `1eaa64821218`) |
+| header of `turboexl3_gu3bgp_t4` | text '#define EXL3_T1V 4\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26392 B, `acaeb8fa61e1`) |
+| header of `turboexl3_gu3bgp_t1` | text '#define EXL3_T1V 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26392 B, `b0622147baad`) |
+| header of `turboexl3_gu3bgp_t0` | text '#define EXL3_T1V 0\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26392 B, `9be4db5164be`) |
+| header of `turboexl3_gu3bgp_pfxh` | text '#define EXL3_GPF 1\n#define EXL3_GXH 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26411 B, `c5b9183f1adc`) |
+| header of `turboexl3_gu3bgp_pfsh` | text '#define EXL3_GPF 1\n#define EXL3_GSH 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26411 B, `2478957c5a9f`) |
+| header of `turboexl3_gu3bgp_xhm2` | text '#define EXL3_GXH 1\n#define EXL3_GM2 1\n' ++ `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `deepseek_v41:banked/gemv_group` (26411 B, `a43b1425ae6c`) |
+
+<!-- /kernel-facts -->
+
+- **Used by:** DeepSeek-V4.1's and GLM-5.3-Flash's banked decode: launch 2 of `root.moeClampedBanked` (each row-slot
+  one routed pair at top-1 over an expert streamer's three slot banks, base, ext and transient; 1 to `banked_rows_max`
+  (64) row-slots) at `Config.banked_group` 4 with `Config.banked_ptg` on today's grouped texts (`banked_m3` false;
+  the plugin's TURBOEXL3_GLM53F_BANKED g4p), variant `Config.banked_variant_gu` (0: `turboexl3_gu3bgp`), or
+  `BankedSel` g4p with any variant (`moeClampedBankedSelV`); `Ptg.gemvs` makes each on first use (`gv`). Not served by
+  default.
+- **Shapes and dtypes:** As `turboexl3_gu3bg`: xgp, xup f16 [rows, hidden]; slots the packed ids u32 or i32 [rows], a
+  skipped row-slot (`root.banked_skip_id`) no lead and no member; gate_t0/1/2, up_t0/1/2 U16 or I16 [E_b, hidden/16,
+  inter/16, n]. Out: zg, zu f32 [KS_gu, rows, inter], only the leads' and members' rows written.
+- **Grid and threadgroup:** `(NPT·128, 1, 1)` / `(128, 1, 1)` (`Ptg.cfgs`, `threadgroupsFor`): NPT the grouped GEMV's
+  work items with every row-slot leading, rows · inter/(16·BT) · z, at most 640 (sixteen 128-thread threadgroups a core
+  of the M5 Max's 40: at least a core's resident threadgroups, so every core stays full). At GLM-5.3-Flash's routed
+  shape (inter 2048, BT 2, z 4): 256 work items a lead, NPT 256 at one row-slot, 512 at two and 640 from three.
+- **Template args:** As `turboexl3_gu3bg`, and NPT (the launch's threadgroups: work item w runs on threadgroup w mod
+  NPT). The variant is the header, as `turboexl3_gu3bg_<variant>`'s.
+- **Replaces:** `turboexl3_gu3bg` (variant 0) or `turboexl3_gu3bg_<variant>` in the same launch: the same work items,
+  each gu3g_3's body on one lead, output tile block and K threadgroup, run by NPT threadgroups in turn from one lead
+  list (`ptg_1`), so no threadgroup runs for a row-slot that leads nothing and no work item scans its members.
+- **Bits:** byte-identical to `turboexl3_gu3bg` (each variant to `turboexl3_gu3bg_<variant>`): the leads, members and
+  member order are the grouped scan's, and each work item reads, decodes and sums the same weights in the same order
+  into the same plane words as the grouped GEMV's lead threadgroup.
+- **Pinned by:** `src/models/glm53f/ptg_test.zig` "turboexl3 glm53f banked ptg: the persistent grouped GEMVs need
+  banked_group 4 and are off by default, ..." (CPU: `banked_ptg` needs `banked_group` 4, the four texts' variant 0
+  names and every persistent name distinct from the grouped texts' own); `src/models/glm53f/ptg_test.zig` "turboexl3
+  gpu glm53f banked ptg: the persistent grouped GEMVs (g4p, g4m3p) at every grouped GEMV variant the plugin takes, ..."
+  (GPU: g4p and g4m3p selected per call at every variant but `sh` and `pfsh` on each GEMV, and configured as the
+  plugin sets them (g4m3p and g4p at t4.t4, y f32 and bf16), against the served banked call (`banked_group` 2), y word
+  for word, at GLM-5.3-Flash's routed geometry (hidden 4096, inter 2048, limit 10, MUL1) over synthetic banks of 20, 12
+  and 8 experts, every SC rate (n 32, 40, 48, 56, 64, 80) and 1, 2, 7, 8, 16, 24, 32, 48 and 64 pairs drawn as a
+  verify's waves); `src/models/deepseek_v41/banked_ptg.zig` "turboexl3 banked ptg: the persistent texts are the grouped
+  GEMVs' first pieces, ..." (CPU: each text's pieces, the names distinct); `src/models/glm53f/fused_test.zig`
+  "turboexl3 gpu glm53f schedule timing: ..." (timing only: g4p and g4m3p beside g4 and g4m3 at a verify's waves).

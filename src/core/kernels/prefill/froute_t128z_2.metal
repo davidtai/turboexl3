@@ -1,0 +1,10 @@
+    threadgroup uint prefm[32];
+    const uint im = simd_prefix_inclusive_sum(cnt);
+    if (L == 31u) prefm[sg] = im;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (sg == 0u) prefm[L] = simd_prefix_exclusive_sum(prefm[L]);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const uint sm = prefm[sg] + im - cnt;
+    if (tid < EC) zmb[tid] = int(sm);
+    for (uint t = 0u; t < nb; ++t) tiles[4u * (sb + t) + 3u] = int(sm + t * BMC);
+    for (uint t = 0u; t < ns; ++t) tiles[4u * (TBIG + ss + t) + 3u] = int(sm + nfull * BMC + 32u * t);

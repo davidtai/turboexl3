@@ -30,15 +30,20 @@ const unfused = @import("unfused.zig");
 const prefill = @import("prefill.zig");
 const config = @import("config.zig");
 const pgemm = @import("pgemm.zig");
+const trunk_q8 = @import("trunk_q8.zig");
 
 /// prepare for a dense linear: xp half [rows, IN] = H128(f16(x[row]) * suh) per 128-block; LANE_ORDER 1 writes the GEMV's
 /// lane order within each 16-block, 0 the natural order the matmul path needs; one simdgroup per (block, row); x any float dtype
 pub const text_prep = prep_1 ++ prep_2 ++ prep_3;
-/// text_prep in three pieces, cut at its load (where Ling's KDA norm-gate writer, models/ling/kdanorm.zig, puts its own
-/// values): the block's indices, the load of each lane's four values, then the butterfly and the store
+/// `text_prep` in pieces: prep_1 the constants and the (block, row) of a simdgroup, prep_2 a block's f16 values (x's f16
+/// rounding, suh, the H128's stages: trunk_q8.zig's int8 prepare runs them a block at a time), prep_3 the store
 pub const prep_1 = @embedFile("kernels/dense/prep_1.metal");
-pub const prep_2 = @embedFile("kernels/dense/prep_2.metal");
+pub const prep_2 = prep_2_1 ++ prep_2_2;
 pub const prep_3 = @embedFile("kernels/dense/prep_3.metal");
+/// prep_2 cut at its load (where Ling's KDA norm-gate writer, models/ling/kdanorm.zig, puts its own values): the load of
+/// each lane's four values (x's f16 rounding, suh), then the H128's stages
+pub const prep_2_1 = @embedFile("kernels/dense/prep_2_1.metal");
+pub const prep_2_2 = @embedFile("kernels/dense/prep_2_2.metal");
 
 /// text_prep (lane order for the multi-row GEMV, natural for the fused prefill GEMM) plus xs f32 [rows, IN/128], the sum of
 /// each 128-block's rounded values (what a deferred MUL1 affine map needs: sum_i x_i (A t_i + C) = A sum_i x_i t_i + C sum_i x_i)
@@ -59,7 +64,11 @@ pub const text_finish_pieces = @embedFile("kernels/dense/finish_pieces.metal");
 
 /// dequantize: W half [IN, OUT] from the trellis [IN/16, OUT/16, n]; one simdgroup per tile, lane L decodes its 8 weights:
 /// weight m of lane L is row 2 (L & 3) + {0, 1, 8, 9}[m & 3], column (L >> 2) + 8 (m >> 2) of the tile (the GEMV's layout)
-pub const text_dequant = @embedFile("kernels/dense/dequant.metal");
+pub const text_dequant = dequant_1 ++ dequant_2;
+/// `text_dequant` in pieces: dequant_1 a simdgroup's tile loaded, dequant_2 its codewords decoded and stored (trunk_q8.zig's
+/// int8 decode stores them as int8 instead)
+pub const dequant_1 = @embedFile("kernels/dense/dequant_1.metal");
+pub const dequant_2 = @embedFile("kernels/dense/dequant_2.metal");
 
 /// multi-row GEMV: every weight is decoded once per threadgroup and applied to RB rows. z f32 [KS * ROWS, OUT]: K-slice
 /// ks's partial sums of row r at z[ks * ROWS + r]. One 128-thread threadgroup per (BT output tiles, row chunk of RB rows,
@@ -113,21 +122,44 @@ pub const dec_head = @embedFile("kernels/dense/dec_head.metal");
 
 /// DEC-ONE with the prepare inside: the threadgroup's K slice of its row chunk into threadgroup memory (text_prep_s's
 /// arithmetic, lane order, spare rows from the chunk's last row as text_dgemv reads them), one simdgroup per (128-block, row)
-pub const dec_prep1 = @embedFile("kernels/dense/dec_prep1.metal");
+pub const dec_prep1 = dec_prep1_1 ++ dec_prep1_2 ++ dec_prep1_3;
 
-/// the GEMV's input loads: prep_sc's rows in device memory (text_dgemv's) ...
-pub const dec_gemv0 = @embedFile("kernels/dense/dec_gemv0.metal");
+/// the GEMV's setup and input loads: prep_sc's rows in device memory (text_dgemv's) ...
+pub const dec_gemv0 = dec_gemv0_head ++ dec_gemv_loop ++ dec_gemv0_x;
 
 /// ... or the slice prepared in threadgroup memory
-pub const dec_gemv1 = @embedFile("kernels/dense/dec_gemv1.metal");
+pub const dec_gemv1 = dec_gemv1_head ++ dec_gemv_loop ++ dec_gemv1_x;
+
+/// dec_gemv0 / dec_gemv1's pieces: the setup (lane plan, accumulators, the slice's first tile, the bases), the input
+/// tile loop's head (shared), and the loads of the tile's inputs (a lane's quad of each row, as floats)
+pub const dec_gemv0_head = @embedFile("kernels/dense/dec_gemv0_head.metal");
+pub const dec_gemv1_head = @embedFile("kernels/dense/dec_gemv1_head.metal");
+pub const dec_gemv_loop = @embedFile("kernels/dense/dec_gemv_loop.metal");
+pub const dec_gemv0_x = @embedFile("kernels/dense/dec_gemv0_x.metal");
+pub const dec_gemv1_x = @embedFile("kernels/dense/dec_gemv1_x.metal");
 
 /// text_dgemv's tile loop, quad fold and simdgroup sum (the z plane values), then the arrival: the loop's head, the
 /// tile's address (`dec_tile`: tile (tk, the block's column t) of the one trellis, which a joined launch reads at its
-/// member's base instead, ricursive.zig), and the rest (in two pieces: the tile's words, then the codewords on)
+/// member's base instead, ricursive.zig), and the rest
 pub const dec_gemv_arrive_1 = @embedFile("kernels/dense/dec_gemv_arrive_1.metal");
 pub const dec_tile = @embedFile("kernels/dense/dec_tile.metal");
-pub const dec_gemv_arrive_2 = dec_gemv_arrive_2_1 ++ dec_gemv_arrive_2_2;
+pub const dec_gemv_arrive_2 = dec_gemv_arrive_2a ++ dec_gemv_arrive_2b ++ dec_gemv_arrive_2c;
 pub const dec_gemv_arrive = dec_gemv_arrive_1 ++ dec_tile ++ dec_gemv_arrive_2;
+/// dec_gemv_arrive_2's pieces: the tile's words loaded, then its codewords, decodes and FMAs to the output-tile loop's
+/// end, then the input tile loop's end, the fold, the plane store, the arrival and the finish's head
+pub const dec_gemv_arrive_2a = @embedFile("kernels/dense/dec_gemv_arrive_2a.metal");
+pub const dec_gemv_arrive_2b = @embedFile("kernels/dense/dec_gemv_arrive_2b.metal");
+pub const dec_gemv_arrive_2c = @embedFile("kernels/dense/dec_gemv_arrive_2c.metal");
+
+/// ku's pieces (`dec_variants`): the input tile loop in pairs with both tiles' words of the BT output tiles loaded at the
+/// pair's head (`dec_ku_loop`, which opens the pair loop and the loop over its two tiles and names the tile `tk`), the
+/// output tile's words taken from them (`dec_ku_ww`, in place of dec_tile and dec_gemv_arrive_2a), and the end of the
+/// loop over the pair's tiles (`dec_ku_close`); each tile's FMAs as dec_gemv_arrive_2b runs them, in tile order
+pub const dec_ku_loop = @embedFile("kernels/dense/dec_ku_loop.metal");
+pub const dec_ku_ww = @embedFile("kernels/dense/dec_ku_ww.metal");
+pub const dec_ku_close = @embedFile("kernels/dense/dec_ku_close.metal");
+/// ku's tile loop through the arrival (dec_gemv_arrive's place in the texts)
+const dec_ku_arrive = dec_gemv_arrive_1 ++ dec_ku_ww ++ dec_gemv_arrive_2b ++ dec_ku_close ++ dec_gemv_arrive_2c;
 
 /// the finish's input sums: prep_sc's (text_dfinish's loop) ...
 pub const dec_xsum0 = @embedFile("kernels/dense/dec_xsum0.metal");
@@ -146,6 +178,62 @@ const dec_finish = dec_finish_v ++ dec_finish_store;
 pub const text_dec0: [:0]const u8 = dec_head ++ dec_gemv0 ++ dec_gemv_arrive ++ dec_xsum0 ++ dec_finish;
 /// DEC-ONE with the prepare inside: y, z, and xsx f32 (the published input sums, scratch)
 pub const text_dec1: [:0]const u8 = dec_head ++ dec_prep1 ++ dec_gemv1 ++ dec_gemv_arrive ++ dec_xsum1 ++ dec_finish;
+/// text_dec0 and text_dec1 with ku's tile loop (`dec_variants`)
+pub const text_dec0_ku: [:0]const u8 = dec_head ++ dec_gemv0_head ++ dec_ku_loop ++ dec_gemv0_x ++ dec_ku_arrive ++ dec_xsum0 ++ dec_finish;
+pub const text_dec1_ku: [:0]const u8 = dec_head ++ dec_prep1 ++ dec_gemv1_head ++ dec_ku_loop ++ dec_gemv1_x ++ dec_ku_arrive ++ dec_xsum1 ++ dec_finish;
+
+/// DEC-ONE's GEMV variants (`Config.dense_variant`; 0 today's): other schedules of the same reads, decodes and sums
+/// (the same codewords, the same decoded values, the same FMA sequence into the same f32 accumulators and the same
+/// folds), so the same bytes. `t4`, `t1` and `t0` take the MUL1 helper's other instruction sequences from a codeword to
+/// its byte sum t (`EXL3_T1V`, each the same exact t: the banked decode's t4 / t1 / t0); `ku` loads both tiles' words of
+/// an input tile pair before either decodes; `kut4` both; `g1` and `g2` (`text_dec0_g1` / `text_dec0_g2`, below) take a
+/// lane's tile word offsets once and step the tile and input pointers, g2 over the prepared rows as f32. Each has kernel
+/// names of its own (MLX keys a custom kernel's library by its name); a dense shape's engine reads the variant when it is
+/// made. `glm`: GLM-5.3-Flash's trunk shapes only (`Dense.glmShape`; any other shape takes today's texts); `xf`: the
+/// GEMV reads the prepared rows as f32 (prep_scf's).
+pub const DecVariant = struct { name: []const u8, dec0: [:0]const u8, dec1: [:0]const u8, text0: [:0]const u8, text1: [:0]const u8, header: [:0]const u8, glm: bool = false, xf: bool = false };
+const def_t4 = @embedFile("kernels/dense/dec_def_t4.metal");
+const def_t1 = @embedFile("kernels/dense/dec_def_t1.metal");
+const def_t0 = @embedFile("kernels/dense/dec_def_t0.metal");
+pub const dec_variants = [_]DecVariant{
+    .{ .name = "", .dec0 = "turboexl3_dense_dec0", .dec1 = "turboexl3_dense_dec1", .text0 = text_dec0, .text1 = text_dec1, .header = decode.header5 },
+    .{ .name = "t4", .dec0 = "turboexl3_dense_dec0_t4", .dec1 = "turboexl3_dense_dec1_t4", .text0 = text_dec0, .text1 = text_dec1, .header = def_t4 ++ decode.header5 },
+    .{ .name = "t1", .dec0 = "turboexl3_dense_dec0_t1", .dec1 = "turboexl3_dense_dec1_t1", .text0 = text_dec0, .text1 = text_dec1, .header = def_t1 ++ decode.header5 },
+    .{ .name = "t0", .dec0 = "turboexl3_dense_dec0_t0", .dec1 = "turboexl3_dense_dec1_t0", .text0 = text_dec0, .text1 = text_dec1, .header = def_t0 ++ decode.header5 },
+    .{ .name = "ku", .dec0 = "turboexl3_dense_dec0_ku", .dec1 = "turboexl3_dense_dec1_ku", .text0 = text_dec0_ku, .text1 = text_dec1_ku, .header = decode.header5 },
+    .{ .name = "kut4", .dec0 = "turboexl3_dense_dec0_kut4", .dec1 = "turboexl3_dense_dec1_kut4", .text0 = text_dec0_ku, .text1 = text_dec1_ku, .header = def_t4 ++ decode.header5 },
+    .{ .name = "g1", .dec0 = "turboexl3_dense_dec0_g1", .dec1 = "turboexl3_dense_dec1_g1", .text0 = text_dec0_g1, .text1 = text_dec1, .header = decode.header5, .glm = true },
+    .{ .name = "g2", .dec0 = "turboexl3_dense_dec0_g2", .dec1 = "turboexl3_dense_dec1_g2", .text0 = text_dec0_g2, .text1 = text_dec1, .header = decode.header5, .glm = true, .xf = true },
+};
+comptime {
+    if (dec_variants.len != config.dense_variants) @compileError("config.dense_variants is not dec_variants.len");
+}
+/// g1 / g2's GEMV (`dec_variants`; GLM-5.3-Flash's trunk shapes only, `Dense.glmShape`): text_dec0 with each lane's tile
+/// word offsets and shift (exl3_tile_load's, the rate's 64-bit window) taken once before the loop and the tile and x
+/// pointers stepped a constant per input tile (`dec_g_1` .. `dec_g_3`), in place of dec_gemv0_head, its loop, its x loads,
+/// the output-tile loop's head, the tile address and dec_gemv_arrive_2a's load; g1 reads the prepared rows as prep_sc's
+/// halves (`dec_g_xh_*`), g2 as f32 (`dec_g_xf_*`: prep_scf's, the same halves stored widened). The decodes, FMAs,
+/// folds, arrival and finish are text_dec0's pieces, so the same words, codewords, values and sums: the same bytes.
+pub const dec_g_1 = @embedFile("kernels/dense/dec_g_1.metal");
+pub const dec_g_2 = @embedFile("kernels/dense/dec_g_2.metal");
+pub const dec_g_3 = @embedFile("kernels/dense/dec_g_3.metal");
+pub const dec_g_xh_1 = @embedFile("kernels/dense/dec_g_xh_1.metal");
+pub const dec_g_xh_2 = @embedFile("kernels/dense/dec_g_xh_2.metal");
+pub const dec_g_xf_1 = @embedFile("kernels/dense/dec_g_xf_1.metal");
+pub const dec_g_xf_2 = @embedFile("kernels/dense/dec_g_xf_2.metal");
+pub const text_dec0_g1: [:0]const u8 = dec_head ++ dec_g_1 ++ dec_g_xh_1 ++ dec_g_2 ++ dec_g_xh_2 ++ dec_g_3 ++ dec_gemv_arrive_2b ++ dec_gemv_arrive_2c ++ dec_xsum0 ++ dec_finish;
+pub const text_dec0_g2: [:0]const u8 = dec_head ++ dec_g_1 ++ dec_g_xf_1 ++ dec_g_2 ++ dec_g_xf_2 ++ dec_g_3 ++ dec_gemv_arrive_2b ++ dec_gemv_arrive_2c ++ dec_xsum0 ++ dec_finish;
+/// dec_prep1's pieces (`dec_prep1`, above): the prepare to its store, the store of a prepared value at its offset in
+/// the slice (the slice's span from its first input; a joined launch whose members take their own K splits stores at
+/// its member's span, glm53f/pair_ks.zig), and the rest
+pub const dec_prep1_1 = @embedFile("kernels/dense/dec_prep1_1.metal");
+pub const dec_prep1_2 = @embedFile("kernels/dense/dec_prep1_2.metal");
+pub const dec_prep1_3 = @embedFile("kernels/dense/dec_prep1_3.metal");
+/// `dec_variants`' index by name (null: none; "" is today's)
+pub fn decVariantOf(name: []const u8) ?u8 {
+    for (dec_variants, 0..) |v, i| if (std.mem.eql(u8, v.name, name)) return @intCast(i);
+    return null;
+}
 
 /// text_prep_s (lane order) that also zeroes the arrival counters of the DEC-ONE launch after it
 pub const text_prep_sc: [:0]const u8 = text_prep_s ++ @embedFile("kernels/dense/prep_sc.metal");
@@ -206,6 +294,34 @@ fn oneRowIndex(shape: Shape) ?u8 {
 const dec_said = Global(bool, "dense_dec_said", false);
 /// the `one_row_table` entries whose engagement line a one-row call has printed (bit i = entry i)
 const table_said = Global(u8, "dense_one_row_table_said", 0);
+/// a glm variant's engage line (`DecVariant.glm`), once a process
+const dec_g_said = Global(bool, "dense_dec_g_said", false);
+
+/// DEC-ONE's arrival counters made on the host (the GLM-5.3-Flash plugin's TURBOEXL3_GLM53F_HOST_ZERO; false keeps
+/// `dec_zero`'s launch): a call whose prepare runs inside its launch, and glm53f's joined launches (`glm53f.pair_ks`,
+/// `glm53f.shared_gu`), take their counters as a new array of zeroed words copied from the host (`hostCounters`) where
+/// they launch `dec_zero` over them. The launch reads the same zeros, so the same bytes, with one launch fewer a call.
+/// Set before the first call.
+pub const dec_host_zero = Global(bool, "dense_dec_host_zero", false);
+/// The calls that took host-made counters since the process began (`hostCounters`).
+pub const dec_host_zeroed = Global(u64, "dense_dec_host_zeroed", 0);
+/// The most counters `hostCounters` makes (an output block a row chunk: GLM-5.3-Flash's widest call, the dense gate | up
+/// at 16 rows, takes 768); a call past it launches `dec_zero`.
+pub const host_counters_max: u32 = 4096;
+const host_zero_words: [host_counters_max]u32 = @splat(0);
+
+/// With `dec_host_zero` set: `n` arrival counters (8 or more: MLX binds an input of fewer than 8 elements in the constant
+/// address space) as a new u32 array of zeros copied from the host, no launch, the call's own buffer (no two calls share
+/// one, so no reset and no order between calls: ROUTER_ONE's counters in the plugin). Null with it unset or past
+/// `host_counters_max` (the caller launches `dec_zero`).
+pub fn hostCounters(n: u32) !?mlx.mlx_array {
+    if (!dec_host_zero.get().* or n > host_counters_max) return null;
+    if (n < 8) return error.BadExl3Shape;
+    const a = mlx.mlx_array_new_data(&host_zero_words, &[_]c_int{@intCast(n)}, 1, .uint32);
+    if (a.ctx == null) return error.MlxError;
+    dec_host_zeroed.get().* += 1;
+    return a;
+}
 
 /// The kernels of one dense linear shape; configs per row count (decode) plus the prefill set.
 pub const Dense = struct {
@@ -270,6 +386,10 @@ pub const Dense = struct {
     /// DEC-ONE's GEMV over rows another launch prepared (`decLinearPrepared`) per row count: text_dec0's config with
     /// `decCfgs`'s grid and template, whatever prepare `linear` itself takes there
     dec0_cfg: [decode.Kernels.max_rows + 1]?mlx.mlx_fast_metal_kernel_config = @splat(null),
+    /// the GEMV variant's prepared rows as f32 (`DecVariant.xf`): prep_scf (prep_sc's text, its xp an f32 array) in prep_sc's
+    /// place, made when the variant takes this shape
+    xf: bool = false,
+    prep_scf: ?mlx.mlx_fast_metal_kernel = null,
     /// the finish over row pieces (`text_finish_pieces`, `finishPieces`): made on first use, so a process that never
     /// splits a call never builds it
     finish_pieces: ?mlx.mlx_fast_metal_kernel = null,
@@ -280,8 +400,9 @@ pub const Dense = struct {
 
     /// `lean`: `gemv` is the lean GEMV text's config (text_dgemv_lean), not text_dgemv's
     pub const Cfg = struct { prep: mlx.mlx_fast_metal_kernel_config, gemv: mlx.mlx_fast_metal_kernel_config, finish: mlx.mlx_fast_metal_kernel_config, lean: bool = false };
-    /// DEC-ONE at one row count: `prep` is prep_sc's config (prepare outside) or dec_zero's (inside); `gemv` dec0's or dec1's
-    pub const DecCfg = struct { prep_in: bool, prep: mlx.mlx_fast_metal_kernel_config, gemv: mlx.mlx_fast_metal_kernel_config };
+    /// DEC-ONE at one row count: `prep` is prep_sc's config (prepare outside) or dec_zero's (inside); `gemv` dec0's or dec1's;
+    /// `ncnt` the arrival counters (`hostCounters`' length where the prepare runs inside)
+    pub const DecCfg = struct { prep_in: bool, prep: mlx.mlx_fast_metal_kernel_config, gemv: mlx.mlx_fast_metal_kernel_config, ncnt: u32 = 8 };
     const Small = struct { io: Cfg, gemm: mlx.mlx_fast_metal_kernel_config, tiles: mlx.mlx_array };
     pub const small_rows_cap: u32 = 128;
 
@@ -405,6 +526,28 @@ pub const Dense = struct {
         };
     }
 
+    /// GLM-5.3-Flash's trunk linears (sc_3.10bpw): K6 for the 45 layers and the head, K4 for the MTP layer, MUL1, as
+    /// (in, out): KDA qkv and o, DSA q_a, q_b, kv_a, o and the indexer's wq_b, the shared expert's gate / up and down,
+    /// the dense MLP's gate / up and down, the head, the MTP layer's eh_proj
+    pub const glm_shapes = [_][2]u32{
+        .{ 4096, 24576 }, .{ 8192, 4096 }, .{ 4096, 1536 }, .{ 1536, 16384 }, .{ 4096, 512 }, .{ 16384, 4096 }, .{ 1536, 4096 },
+        .{ 4096, 2048 },  .{ 2048, 4096 }, .{ 4096, 12288 }, .{ 12288, 4096 }, .{ 4096, 154880 },
+    };
+
+    /// Whether `shape` is one of GLM-5.3-Flash's trunk linears at its stored rate (a `glm` variant's texts: K4 or K6, so
+    /// the 64-bit tile window, MUL1)
+    pub fn glmShape(shape: Shape) bool {
+        if (shape.dec.codebook != .mul1 or (shape.rate.n != 64 and shape.rate.n != 96)) return false;
+        for (glm_shapes) |g| if (shape.in == g[0] and shape.out == g[1]) return true;
+        return false;
+    }
+
+    /// The DEC-ONE variant a shape takes: `variant`'s, or today's where a `glm` variant meets another shape
+    pub fn variantFor(shape: Shape, variant: u8) *const DecVariant {
+        const dv = &dec_variants[variant];
+        return if (dv.glm and !glmShape(shape)) &dec_variants[0] else dv;
+    }
+
     /// the smallest K split that puts 160 threadgroups (4 per core of a 40-core GPU) in flight at one row (BT 4); fixed per
     /// shape, so every row count sums alike
     pub fn ksFor(in: u32, out: u32) u32 {
@@ -425,6 +568,11 @@ pub const Dense = struct {
 
     pub fn init(shape: Shape) !Dense {
         if (shape.in % 128 != 0 or shape.out % 128 != 0 or (shape.in / 16) % 4 != 0 or shape.in == 0 or shape.out == 0) return error.BadExl3Shape;
+        const dv = variantFor(shape, config.get().dense_variant);
+        if (dv.glm and !dec_g_said.get().*) {
+            dec_g_said.get().* = true;
+            std.debug.print("[turboexl3] DEC-ONE's GLM-5.3-Flash GEMV engaged ({s}): its own text at the trunk shapes, the first {d} x {d} at K{d}\n", .{ dv.name, shape.in, shape.out, shape.rate.n / 16 });
+        }
         return .{
             .shape = shape,
             .prep = ks.newKernel("turboexl3_dense_prep", &prep_in, &prep_out, text_prep, decode.header, true) orelse return error.KernelCreateFailed,
@@ -451,17 +599,20 @@ pub const Dense = struct {
             .one_prep_in = onePrepFor(config.get().*, shape),
             .one_row = if (config.get().dec_one_row_table) oneRowIndex(shape) else null,
             .dec_prep_out = 1024,
-            .dec0 = ks.newKernel("turboexl3_dense_dec0", &dec0_in, &dec0_out, text_dec0, decode.header5, true) orelse return error.KernelCreateFailed,
-            .dec1 = ks.newKernel("turboexl3_dense_dec1", &dec1_in, &dec1_out, text_dec1, decode.header5, true) orelse return error.KernelCreateFailed,
+            .dec0 = ks.newKernel(dv.dec0, &dec0_in, &dec0_out, dv.text0, dv.header, true) orelse return error.KernelCreateFailed,
+            .dec1 = ks.newKernel(dv.dec1, &dec1_in, &dec1_out, dv.text1, dv.header, true) orelse return error.KernelCreateFailed,
             .prep_sc = ks.newKernel("turboexl3_dense_prep_sc", &prep_in, &prep_sc_out, text_prep_sc, decode.header, true) orelse return error.KernelCreateFailed,
             .dec_zero = ks.newKernel("turboexl3_dense_dec_zero", &dec_zero_in, &dec_zero_out, text_dec_zero, decode.header, true) orelse return error.KernelCreateFailed,
+            .xf = dv.xf,
+            .prep_scf = if (dv.xf) (ks.newKernel("turboexl3_dense_prep_scf", &prep_in, &prep_sc_out, text_prep_sc, decode.header, true) orelse return error.KernelCreateFailed) else null,
         };
     }
 
-    /// `bt_set` as a Dense of `shape` starts under `cfg`: none set, but a one-row call's `one_row_table` entry's under
-    /// `Config.dec_one_row_table`
+    /// `bt_set` as a Dense of `shape` starts under `cfg`: DEC-ONE's output tiles per threadgroup at decode rows 1 to 4 as
+    /// `Config.dec_bt` says (0: btFor's), and a one-row call's `one_row_table` entry's under `Config.dec_one_row_table`
     pub fn btSetFor(cfg: config.Config, shape: Shape) [decode.Kernels.max_rows + 1]u8 {
         var b: [decode.Kernels.max_rows + 1]u8 = @splat(0);
+        for (cfg.dec_bt, 0..) |v, r| b[r] = v;
         if (cfg.dec_one_row_table) if (oneRowFor(shape)) |e| {
             b[1] = e.bt;
         };
@@ -547,10 +698,10 @@ pub const Dense = struct {
             const nx: u32 = if (self.defer_affine) @max(nob * chunks * rb * nb, 8) else 8;
             const prep = try ks.buildConfig(.{ .grid = .{ ((ncnt + 127) / 128) * 128, 1, 1 }, .threadgroup = .{ 128, 1, 1 }, .out_shapes = &.{&ncnt_shape}, .out_dtypes = &.{.uint32}, .template = &.{.{ .name = "NCNT", .value = .{ .int = @intCast(ncnt) } }} });
             errdefer _ = mlx.mlx_fast_metal_kernel_config_free(prep);
-            c = .{ .prep_in = true, .prep = prep, .gemv = try ks.buildConfig(.{ .grid = grid, .threadgroup = .{ 128, 1, 1 }, .out_shapes = &.{ &y_shape, &z_shape, &[_]c_int{@intCast(nx)} }, .out_dtypes = &.{ self.shape.out_dtype, .float32, .float32 }, .template = &tmpl }) };
+            c = .{ .prep_in = true, .prep = prep, .gemv = try ks.buildConfig(.{ .grid = grid, .threadgroup = .{ 128, 1, 1 }, .out_shapes = &.{ &y_shape, &z_shape, &[_]c_int{@intCast(nx)} }, .out_dtypes = &.{ self.shape.out_dtype, .float32, .float32 }, .template = &tmpl }), .ncnt = ncnt };
         } else {
             const nth: u32 = nb * 32 * rows_u;
-            const prep = try ks.buildConfig(.{ .grid = .{ nb * 32, rows_u, 1 }, .threadgroup = .{ 32, 1, 1 }, .out_shapes = &.{ &[_]c_int{ r, IN }, &[_]c_int{ r, @intCast(nb) }, &ncnt_shape }, .out_dtypes = &.{ .float16, .float32, .uint32 }, .template = &.{
+            const prep = try ks.buildConfig(.{ .grid = .{ nb * 32, rows_u, 1 }, .threadgroup = .{ 32, 1, 1 }, .out_shapes = &.{ &[_]c_int{ r, IN }, &[_]c_int{ r, @intCast(nb) }, &ncnt_shape }, .out_dtypes = &.{ if (self.xf) .float32 else .float16, .float32, .uint32 }, .template = &.{
                 .{ .name = "DIM", .value = .{ .int = IN } },
                 .{ .name = "LANE_ORDER", .value = .{ .int = 1 } },
                 .{ .name = "NCNT", .value = .{ .int = @intCast(ncnt) } },
@@ -601,6 +752,40 @@ pub const Dense = struct {
         return o[0];
     }
 
+    /// What prep_sc's launch hands DEC-ONE's GEMV at `rows` rows, for a caller that makes it in a launch of its own
+    /// (`decPrepared`): xp [rows, in] (f32 where `xp_f32`, the variant's prep_scf; else f16), each value prep_s's half in
+    /// lane order; xs f32 [rows, nb], each 128-block's sum of its stored halves; cnt u32 [ncnt] zeroed, prep_sc's
+    /// threads striding it by `nth` (`(row nb + block) 32 + lane` from 0). Null where DEC-ONE does not take the call or
+    /// runs its prepare inside its launch.
+    pub const DecPrep = struct { xp_f32: bool, nb: u32, ncnt: u32, nth: u32 };
+    pub fn decPrepSpec(self: *Dense, rows: usize) !?DecPrep {
+        if (!self.decTakes(rows)) return null;
+        if ((try self.decCfgs(rows)).prep_in) return null;
+        const rows_u: u32 = @intCast(rows);
+        const rb: u32 = rbFor(rows_u);
+        const chunks: u32 = (rows_u + rb - 1) / rb;
+        const nb = self.shape.in / 128;
+        // decCfgs' counters (at least 8: MLX binds an input of fewer in the constant address space) and prep_sc's grid
+        return .{ .xp_f32 = self.xf, .nb = nb, .ncnt = @max((self.shape.out / 128) * chunks, 8), .nth = nb * 32 * rows_u };
+    }
+
+    /// DEC-ONE's GEMV launch alone (dec0 at decCfgs' config) over rows a launch before it prepared as `decPrepSpec` says:
+    /// the launch `decLinear` runs after prep_sc's, on the same operands, so its bytes. y [rows, out] in
+    /// `shape.out_dtype`; the caller frees y. error.Exl3EngineNotImplemented where `decPrepSpec` is null.
+    pub fn decPrepared(self: *Dense, s: mlx.mlx_stream, xp: mlx.mlx_array, xs: mlx.mlx_array, cnt: mlx.mlx_array, trellis: mlx.mlx_array, svh: mlx.mlx_array, rows: usize) !mlx.mlx_array {
+        if (!self.decTakes(rows)) return error.Exl3EngineNotImplemented;
+        const c = try self.decCfgs(rows);
+        if (c.prep_in) return error.Exl3EngineNotImplemented;
+        if (!dec_said.get().*) {
+            dec_said.get().* = true;
+            std.debug.print("[turboexl3] DEC-ONE engaged: one GEMV launch per dense linear at decode rows <= {d}\n", .{self.dec_rows});
+        }
+        var o: [2]mlx.mlx_array = undefined;
+        try ks.applyConfig(self.dec0, c.gemv, &.{ xp, xs, trellis, svh, cnt }, &o, s);
+        _ = mlx.mlx_array_free(o[1]);
+        return o[0];
+    }
+
     /// `linear` at decode rows from rows a launch before it prepared (xp, xs as `decLinearPrepared` and `linearPrepared`
     /// take them): DEC-ONE's GEMV where DEC-ONE takes the call (`cnt` zeroed, `decCounters(rows)` long), else the chain's GEMV
     /// and finish (`cnt` unread). error.Exl3EngineNotImplemented where neither serves (the caller runs `linear`).
@@ -624,7 +809,8 @@ pub const Dense = struct {
             }
         };
         if (c.prep_in) {
-            const cnt = try one(self.dec_zero, c.prep, &.{svh}, s);
+            // the counters made on the host (`dec_host_zero`), else zeroed by dec_zero's launch
+            const cnt = (try hostCounters(c.ncnt)) orelse try one(self.dec_zero, c.prep, &.{svh}, s);
             defer _ = mlx.mlx_array_free(cnt);
             var o: [3]mlx.mlx_array = undefined;
             try ks.applyConfig(self.dec1, c.gemv, &.{ x, suh, trellis, svh, cnt }, &o, s);
@@ -633,7 +819,7 @@ pub const Dense = struct {
             return o[0];
         }
         var po: [3]mlx.mlx_array = undefined;
-        try ks.applyConfig(self.prep_sc, c.prep, &.{ x, suh }, &po, s);
+        try ks.applyConfig(if (self.prep_scf) |k| k else self.prep_sc, c.prep, &.{ x, suh }, &po, s);
         defer for (po) |a| {
             _ = mlx.mlx_array_free(a);
         };
@@ -655,6 +841,8 @@ pub const Dense = struct {
         inline for (.{ self.prep, self.gemv, self.finish, self.dequant, self.dgemv, self.dgemv_lean, self.dfinish, self.prep_s, self.gemm_pf, self.gemm_rs, self.dec0, self.dec1, self.prep_sc, self.dec_zero }) |k| decode.freeKernel(k);
         if (self.finish_pieces) |k| decode.freeKernel(k);
         self.finish_pieces = null;
+        if (self.prep_scf) |k| decode.freeKernel(k);
+        self.prep_scf = null;
     }
 
     pub fn templ(self: *const Dense) [3]ks.TemplateArg {
@@ -858,11 +1046,13 @@ pub const Dense = struct {
 
     /// `linear`'s inner product on `path` (.small or .matmul) of prepared rows xp half [rows, in] (natural order: `text_prep`
     /// with LANE_ORDER 0, what both paths read): z half [rows, out] by the launches `linear` makes there (the register path's
-    /// cached config and tile table; the dequantized W_hat and MLX's matmul), so the same bytes. Other paths refuse.
+    /// cached config and tile table; the dequantized W_hat and MLX's matmul), so the same bytes. Other paths refuse. The
+    /// matmul path on trunk int8's inner launches where they take this linear (`trunk_q8.innerTakes`; lossy).
     pub fn innerOf(self: *Dense, s: mlx.mlx_stream, xp: mlx.mlx_array, trellis: mlx.mlx_array, rows: usize, path: Path) !mlx.mlx_array {
         switch (path) {
             .small => return self.smallInner(s, xp, trellis, rows),
             .matmul => {
+                if (trunk_q8.innerTakes(self)) return trunk_q8.innerOf(self, s, xp, trellis, rows);
                 const W = try self.dequantize(s, trellis);
                 defer _ = mlx.mlx_array_free(W);
                 var inner = mlx.mlx_array_new();
@@ -894,7 +1084,8 @@ pub const Dense = struct {
     /// `linearOn`'s launches up to its finish (the host's fused GDN norm-gate runs from there): the inner product z half
     /// [rows, out] of x [rows, in] its finish would read, the register path's prepare and GEMM on `s`; on the matmul path
     /// the prepare on `s`, the dequantize and the matmul on `rs`. The same configs and operands as `linearOn`, so the same
-    /// bytes. The GEMV's rows and the fused-GEMM option refuse (error.Exl3EngineNotImplemented) before any launch.
+    /// bytes. The GEMV's rows and the fused-GEMM option refuse (error.Exl3EngineNotImplemented) before any launch. The
+    /// matmul path on trunk int8's inner launches where they take this linear (`trunk_q8.innerTakes`; lossy).
     pub fn innerOn(self: *Dense, s: mlx.mlx_stream, rs: mlx.mlx_stream, x: mlx.mlx_array, trellis: mlx.mlx_array, suh: mlx.mlx_array, rows: usize) !mlx.mlx_array {
         switch (self.pathFor(rows)) {
             .small => {
@@ -904,6 +1095,7 @@ pub const Dense = struct {
                 return one(self.gemm_rs, c.gemm, &.{ c.tiles, xp, trellis, self.xs_dummy }, s);
             },
             .matmul => {
+                if (trunk_q8.innerTakes(self)) return trunk_q8.innerOn(self, s, rs, x, trellis, suh, rows);
                 const c = try self.buildCfg(rows, false);
                 defer _ = mlx.mlx_fast_metal_kernel_config_free(c.prep);
                 defer _ = mlx.mlx_fast_metal_kernel_config_free(c.finish);
@@ -936,9 +1128,11 @@ pub const Dense = struct {
     }
 
     /// One piece's inner product z half [rows, out]: `linearOn`'s prepare of x [rows, in] (its config at these rows)
-    /// and its matmul against W (`dequantize`'s, made once for every piece of the call), both on `s`
+    /// and its matmul against W (`dequantize`'s, made once for every piece of the call), both on `s`. A W of int8 is trunk
+    /// int8's (`trunk_q8.decodeW`, what `root.linearPiecesBegin` makes where `trunk_q8.innerTakes`): its inner launches.
     pub fn pieceInner(self: *Dense, s: mlx.mlx_stream, x: mlx.mlx_array, W: mlx.mlx_array, suh: mlx.mlx_array, rows: usize) !mlx.mlx_array {
         if (self.pathFor(rows) != .matmul) return error.Exl3EngineNotImplemented;
+        if (mlx.mlx_array_dtype(W) == .int8) return trunk_q8.pieceInner(self, s, x, W, suh, rows);
         const c = try self.buildCfg(rows, false);
         defer _ = mlx.mlx_fast_metal_kernel_config_free(c.prep);
         defer _ = mlx.mlx_fast_metal_kernel_config_free(c.finish);
@@ -955,6 +1149,7 @@ pub const Dense = struct {
     /// without its prepare, on `s`
     pub fn piecePrepared(self: *const Dense, s: mlx.mlx_stream, xp: mlx.mlx_array, W: mlx.mlx_array, rows: usize) !mlx.mlx_array {
         if (self.pathFor(rows) != .matmul) return error.Exl3EngineNotImplemented;
+        if (mlx.mlx_array_dtype(W) == .int8) return trunk_q8.piecePrepared(self, s, xp, W, rows);
         var inner = mlx.mlx_array_new();
         errdefer _ = mlx.mlx_array_free(inner);
         try mlx.check(mlx.mlx_matmul(&inner, xp, W, s));
@@ -1066,6 +1261,9 @@ pub const Dense = struct {
         // an un-rotated linear's rows past `unrot_min_rows` are one matmul of x against its resident W_std in x's dtype, on
         // the inner product's stream; null keeps the chain below (its W_hat decoded per call)
         if (rows > unrot_min_rows) if (try residentPlain(rs, x, trellis)) |y| return y;
+        // trunk int8 (`Config.pf_trunk_int8` at the host's shapes, trunk_q8.zig; lossy): its int8 prepare on `s`, the int8
+        // decode and the int8 GEMM with the finish on `rs`
+        if (!self.fused_prefill and trunk_q8.takes(self)) return trunk_q8.linearOn(self, s, rs, x, trellis, suh, svh, rows);
         // prefill: prepared rows (natural order) x the trellis, f32 accumulation, f16 inner = the finish's first rounding
         const c = try self.buildCfg(rows, false);
         defer _ = mlx.mlx_fast_metal_kernel_config_free(c.prep);
@@ -1604,13 +1802,6 @@ fn residentPlain(s: mlx.mlx_stream, x: mlx.mlx_array, trellis: mlx.mlx_array) !?
     try mlx.check(mlx.mlx_matmul(&y, x, w, s));
     return y;
 }
-
-// ---- `dec_gemv_arrive_2`'s two pieces ----
-
-/// `dec_gemv_arrive_2`'s pieces: the tile's words for lane L (`exl3_tile_load` at `dec_tile`'s address), then the
-/// codewords, the decodes and the FMAs, the fold, the plane store, the arrival and the finish's opening
-pub const dec_gemv_arrive_2_1 = @embedFile("kernels/dense/dec_gemv_arrive_2_1.metal");
-pub const dec_gemv_arrive_2_2 = @embedFile("kernels/dense/dec_gemv_arrive_2_2.metal");
 
 // ---- The un-rotation's CPU checks: the kernels' arithmetic ported statement for statement against an f64 reference ----
 
@@ -2168,6 +2359,9 @@ test "turboexl3 dense lean GEMV text: text_dgemv but its input loads and codewor
 /// This file's module state (`Global`): what a host that shares its units' state registers.
 pub const shared_state = .{
     dec_said,
+    dec_g_said,
+    dec_host_zero,
+    dec_host_zeroed,
     resident_bypass,
     Resident.lock,
     Resident.armed,

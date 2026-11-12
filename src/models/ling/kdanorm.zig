@@ -28,8 +28,8 @@ const A = mlx.mlx_array;
 /// the norm-gate's statements at head b and the prepare's lanes, each lane's four values as the prepare takes them
 pub const kgate = @embedFile("kernels/kdanorm/gate.metal");
 
-/// dense's prepare with the norm-gate in its load's place
-pub const text_normprep: [:0]const u8 = dense.prep_1 ++ kgate ++ dense.prep_3;
+/// dense's prepare with the norm-gate in its load's place (prep_2_1): its H128 stages (prep_2_2) and store (prep_3) after
+pub const text_normprep: [:0]const u8 = dense.prep_1 ++ kgate ++ dense.prep_2_2 ++ dense.prep_3;
 
 pub const normprep_in = [_][*:0]const u8{ "y", "z", "norm_w", "eps", "sigtab", "suh" };
 pub const normprep_out = [_][*:0]const u8{"xp"};
@@ -208,16 +208,16 @@ fn between(hay: []const u8, first: []const u8, last: []const u8) ?[]const u8 {
 test "turboexl3 ling kdanorm texts: the launch is dense's prepare with the norm-gate in its load's place (text_prep's first and last pieces around it); text_prep is its three pieces, its bytes kept" {
     // the served piece's, the host copy's and the prepare's statements these tests pin
     const pin = comptime @import("../../core/test_support.zig").pins(@embedFile("kernels/test/pins/kdanorm.metal"));
-    try testing.expectEqualStrings(dense.prep_1 ++ dense.prep_2 ++ dense.prep_3, dense.text_prep);
+    try testing.expectEqualStrings(dense.prep_1 ++ dense.prep_2_1 ++ dense.prep_2_2 ++ dense.prep_3, dense.text_prep);
     // text_prep as it was before its cut (c2783f5's kernels/dense/prep.metal: 1085 B)
     var h: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(dense.text_prep, &h, .{});
     const hex = std.fmt.bytesToHex(h, .lower);
     try testing.expectEqual(@as(usize, 1085), dense.text_prep.len);
     try testing.expectEqualStrings("110e3a6a2eb5f59a70aca17ee2b3cd8e7bf376d24e7722d7e97ae862573822e4", &hex);
-    try testing.expectEqualStrings(dense.prep_1 ++ kgate ++ dense.prep_3, text_normprep);
-    // the cut is at the load: prep_2 is its declaration and its load, and the gate makes the same four values
-    try testing.expect(once(dense.prep_2, pin[24]) and once(dense.prep_2, pin[34]));
+    try testing.expectEqualStrings(dense.prep_1 ++ kgate ++ dense.prep_2_2 ++ dense.prep_3, text_normprep);
+    // the cut is at the load: prep_2_1 is its declaration and its load, and the gate makes the same four values
+    try testing.expect(once(dense.prep_2_1, pin[24]) and once(dense.prep_2_1, pin[34]));
     try testing.expect(once(kgate, pin[25]) and once(kgate, pin[35]));
     try testing.expect(std.mem.indexOf(u8, text_normprep, pin[24]) == null);
 }

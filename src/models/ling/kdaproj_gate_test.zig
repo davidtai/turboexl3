@@ -147,13 +147,16 @@ fn sentinel(comptime s: []const u8) [:0]const u8 {
 
 /// A gate launch's text with `piece` in its store loop's place (a planted fault's)
 fn faultText(comptime piece: []const u8) [:0]const u8 {
-    return sentinel(kdaproj_pf.kpf_1 ++ pgemm.fused_2 ++ kdaproj_pf.kpf_3_1 ++ kdaproj_pf.kpf_3_2g ++ pgemm.fused_4 ++ kdaproj_pf.kpf_5 ++ pgemm.fused_6_1 ++ piece ++ kdaproj_pf.kpf_undef);
+    return sentinel(kdaproj_pf.kpf_1 ++ pgemm.fused_1_2 ++ kdaproj_pf.kpf_3_1 ++ kdaproj_pf.kpf_3_2g ++ pgemm.fused_1_4 ++ kdaproj_pf.kpf_5 ++ pgemm.fused_1_6 ++ pgemm.fused_2_1 ++ piece ++ kdaproj_pf.kpf_undef);
 }
 
 const Fault = struct { name: []const u8, form: kdaproj_pf.GateForm, rows: u32, k: mlx.mlx_fast_metal_kernel };
 
 test "turboexl3 gpu ling kdaproj gate: kdaProjPromptGate's y_0 and y_2 are kdaProjPrompt's and its g the served one-launch gate of kdaProjPrompt's y_1, word for word, G0 and G1, at prompt rows 33 to 16384; kdaProjPromptWGate's the same over given W_hats; its declines and refusals; planted faults caught (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    // a GPU test past others in one process starts and ends with no engine cached (`root.releaseEngines`)
+    root.releaseEngines();
+    defer root.releaseEngines();
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s) or !config.get().nax) return error.SkipZigTest;
     const a = std.heap.page_allocator;
@@ -378,6 +381,9 @@ fn timeRows(a: std.mem.Allocator, g: *G, rnd: std.Random, cx0: Arms, rows: u32, 
 
 test "turboexl3 gpu ling timing: kdaproj gate: the served chain (kdaProjPrompt, then the served gate) against G0 and G1 and the gate alone at prompt rows, and the W pair at 4096 (TURBOEXL3_LING_TIME=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    // a GPU test past others in one process starts and ends with no engine cached (`root.releaseEngines`)
+    root.releaseEngines();
+    defer root.releaseEngines();
     _ = std.c.getenv("TURBOEXL3_LING_TIME") orelse return error.SkipZigTest;
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s) or !config.get().nax) return error.SkipZigTest;

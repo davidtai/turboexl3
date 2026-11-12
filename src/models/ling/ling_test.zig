@@ -287,6 +287,9 @@ fn sampleRows(rows: u32, buf: *[3]u32) []const u32 {
 // `silu_out` on sampled rows, clamped_test's bar (5e-3 of the reference's rms; bf16 beyond its store's rounding).
 test "turboexl3 gpu ling: root.moeLing at Ling-3.1-flash's routed geometry (4096 x 1280, 512 experts, top-8, n 40 and 32) gives moe's bytes where no value clamps and equals the reference at limits 0 and 10, decode and prefill rows (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    // a GPU test past others in one process starts and ends with no engine cached (`root.releaseEngines`)
+    root.releaseEngines();
+    defer root.releaseEngines();
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
     const a = std.heap.page_allocator;
@@ -373,6 +376,9 @@ test "turboexl3 gpu ling: root.moeLing at Ling-3.1-flash's routed geometry (4096
 // the top-8 test's bar.
 test "turboexl3 gpu ling top4: root.moeLing at top-4 on the MTP head's operands (x f32, u32 slots, bf16-rounded f32 weights, limit 0) equals the reference at Ling-3.1-flash's routed geometry, decode rows 1 and 4 and prefill rows 17, 1328 and 4096 (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    // a GPU test past others in one process starts and ends with no engine cached (`root.releaseEngines`)
+    root.releaseEngines();
+    defer root.releaseEngines();
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
     const a = std.heap.page_allocator;
@@ -461,6 +467,9 @@ fn drawPairs(rnd: std.Random, bank: []u32, slot: []u32) void {
 // `Config.banked_group` in the process selects nothing). x ~ N(0, 8^2), so the clamp acts at 10.
 test "turboexl3 gpu ling banked: every pair of moeLingBanked over three banks is moeLing's on its bank at top-1 with score 1, byte for byte, at limits 0 and 10, on the configured texts (group 2), the grouped texts (g4) and the M = 3 path (g4m3), each selected (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    // a GPU test past others in one process starts and ends with no engine cached (`root.releaseEngines`)
+    root.releaseEngines();
+    defer root.releaseEngines();
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
     const a = std.heap.page_allocator;
@@ -577,6 +586,9 @@ test "turboexl3 gpu ling banked: every pair of moeLingBanked over three banks is
 // lines. Kernel objects only: nothing launches.
 test "turboexl3 gpu ling kernel cache: the 17 routed geometries the Ling GPU tests make (top-8, top-4 and top-1, n 40 and 32, limits 0, 10 and 128, out bf16 and f32) have their kernels in root's cache at once (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    // a GPU test past others in one process starts and ends with no engine cached (`root.releaseEngines`)
+    root.releaseEngines();
+    defer root.releaseEngines();
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
     const Key = struct { topk: u32, n: u32, lim: u32, out: mlx.mlx_dtype };
@@ -677,6 +689,9 @@ fn denseCase(a: std.mem.Allocator, g: *G, s: mlx.mlx_stream, c: DenseCase) !usiz
 
 test "turboexl3 gpu ling dense: root.linear equals the host reference at every Ling-3.1-flash trunk shape, K6 and the dense FFN's K4 (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    // a GPU test past others in one process starts and ends with no engine cached (`root.releaseEngines`)
+    root.releaseEngines();
+    defer root.releaseEngines();
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
     const a = std.heap.page_allocator;
@@ -733,6 +748,9 @@ test "turboexl3 ling: Config.dec_one_row_table gives each Ling-3.1-flash trunk s
 
 test "turboexl3 gpu ling dense: the one-row launch table (Config.dec_one_row_table) gives one row's own bytes and the three-launch chain's at every Ling-3.1-flash trunk shape, on its table launch (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    // a GPU test past others in one process starts and ends with no engine cached (`root.releaseEngines`)
+    root.releaseEngines();
+    defer root.releaseEngines();
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
     const a = std.heap.page_allocator;
@@ -821,6 +839,9 @@ fn synthProj(a: std.mem.Allocator, g: *G, rnd: std.Random, in: u32, out: u32, n:
 
 test "turboexl3 gpu ling pair: z | a and the shared and dense gate | up in one launch give each member's linear bytes, the prepare inside or in its own launch, at decode rows 1 to 16 (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    // a GPU test past others in one process starts and ends with no engine cached (`root.releaseEngines`)
+    root.releaseEngines();
+    defer root.releaseEngines();
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
     const a = std.heap.page_allocator;
@@ -932,6 +953,9 @@ fn wordsDiffer(p: []const f32, q: []const f32) usize {
 
 test "turboexl3 gpu ling served operands: the shared expert, the pairs and the one-row table on the pack's I16 trellis words and [1, rows, in] activations (whole or a row view) give their composed chains' words and those of U16 words on [rows, in] rows (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    // a GPU test past others in one process starts and ends with no engine cached (`root.releaseEngines`)
+    root.releaseEngines();
+    defer root.releaseEngines();
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
     const a = std.heap.page_allocator;
@@ -1145,6 +1169,9 @@ fn preparedRows(g: *G, s: mlx.mlx_stream, d: *dense.Dense, x: mlx.mlx_array, suh
 // words that differ from the clean `linear`'s. Lines: TURBOEXL3_LING_KDA_EPI_OPROJ (80), _RED (1), _DONE.
 test "turboexl3 gpu ling kda epilogue o_proj: linearFromPrepared over prep_sc's rows gives linear's words at every Ling-3.1-flash trunk shape, rows 1 to 4, x bf16 and f32, on the pack's I16 trellis words under the served Config; a flipped input word differs (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    // a GPU test past others in one process starts and ends with no engine cached (`root.releaseEngines`)
+    root.releaseEngines();
+    defer root.releaseEngines();
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
     const a = std.heap.page_allocator;
@@ -1225,6 +1252,9 @@ const kdaproj_rows = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 16 };
 
 test "turboexl3 gpu ling kda proj: q|k|v, f and g in one launch give each member's linear bytes, after its own prepare and over each member's own prep_sc rows joined, at decode rows 1 to 8 and 16 (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    // a GPU test past others in one process starts and ends with no engine cached (`root.releaseEngines`)
+    root.releaseEngines();
+    defer root.releaseEngines();
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
     const a = std.heap.page_allocator;
@@ -1444,6 +1474,9 @@ const PromptLinear = struct {
 // the register-path GEMM and MLX's split-K matmul sum in other orders, and their lines say whether the words still match.
 test "turboexl3 gpu ling prompt linears: a prompt call's rows of root.linear have the whole-prompt call's bytes at every EXL3 trunk shape the 2.60 pack serves at prompt rows, where both run MLX's regular matmul (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    // a GPU test past others in one process starts and ends with no engine cached (`root.releaseEngines`)
+    root.releaseEngines();
+    defer root.releaseEngines();
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
     const a = std.heap.page_allocator;
@@ -1597,6 +1630,9 @@ fn drawDecodePairs(rnd: std.Random, rows: u32, k: u32, pool: []const u32, ids: [
 // Each line: min and median us per call (deepseek_test's timeIt). TURBOEXL3_LING_N (default 40,32) narrows the rates.
 test "turboexl3 gpu ling timing: every trunk linear, moeLing and moeLingBanked at Ling-3.1-flash's shapes (TURBOEXL3_LING_TIME=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    // a GPU test past others in one process starts and ends with no engine cached (`root.releaseEngines`)
+    root.releaseEngines();
+    defer root.releaseEngines();
     _ = std.c.getenv("TURBOEXL3_LING_TIME") orelse return error.SkipZigTest;
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
@@ -1958,6 +1994,9 @@ fn chainForward(g: *G, s: mlx.mlx_stream, layers: []const ChainLayer, ids: []con
 // recurrence and its gates, the norms, the router and the streamer's routing barriers.
 test "turboexl3 gpu ling timing: the decode forward's linears over 72 layers chained in one evaluation (TURBOEXL3_LING_TIME=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    // a GPU test past others in one process starts and ends with no engine cached (`root.releaseEngines`)
+    root.releaseEngines();
+    defer root.releaseEngines();
     _ = std.c.getenv("TURBOEXL3_LING_TIME") orelse return error.SkipZigTest;
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
@@ -2172,6 +2211,9 @@ fn lingTrunkMin(g: *G, s: mlx.mlx_stream, layers: []const ChainLayer, head: root
 // against the served chain in interleaved rounds. Lines: TURBOEXL3_LING_GEMV, _BEST, _TABLE.
 test "turboexl3 gpu ling timing: the dense decode GEMV's launch shapes per trunk shape on the 72-layer chain, rows 1..8 (TURBOEXL3_LING_TIME=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    // a GPU test past others in one process starts and ends with no engine cached (`root.releaseEngines`)
+    root.releaseEngines();
+    defer root.releaseEngines();
     _ = std.c.getenv("TURBOEXL3_LING_TIME") orelse return error.SkipZigTest;
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
@@ -2278,6 +2320,9 @@ fn bytesDifferF32(p: []const f32, q: []const f32) usize {
 // the one kept was the fastest at every row count (strip2). Guidance; the standard test decides the switch.
 test "turboexl3 gpu ling timing: D1, the MTP head's latent attention on the matrix units at rows 1 to 5 over 18,380 keys (TURBOEXL3_LING_TIME=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    // a GPU test past others in one process starts and ends with no engine cached (`root.releaseEngines`)
+    root.releaseEngines();
+    defer root.releaseEngines();
     _ = std.c.getenv("TURBOEXL3_LING_TIME") orelse return error.SkipZigTest;
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;

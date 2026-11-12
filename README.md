@@ -29,6 +29,7 @@ first decode its code into a number. turboexl3 decodes the codes inside its own 
 | Qwen3.8-Flash-Next | routed experts, the fused shared expert and router, the dense trunk, the attention projections, the decode-row merges, the GDN tail | [docs/models/qwen38](docs/models/qwen38/README.md) |
 | Ricursive Ripple-65B | the dense linears at K3 and the K6 head, q \| g and k \| v in joined launches, the value residual and the clamped SwiGLU in the prepares | [docs/models/ricursive](docs/models/ricursive/README.md) |
 | DeepSeek-V4.1 | the clamped routed experts, the banked decode, the dense trunk, the grouped `wo_a`, F3 | [docs/models/deepseek_v41](docs/models/deepseek_v41/README.md) |
+| GLM-5.3-Flash | the clamped routed experts at every rate of turboderp's self-calibrated packs, the banked decode, the dense trunk, head, MTP layer and vision tower | [docs/models/glm53f](docs/models/glm53f/README.md) |
 
 One host reference holds every kernel to the same numbers: `format.project`, a port of Sushi's EXL3 reference. A kernel
 that replaces a chain of other kernels is byte-identical to that chain; a kernel that sums in its own order stays within

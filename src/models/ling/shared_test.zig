@@ -138,6 +138,9 @@ fn wordsDiffer(a: std.mem.Allocator, g: *G, x: A, y: A, n: usize) !usize {
 
 test "turboexl3 gpu ling shared: the gate and the up in one launch with the host's SwiGLU and the down's prepare in their pairs' second finishes, then the down, give the composed shared expert's words at rows 1 to 4, limits 0 and 10 (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    // a GPU test past others in one process starts and ends with no engine cached (`root.releaseEngines`)
+    root.releaseEngines();
+    defer root.releaseEngines();
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
     const a = std.heap.page_allocator;

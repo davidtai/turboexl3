@@ -104,6 +104,9 @@ fn differ(a: std.mem.Allocator, g: *G, got: T, want: T) !usize {
 
 test "turboexl3 gpu ling bproj: kdaProjB's b_proj member is the served b_proj (one-row matmul, the exact verify's denseRows) and its three members kdaProj's, word for word at rows 1 to 8, operands as the loader keeps them (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    // a GPU test past others in one process starts and ends with no engine cached (`root.releaseEngines`)
+    root.releaseEngines();
+    defer root.releaseEngines();
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
     const a = std.heap.page_allocator;

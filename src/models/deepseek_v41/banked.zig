@@ -177,6 +177,10 @@ const down3g_3 = @embedFile("kernels/banked/down3g_3.metal");
 const gu3g_3m3 = @embedFile("kernels/banked/gu3g_3m3.metal");
 const down3g_3m3 = @embedFile("kernels/banked/down3g_3m3.metal");
 
+/// wave3 (`Config.banked_wave3`): the whole grouped call in three launches, each finish run by its unit's last arriving
+/// GEMV threadgroup (`Banked.wave3`, `bankedMoeSelV`)
+const banked_wave3 = @import("banked_wave3.zig");
+
 /// The most row-slots a banked call takes (an expert streamer's route: 8 verify rows of top-6 = 48 pairs)
 pub const banked_rows_max: usize = 64;
 /// The banked texts' kernels (`text_prep2b` .. `text_dfin3b`)
@@ -189,6 +193,9 @@ pub const BankedKernels = struct {
 };
 /// A grouped GEMV variant's two kernels (`banked_gv`, `banked_gvm3`)
 pub const GroupGemvs = struct { gu: mlx.mlx_fast_metal_kernel, down: mlx.mlx_fast_metal_kernel };
+
+/// The persistent grouped GEMVs (`Config.banked_ptg`): their texts, kernels and configs (`Banked.ptg`)
+const banked_ptg = @import("banked_ptg.zig");
 
 /// A geometry's banked state beside its `Kernels3`: the banked kernels and configs, made on first use.
 pub const Banked = struct {
@@ -208,19 +215,29 @@ pub const Banked = struct {
     banked_m3: bool = false,
     banked_gm3: ?BankedKernels = null,
     cfgbgm3: [banked_rows_max + 1]?Cfg = @splat(null),
+    /// wave3 (`Config.banked_wave3`, read at the geometry's first whole call; banked_wave3.zig): the whole call
+    /// (`bankedMoeSelV`) on the grouped texts as three launches, its kernels and configs made on first use. The same hd,
+    /// hs and y.
+    wave3: banked_wave3.Wave3 = .{},
     /// hw2: each grouped GEMV variant's gate|up and down kernels on today's grouped texts (`banked_gv`) and on hw4b's
     /// (`banked_gvm3`) (`group_variants`; `bankedGateUpSelV`, `bankedDownSelV`), made on first use (variant 0's are
     /// `banked_g`'s and `banked_gm3`'s). The configs are their texts' (`cfgbg`, `cfgbgm3`).
     banked_gv: [group_variants.len]?GroupGemvs = @splat(null),
     banked_gvm3: [group_variants.len]?GroupGemvs = @splat(null),
+    /// At `banked_group` 4, the grouped GEMVs as persistent threadgroups (banked_ptg.zig: `ptg`'s kernels and configs, on
+    /// today's grouped texts or hw4b's with `banked_m3`; prep2bg, fin7cbg and dfin3bg `banked_g`'s). The same bytes for
+    /// every row-slot.
+    banked_ptg: bool = false,
+    ptg: banked_ptg.Ptg = .{},
 
-    /// The banked state for the process's `Kernels3` of a geometry (`forKernels`): `Config.banked_group` and
-    /// `banked_m3` as configured when it is made
+    /// The banked state for the process's `Kernels3` of a geometry (`forKernels`): `Config.banked_group`, `banked_m3` and
+    /// `banked_ptg` as configured when it is made
     pub fn init() Banked {
-        return .{ .banked_group = config.get().banked_group, .banked_m3 = config.get().banked_m3 };
+        return .{ .banked_group = config.get().banked_group, .banked_m3 = config.get().banked_m3, .banked_ptg = config.get().banked_ptg };
     }
 
     pub fn deinit(self: *Banked) void {
+        self.wave3.deinit();
         for ([_]*[banked_rows_max + 1]?Cfg{ &self.cfgb, &self.cfgbg, &self.cfgbgm3 }) |tbl| for (tbl) |*c| if (c.*) |cc| {
             inline for (.{ cc.prep_h, cc.gu, cc.fin, cc.down, cc.dfin, cc.fin7, cc.dfin7, cc.gu8 }) |k| _ = mlx.mlx_fast_metal_kernel_config_free(k);
             c.* = null;
@@ -238,6 +255,7 @@ pub const Banked = struct {
             freeKernel(gg.down);
             g.* = null;
         };
+        self.ptg.deinit();
         if (self.banked_ones) |o| _ = mlx.mlx_array_free(o);
         self.* = undefined;
     }
@@ -346,42 +364,57 @@ pub const Banked = struct {
         return c;
     }
 
-    /// Which banked texts a call runs (`bankedGateUpSel`, `bankedDownSel`): `configured` (`banked_group`, `banked_m3`),
-    /// today's grouped texts (`g4`) or hw4b's (`g4m3`: the M = 3 path). Every selection gives a row-slot the same bytes.
-    pub const BankedSel = enum { configured, g4, g4m3 };
-    /// A set's texts: the banked ones (GROUP 2), today's grouped ones or hw4b's (the texts hw2's variants run on)
-    pub const Texts = enum { banked, g4, g4m3 };
+    /// Which banked texts a call runs (`bankedGateUpSel`, `bankedDownSel`): `configured` (`banked_group`, `banked_m3`,
+    /// `banked_ptg`), today's grouped texts (`g4`), hw4b's (`g4m3`: the M = 3 path), or either with the persistent grouped
+    /// GEMVs (`g4p`, `g4m3p`). Every selection gives a row-slot the same bytes.
+    pub const BankedSel = enum { configured, g4, g4m3, g4p, g4m3p };
+    /// A set's texts: the banked ones (GROUP 2), today's grouped ones or hw4b's, or either's persistent GEMVs (the texts
+    /// hw2's variants run on)
+    pub const Texts = enum { banked, g4, g4m3, g4p, g4m3p };
 
     /// The texts a call on `sel` runs (`bankedSetSel`'s choice, read without a launch): a test's check that an arm ran the
-    /// texts it names (`configured` follows `banked_group` and `banked_m3` as this state took them at its first call).
+    /// texts it names (`configured` follows `banked_group`, `banked_m3` and `banked_ptg` as this state took them at its
+    /// first call).
     pub fn selTexts(self: *const Banked, sel: BankedSel) Texts {
         return switch (sel) {
-            .configured => if (self.banked_group == 4) (if (self.banked_m3) .g4m3 else .g4) else .banked,
+            .configured => if (self.banked_group == 4) (if (self.banked_ptg) (if (self.banked_m3) Texts.g4m3p else .g4p) else if (self.banked_m3) Texts.g4m3 else .g4) else .banked,
             .g4 => .g4,
             .g4m3 => .g4m3,
+            .g4p => .g4p,
+            .g4m3p => .g4m3p,
         };
     }
 
-    const BankedSet = struct { k: *const BankedKernels, c: Cfg, texts: Texts };
+    const BankedSet = struct { k: BankedKernels, c: Cfg, texts: Texts };
 
     /// The banked launches and configs at `banked_group`: the banked texts at 2, the grouped texts at 4 (hw4b's with
     /// `banked_m3`).
     fn bankedSet(self: *Banked, k3: *Kernels3, rows: usize) !BankedSet {
         return switch (self.banked_group) {
-            2 => .{ .k = try self.bankedKernels(k3), .c = try self.cfgsBanked(k3, rows), .texts = .banked },
-            4 => if (self.banked_m3) self.gm3Set(k3, rows) else self.g4Set(k3, rows),
+            2 => .{ .k = (try self.bankedKernels(k3)).*, .c = try self.cfgsBanked(k3, rows), .texts = .banked },
+            4 => if (self.banked_ptg) self.gpSet(k3, rows, self.banked_m3) else if (self.banked_m3) self.gm3Set(k3, rows) else self.g4Set(k3, rows),
             else => error.BadExl3Shape,
         };
     }
 
     /// Today's grouped texts at GROUP 4.
     fn g4Set(self: *Banked, k3: *Kernels3, rows: usize) !BankedSet {
-        return .{ .k = try self.bankedKernelsG(k3), .c = try self.cfgsBankedG(k3, rows), .texts = .g4 };
+        return .{ .k = (try self.bankedKernelsG(k3)).*, .c = try self.cfgsBankedG(k3, rows), .texts = .g4 };
     }
 
     /// hw4b's texts at GROUP 4.
     fn gm3Set(self: *Banked, k3: *Kernels3, rows: usize) !BankedSet {
-        return .{ .k = try self.bankedKernelsGM3(k3), .c = try self.cfgsBankedGM3(k3, rows), .texts = .g4m3 };
+        return .{ .k = (try self.bankedKernelsGM3(k3)).*, .c = try self.cfgsBankedGM3(k3, rows), .texts = .g4m3 };
+    }
+
+    /// The persistent GEMVs (`ptg`'s variant 0) on today's grouped texts or, `m3`, on hw4b's, beside today's grouped
+    /// prep2bg, fin7cbg and dfin3bg, at GROUP 4 on `ptg`'s configs.
+    fn gpSet(self: *Banked, k3: *Kernels3, rows: usize, m3: bool) !BankedSet {
+        var k = (try self.bankedKernelsG(k3)).*;
+        const p = try self.ptg.gemvs(0, m3);
+        k.gu = p.gu;
+        k.down = p.down;
+        return .{ .k = k, .c = try self.ptg.cfgs(k3, rows), .texts = if (m3) .g4m3p else .g4p };
     }
 
     /// `sel`'s launches and configs (`configured`: `bankedSet`'s).
@@ -390,6 +423,8 @@ pub const Banked = struct {
             .configured => self.bankedSet(k3, rows),
             .g4 => self.g4Set(k3, rows),
             .g4m3 => self.gm3Set(k3, rows),
+            .g4p => self.gpSet(k3, rows, false),
+            .g4m3p => self.gpSet(k3, rows, true),
         };
     }
 
@@ -398,10 +433,10 @@ pub const Banked = struct {
     fn bankedSetSelV(self: *Banked, k3: *Kernels3, rows: usize, sel: BankedSel, variant: u8) !struct { k: BankedKernels, c: Cfg, texts: Texts } {
         if (variant >= group_variants.len) return error.BadExl3Shape;
         const set = try self.bankedSetSel(k3, rows, sel);
-        var k = set.k.*;
+        var k = set.k;
         if (variant != 0) {
             if (set.texts == .banked) return error.BadExl3Shape;
-            const g = try self.groupGemvs(variant, set.texts == .g4m3);
+            const g = if (set.texts == .g4p or set.texts == .g4m3p) try self.ptg.gemvs(variant, set.texts == .g4m3p) else try self.groupGemvs(variant, set.texts == .g4m3);
             k.gu = g.gu;
             k.down = g.down;
         }
@@ -511,6 +546,34 @@ pub const Banked = struct {
         defer _ = mlx.mlx_array_free(zd);
         return one(k.dfin, c.dfin, &.{ zd, ids, ones, b[0].down_svh, b[1].down_svh, b[2].down_svh, hs }, s);
     }
+
+    /// The whole banked call on `sel`'s texts with the grouped GEMVs of `vgu` (gate|up) and `vdn` (down): hd, hs and y,
+    /// as the five launches (`bankedGateUpSelV`, then `bankedDownSelV`) or, `wave3`, as banked_wave3.zig's three on the
+    /// same grouped texts and variants (`wave3Texts`): the same words either way. The caller frees all three.
+    pub fn bankedMoeSelV(self: *Banked, k3: *Kernels3, s: mlx.mlx_stream, x: mlx.mlx_array, ids: mlx.mlx_array, banks: *const [3]Kernels.Bank, rows: usize, sel: BankedSel, vgu: u8, vdn: u8, wave3: bool) ![3]mlx.mlx_array {
+        if (wave3) return self.wave3.moe(k3, s, x, ids, banks, rows, try self.wave3Texts(sel), vgu, vdn, try self.bankedOnes());
+        const h = try self.bankedGateUpSelV(k3, s, x, ids, banks, rows, sel, vgu);
+        errdefer for (h) |a| {
+            _ = mlx.mlx_array_free(a);
+        };
+        const y = try self.bankedDownSelV(k3, s, h[0], h[1], ids, banks, rows, sel, vdn);
+        return .{ h[0], h[1], y };
+    }
+
+    /// Whether the whole call runs wave3 here: `Config.banked_wave3` as configured at this geometry's first whole call
+    pub fn wave3On(self: *Banked) bool {
+        return self.wave3.configured();
+    }
+
+    /// The grouped texts wave3 runs for `sel`: today's (g4) or hw4b's (g4m3), `configured` the ones `banked_group` 4
+    /// runs (hw4b's with `banked_m3`); the banked texts (`banked_group` 2) and any other selection
+    /// error.Exl3EngineNotImplemented, before a launch.
+    fn wave3Texts(self: *const Banked, sel: BankedSel) !banked_wave3.Texts {
+        if (sel == .g4) return .g4;
+        if (sel == .g4m3) return .g4m3;
+        if (sel == .configured and self.banked_group == 4) return if (self.banked_m3) .g4m3 else .g4;
+        return error.Exl3EngineNotImplemented;
+    }
 };
 
 /// A geometry's `Kernels3` and its banked state owned together (a caller that builds its own, as the tests do)
@@ -556,6 +619,16 @@ fn sayVariant(half: enum { gate_up, down }, variant: u8, texts: Banked.Texts) vo
     if ((variant_said.get().* & bit) != 0) return;
     variant_said.get().* |= bit;
     std.debug.print("[turboexl3] banked variant engaged: the grouped {s} GEMV on variant {s} ({s} texts)\n", .{ @tagName(half), group_variants[variant].name, @tagName(texts) });
+}
+
+/// Every banked state freed (`root.releaseEngines`, before the `Kernels3` they sit beside): no call in flight.
+pub fn releaseAll() void {
+    while (cache_lock.get().*.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
+    defer cache_lock.get().*.store(0, .release);
+    for (&cache.get().*) |*slot| if (slot.*) |*e| {
+        e.b.deinit();
+        slot.* = null;
+    };
 }
 
 /// This file's module state (`Global`): what a host that shares its units' state registers.

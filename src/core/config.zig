@@ -24,6 +24,46 @@ pub const Config = struct {
     /// (an expert streamer's prompt calls, `moeSwigluRows`, or `moe` at top-1), the down launch writing y; a call can
     /// decline it (`prefill.Call`, the `...With` entries) for the served ending of the same engine. The same bytes.
     pf_dfin: bool = false,
+    /// The routed prefill's down GEMM in 128-deep K stages (`prefill.Options.bk128`: two 64-deep sub-stages per buffer
+    /// between barriers). The same bytes.
+    pf_bk128: bool = false,
+    /// A routed prefill simdgroup whose rows end within its first 16 multiplies only that fragment row
+    /// (`prefill.Options.half_rows`). The same bytes.
+    pf_half_rows: bool = false,
+    /// Both routed prefill GEMMs' 128-row tile launches in 128-deep K stages, the mixed launches at their own depth
+    /// (`prefill.Options.t128_bk128`; with `pf_t128`). The same bytes.
+    pf_t128_bk128: bool = false,
+    /// Beside the 128-row tiles, the mixed launch's outputs at the rows they hold (`prefill.Options.t128_zfit`; with
+    /// `pf_t128`): each expert's remainder back to back, in arrays of `prefill.t128ZCap` rows where the caller names the
+    /// call's experts (`root.moeClampedRowsFit`). The same bytes.
+    pf_t128_zfit: bool = false,
+    /// The routed prefill's row-slot-sized arrays (prep's, both GEMMs' and mid's outputs, and y) allocated at the call's
+    /// row-slots rounded up to a multiple of `prefill.size_class_rows` (`prefill.Options.size_class`; with `pf_t128`,
+    /// without `pf_t128_zfit`): successive calls' buffers then match MLX's cache, which reuses a buffer only within two
+    /// pages of a request. The kernels run over the call's rows and nothing reads the padding. The same bytes.
+    pf_size_class: bool = false,
+    /// The routed prefill's gate|up and down GEMMs on int8 (`prefill.Options.int8`, with `pf_t128` and without
+    /// `pf_t128_zfit`; lossy): 1 each activation 128-block at its own scale, 2 one scale a row (per token); 0 the exact chain.
+    pf_int8: u8 = 0,
+    /// The int8 GEMMs' weight center, doubled (`prefill.Options.int8_c2`, trunk_q8.zig's GEMMs): a MUL1 weight is int8
+    /// q = round((t - 510) / 4) of its byte sum t, halves rounded up, and each epilogue rebuilds it as 4 A q + (c A + C).
+    /// 1020 (c = 510: the texts GLM-5.3-Flash serves, half a unit of t high on average) or 1019 (c = 509.5, centered: the
+    /// texts' `_c` variants, the center a template argument). int8_center.zig pins both over every codeword.
+    pf_int8_c2: u16 = 1020,
+    /// A dense linear's prefill rows on int8 at the host's shapes (`trunk_q8.shapes`; lossy): `Dense.linearOn`'s matmul
+    /// path as trunk_q8.zig's int8 prepare (one scale a row), int8 decode and int8 GEMM with the finish, on MUL1 packs on the
+    /// NAX path; false (or a shape the host did not name) the chain.
+    pf_trunk_int8: bool = false,
+    /// With `pf_trunk_int8`, at its shapes: also the inner products a host splits off `linear` at prefill rows (lossy):
+    /// `Dense.innerOf` and `innerOn` on the matmul path, the row pieces (`root.linearPiecesBegin` hands them int8 wq), and
+    /// ATTN-IN's and ATTN-OUT's GEMMs (`attn_io.prefillInner`) on trunk int8's launches up to z, the host's finish after
+    /// (trunk_q8.zig's module comment). False keeps them on the chain.
+    pf_trunk_int8_inner: bool = false,
+    /// The routed prefill's deferred MUL1 map (`prefill.Options.defer_affine`): its GEMMs sum each input times a codeword's
+    /// byte sum and apply the affine map once per output. False decodes every weight to its f16 value first (the reference's
+    /// rounding, the dense prefill's): exact either way, a rounding apart, the floor arm beside an int8 arm's NLL. The routed
+    /// int8 GEMMs need the map (`pf_int8` is refused without it).
+    pf_defer_affine: bool = true,
     /// Routed prefill rows on the fused GEMM chain; false refuses them (`error.Exl3EngineNotImplemented`).
     prefill: bool = true,
     /// The device passes MLX's NAX gate (an M5-class GPU and macOS 26.2 or later), the consumer's to say. False keeps
@@ -42,6 +82,13 @@ pub const Config = struct {
     /// group of up to 4 rows, every weight word read once for them, each row's statements the served launch's. The same
     /// bytes.
     router_rows: bool = false,
+    /// DEC-ONE's GEMV variant (`dense.dec_variants`, `dense_variants` of them; 0 today's): another schedule of the same
+    /// reads, decodes and sums, so the same bytes. A dense shape's engine reads it when it is made.
+    dense_variant: u8 = 0,
+    /// DEC-ONE's output tiles per GEMV threadgroup at each decode row count (index: the call's rows, 1 to 4; 0 the
+    /// default, `dense.Dense.btFor`'s): 1, 2, 4 or 8. Launch shape only (a row's sums do not depend on it), so the same
+    /// bytes. A dense shape's engine reads it when it is made.
+    dec_bt: [5]u8 = @splat(0),
     /// The row chunks of the dense decode GEMV chain: at most 8 rows, a chunk of 6 to 8 rows on the lean GEMV text (its
     /// codeword loop by input element); false keeps chunks of at most 5 rows, all on the plain GEMV text. The same bytes.
     dense_lean: bool = true,
@@ -73,9 +120,18 @@ pub const Config = struct {
     /// and the token's one roped key read in place, the expanded key never built); off refuses the calls. The same bytes
     /// as `ling.mlaFlashPrefill` over the expanded key.
     mla_rope_once: bool = false,
+    /// The grouped banked GEMVs as persistent threadgroups (`banked_ptg.text_gu3bgp`, `text_down3bgp`, or hw4b's with
+    /// `banked_m3`): each runs the call's work items in turn from one lead list, so no threadgroup runs for a row-slot that
+    /// leads nothing and no work item scans its members. The same work items, so the same bytes. Needs `banked_group` 4.
+    banked_ptg: bool = false,
     /// A diagnostic: each routed decode call's routing read back (a sync per call), its expert multiplicities printed
     /// every 480 calls.
     slot_stats: bool = false,
+    /// wave3: the whole banked call (`moeClampedBanked`, `moeClampedBankedAs`) on the grouped texts in three launches
+    /// where five run (models/deepseek_v41/banked_wave3.zig): prep2bg zeroing the arrival counters, then each GEMV with
+    /// its finish run by the last threadgroup to arrive at each finish unit (fin7's after the gate|up, dfin3's after the
+    /// down). The same words. Needs `banked_group` 4; a geometry's banked state reads it at its first whole call.
+    banked_wave3: bool = false,
     /// A diagnostic: the first 512 routed prefill calls' routing written under this directory (a sync per call).
     pf_capture_dir: ?[]const u8 = null,
 
@@ -84,15 +140,34 @@ pub const Config = struct {
         const forms = [_]u8{ 3, 5, 6, 7, 8, 9 };
         const spts = [_]u32{ 1, 2, 4, 5, 10, 20 };
         return std.mem.indexOfScalar(u8, &forms, c.decode_form) != null and
-            std.mem.indexOfScalar(u32, &spts, c.shared_spt) != null and c.pf_alay <= 2 and
+            std.mem.indexOfScalar(u32, &spts, c.shared_spt) != null and c.pf_alay <= 2 and c.pf_int8 <= 2 and
+            (c.pf_int8_c2 == 1020 or c.pf_int8_c2 == 1019) and (!c.pf_trunk_int8_inner or c.pf_trunk_int8) and
+            (c.pf_defer_affine or c.pf_int8 == 0) and
             (c.banked_group == 2 or c.banked_group == 4) and (!c.banked_m3 or c.banked_group == 4) and
+            (!c.banked_ptg or c.banked_group == 4) and
             c.banked_variant_gu < banked_variants and c.banked_variant_dn < banked_variants and
-            ((c.banked_variant_gu == 0 and c.banked_variant_dn == 0) or c.banked_group == 4);
+            ((c.banked_variant_gu == 0 and c.banked_variant_dn == 0) or c.banked_group == 4) and
+            c.dense_variant < dense_variants and decBtValid(c.dec_bt) and
+            (!c.banked_wave3 or (c.banked_group == 4 and !ptgSet(c)));
+    }
+
+    /// Whether `c` also names the persistent grouped GEMVs (`banked_ptg`, where this build has that field; false where
+    /// it has none): wave3 runs GEMV grids of its own, so a configuration naming both is refused
+    fn ptgSet(c: Config) bool {
+        return if (@hasField(Config, "banked_ptg")) c.banked_ptg else false;
+    }
+
+    fn decBtValid(bt: [5]u8) bool {
+        if (bt[0] != 0) return false;
+        for (bt[1..]) |b| if (b != 0 and b != 1 and b != 2 and b != 4 and b != 8) return false;
+        return true;
     }
 };
 
 /// The grouped banked GEMVs' variant count (`decode.group_variants.len`, checked there).
 pub const banked_variants: u8 = 12;
+/// DEC-ONE's GEMV variant count (`dense.dec_variants.len`, checked there).
+pub const dense_variants: u8 = 8;
 
 const current = Global(Config, "config_current", .{});
 
@@ -119,6 +194,16 @@ test "turboexl3 config: the defaults are valid and served; an unserved form, sli
     try t.expect(!(Config{ .pf_alay = 3 }).valid());
     // the routed prefill's fused finish: off by default
     try t.expect(!d.pf_dfin and (Config{ .pf_dfin = true }).valid());
+    // the int8 center: 510 (today's texts) by default, 509.5 served, any other refused
+    try t.expectEqual(@as(u16, 1020), d.pf_int8_c2);
+    try t.expect((Config{ .pf_int8 = 1, .pf_int8_c2 = 1019 }).valid());
+    for ([_]u16{ 0, 1018, 1021, 510 }) |c2| try t.expect(!(Config{ .pf_int8_c2 = c2 }).valid());
+    // trunk int8's inner products ride trunk int8; the routed int8 rides the deferred map
+    try t.expect(!d.pf_trunk_int8_inner and d.pf_defer_affine);
+    try t.expect((Config{ .pf_trunk_int8 = true, .pf_trunk_int8_inner = true }).valid());
+    try t.expect(!(Config{ .pf_trunk_int8_inner = true }).valid());
+    try t.expect((Config{ .pf_defer_affine = false }).valid());
+    try t.expect(!(Config{ .pf_defer_affine = false, .pf_int8 = 1 }).valid());
     try t.expectEqual(@as(u32, 2), d.banked_group);
     try t.expect((Config{ .banked_group = 4 }).valid());
     for ([_]u32{ 0, 1, 3, 8 }) |g| try t.expect(!(Config{ .banked_group = g }).valid());
@@ -147,6 +232,14 @@ test "turboexl3 config: the defaults are valid and served; an unserved form, sli
     try t.expect((Config{ .mla_latent_nax = true, .mla_latent_stage = true }).valid());
     try t.expect(!d.mla_rope_once);
     try t.expect((Config{ .mla_rope_once = true }).valid());
+    // DEC-ONE's variants and output tiles: today's by default, every variant and tile count served, others refused
+    try t.expectEqual(@as(u8, 0), d.dense_variant);
+    try t.expectEqualSlices(u8, &.{ 0, 0, 0, 0, 0 }, &d.dec_bt);
+    for (0..dense_variants) |v| try t.expect((Config{ .dense_variant = @intCast(v) }).valid());
+    try t.expect(!(Config{ .dense_variant = dense_variants }).valid());
+    for ([_]u8{ 1, 2, 4, 8 }) |b| try t.expect((Config{ .dec_bt = .{ 0, b, b, b, b } }).valid());
+    for ([_]u8{ 3, 5, 16 }) |b| try t.expect(!(Config{ .dec_bt = .{ 0, 0, 0, b, 0 } }).valid());
+    try t.expect(!(Config{ .dec_bt = .{ 2, 0, 0, 0, 0 } }).valid());
     const saved = current.get().*;
     defer current.get().* = saved;
     try t.expectError(error.InvalidTurboexl3Config, configure(.{ .decode_form = 4 }));

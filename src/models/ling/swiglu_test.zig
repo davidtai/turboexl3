@@ -166,6 +166,9 @@ const test_rows = [_]u32{ 17, 31, 32, 33, 100, 1965, 4096, 16384 };
 
 test "turboexl3 gpu ling swiglu epi: up's finish running the host's SwiGLU gives the composed chain's words at the shared expert's and the dense layers' shapes, rows 17 to 16384, limits 0 and 10 (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    // a GPU test past others in one process starts and ends with no engine cached (`root.releaseEngines`)
+    root.releaseEngines();
+    defer root.releaseEngines();
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
     const a = std.heap.page_allocator;
@@ -235,6 +238,9 @@ test "turboexl3 gpu ling swiglu epi: up's finish running the host's SwiGLU gives
 
 test "turboexl3 gpu ling swiglu epi over a given W_hat: upSwigluW over the trellis's W_hat, decoded once and read by every call, gives upSwiglu's words at the matmul path's rows (33, 1965, 4096), the shared expert's shape at limits 0 and 10 and the dense layers' at 0; null at the GEMV's and the register path's rows; its refusals (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    // a GPU test past others in one process starts and ends with no engine cached (`root.releaseEngines`)
+    root.releaseEngines();
+    defer root.releaseEngines();
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
     const a = std.heap.page_allocator;
@@ -295,6 +301,9 @@ test "turboexl3 gpu ling swiglu epi over a given W_hat: upSwigluW over the trell
 
 test "turboexl3 gpu ling swiglu timing: up's linear and the host's SwiGLU against upSwiglu at the shared expert's and the dense layers' shapes, rows 4096 and 16384 (TURBOEXL3_LING_TIME=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    // a GPU test past others in one process starts and ends with no engine cached (`root.releaseEngines`)
+    root.releaseEngines();
+    defer root.releaseEngines();
     _ = std.c.getenv("TURBOEXL3_LING_TIME") orelse return error.SkipZigTest;
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;

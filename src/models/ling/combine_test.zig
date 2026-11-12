@@ -13,6 +13,7 @@ const std = @import("std");
 const sdk = @import("sdk");
 const mlx = sdk.mlx;
 const support = @import("../../core/test_support.zig");
+const root = @import("../../root.zig");
 const G = support.Graph;
 const combine = @import("combine.zig");
 
@@ -155,6 +156,9 @@ fn compareWords(label: []const u8, n: usize, got: []const f32, want: []const f32
 
 test "turboexl3 gpu ling combine: combineRouted gives MLX's sum(multiply(astype(routed, f32), expand_dims(weights, -1)), -2) word for word at rows 1, 7, 4096 and 4097 over signed zeros, overflowing, tiny and denormal products and cancellations (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    // a GPU test past others in one process starts and ends with no engine cached (`root.releaseEngines`)
+    root.releaseEngines();
+    defer root.releaseEngines();
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
     const a = std.heap.page_allocator;
@@ -240,6 +244,9 @@ pub fn fillJoinlessLoc(rows: []const u32, src: []const u8, off: []const u32, pos
 
 test "turboexl3 gpu ling combine: combineParts over a wide call's unjoined outputs (5 read in place; 40 through the streamer's merge rule) gives the composed combine's bytes on the array the join builds (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    // a GPU test past others in one process starts and ends with no engine cached (`root.releaseEngines`)
+    root.releaseEngines();
+    defer root.releaseEngines();
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
     const a = std.heap.page_allocator;
@@ -334,6 +341,9 @@ test "turboexl3 gpu ling combine: combineParts over a wide call's unjoined outpu
 
 test "turboexl3 gpu ling combine: the refusals (K past 8, a shape or dtype off, no sources or more than 24) come before any launch (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    // a GPU test past others in one process starts and ends with no engine cached (`root.releaseEngines`)
+    root.releaseEngines();
+    defer root.releaseEngines();
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
     const a = std.heap.page_allocator;

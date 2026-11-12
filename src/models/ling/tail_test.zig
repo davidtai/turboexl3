@@ -109,6 +109,9 @@ fn check(a: std.mem.Allocator, g: *G, s: mlx.mlx_stream, h: mlx.mlx_array, ro: m
 
 test "turboexl3 gpu ling tail: moeTail gives the served chain's words (the source's routed sum, the astype, the shared add, then MLX's add and fast rms_norm, the add_norm's words) at rows 1 to 8, limits 0 and 10, the join's rows and flat rows, and planted signed zeros (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    // a GPU test past others in one process starts and ends with no engine cached (`root.releaseEngines`)
+    root.releaseEngines();
+    defer root.releaseEngines();
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
     const a = std.heap.page_allocator;
@@ -279,6 +282,9 @@ fn checkParts(a: std.mem.Allocator, g: *G, s: mlx.mlx_stream, h: mlx.mlx_array, 
 // streamer's join of them, wherever the miss parts' rows replace the device wave's; and it refuses what it cannot take.
 test "turboexl3 gpu ling tail parts: moeTailParts reads each pair's row in place from the call's unjoined outputs, the words of the served chain and of moeTail over the streamer's join (take of the concatenate at each pair's last carrier), at rows 1 to 8, limits 0 and 10, one to three sources and all eight, and its refusals (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    // a GPU test past others in one process starts and ends with no engine cached (`root.releaseEngines`)
+    root.releaseEngines();
+    defer root.releaseEngines();
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
     const a = std.heap.page_allocator;
@@ -598,6 +604,9 @@ fn refuses(r: anyerror!tail.Out, want: anyerror) bool {
 
 test "turboexl3 gpu ling tail wide: moeTailWide gives the served chain's words at prompt widths (the combine over the call's JOINLESS parts, the block's astype and shared add, MLX's add and fast rms_norm) at the standard request's spans 4096 x 4, 1965 and 31 over 24 merged sources, f16 and f32; a planted reordering of the norm shows, and its refusals (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    // a GPU test past others in one process starts and ends with no engine cached (`root.releaseEngines`)
+    root.releaseEngines();
+    defer root.releaseEngines();
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
     const a = std.heap.page_allocator;

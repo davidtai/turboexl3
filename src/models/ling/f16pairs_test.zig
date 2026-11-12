@@ -236,7 +236,7 @@ const CallPairs = struct {
 /// One chunk on engine `pf` at `out_dtype` through the row map, the call's ending as `call` asks: y [pairs, hidden] (a
 /// padded call's pad rows dropped)
 fn chunkRows(g: *G, pf: *prefill.Prefill, s: mlx.mlx_stream, xb: mlx.mlx_array, o: rt.RowsOps, ops: prefill.Operands, pairs: usize, out_dtype: mlx.mlx_dtype, call: prefill.Call) !mlx.mlx_array {
-    const y = try g.adopt(try pf.moeT128WithCall(s, xb, o.ids, o.sc, ops, o.n_call, out_dtype, o.rm, call));
+    const y = try g.adopt(try pf.moeT128WithCall(s, xb, o.ids, o.sc, ops, o.n_call, out_dtype, o.rm, null, call));
     if (!o.small) return y;
     return g.slice(y, &.{ 0, 0 }, &.{ ci(pairs), ci(hidden) }, &.{ 1, 1 });
 }
@@ -245,6 +245,9 @@ const ending_names = [_][]const u8{ "dfin", "served" };
 
 test "turboexl3 gpu ling f16 pairs: moeLingRowsPairsF16's f16 rows widen to the served f32 rows, and the JOINLESS combine over f16 sources gives the f32 sources' words, at the standard request's call (18,380 tokens at top-8 over 512), a 2,048-token call and a padded call, on both endings, with red checks (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    // a GPU test past others in one process starts and ends with no engine cached (`root.releaseEngines`)
+    root.releaseEngines();
+    defer root.releaseEngines();
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
     const a = std.heap.page_allocator;
@@ -385,7 +388,7 @@ fn redChecks(a: std.mem.Allocator, g: *G, s: mlx.mlx_stream, n: u32, xb: mlx.mlx
         _ = hostWeights(ca.len, &wv);
         for (wv[0..ca.len]) |*w| w.* = 0.3;
         const sc = try g.hostArray(std.mem.sliceAsBytes(wv[0..o.n_call]), &.{ci(o.n_call)}, .float32);
-        const y = try g.adopt(try pf.moeT128WithCall(s, xb, o.ids, sc, ops, o.n_call, .float32, o.rm, .{ .dfin = false }));
+        const y = try g.adopt(try pf.moeT128WithCall(s, xb, o.ids, sc, ops, o.n_call, .float32, o.rm, null, .{ .dfin = false }));
         const off = try notF16Words(a, g, y);
         const caught = refused and off > 0;
         std.debug.print("TURBOEXL3_LING_F16_PAIRS_RED n={d} fault=weight_not_1 refused={} f32_off_f16_grid_at_0.3={d}/{d} caught={}\n", .{ n, refused, off, mlx.mlx_array_size(y), caught });

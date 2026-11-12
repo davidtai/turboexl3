@@ -34,7 +34,7 @@ the down's DEC-ONE GEMV (`turboexl3_dense_dec0`).
 | made at | `src/models/ling/shared.zig:71` (`fn kernelOf`) |
 | inputs | `x`, `suh0`, `suh1`, `w`, `w1`, `svh0`, `svh1`, `suh2`, `sigtab`, `cnt`, `pcnt` |
 | outputs | `y`, `z`, `xsx`, `xp`, `xs` |
-| source | `text_sgu` = `dense/dec_head` ++ `ling:shared/msel` ++ `dense/dec_prep1` ++ `dense/dec_gemv1` ++ `dense/dec_gemv_arrive_1` ++ `ling:shared/mtile` ++ `dense/dec_gemv_arrive_2_1` ++ `dense/dec_gemv_arrive_2_2` ++ `dense/dec_xsum1` ++ `dense/dec_finish_v` ++ `ling:shared/sgu_store` ++ `ling:shared/sgu_pair_1` ++ `ling:shared/sgu_swiglu` ++ `ling:shared/sgu_pair_2` (11827 B, `9233e19e7283`) |
+| source | `text_sgu` = `dense/dec_head` ++ `ling:shared/msel` ++ `dense/dec_prep1_1` ++ `dense/dec_prep1_2` ++ `dense/dec_prep1_3` ++ `dense/dec_gemv1_head` ++ `dense/dec_gemv_loop` ++ `dense/dec_gemv1_x` ++ `dense/dec_gemv_arrive_1` ++ `ling:shared/mtile` ++ `dense/dec_gemv_arrive_2a` ++ `dense/dec_gemv_arrive_2b` ++ `dense/dec_gemv_arrive_2c` ++ `dense/dec_xsum1` ++ `dense/dec_finish_v` ++ `ling:shared/sgu_store` ++ `ling:shared/sgu_pair_1` ++ `ling:shared/sgu_swiglu` ++ `ling:shared/sgu_pair_2` (11827 B, `9233e19e7283`) |
 | header | `decode.header5` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` (26594 B, `41efbbbbd943`) |
 
 <!-- /kernel-facts -->
@@ -84,7 +84,7 @@ the down's DEC-ONE GEMV (`turboexl3_dense_dec0`).
 | made at | `src/models/ling/shared.zig:72` (`fn kernelOf`) |
 | inputs | `x`, `suh0`, `suh1`, `w`, `w1`, `svh0`, `svh1`, `suh2`, `sig32`, `lim`, `cnt`, `pcnt` |
 | outputs | `y`, `z`, `xsx`, `xp`, `xs` |
-| source | `text_sguco` = `dense/dec_head` ++ `ling:shared/msel` ++ `dense/dec_prep1` ++ `dense/dec_gemv1` ++ `dense/dec_gemv_arrive_1` ++ `ling:shared/mtile` ++ `dense/dec_gemv_arrive_2_1` ++ `dense/dec_gemv_arrive_2_2` ++ `dense/dec_xsum1` ++ `dense/dec_finish_v` ++ `ling:shared/sgu_store` ++ `ling:shared/sgu_pair_1` ++ `ling:shared/sgu_swiglu_clamp_out` ++ `ling:shared/sgu_pair_2` (12373 B, `22dd0e8c6666`) |
+| source | `text_sguco` = `dense/dec_head` ++ `ling:shared/msel` ++ `dense/dec_prep1_1` ++ `dense/dec_prep1_2` ++ `dense/dec_prep1_3` ++ `dense/dec_gemv1_head` ++ `dense/dec_gemv_loop` ++ `dense/dec_gemv1_x` ++ `dense/dec_gemv_arrive_1` ++ `ling:shared/mtile` ++ `dense/dec_gemv_arrive_2a` ++ `dense/dec_gemv_arrive_2b` ++ `dense/dec_gemv_arrive_2c` ++ `dense/dec_xsum1` ++ `dense/dec_finish_v` ++ `ling:shared/sgu_store` ++ `ling:shared/sgu_pair_1` ++ `ling:shared/sgu_swiglu_clamp_out` ++ `ling:shared/sgu_pair_2` (12373 B, `22dd0e8c6666`) |
 | header | `decode.header5` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` (26594 B, `41efbbbbd943`) |
 
 <!-- /kernel-facts -->
@@ -120,7 +120,7 @@ A KDA layer's z | a, the shared expert's gate | up and the dense FFN's gate | up
 | made at | `src/models/ling/pair.zig:66` (`fn kernelOf`) |
 | inputs | `jxp`, `jxs`, `w0`, `w1`, `svh0`, `svh1`, `cnt` |
 | outputs | `y`, `z` |
-| source | `text_jdec0` = `dense/dec_head` ++ `ling:pair/jrows` ++ `ling:pair/jw` ++ `dense/dec_gemv0` ++ `dense/dec_gemv_arrive_1` ++ `ricursive:ricursive/jtile` ++ `dense/dec_gemv_arrive_2_1` ++ `dense/dec_gemv_arrive_2_2` ++ `dense/dec_xsum0` ++ `dense/dec_finish_v` ++ `dense/dec_finish_store` (7441 B, `e67032a622fb`) |
+| source | `text_jdec0` = `dense/dec_head` ++ `ling:pair/jrows` ++ `ling:pair/jw` ++ `dense/dec_gemv0_head` ++ `dense/dec_gemv_loop` ++ `dense/dec_gemv0_x` ++ `dense/dec_gemv_arrive_1` ++ `ricursive:ricursive/jtile` ++ `dense/dec_gemv_arrive_2a` ++ `dense/dec_gemv_arrive_2b` ++ `dense/dec_gemv_arrive_2c` ++ `dense/dec_xsum0` ++ `dense/dec_finish_v` ++ `dense/dec_finish_store` (7441 B, `e67032a622fb`) |
 | header | `decode.header5` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` (26594 B, `41efbbbbd943`) |
 
 <!-- /kernel-facts -->
@@ -157,7 +157,7 @@ A KDA layer's z | a, the shared expert's gate | up and the dense FFN's gate | up
 | made at | `src/models/ling/pair.zig:67` (`fn kernelOf`) |
 | inputs | `x`, `suh0`, `suh1`, `w0`, `w1`, `svh0`, `svh1`, `cnt` |
 | outputs | `y`, `z`, `xsx` |
-| source | `text_jdec1` = `dense/dec_head` ++ `ling:pair/jsuh` ++ `ling:pair/jw` ++ `dense/dec_prep1` ++ `dense/dec_gemv1` ++ `dense/dec_gemv_arrive_1` ++ `ricursive:ricursive/jtile` ++ `dense/dec_gemv_arrive_2_1` ++ `dense/dec_gemv_arrive_2_2` ++ `dense/dec_xsum1` ++ `dense/dec_finish_v` ++ `dense/dec_finish_store` (8776 B, `6f8fa1171cb0`) |
+| source | `text_jdec1` = `dense/dec_head` ++ `ling:pair/jsuh` ++ `ling:pair/jw` ++ `dense/dec_prep1_1` ++ `dense/dec_prep1_2` ++ `dense/dec_prep1_3` ++ `dense/dec_gemv1_head` ++ `dense/dec_gemv_loop` ++ `dense/dec_gemv1_x` ++ `dense/dec_gemv_arrive_1` ++ `ricursive:ricursive/jtile` ++ `dense/dec_gemv_arrive_2a` ++ `dense/dec_gemv_arrive_2b` ++ `dense/dec_gemv_arrive_2c` ++ `dense/dec_xsum1` ++ `dense/dec_finish_v` ++ `dense/dec_finish_store` (8776 B, `6f8fa1171cb0`) |
 | header | `decode.header5` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` (26594 B, `41efbbbbd943`) |
 
 <!-- /kernel-facts -->
@@ -225,7 +225,7 @@ K split.
 | made at | `src/models/ling/kdaproj.zig:67` (`fn kernelOf`) |
 | inputs | `jxp`, `jxs`, `w0`, `w1`, `w2`, `svh0`, `svh1`, `svh2`, `jcnt` |
 | outputs | `y0`, `y1`, `y2`, `z0`, `z1`, `z2` |
-| source | `text_kdec0` = `ling:kdaproj/head` ++ `ling:kdaproj/member` ++ `dense/dec_gemv0` ++ `dense/dec_gemv_arrive_1` ++ `dense/dec_tile` ++ `dense/dec_gemv_arrive_2_1` ++ `dense/dec_gemv_arrive_2_2` ++ `dense/dec_xsum0` ++ `dense/dec_finish_v` ++ `dense/dec_finish_store` (7971 B, `a9c43d427f96`) |
+| source | `text_kdec0` = `ling:kdaproj/head` ++ `ling:kdaproj/member` ++ `dense/dec_gemv0_head` ++ `dense/dec_gemv_loop` ++ `dense/dec_gemv0_x` ++ `dense/dec_gemv_arrive_1` ++ `dense/dec_tile` ++ `dense/dec_gemv_arrive_2a` ++ `dense/dec_gemv_arrive_2b` ++ `dense/dec_gemv_arrive_2c` ++ `dense/dec_xsum0` ++ `dense/dec_finish_v` ++ `dense/dec_finish_store` (7971 B, `a9c43d427f96`) |
 | header | `decode.header5` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` (26594 B, `41efbbbbd943`) |
 
 <!-- /kernel-facts -->
@@ -287,7 +287,7 @@ K split.
 | made at | `src/models/ling/kdaproj.zig:68` (`fn kernelOf`) |
 | inputs | `jxp`, `jxs`, `w0`, `w1`, `w2`, `svh0`, `svh1`, `svh2`, `jcnt`, `xb`, `wb` |
 | outputs | `y0`, `y1`, `y2`, `z0`, `z1`, `z2`, `yb` |
-| source | `text_kdec0b` = `ling:kdaproj/bmember_1` ++ `ling:kdaproj/bmember_2` ++ `ling:kdaproj/head` ++ `ling:kdaproj/member` ++ `dense/dec_gemv0` ++ `dense/dec_gemv_arrive_1` ++ `dense/dec_tile` ++ `dense/dec_gemv_arrive_2_1` ++ `dense/dec_gemv_arrive_2_2` ++ `dense/dec_xsum0` ++ `dense/dec_finish_v` ++ `dense/dec_finish_store` (10779 B, `869bb863886d`) |
+| source | `text_kdec0b` = `ling:kdaproj/bmember_1` ++ `ling:kdaproj/bmember_2` ++ `ling:kdaproj/head` ++ `ling:kdaproj/member` ++ `dense/dec_gemv0_head` ++ `dense/dec_gemv_loop` ++ `dense/dec_gemv0_x` ++ `dense/dec_gemv_arrive_1` ++ `dense/dec_tile` ++ `dense/dec_gemv_arrive_2a` ++ `dense/dec_gemv_arrive_2b` ++ `dense/dec_gemv_arrive_2c` ++ `dense/dec_xsum0` ++ `dense/dec_finish_v` ++ `dense/dec_finish_store` (10779 B, `869bb863886d`) |
 | header | `decode.header5` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` ++ `decode/form5` (26594 B, `41efbbbbd943`) |
 
 <!-- /kernel-facts -->
@@ -325,7 +325,7 @@ pf_3 at its output line, the same bytes.
 | made at | `src/models/ling/kdaproj_pf.zig:52` (`fn kernelGet`) |
 | inputs | `x0`, `x1`, `x2`, `w0`, `w1`, `w2`, `svh0`, `svh1`, `svh2` |
 | outputs | `y0`, `y1`, `y2` |
-| source | `text_pf` = `ling:kdaproj/pf_1` ++ `pg2/gemm_fused_2` ++ `ling:kdaproj/pf_3_1` ++ `ling:kdaproj/pf_3_2` ++ `pg2/gemm_fused_4` ++ `ling:kdaproj/pf_5` ++ `pg2/gemm_fused_6_1` ++ `pg2/gemm_fused_6_2` ++ `ling:kdaproj/pf_undef` (5529 B, `7454701fcb9a`) |
+| source | `text_pf` = `ling:kdaproj/pf_1` ++ `pg2/gemm_fused_1_2` ++ `ling:kdaproj/pf_3_1` ++ `ling:kdaproj/pf_3_2` ++ `pg2/gemm_fused_1_4` ++ `ling:kdaproj/pf_5` ++ `pg2/gemm_fused_1_6` ++ `pg2/gemm_fused_2_1` ++ `pg2/gemm_fused_2_2` ++ `ling:kdaproj/pf_undef` (5529 B, `7454701fcb9a`) |
 | header | `pgemm.header` = `steel_nax` ++ text 'using namespace mlx::steel;\n' ++ `pg2/gemm_loop` ++ text (72 B) (34287 B, `0ab3ef8c4fca`) |
 
 <!-- /kernel-facts -->
@@ -375,7 +375,7 @@ pf_3 at its output line, the same bytes.
 | made at | `src/models/ling/kdaproj_pf.zig:304` (`fn gateKernelGet`) |
 | inputs | `x0`, `x1`, `x2`, `w0`, `w1`, `w2`, `svh0`, `svh1`, `svh2`, `A_log`, `dt_bias`, `lb` |
 | outputs | `y0`, `y1`, `y2` |
-| source | `text_pfg0` = `ling:kdaproj/pf_1` ++ `pg2/gemm_fused_2` ++ `ling:kdaproj/pf_3_1` ++ `ling:kdaproj/pf_3_2g` ++ `pg2/gemm_fused_4` ++ `ling:kdaproj/pf_5` ++ `pg2/gemm_fused_6_1` ++ `ling:kdaproj/pf_6g0` ++ `ling:kdaproj/pf_undef` (6232 B, `8202282622ad`) |
+| source | `text_pfg0` = `ling:kdaproj/pf_1` ++ `pg2/gemm_fused_1_2` ++ `ling:kdaproj/pf_3_1` ++ `ling:kdaproj/pf_3_2g` ++ `pg2/gemm_fused_1_4` ++ `ling:kdaproj/pf_5` ++ `pg2/gemm_fused_1_6` ++ `pg2/gemm_fused_2_1` ++ `ling:kdaproj/pf_6g0` ++ `ling:kdaproj/pf_undef` (6232 B, `8202282622ad`) |
 | header | `pgemm.header` = `steel_nax` ++ text 'using namespace mlx::steel;\n' ++ `pg2/gemm_loop` ++ text (72 B) (34287 B, `0ab3ef8c4fca`) |
 
 <!-- /kernel-facts -->
@@ -408,7 +408,7 @@ pf_3 at its output line, the same bytes.
 | made at | `src/models/ling/kdaproj_pf.zig:309` (`fn gateKernelGet`) |
 | inputs | `x0`, `x1`, `x2`, `w0`, `w1`, `w2`, `svh0`, `svh1`, `svh2`, `gea`, `dt_bias`, `lb` |
 | outputs | `y0`, `y1`, `y2` |
-| source | `text_pfg1` = `ling:kdaproj/pf_1` ++ `pg2/gemm_fused_2` ++ `ling:kdaproj/pf_3_1` ++ `ling:kdaproj/pf_3_2g` ++ `pg2/gemm_fused_4` ++ `ling:kdaproj/pf_5` ++ `pg2/gemm_fused_6_1` ++ `ling:kdaproj/pf_6g1` ++ `ling:kdaproj/pf_undef` (6214 B, `1de657c4cd05`) |
+| source | `text_pfg1` = `ling:kdaproj/pf_1` ++ `pg2/gemm_fused_1_2` ++ `ling:kdaproj/pf_3_1` ++ `ling:kdaproj/pf_3_2g` ++ `pg2/gemm_fused_1_4` ++ `ling:kdaproj/pf_5` ++ `pg2/gemm_fused_1_6` ++ `pg2/gemm_fused_2_1` ++ `ling:kdaproj/pf_6g1` ++ `ling:kdaproj/pf_undef` (6214 B, `1de657c4cd05`) |
 | header | `pgemm.header` = `steel_nax` ++ text 'using namespace mlx::steel;\n' ++ `pg2/gemm_loop` ++ text (72 B) (34287 B, `0ab3ef8c4fca`) |
 
 <!-- /kernel-facts -->
@@ -1537,7 +1537,7 @@ The wide tail's red check's planted fault: a kernel made only by the wide tail's
 | made at | `src/models/ling/kdaproj_gate_test.zig:269` (`test turboexl3 gpu ling kdaproj gate: kdaProjPromptGate's y_0 and y_2 are kdaProjPrompt's and its g the served one-launch gate of kdaProjPrompt's y_1, word for word, G0 and G1, at prompt rows 33 to 16384; kdaProjPromptWGate's the same over given W_hats; its declines and refusals; planted faults caught (TURBOEXL3_GPU=1)`) |
 | inputs | `x0`, `x1`, `x2`, `w0`, `w1`, `w2`, `svh0`, `svh1`, `svh2`, `gea`, `dt_bias`, `lb` |
 | outputs | `y0`, `y1`, `y2` |
-| source | `comptime faultText(@embedFile("kernels/test/fault/kdagate_g1_ea_shift.metal"))` = `ling:kdaproj/pf_1` ++ `pg2/gemm_fused_2` ++ `ling:kdaproj/pf_3_1` ++ `ling:kdaproj/pf_3_2g` ++ `pg2/gemm_fused_4` ++ `ling:kdaproj/pf_5` ++ `pg2/gemm_fused_6_1` ++ `ling:test/fault/kdagate_g1_ea_shift` ++ `ling:kdaproj/pf_undef` (6087 B, `2b7ed2d0dfbb`) |
+| source | `comptime faultText(@embedFile("kernels/test/fault/kdagate_g1_ea_shift.metal"))` = `ling:kdaproj/pf_1` ++ `pg2/gemm_fused_1_2` ++ `ling:kdaproj/pf_3_1` ++ `ling:kdaproj/pf_3_2g` ++ `pg2/gemm_fused_1_4` ++ `ling:kdaproj/pf_5` ++ `pg2/gemm_fused_1_6` ++ `pg2/gemm_fused_2_1` ++ `ling:test/fault/kdagate_g1_ea_shift` ++ `ling:kdaproj/pf_undef` (6087 B, `2b7ed2d0dfbb`) |
 | header | `pgemm.header` = `steel_nax` ++ text 'using namespace mlx::steel;\n' ++ `pg2/gemm_loop` ++ text (72 B) (34287 B, `0ab3ef8c4fca`) |
 
 <!-- /kernel-facts -->
@@ -1564,7 +1564,7 @@ The wide tail's red check's planted fault: a kernel made only by the wide tail's
 | made at | `src/models/ling/kdaproj_gate_test.zig:266` (`test turboexl3 gpu ling kdaproj gate: kdaProjPromptGate's y_0 and y_2 are kdaProjPrompt's and its g the served one-launch gate of kdaProjPrompt's y_1, word for word, G0 and G1, at prompt rows 33 to 16384; kdaProjPromptWGate's the same over given W_hats; its declines and refusals; planted faults caught (TURBOEXL3_GPU=1)`) |
 | inputs | `x0`, `x1`, `x2`, `w0`, `w1`, `w2`, `svh0`, `svh1`, `svh2`, `A_log`, `dt_bias`, `lb` |
 | outputs | `y0`, `y1`, `y2` |
-| source | `comptime faultText(@embedFile("kernels/test/fault/kdagate_dtb_shift.metal"))` = `ling:kdaproj/pf_1` ++ `pg2/gemm_fused_2` ++ `ling:kdaproj/pf_3_1` ++ `ling:kdaproj/pf_3_2g` ++ `pg2/gemm_fused_4` ++ `ling:kdaproj/pf_5` ++ `pg2/gemm_fused_6_1` ++ `ling:test/fault/kdagate_dtb_shift` ++ `ling:kdaproj/pf_undef` (6133 B, `99ce6389cee5`) |
+| source | `comptime faultText(@embedFile("kernels/test/fault/kdagate_dtb_shift.metal"))` = `ling:kdaproj/pf_1` ++ `pg2/gemm_fused_1_2` ++ `ling:kdaproj/pf_3_1` ++ `ling:kdaproj/pf_3_2g` ++ `pg2/gemm_fused_1_4` ++ `ling:kdaproj/pf_5` ++ `pg2/gemm_fused_1_6` ++ `pg2/gemm_fused_2_1` ++ `ling:test/fault/kdagate_dtb_shift` ++ `ling:kdaproj/pf_undef` (6133 B, `99ce6389cee5`) |
 | header | `pgemm.header` = `steel_nax` ++ text 'using namespace mlx::steel;\n' ++ `pg2/gemm_loop` ++ text (72 B) (34287 B, `0ab3ef8c4fca`) |
 
 <!-- /kernel-facts -->
@@ -1591,7 +1591,7 @@ The wide tail's red check's planted fault: a kernel made only by the wide tail's
 | made at | `src/models/ling/kdaproj_gate_test.zig:267` (`test turboexl3 gpu ling kdaproj gate: kdaProjPromptGate's y_0 and y_2 are kdaProjPrompt's and its g the served one-launch gate of kdaProjPrompt's y_1, word for word, G0 and G1, at prompt rows 33 to 16384; kdaProjPromptWGate's the same over given W_hats; its declines and refusals; planted faults caught (TURBOEXL3_GPU=1)`) |
 | inputs | `x0`, `x1`, `x2`, `w0`, `w1`, `w2`, `svh0`, `svh1`, `svh2`, `A_log`, `dt_bias`, `lb` |
 | outputs | `y0`, `y1`, `y2` |
-| source | `comptime faultText(@embedFile("kernels/test/fault/kdagate_fastexp.metal"))` = `ling:kdaproj/pf_1` ++ `pg2/gemm_fused_2` ++ `ling:kdaproj/pf_3_1` ++ `ling:kdaproj/pf_3_2g` ++ `pg2/gemm_fused_4` ++ `ling:kdaproj/pf_5` ++ `pg2/gemm_fused_6_1` ++ `ling:test/fault/kdagate_fastexp` ++ `ling:kdaproj/pf_undef` (6109 B, `c30c4c5766ee`) |
+| source | `comptime faultText(@embedFile("kernels/test/fault/kdagate_fastexp.metal"))` = `ling:kdaproj/pf_1` ++ `pg2/gemm_fused_1_2` ++ `ling:kdaproj/pf_3_1` ++ `ling:kdaproj/pf_3_2g` ++ `pg2/gemm_fused_1_4` ++ `ling:kdaproj/pf_5` ++ `pg2/gemm_fused_1_6` ++ `pg2/gemm_fused_2_1` ++ `ling:test/fault/kdagate_fastexp` ++ `ling:kdaproj/pf_undef` (6109 B, `c30c4c5766ee`) |
 | header | `pgemm.header` = `steel_nax` ++ text 'using namespace mlx::steel;\n' ++ `pg2/gemm_loop` ++ text (72 B) (34287 B, `0ab3ef8c4fca`) |
 
 <!-- /kernel-facts -->
@@ -1618,7 +1618,7 @@ The wide tail's red check's planted fault: a kernel made only by the wide tail's
 | made at | `src/models/ling/kdaproj_gate_test.zig:268` (`test turboexl3 gpu ling kdaproj gate: kdaProjPromptGate's y_0 and y_2 are kdaProjPrompt's and its g the served one-launch gate of kdaProjPrompt's y_1, word for word, G0 and G1, at prompt rows 33 to 16384; kdaProjPromptWGate's the same over given W_hats; its declines and refusals; planted faults caught (TURBOEXL3_GPU=1)`) |
 | inputs | `x0`, `x1`, `x2`, `w0`, `w1`, `w2`, `svh0`, `svh1`, `svh2`, `A_log`, `dt_bias`, `lb` |
 | outputs | `y0`, `y1`, `y2` |
-| source | `comptime faultText(@embedFile("kernels/test/fault/kdagate_member2.metal"))` = `ling:kdaproj/pf_1` ++ `pg2/gemm_fused_2` ++ `ling:kdaproj/pf_3_1` ++ `ling:kdaproj/pf_3_2g` ++ `pg2/gemm_fused_4` ++ `ling:kdaproj/pf_5` ++ `pg2/gemm_fused_6_1` ++ `ling:test/fault/kdagate_member2` ++ `ling:kdaproj/pf_undef` (6129 B, `ebad74cab6c9`) |
+| source | `comptime faultText(@embedFile("kernels/test/fault/kdagate_member2.metal"))` = `ling:kdaproj/pf_1` ++ `pg2/gemm_fused_1_2` ++ `ling:kdaproj/pf_3_1` ++ `ling:kdaproj/pf_3_2g` ++ `pg2/gemm_fused_1_4` ++ `ling:kdaproj/pf_5` ++ `pg2/gemm_fused_1_6` ++ `pg2/gemm_fused_2_1` ++ `ling:test/fault/kdagate_member2` ++ `ling:kdaproj/pf_undef` (6129 B, `ebad74cab6c9`) |
 | header | `pgemm.header` = `steel_nax` ++ text 'using namespace mlx::steel;\n' ++ `pg2/gemm_loop` ++ text (72 B) (34287 B, `0ab3ef8c4fca`) |
 
 <!-- /kernel-facts -->
@@ -1645,7 +1645,7 @@ The wide tail's red check's planted fault: a kernel made only by the wide tail's
 | made at | `src/models/ling/kdaproj_gate_test.zig:265` (`test turboexl3 gpu ling kdaproj gate: kdaProjPromptGate's y_0 and y_2 are kdaProjPrompt's and its g the served one-launch gate of kdaProjPrompt's y_1, word for word, G0 and G1, at prompt rows 33 to 16384; kdaProjPromptWGate's the same over given W_hats; its declines and refusals; planted faults caught (TURBOEXL3_GPU=1)`) |
 | inputs | `x0`, `x1`, `x2`, `w0`, `w1`, `w2`, `svh0`, `svh1`, `svh2`, `A_log`, `dt_bias`, `lb` |
 | outputs | `y0`, `y1`, `y2` |
-| source | `comptime faultText(@embedFile("kernels/test/fault/kdagate_unrounded.metal"))` = `ling:kdaproj/pf_1` ++ `pg2/gemm_fused_2` ++ `ling:kdaproj/pf_3_1` ++ `ling:kdaproj/pf_3_2g` ++ `pg2/gemm_fused_4` ++ `ling:kdaproj/pf_5` ++ `pg2/gemm_fused_6_1` ++ `ling:test/fault/kdagate_unrounded` ++ `ling:kdaproj/pf_undef` (6127 B, `f7f5df3c7278`) |
+| source | `comptime faultText(@embedFile("kernels/test/fault/kdagate_unrounded.metal"))` = `ling:kdaproj/pf_1` ++ `pg2/gemm_fused_1_2` ++ `ling:kdaproj/pf_3_1` ++ `ling:kdaproj/pf_3_2g` ++ `pg2/gemm_fused_1_4` ++ `ling:kdaproj/pf_5` ++ `pg2/gemm_fused_1_6` ++ `pg2/gemm_fused_2_1` ++ `ling:test/fault/kdagate_unrounded` ++ `ling:kdaproj/pf_undef` (6127 B, `f7f5df3c7278`) |
 | header | `pgemm.header` = `steel_nax` ++ text 'using namespace mlx::steel;\n' ++ `pg2/gemm_loop` ++ text (72 B) (34287 B, `0ab3ef8c4fca`) |
 
 <!-- /kernel-facts -->
@@ -1678,7 +1678,7 @@ place.
 | made at | `src/models/ling/kdanorm.zig:51` (`fn kernelGet`) |
 | inputs | `y`, `z`, `norm_w`, `eps`, `sigtab`, `suh` |
 | outputs | `xp` |
-| source | `text_normprep` = `dense/prep_1` ++ `ling:kdanorm/gate` ++ `dense/prep_3` (2098 B, `c70564d5b441`) |
+| source | `text_normprep` = `dense/prep_1` ++ `ling:kdanorm/gate` ++ `dense/prep_3` (1753 B, `754e65698829`) |
 | header | `decode.header` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` (18000 B, `771237d24284`) |
 
 <!-- /kernel-facts -->
@@ -1756,7 +1756,7 @@ faults.
 | made at | `src/models/ling/kdanorm_test.zig:241` (`test turboexl3 gpu ling kdanorm: kdaNormGatePrep's xp is o_proj's prepare of the served norm-gate's output and o_proj's y over it is linear's, word for word, at prompt rows 33 to 16384; its refusals before any launch; planted faults caught (TURBOEXL3_GPU=1)`) |
 | inputs | `y`, `z`, `norm_w`, `eps`, `sigtab`, `suh` |
 | outputs | `xp` |
-| source | `comptime faultText(@embedFile("kernels/test/fault/kdanorm_nw_shift.metal"))` = `dense/prep_1` ++ `ling:test/fault/kdanorm_nw_shift` ++ `dense/prep_3` (2084 B, `df58762a2249`) |
+| source | `comptime faultText(@embedFile("kernels/test/fault/kdanorm_nw_shift.metal"))` = `dense/prep_1` ++ `ling:test/fault/kdanorm_nw_shift` ++ `dense/prep_3` (1739 B, `6fca72df8b6e`) |
 | header | `decode.header` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` (18000 B, `771237d24284`) |
 
 <!-- /kernel-facts -->
@@ -1782,7 +1782,7 @@ faults.
 | made at | `src/models/ling/kdanorm_test.zig:244` (`test turboexl3 gpu ling kdanorm: kdaNormGatePrep's xp is o_proj's prepare of the served norm-gate's output and o_proj's y over it is linear's, word for word, at prompt rows 33 to 16384; its refusals before any launch; planted faults caught (TURBOEXL3_GPU=1)`) |
 | inputs | `y`, `z`, `norm_w`, `eps`, `sigtab`, `suh` |
 | outputs | `xp` |
-| source | `comptime faultText(@embedFile("kernels/test/fault/kdanorm_suh_next_block.metal"))` = `dense/prep_1` ++ `ling:test/fault/kdanorm_suh_next_block` ++ `dense/prep_3` (2083 B, `97ed2295d2cb`) |
+| source | `comptime faultText(@embedFile("kernels/test/fault/kdanorm_suh_next_block.metal"))` = `dense/prep_1` ++ `ling:test/fault/kdanorm_suh_next_block` ++ `dense/prep_3` (1738 B, `522b5db98bf7`) |
 | header | `decode.header` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` (18000 B, `771237d24284`) |
 
 <!-- /kernel-facts -->
@@ -1808,7 +1808,7 @@ faults.
 | made at | `src/models/ling/kdanorm_test.zig:243` (`test turboexl3 gpu ling kdanorm: kdaNormGatePrep's xp is o_proj's prepare of the served norm-gate's output and o_proj's y over it is linear's, word for word, at prompt rows 33 to 16384; its refusals before any launch; planted faults caught (TURBOEXL3_GPU=1)`) |
 | inputs | `y`, `z`, `norm_w`, `eps`, `sigtab`, `suh` |
 | outputs | `xp` |
-| source | `comptime faultText(@embedFile("kernels/test/fault/kdanorm_sum_strided.metal"))` = `dense/prep_1` ++ `ling:test/fault/kdanorm_sum_strided` ++ `dense/prep_3` (2129 B, `7cac59b113b2`) |
+| source | `comptime faultText(@embedFile("kernels/test/fault/kdanorm_sum_strided.metal"))` = `dense/prep_1` ++ `ling:test/fault/kdanorm_sum_strided` ++ `dense/prep_3` (1784 B, `c5ed422c18ba`) |
 | header | `decode.header` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` (18000 B, `771237d24284`) |
 
 <!-- /kernel-facts -->
@@ -1835,7 +1835,7 @@ faults.
 | made at | `src/models/ling/kdanorm_test.zig:242` (`test turboexl3 gpu ling kdanorm: kdaNormGatePrep's xp is o_proj's prepare of the served norm-gate's output and o_proj's y over it is linear's, word for word, at prompt rows 33 to 16384; its refusals before any launch; planted faults caught (TURBOEXL3_GPU=1)`) |
 | inputs | `y`, `z`, `norm_w`, `eps`, `sigtab`, `suh` |
 | outputs | `xp` |
-| source | `comptime faultText(@embedFile("kernels/test/fault/kdanorm_z_next_head.metal"))` = `dense/prep_1` ++ `ling:test/fault/kdanorm_z_next_head` ++ `dense/prep_3` (2080 B, `466a3d8115a1`) |
+| source | `comptime faultText(@embedFile("kernels/test/fault/kdanorm_z_next_head.metal"))` = `dense/prep_1` ++ `ling:test/fault/kdanorm_z_next_head` ++ `dense/prep_3` (1735 B, `9cc193f80621`) |
 | header | `decode.header` = `lane/helpers` ++ `decode/common` ++ `decode/gemv_core` (18000 B, `771237d24284`) |
 
 <!-- /kernel-facts -->

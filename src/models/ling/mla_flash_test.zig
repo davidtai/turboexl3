@@ -301,6 +301,9 @@ fn hostRow(c: Case, o: Operands, scale: f32, b: u32, h: u32, r: u32, out: []f64,
 
 test "turboexl3 gpu ling mla flash: at the head dims MLX instantiates its fused NAX kernel for, the kernel gives MLX's fused causal SDPA's words (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    // a GPU test past others in one process starts and ends with no engine cached (`root.releaseEngines`)
+    root.releaseEngines();
+    defer root.releaseEngines();
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
     if (!config.get().nax) return error.SkipZigTest;
@@ -345,6 +348,9 @@ test "turboexl3 gpu ling mla flash: at the head dims MLX instantiates its fused 
 
 test "turboexl3 gpu ling mla flash: at Ling's heads (qk 192, v 128) the causal prompt attention is within tolerance of an f64 host reference and no worse than MLX's composed path against it (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    // a GPU test past others in one process starts and ends with no engine cached (`root.releaseEngines`)
+    root.releaseEngines();
+    defer root.releaseEngines();
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
     if (!config.get().nax) return error.SkipZigTest;
@@ -582,6 +588,9 @@ fn wordsDiffering(a: std.mem.Allocator, g: *G, x: mlx.mlx_array, y: mlx.mlx_arra
 
 test "turboexl3 gpu ling mla flash rope once: over the rope-once cache (each head's nope keys and values one row a token, the roped key once a token, read in place) the launch gives mlaFlashPrefill's words over the expanded key; a planted fault and a changed roped key differ (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    // a GPU test past others in one process starts and ends with no engine cached (`root.releaseEngines`)
+    root.releaseEngines();
+    defer root.releaseEngines();
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
     if (!config.get().nax) return error.SkipZigTest;

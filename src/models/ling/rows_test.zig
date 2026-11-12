@@ -326,7 +326,7 @@ pub fn opsOf(b: root.Bank) prefill.Operands {
 /// One rows-path call on engine `pf` through the row map (`moeT128With` with the 128-row tiles, else `moeWith`), y f32
 /// [o.n_call, hidden]
 fn engineRows(pf: *prefill.Prefill, s: mlx.mlx_stream, x: mlx.mlx_array, o: RowsOps, ops: prefill.Operands) !mlx.mlx_array {
-    if (pf.opts.t128) return pf.moeT128With(s, x, o.ids, o.sc, ops, o.n_call, .float32, o.rm);
+    if (pf.opts.t128) return pf.moeT128With(s, x, o.ids, o.sc, ops, o.n_call, .float32, o.rm, null);
     return pf.moeWith(s, x, o.ids, o.sc, ops, o.n_call, .float32, o.rm);
 }
 
@@ -523,7 +523,7 @@ fn flipOne(a: std.mem.Allocator, g: *G, got: mlx.mlx_array, at: usize) !mlx.mlx_
 /// (`prefill.Call`: `moeT128WithCall` with the 128-row tiles; an engine without them has no fused finish, so `moeWith`),
 /// y f32 [o.n_call, hidden]
 fn engineCall(pf: *prefill.Prefill, s: mlx.mlx_stream, x: mlx.mlx_array, o: RowsOps, ops: prefill.Operands, choice: prefill.Call) !mlx.mlx_array {
-    if (pf.opts.t128) return pf.moeT128WithCall(s, x, o.ids, o.sc, ops, o.n_call, .float32, o.rm, choice);
+    if (pf.opts.t128) return pf.moeT128WithCall(s, x, o.ids, o.sc, ops, o.n_call, .float32, o.rm, null, choice);
     return pf.moeWith(s, x, o.ids, o.sc, ops, o.n_call, .float32, o.rm);
 }
 
@@ -603,6 +603,9 @@ const rule_cases = [_]RuleCase{
 
 test "turboexl3 gpu ling rows: moeLingRows is the plugin's prompt chunk (take, bf16, f32, moeLing at top-1) byte for byte on every chunk of a prompt layer's call and a padded call, at n 40 and 32, limits 0 and 10, x bf16 and f32, on the loader's views (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    // a GPU test past others in one process starts and ends with no engine cached (`root.releaseEngines`)
+    root.releaseEngines();
+    defer root.releaseEngines();
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
     const a = std.heap.page_allocator;
@@ -698,7 +701,7 @@ test "turboexl3 gpu ling rows: moeLingRows is the plugin's prompt chunk (take, b
                 const o = try rowsOps(&g, ca, cs);
                 const xg = try g.take(xbf, o.rm, 0);
                 const want = try g.adopt(if (t128) try pf.moeT128(s, xg, o.ids, o.sc, ops, o.n_call, .float32) else try pf.moe(s, xg, o.ids, o.sc, ops, o.n_call, .float32));
-                const got = try g.adopt(if (t128) try pf.moeT128With(s, xbf, o.ids, o.sc, ops, o.n_call, .float32, o.rm) else try pf.moeWith(s, xbf, o.ids, o.sc, ops, o.n_call, .float32, o.rm));
+                const got = try g.adopt(if (t128) try pf.moeT128With(s, xbf, o.ids, o.sc, ops, o.n_call, .float32, o.rm, null) else try pf.moeWith(s, xbf, o.ids, o.sc, ops, o.n_call, .float32, o.rm));
                 const c = try compare(a, &g, got, want);
                 const ok = c.differing == 0 and c.nonfinite == 0;
                 std.debug.print("TURBOEXL3_LING_ROWS_ENGINE n={d} limit={d} t128={} pairs={d} row_slots={d} differing={d}/{d} nonfinite={d} {s}\n", .{ n, lim, t128, ca.len, o.n_call, c.differing, c.of, c.nonfinite, if (ok) "PASS" else "FAIL" });
@@ -711,6 +714,9 @@ test "turboexl3 gpu ling rows: moeLingRows is the plugin's prompt chunk (take, b
 
 test "turboexl3 gpu ling rows variants: the routed chain's fused finish (over both tables at the served options, and at each other stage shape it takes) is the served engine's words on synthetic calls at every row bucket, n 40 and 32, limits 0 and 10; planted faults are caught (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    // a GPU test past others in one process starts and ends with no engine cached (`root.releaseEngines`)
+    root.releaseEngines();
+    defer root.releaseEngines();
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
     const a = std.heap.page_allocator;
@@ -1031,6 +1037,9 @@ fn timeCall(g: *G, ctx: TimeCtx, comptime f: fn (*G, TimeCtx) anyerror!mlx.mlx_a
 // (moeLingRows), each round's graph built and evaluated alone, then both outputs' differing words.
 test "turboexl3 gpu ling timing: the prompt call over gathered rows (moeLingRows) against the plugin's chain at its call shape, and their bytes (TURBOEXL3_LING_TIME=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    // a GPU test past others in one process starts and ends with no engine cached (`root.releaseEngines`)
+    root.releaseEngines();
+    defer root.releaseEngines();
     _ = std.c.getenv("TURBOEXL3_LING_TIME") orelse return error.SkipZigTest;
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;

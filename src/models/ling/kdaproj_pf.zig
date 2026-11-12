@@ -35,7 +35,7 @@ pub const kpf_5 = @embedFile("kernels/kdaproj/pf_5.metal");
 pub const kpf_undef = @embedFile("kernels/kdaproj/pf_undef.metal");
 
 /// pg2's body with the member choice in place of its single operand pair
-pub const text_pf: [:0]const u8 = kpf_1 ++ pgemm.fused_2 ++ kpf_3 ++ pgemm.fused_4 ++ kpf_5 ++ pgemm.fused_6 ++ kpf_undef;
+pub const text_pf: [:0]const u8 = kpf_1 ++ pgemm.fused_1_2 ++ kpf_3 ++ pgemm.fused_1_4 ++ kpf_5 ++ pgemm.fused_1_6 ++ pgemm.fused_2 ++ kpf_undef;
 
 const pf_in = [_][*:0]const u8{ "x0", "x1", "x2", "w0", "w1", "w2", "svh0", "svh1", "svh2" };
 const pf_out = [_][*:0]const u8{ "y0", "y1", "y2" };
@@ -257,7 +257,7 @@ fn launch(s: mlx.mlx_stream, xp: [3]A, w: [3]A, svh: [3]A, outs: [3]u32, m: u32,
 /// the gate's launches' output line, in kpf_3_2's place: y names member 0's and 2's outputs (OUT_T); member 1's tiles
 /// write y1 (f32) in the store loop
 pub const kpf_3_2g = @embedFile("kernels/kdaproj/pf_3_2g.metal");
-/// the gate's store loop (G0), in pg2's fused_6_2's place: members 0 and 2 store as fused_6_2 does; member 1 rounds its
+/// the gate's store loop (G0), in pg2's fused_2_2's place: members 0 and 2 store as fused_2_2 does; member 1 rounds its
 /// word as that store does, then runs the bounded gate's statements on it in their order, exp(A_log) for each element
 /// as the gate takes it, g into y1
 pub const kpf_6g0 = @embedFile("kernels/kdaproj/pf_6g0.metal");
@@ -266,10 +266,10 @@ pub const kpf_6g1 = @embedFile("kernels/kdaproj/pf_6g1.metal");
 /// `gateEa`'s launch: exp(A_log) per channel, the gate's first statement
 pub const kgate_ea = @embedFile("kernels/kdaproj/gate_ea.metal");
 
-/// G0's launch: P4's pieces with kpf_3_2g in kpf_3_2's place and kpf_6g0 in pg2's fused_6_2's
-pub const text_pfg0: [:0]const u8 = kpf_1 ++ pgemm.fused_2 ++ kpf_3_1 ++ kpf_3_2g ++ pgemm.fused_4 ++ kpf_5 ++ pgemm.fused_6_1 ++ kpf_6g0 ++ kpf_undef;
+/// G0's launch: P4's pieces with kpf_3_2g in kpf_3_2's place and kpf_6g0 in pg2's fused_2_2's
+pub const text_pfg0: [:0]const u8 = kpf_1 ++ pgemm.fused_1_2 ++ kpf_3_1 ++ kpf_3_2g ++ pgemm.fused_1_4 ++ kpf_5 ++ pgemm.fused_1_6 ++ pgemm.fused_2_1 ++ kpf_6g0 ++ kpf_undef;
 /// G1's launch: the same with kpf_6g1
-pub const text_pfg1: [:0]const u8 = kpf_1 ++ pgemm.fused_2 ++ kpf_3_1 ++ kpf_3_2g ++ pgemm.fused_4 ++ kpf_5 ++ pgemm.fused_6_1 ++ kpf_6g1 ++ kpf_undef;
+pub const text_pfg1: [:0]const u8 = kpf_1 ++ pgemm.fused_1_2 ++ kpf_3_1 ++ kpf_3_2g ++ pgemm.fused_1_4 ++ kpf_5 ++ pgemm.fused_1_6 ++ pgemm.fused_2_1 ++ kpf_6g1 ++ kpf_undef;
 /// `gateEa`'s text
 pub const text_gate_ea: [:0]const u8 = kgate_ea;
 
@@ -513,8 +513,8 @@ fn count(hay: []const u8, needle: []const u8) usize {
 }
 
 test "turboexl3 ling kdaproj prompt texts: pg2's body is its six pieces; the grouped body is pg2's pieces 2, 4 and 6 with the member choice, its column and the macro's end around them" {
-    try testing.expectEqualStrings(pgemm.fused_1 ++ pgemm.fused_2 ++ pgemm.fused_3 ++ pgemm.fused_4 ++ pgemm.fused_5 ++ pgemm.fused_6, pgemm.text_fused);
-    try testing.expectEqualStrings(kpf_1 ++ pgemm.fused_2 ++ kpf_3 ++ pgemm.fused_4 ++ kpf_5 ++ pgemm.fused_6 ++ kpf_undef, text_pf);
+    try testing.expectEqualStrings(pgemm.fused_1_1 ++ pgemm.fused_1_2 ++ pgemm.fused_1_3 ++ pgemm.fused_1_4 ++ pgemm.fused_1_5 ++ pgemm.fused_1_6 ++ pgemm.fused_2, pgemm.text_fused);
+    try testing.expectEqualStrings(kpf_1 ++ pgemm.fused_1_2 ++ kpf_3 ++ pgemm.fused_1_4 ++ kpf_5 ++ pgemm.fused_1_6 ++ pgemm.fused_2 ++ kpf_undef, text_pf);
     // the grouped body names its members' operands and outputs, never pg2's single pair, and reads no strides
     for ([_][]const u8{ "x0", "x1", "x2", "w0", "w1", "w2", "svh0", "svh1", "svh2", "y0", "y1", "y2" }) |n| try testing.expect(count(text_pf, n) > 0);
     for ([_][]const u8{ "x_shape", "w_shape", "_strides" }) |n| try testing.expectEqual(@as(usize, 0), count(text_pf, n));
@@ -531,10 +531,10 @@ test "turboexl3 ling kdaproj prompt: the tile is admitted, divides Ling's KDA wi
 // ── CPU tests: L6, the KDA gate in the launch's epilogue ──
 
 test "turboexl3 ling kdaproj gate texts: G0's and G1's launches are P4's pieces with the gate's output line in pf_3_2's place and its store loop in pg2's fused_6_2's, the cuts keep P4's and pg2's pieces whole, G0 reads A_log and G1 gea" {
-    try testing.expectEqualStrings(kpf_1 ++ pgemm.fused_2 ++ kpf_3_1 ++ kpf_3_2g ++ pgemm.fused_4 ++ kpf_5 ++ pgemm.fused_6_1 ++ kpf_6g0 ++ kpf_undef, text_pfg0);
-    try testing.expectEqualStrings(kpf_1 ++ pgemm.fused_2 ++ kpf_3_1 ++ kpf_3_2g ++ pgemm.fused_4 ++ kpf_5 ++ pgemm.fused_6_1 ++ kpf_6g1 ++ kpf_undef, text_pfg1);
+    try testing.expectEqualStrings(kpf_1 ++ pgemm.fused_1_2 ++ kpf_3_1 ++ kpf_3_2g ++ pgemm.fused_1_4 ++ kpf_5 ++ pgemm.fused_1_6 ++ pgemm.fused_2_1 ++ kpf_6g0 ++ kpf_undef, text_pfg0);
+    try testing.expectEqualStrings(kpf_1 ++ pgemm.fused_1_2 ++ kpf_3_1 ++ kpf_3_2g ++ pgemm.fused_1_4 ++ kpf_5 ++ pgemm.fused_1_6 ++ pgemm.fused_2_1 ++ kpf_6g1 ++ kpf_undef, text_pfg1);
     try testing.expectEqualStrings(kpf_3_1 ++ kpf_3_2, kpf_3);
-    try testing.expectEqualStrings(pgemm.fused_6_1 ++ pgemm.fused_6_2, pgemm.fused_6);
+    try testing.expectEqualStrings(pgemm.fused_2_1 ++ pgemm.fused_2_2, pgemm.fused_2);
     // P4's output line names its three outputs; the gate's names members 0's and 2's alone (y1 is its store loop's)
     try testing.expectEqual(@as(usize, 1), count(kpf_3_2, "y1"));
     try testing.expectEqual(@as(usize, 0), count(kpf_3_2g, "y1"));
@@ -604,9 +604,9 @@ test "turboexl3 ling kdaproj gate statements: the store loop's gate is the serve
     const g1_want = [_][]const u8{ pin[16], pin[10], pin[11], pin[12], pin[13], pin[14], pin[15] };
     try testing.expect(onceInOrder(kpf_6g1, &g1_want));
     try testing.expectEqual(@as(usize, 0), count(kpf_6g1, pin[9]));
-    // member 1's word is the store's value (pin 1) as fused_6_2 stores it (pin 0), once before the gate (pin 26); members
-    // 0 and 2 store as fused_6_2 does (pin 27 holds pin 0)
-    try testing.expectEqual(@as(usize, 1), count(pgemm.fused_6_2, pin[0]));
+    // member 1's word is the store's value (pin 1) as fused_2_2 stores it (pin 0), once before the gate (pin 26); members
+    // 0 and 2 store as fused_2_2 does (pin 27 holds pin 0)
+    try testing.expectEqual(@as(usize, 1), count(pgemm.fused_2_2, pin[0]));
     try testing.expect(count(pin[0], pin[1]) == 1 and count(pin[26], pin[1]) == 1 and count(pin[27], pin[0]) == 1);
     for ([_][]const u8{ kpf_6g0, kpf_6g1 }) |txt| {
         try testing.expectEqual(@as(usize, 1), count(txt, pin[26]));
