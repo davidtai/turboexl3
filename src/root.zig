@@ -27,6 +27,8 @@ pub const unfused = @import("core/unfused.zig");
 pub const dense = @import("core/dense.zig");
 /// pg2: a dense linear's prefill matmul and finish as one launch at this machine's tiles (pgemm.zig); the host sets `pgemm.mode`.
 pub const pgemm = @import("core/pgemm.zig");
+/// Trunk int8: a dense linear's prefill matmul path on int8 at the host's shapes (trunk_q8.zig; `Config.pf_trunk_int8`).
+pub const trunk_q8 = @import("core/trunk_q8.zig");
 pub const prefill = @import("core/prefill.zig");
 /// The kernel texts a consumer may splice into its own Metal (MLX-free; `sources.zig`).
 pub const sources = @import("core/sources.zig");
@@ -47,6 +49,8 @@ pub const ricursive = @import("models/ricursive/ricursive.zig");
 /// The model entry points (root re-exports each under its own name)
 pub const qwen38 = @import("models/qwen38/api.zig");
 pub const deepseek_v41 = @import("models/deepseek_v41/api.zig");
+/// GLM-5.3-Flash's trunk linears at prefill rows and the pg2 table a host builds from their tile codes
+pub const glm53f = @import("models/glm53f/api.zig");
 /// DeepSeek-V4.1's shared expert's fused SwiGLU (models/deepseek_v41/api.zig)
 pub const sharedSwigluTakes = deepseek_v41.sharedSwigluTakes;
 pub const sharedSwiglu = deepseek_v41.sharedSwiglu;
@@ -134,10 +138,19 @@ pub fn validateCall(x: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array, scores: m
     return bankGeometry(bank, sh[2]);
 }
 
+/// The slots of each engine cache: a geometry's kernels are compiled at its first call and kept for the process, and a call
+/// at a geometry past a full cache fails with error.Exl3EngineCacheFull. One served model needs a handful of each:
+/// GLM-5.3-Flash's SC packs (models/glm53f) 20 dense (in, out, K) per activation dtype of the 64, at most 4 decode
+/// geometries of the 16 and 5 prefill geometries of the 16 (glm53f_test.zig's per-pack count holds each pack to them).
+/// A test that runs more geometries in one process frees them between its cases (`releaseEngines`).
+pub const engine_cache_slots = 16;
+pub const dense_cache_slots = 64;
+pub const prefill_cache_slots = 16;
+
 /// The compiled kernels of every geometry this process has served (a handful per model).
 /// a spinlock: the cache fills once per geometry and is read thereafter
 const cache_lock = Global(std.atomic.Value(u32), "root_cache_lock", std.atomic.Value(u32).init(0));
-const cache = Global([16]?decode.Kernels3, "root_cache", @splat(null));
+const cache = Global([engine_cache_slots]?decode.Kernels3, "root_cache", @splat(null));
 
 pub fn kernelsFor(geo: decode.Geometry, out_dtype: mlx.mlx_dtype) !*decode.Kernels3 {
     while (cache_lock.get().*.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
@@ -220,7 +233,7 @@ pub const SlotStats = struct {
 };
 
 /// Form 5's kernels per geometry, as `cache` holds form 3's.
-const cache5 = Global([16]?decode.Kernels5, "root_cache5", @splat(null));
+const cache5 = Global([engine_cache_slots]?decode.Kernels5, "root_cache5", @splat(null));
 
 fn kernels5For(geo: decode.Geometry, out_dtype: mlx.mlx_dtype) !*decode.Kernels5 {
     while (cache_lock.get().*.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
@@ -261,7 +274,7 @@ fn decodeForm() u8 {
 /// fourteen with its vision tower, its aligner and `wo_a`'s slice. 64 holds two such models at two dtypes (every test in
 /// one process).
 const dense_lock = Global(std.atomic.Value(u32), "root_dense_lock", std.atomic.Value(u32).init(0));
-const dense_cache = Global([64]?dense.Dense, "root_dense_cache", @splat(null));
+const dense_cache = Global([dense_cache_slots]?dense.Dense, "root_dense_cache", @splat(null));
 
 fn denseFor(shape: dense.Shape) !*dense.Dense {
     while (dense_lock.get().*.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
@@ -571,6 +584,32 @@ pub fn linearPrepared(s: mlx.mlx_stream, xp: mlx.mlx_array, p: Proj, dec: format
     return d.finishOf(s, z, p.svh, rows);
 }
 
+/// What `decPrepared` reads for one projection at `rows` decode rows (`dense.Dense.decPrepSpec` on the `Dense` `linear`
+/// takes for an x of `out_dtype`): null where DEC-ONE does not take the call or runs its prepare inside its GEMV launch
+/// (the caller runs `linear`).
+pub fn decPrepSpec(p: Proj, in_dim: u32, out_dtype: mlx.mlx_dtype, dec: format.Decode, rows: usize) !?dense.Dense.DecPrep {
+    if (out_dtype != .bfloat16 and out_dtype != .float32 and out_dtype != .float16) return error.BadExl3Dtype;
+    const d = try denseOf(p, in_dim, out_dtype, dec);
+    return d.decPrepSpec(rows);
+}
+
+/// `linear` at decode rows from rows a launch before it prepared as `decPrepSpec` says: xp [rows, in] (f32 or f16, the
+/// spec's), xs f32 [rows, in / 128], cnt u32 [ncnt] zeroed. DEC-ONE's GEMV launch on the `Dense` `linear` takes for an x
+/// of `out_dtype`, at its config, so `linear`'s bytes where xp, xs and cnt are prep_sc's. y [rows, out] in `out_dtype`.
+pub fn decPrepared(s: mlx.mlx_stream, xp: mlx.mlx_array, xs: mlx.mlx_array, cnt: mlx.mlx_array, p: Proj, dec: format.Decode, out_dtype: mlx.mlx_dtype) !mlx.mlx_array {
+    const psh = mlx.getShape(xp);
+    if (psh.len != 2 or psh[0] < 1) return error.BadExl3Shape;
+    if (out_dtype != .bfloat16 and out_dtype != .float32 and out_dtype != .float16) return error.BadExl3Dtype;
+    const d = try denseOf(p, @intCast(psh[1]), out_dtype, dec);
+    const rows: usize = @intCast(psh[0]);
+    const sp = (try d.decPrepSpec(rows)) orelse return error.Exl3EngineNotImplemented;
+    const xp_dt: mlx.mlx_dtype = if (sp.xp_f32) .float32 else .float16;
+    if (mlx.mlx_array_dtype(xp) != xp_dt or mlx.mlx_array_dtype(xs) != .float32 or mlx.mlx_array_dtype(cnt) != .uint32) return error.BadExl3Dtype;
+    const xsh = mlx.getShape(xs);
+    if (xsh.len != 2 or xsh[0] != psh[0] or xsh[1] != @as(c_int, @intCast(sp.nb)) or mlx.mlx_array_size(cnt) != sp.ncnt) return error.BadExl3Shape;
+    return d.decPrepared(s, xp, xs, cnt, p.trellis, p.svh, rows);
+}
+
 /// `linear`'s finish of an inner product z F16 [rows, out] at prefill rows: y [rows, out] in `out_dtype`.
 pub fn linearFinish(s: mlx.mlx_stream, z: mlx.mlx_array, p: Proj, dec: format.Decode, out_dtype: mlx.mlx_dtype) !mlx.mlx_array {
     const zsh = mlx.getShape(z);
@@ -612,13 +651,15 @@ pub const gdnOutPrep = qwen38.gdnOutPrep;
 
 /// The dequantized f16 W [in, out] of linear `p` for a call of x's dtype `xd` split into pieces of `rows` rows
 /// (2..`dense.Dense.max_pieces`), made on `ws`, or error.Exl3EngineNotImplemented (nothing launched) where the call or a
-/// piece leaves the matmul path.
+/// piece leaves the matmul path. Where trunk int8 takes the linear's inner products (`trunk_q8.innerTakes`), its int8
+/// wq [out, in] instead (`trunk_q8.decodeW`): the pieces then run its inner launches (lossy).
 pub fn linearPiecesBegin(ws: mlx.mlx_stream, p: Proj, rows: []const usize, xd: mlx.mlx_dtype, dec: format.Decode) !mlx.mlx_array {
     const tsh = mlx.getShape(p.trellis);
     if (tsh.len != 3) return error.BadExl3Shape;
     if (xd != .bfloat16 and xd != .float32 and xd != .float16) return error.BadExl3Dtype;
     const d = try denseOf(p, @intCast(tsh[0] * 16), xd, dec);
     if (!d.piecesServe(rows)) return error.Exl3EngineNotImplemented;
+    if (trunk_q8.innerTakes(d)) return trunk_q8.decodeW(ws, d, p.trellis);
     return d.dequantize(ws, p.trellis);
 }
 
@@ -661,8 +702,12 @@ pub fn linearPiecesFinish(s: mlx.mlx_stream, inners: []const mlx.mlx_array, p: P
 /// included): DeepSeek-V4.1 alone serves 8 (its K3 and K2 routed banks per streamed bank kind, the DSpark stages, the
 /// shared expert as a one-expert bank).
 const pf_lock = Global(std.atomic.Value(u32), "root_pf_lock", std.atomic.Value(u32).init(0));
-const pf_cache = Global([16]?prefill.Prefill, "root_pf_cache", @splat(null));
+const pf_cache = Global([prefill_cache_slots]?prefill.Prefill, "root_pf_cache", @splat(null));
 const pf_logged = Global(bool, "root_pf_logged", false);
+/// `Config.pf_size_class`'s engage line, once a process
+const pf_class_logged = Global(bool, "root_pf_class_logged", false);
+/// `Config.pf_int8`'s engage line, once a process
+const pf_i8_logged = Global(bool, "root_pf_i8_logged", false);
 
 /// The served prefill variant: 64-row tiles (bm 64) with the register path for <= 32-row remainders in one launch (mixed),
 /// the double-buffered weight stage, unrolled MMA sub-steps, the stage in NAX fragment order and the integer-rate reader
@@ -678,6 +723,14 @@ fn pfOptions() prefill.Options {
     var o: prefill.Options = .{ .bm = 64, .small = .mixed, .dbuf = true, .unroll = true, .fragb = true, .intr = true, .defer_affine = true, .ncb = 4, .sintr = true, .froute = true };
     o.alay = config.get().pf_alay;
     o.t128 = config.get().pf_t128;
+    o.bk128 = config.get().pf_bk128;
+    o.half_rows = config.get().pf_half_rows;
+    o.t128_bk128 = config.get().pf_t128_bk128;
+    o.t128_zfit = config.get().pf_t128_zfit;
+    o.size_class = config.get().pf_size_class;
+    o.int8 = config.get().pf_int8;
+    o.int8_c2 = config.get().pf_int8_c2;
+    o.defer_affine = config.get().pf_defer_affine;
     return o;
 }
 
@@ -710,10 +763,26 @@ fn prefillFor(geo: prefill.Geometry) !*prefill.Prefill {
     // the 128-row tiles: their remainder tiles ride the mixed launch (froute's route at split 1, the strided mid and finish),
     // the 128-row tiles the bm-128 body beside bm 64's
     if (o.small != .mixed or o.split != 1 or !o.froute or o.aux != 0 or o.bm != 64) o.t128 = false;
+    // the 128-row tile launches' 128-deep stages: where those launches run, within 32 KB
+    if (!o.t128 or o.stageBytes(128) > 32768) o.t128_bk128 = false;
+    // the compact mixed outputs: the 128-row tiles' mixed launch
+    if (!o.t128) o.t128_zfit = false;
+    // the size classes: the 128-row tiles' arrays at their sorted positions (not the compact mixed outputs)
+    if (!o.t128 or o.t128_zfit) o.size_class = false;
+    // int8 gate|up and down: beside the 128-row tiles, on the deferred map, the mixed outputs at their sorted positions
+    if (!o.t128 or !o.defer_affine or o.t128_zfit) o.int8 = 0;
     pf_cache.get().*[i] = try prefill.Prefill.init(geo, o);
     if (!pf_logged.get().*) {
         pf_logged.get().* = true;
-        std.debug.print("[turboexl3] prefill engaged: fused EXL3 GEMM chain (bm={d} dbuf={} unroll={} fragb={} intr={} sintr={} defer={} split={d} small={s} down_bk={d} down_ncb={d} froute={} aux={d} alay={d} t128={})\n", .{ o.bm, o.dbuf, o.unroll, o.fragb, o.intr, o.sintr, o.defer_affine, o.split, @tagName(o.small), o.downStage(), o.ncb, o.froute, o.aux, o.alay, o.t128 });
+        std.debug.print("[turboexl3] prefill engaged: fused EXL3 GEMM chain (bm={d} dbuf={} unroll={} fragb={} intr={} sintr={} defer={} split={d} small={s} down_bk={d} down_ncb={d} froute={} aux={d} alay={d} t128={} t128_bk128={} t128_zfit={})\n", .{ o.bm, o.dbuf, o.unroll, o.fragb, o.intr, o.sintr, o.defer_affine, o.split, @tagName(o.small), o.downStage(), o.ncb, o.froute, o.aux, o.alay, o.t128, o.t128_bk128, o.t128_zfit });
+    }
+    if (o.size_class and !pf_class_logged.get().*) {
+        pf_class_logged.get().* = true;
+        std.debug.print("[turboexl3] prefill size classes engaged: a routed call's row-slot-sized arrays at multiples of {d} rows\n", .{prefill.size_class_rows});
+    }
+    if (o.int8 != 0 and !pf_i8_logged.get().*) {
+        pf_i8_logged.get().* = true;
+        std.debug.print("[turboexl3] prefill int8 engaged: the routed gate|up and down GEMMs on int8 ({s}{s})\n", .{ if (o.int8 == 2) "per-token scales" else "per-block scales", if (o.int8_c2 == 1020) "" else ", weights centered at 509.5" });
     }
     return &pf_cache.get().*[i].?;
 }
@@ -902,11 +971,73 @@ pub fn moeClamped(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx.mlx
 }
 const clamp_logged = Global(bool, "root_clamp_logged", false);
 
+/// `moeClamped`'s prefill chain at top-1 over gathered rows (GLM-5.3-Flash's prompt calls over an expert streamer's slot
+/// bank, models/glm53f): row-slot p reads x's row `rows[p]`, runs the expert at slot `inds[p]` at weight `scores[p]`, and y
+/// [S, hidden] in `out_dtype` holds row-slot p's output at row p. The gather is in the chain's prepare
+/// (`prefill.text_prep_rows`), so no gathered copy of x is made, and the prepare rounds every x value to f16 whatever x's
+/// dtype: row p is, bit for bit, row p of `moeClamped` at top-1 over `take(x, rows)` in any float dtype holding the same
+/// values (x [1, S, hidden], inds and scores [1, S, 1]), its y rounded once to `out_dtype` (the chain's finish stores the
+/// one f32 sum in `out_dtype`, as an astype of an f32 y does). x [n, hidden] bf16, f16 or f32; rows u32 [S], each below n
+/// (not checked: the caller's routing); inds u32 or i32 [S] (slots of the bank); scores f32, bf16 or f16 [S]; S more than
+/// `kernels.DECODE_ROWS_MAX` (the chain's rows: a caller pads a smaller call, as moeClamped's callers do); `out_dtype` bf16,
+/// f16 or f32; `limit` 1..128, else error.InvalidExl3Clamp. `Config.prefill` and `Config.nax` as `moe`'s prefill rows;
+/// gate, up and down at one rate.
+pub fn moeClampedRows(s: mlx.mlx_stream, x: mlx.mlx_array, rows: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array, scores: mlx.mlx_array, dec: format.Decode, limit: c_int, out_dtype: mlx.mlx_dtype) !mlx.mlx_array {
+    return clampedRows(s, x, rows, bank, inds, scores, dec, limit, out_dtype, null);
+}
+
+/// `moeClampedRows` over a call whose `inds` hold at most `call_experts` distinct slots (the caller's count, 1 or more;
+/// more slots than that in inds is the caller's error, not checked): with `Config.pf_t128_zfit` the mixed launch's compact
+/// outputs take `prefill.t128ZCap` rows (64 an expert, at most S) in place of S. The same bytes.
+pub fn moeClampedRowsFit(s: mlx.mlx_stream, x: mlx.mlx_array, rows: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array, scores: mlx.mlx_array, dec: format.Decode, limit: c_int, out_dtype: mlx.mlx_dtype, call_experts: u32) !mlx.mlx_array {
+    if (call_experts == 0) return error.BadExl3Shape;
+    return clampedRows(s, x, rows, bank, inds, scores, dec, limit, out_dtype, call_experts);
+}
+
+/// `moeClampedRows`' body; `call_experts` as `moeClampedRowsFit`'s (null: the call's row count bounds the compact outputs).
+fn clampedRows(s: mlx.mlx_stream, x: mlx.mlx_array, rows: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array, scores: mlx.mlx_array, dec: format.Decode, limit: c_int, out_dtype: mlx.mlx_dtype, call_experts: ?u32) !mlx.mlx_array {
+    if (limit <= 0 or limit > 128) return error.InvalidExl3Clamp;
+    if (!config.get().prefill or !config.get().nax) return error.Exl3EngineNotImplemented;
+    const xsh = mlx.getShape(x);
+    const rs = mlx.getShape(rows);
+    if (xsh.len != 2 or xsh[0] <= 0 or xsh[1] <= 0 or @mod(xsh[1], 128) != 0) return error.BadExl3Shape;
+    if (rs.len != 1 or rs[0] <= 0 or !std.mem.eql(c_int, rs, mlx.getShape(inds)) or !std.mem.eql(c_int, rs, mlx.getShape(scores))) return error.BadExl3Shape;
+    const S: usize = @intCast(rs[0]);
+    if (S <= kernels.DECODE_ROWS_MAX) return error.Exl3EngineNotImplemented;
+    const xd = mlx.mlx_array_dtype(x);
+    const id = mlx.mlx_array_dtype(inds);
+    const sd = mlx.mlx_array_dtype(scores);
+    if ((xd != .bfloat16 and xd != .float32 and xd != .float16) or mlx.mlx_array_dtype(rows) != .uint32 or
+        (id != .uint32 and id != .int32) or (sd != .float32 and sd != .bfloat16 and sd != .float16) or
+        (out_dtype != .bfloat16 and out_dtype != .float32 and out_dtype != .float16)) return error.BadExl3Dtype;
+    const geo = try bankGeometry(bank, xsh[1]);
+    if (geo.gate_up.n != geo.down.n) return error.Exl3EngineNotImplemented;
+    if (!clamp_logged.get().*) {
+        clamp_logged.get().* = true;
+        std.debug.print("[turboexl3] clamped SwiGLU engaged (swiglu_limit {d}): fin7's and the prefill mid's clamped variants\n", .{limit});
+    }
+    const pf = try prefillFor(.{ .hidden = @intCast(geo.hidden), .inter = @intCast(geo.width), .topk = 1, .experts = @intCast(geo.experts), .rate = geo.gate_up, .dec = dec, .limit = @intCast(limit) });
+    const ops: prefill.Operands = .{
+        .gate_t = bank.gate.trellis,
+        .gate_suh = bank.gate.suh,
+        .gate_svh = bank.gate.svh,
+        .up_t = bank.up.trellis,
+        .up_suh = bank.up.suh,
+        .up_svh = bank.up.svh,
+        .down_t = bank.down.trellis,
+        .down_suh = bank.down.suh,
+        .down_svh = bank.down.svh,
+    };
+    if (pf.opts.t128) return pf.moeT128With(s, x, inds, scores, ops, S, out_dtype, rows, call_experts);
+    return pf.moeWith(s, x, inds, scores, ops, S, out_dtype, rows);
+}
+
 /// DeepSeek-V4.1's clamped routed experts over an expert streamer's slot banks (models/deepseek_v41/api.zig)
 pub const banked_rows_max = deepseek_v41.banked_rows_max;
 pub const banked_skip_id = deepseek_v41.banked_skip_id;
 pub const BankedHalf = deepseek_v41.BankedHalf;
 pub const moeClampedBanked = deepseek_v41.moeClampedBanked;
+pub const moeClampedBankedAs = deepseek_v41.moeClampedBankedAs;
 pub const BankedSel = deepseek_v41.BankedSel;
 pub const group_variants = deepseek_v41.group_variants;
 pub const groupVariantOf = deepseek_v41.groupVariantOf;
@@ -921,6 +1052,63 @@ pub const moeClampedBankedDown = deepseek_v41.moeClampedBankedDown;
 pub const moeClampedBankedDownSel = deepseek_v41.moeClampedBankedDownSel;
 pub const moeClampedBankedDownV = deepseek_v41.moeClampedBankedDownV;
 pub const moeClampedBankedDownSelV = deepseek_v41.moeClampedBankedDownSelV;
+
+/// Test seam: every engine this process compiled freed and its slot emptied (the decode, dense, prefill and grouped
+/// caches, and the banked, shared-head and F3 states keyed by those engines' addresses, which go first so no stale
+/// key names a reused slot). For a test that runs more geometries in one process than a served model does
+/// (`engine_cache_slots`); the stream synchronized, no call in flight and no engine pointer held. A later call compiles
+/// its geometry again.
+pub fn releaseEngines() void {
+    banked.releaseAll();
+    shared_heads.releaseAll();
+    f3.releaseAll();
+    deepseek_v41.releaseGrouped();
+    {
+        while (cache_lock.get().*.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
+        defer cache_lock.get().*.store(0, .release);
+        for (&cache.get().*) |*slot| if (slot.*) |*k| {
+            k.deinit();
+            slot.* = null;
+        };
+        for (&cache5.get().*) |*slot| if (slot.*) |*k| {
+            k.deinit();
+            slot.* = null;
+        };
+    }
+    {
+        while (dense_lock.get().*.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
+        defer dense_lock.get().*.store(0, .release);
+        for (&dense_cache.get().*) |*slot| if (slot.*) |*d| {
+            d.deinit();
+            slot.* = null;
+        };
+    }
+    {
+        while (pf_lock.get().*.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
+        defer pf_lock.get().*.store(0, .release);
+        for (&pf_cache.get().*) |*slot| if (slot.*) |*p| {
+            p.deinit();
+            slot.* = null;
+        };
+    }
+}
+
+/// The engines `releaseEngines` would free: the decode (forms 3 and 5), dense and prefill caches' filled slots.
+pub const EnginesHeld = struct { decode: usize = 0, dense: usize = 0, prefill: usize = 0 };
+pub fn enginesHeld() EnginesHeld {
+    var n: EnginesHeld = .{};
+    for (cache.get().*) |s| n.decode += @intFromBool(s != null);
+    for (cache5.get().*) |s| n.decode += @intFromBool(s != null);
+    for (dense_cache.get().*) |s| n.dense += @intFromBool(s != null);
+    for (pf_cache.get().*) |s| n.prefill += @intFromBool(s != null);
+    return n;
+}
+
+test "turboexl3 root: releaseEngines empties every engine cache (a no-op on empty ones)" {
+    releaseEngines();
+    const n = enginesHeld();
+    try std.testing.expectEqual(@as(usize, 0), n.decode + n.dense + n.prefill);
+}
 
 test {
     _ = config;
@@ -975,6 +1163,8 @@ pub const shared_state = .{
     pf_lock,
     pf_cache,
     pf_logged,
+    pf_class_logged,
+    pf_i8_logged,
     PfCapture.calls,
     clamp_logged,
     attn_io.shared_state,
@@ -988,4 +1178,6 @@ pub const shared_state = .{
     ricursive.shared_state,
     qwen38.shared_state,
     deepseek_v41.shared_state,
+    glm53f.shared_gu.shared_state,
+    glm53f.pair_ks.shared_state,
 };

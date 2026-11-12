@@ -19,6 +19,42 @@ const freeArr = root.freeArr;
 const kernels = root.kernels;
 const kernelsFor = root.kernelsFor;
 const linearOn = root.linearOn;
+const trunk_q8 = root.trunk_q8;
+
+// ── The trunk linears at prefill rows: the shapes a host names for trunk int8 (`trunk_q8.shapes`) ──
+
+/// One trunk linear at prefill rows: its name, in (K) and out (N); `attn` an attention projection (the int8 levels'
+/// split). No two of DeepSeek-V4.1's share a (K, N) across the split, so none names a rate.
+pub const Linear = struct { name: []const u8, k: u32, n: u32, attn: bool };
+
+/// DeepSeek-V4.1's EXL3 trunk linears that run at prefill rows (the 2.25 pack's K6 trunk, DSpark's main_proj K4), each
+/// (K, N) once: the 40 layers' attention (the three DSpark stages' share its shapes) wq_a, wkv (a compressor's wkv and
+/// wgate share it), wq_b, wo_a (one group of `linearGrouped`'s eight, at 4096 -> 1024), wo_b and the indexer's wq_b; the
+/// shared expert's w1|w3 and w2; DSpark's main_proj. The head is not here.
+pub const trunk = [_]Linear{
+    .{ .name = "attn.wq_a", .k = 5120, .n = 1280, .attn = true },
+    .{ .name = "attn.wkv|compressor.wkv|compressor.wgate", .k = 5120, .n = 512, .attn = true },
+    .{ .name = "attn.wq_b", .k = 1280, .n = 32768, .attn = true },
+    .{ .name = "attn.wo_a (a group)", .k = 4096, .n = 1024, .attn = true },
+    .{ .name = "attn.wo_b", .k = 8192, .n = 5120, .attn = true },
+    .{ .name = "attn.indexer.wq_b", .k = 1280, .n = 4096, .attn = true },
+    .{ .name = "ffn.shared_experts.w1|w3", .k = 5120, .n = 2304, .attn = false },
+    .{ .name = "ffn.shared_experts.w2", .k = 2304, .n = 5120, .attn = false },
+    .{ .name = "mtp.main_proj", .k = 15360, .n = 5120, .attn = false },
+};
+
+/// The trunk int8 shapes of int8 level `level` (3: the attention projections; 4: every linear of `trunk`; else none),
+/// written to `out` (the caller keeps it while the shapes are in force)
+pub fn trunkShapes(level: u8, out: *[trunk.len]trunk_q8.Shape) []const trunk_q8.Shape {
+    var n: usize = 0;
+    for (trunk) |l| {
+        if (level == 4 or (level == 3 and l.attn)) {
+            out[n] = .{ .k = l.k, .n = l.n };
+            n += 1;
+        }
+    }
+    return out[0..n];
+}
 
 // ── The grouped linear ──
 
@@ -162,14 +198,24 @@ pub fn moeClampedBanked(s: mlx.mlx_stream, x: mlx.mlx_array, banks: *const [3]Ba
     return moeClampedBankedSelV(s, x, banks, ids, dec, limit, .configured, config.get().banked_variant_gu, config.get().banked_variant_dn);
 }
 
-/// hw4b: which banked texts a call runs (`decode.Kernels3.BankedSel`): the configured ones, today's grouped texts (g4) or
-/// the grouped texts with the M = 3 member path (g4m3). Every selection gives a row-slot the same bytes.
+/// hw4b: which banked texts a call runs (`decode.Kernels3.BankedSel`): the configured ones, today's grouped texts (g4),
+/// the grouped texts with the M = 3 member path (g4m3), or either with the persistent grouped GEMVs (g4p, g4m3p:
+/// `Config.banked_ptg`). Every selection gives a row-slot the same bytes.
 pub const BankedSel = banked.Banked.BankedSel;
 
 /// hw2: the grouped banked GEMVs' variants (`Config.banked_variant_gu`, `banked_variant_dn`; `decode.group_variants`),
 /// on whichever grouped texts a call runs (today's or hw4b's), and a variant's index by name (null: none).
 pub const group_variants = banked.group_variants;
 pub const groupVariantOf = banked.groupVariantOf;
+
+/// `moeClampedBanked` with y in `out_dtype` (bf16, f16 or f32): the same launches on `kernelsFor`'s kernels of that output
+/// dtype, which change dfin3b's store only (OUT_T: the one f32 sum rounded once to `out_dtype`), so y is the f32 call's y
+/// rounded to `out_dtype` as its astype rounds it, bit for bit. A caller that rounds the f32 y (an expert streamer's bf16
+/// joins: GLM-5.3-Flash's turboexl3_glm53f) drops its cast launch. The configured texts, GEMV variants and wave3
+/// (`Config.banked_wave3`: the call in three launches, the same y).
+pub fn moeClampedBankedAs(s: mlx.mlx_stream, x: mlx.mlx_array, banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, limit: c_int, out_dtype: mlx.mlx_dtype) !mlx.mlx_array {
+    return bankedY(s, x, banks, ids, dec, limit, .configured, config.get().banked_variant_gu, config.get().banked_variant_dn, out_dtype);
+}
 
 /// `moeClampedBanked` on `sel`'s texts at the configured variants (hw4b's check mode's calls, the tests).
 pub fn moeClampedBankedSel(s: mlx.mlx_stream, x: mlx.mlx_array, banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, limit: c_int, sel: BankedSel) !mlx.mlx_array {
@@ -184,12 +230,39 @@ pub fn moeClampedBankedV(s: mlx.mlx_stream, x: mlx.mlx_array, banks: *const [3]B
 }
 
 /// `moeClampedBanked` on `sel`'s texts with the grouped GEMVs of variants `vgu` (gate|up) and `vdn` (down) on them: the
-/// same bytes for every selection and variant.
+/// same bytes for every selection and variant, fused as configured (`Config.banked_wave3`) or not.
 pub fn moeClampedBankedSelV(s: mlx.mlx_stream, x: mlx.mlx_array, banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, limit: c_int, sel: BankedSel, vgu: u8, vdn: u8) !mlx.mlx_array {
-    const h = try moeClampedBankedGateUpSelV(s, x, banks, ids, dec, limit, sel, vgu);
-    defer freeArr(h.hd);
-    defer freeArr(h.hs);
-    return moeClampedBankedDownSelV(s, h, banks, ids, dec, limit, sel, vdn);
+    return bankedY(s, x, banks, ids, dec, limit, sel, vgu, vdn, .float32);
+}
+
+/// wave3: the whole banked call's outputs (`moeClampedBankedWave`): hd f16 [rows, inter] and hs f32 [rows, inter / 128]
+/// (the down's prepared input and its 128-block sums; a skipped row-slot's rows are left unwritten) and y [rows, hidden]
+/// in the call's output dtype. The caller frees all three.
+pub const BankedOuts = struct { hd: mlx.mlx_array, hs: mlx.mlx_array, y: mlx.mlx_array };
+
+/// The whole banked call (`moeClampedBankedAs`) on `sel`'s texts with the grouped GEMVs of `vgu` (gate|up) and `vdn`
+/// (down), y in `out_dtype`, as five launches (`wave3` false), as wave3's three (true: `Config.banked_wave3`'s launches,
+/// models/deepseek_v41/banked_wave3.zig; grouped texts only, else error.Exl3EngineNotImplemented before a launch), or
+/// as the geometry's banked state was configured (null): the same hd, hs and y every way (glm53f/wave3_test.zig's calls).
+pub fn moeClampedBankedWave(s: mlx.mlx_stream, x: mlx.mlx_array, banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, limit: c_int, sel: BankedSel, vgu: u8, vdn: u8, out_dtype: mlx.mlx_dtype, wave3: ?bool) !BankedOuts {
+    if (out_dtype != .bfloat16 and out_dtype != .float16 and out_dtype != .float32) return error.BadExl3Dtype;
+    const c = try bankedCall(banks, ids, dec, limit);
+    const xs = mlx.getShape(x);
+    if (xs.len != 2 or xs[0] != @as(c_int, @intCast(c.rows)) or xs[1] != @as(c_int, @intCast(c.geo.hidden))) return error.BadExl3Shape;
+    const xd = mlx.mlx_array_dtype(x);
+    if (xd != .bfloat16 and xd != .float32 and xd != .float16) return error.BadExl3Dtype;
+    const k3 = try kernelsFor(c.geo, out_dtype);
+    const b = try banked.forKernels(k3);
+    const o = try b.bankedMoeSelV(k3, s, x, ids, &c.kb, c.rows, sel, vgu, vdn, wave3 orelse b.wave3On());
+    return .{ .hd = o[0], .hs = o[1], .y = o[2] };
+}
+
+/// `moeClampedBankedWave`'s y as configured (hd and hs freed)
+fn bankedY(s: mlx.mlx_stream, x: mlx.mlx_array, banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, limit: c_int, sel: BankedSel, vgu: u8, vdn: u8, out_dtype: mlx.mlx_dtype) !mlx.mlx_array {
+    const o = try moeClampedBankedWave(s, x, banks, ids, dec, limit, sel, vgu, vdn, out_dtype, null);
+    freeArr(o.hd);
+    freeArr(o.hs);
+    return o.y;
 }
 
 /// `moeClampedBanked`'s gate|up: prep2b, gu3b and fin7cb (`decode.Kernels3.bankedGateUp`). It reads every bank's gate and
@@ -296,6 +369,16 @@ fn bankedGeometry(banks: *const [3]Bank) !Geometry {
 /// The shared expert's fused SwiGLU at decode rows (`f3.zig`)
 pub const sharedSwigluTakes = f3.sharedSwigluTakes;
 pub const sharedSwiglu = f3.sharedSwiglu;
+
+/// Every grouped linear's kernels freed (`root.releaseEngines`): no call in flight.
+pub fn releaseGrouped() void {
+    while (grouped_lock.get().*.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
+    defer grouped_lock.get().*.store(0, .release);
+    for (&grouped_cache.get().*) |*slot| if (slot.*) |*gr| {
+        gr.deinit();
+        slot.* = null;
+    };
+}
 
 /// The process-wide state here (root's `shared_state` lists it)
 pub const shared_state = .{ grouped_lock, grouped_cache };

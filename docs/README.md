@@ -24,6 +24,7 @@ The docs mirror the code: one shared core (`src/core/`, `docs/core/`) and a fold
 | Qwen3.8-Flash-Next | [models/qwen38/README.md](models/qwen38/README.md): the parts it runs on turboexl3, the packs, the coding evals | [models/qwen38/kernels.md](models/qwen38/kernels.md): the shared expert and router in the decode launches, the attention projections, the decode-row merges, the GDN tail | [models/qwen38/results.md](models/qwen38/results.md): speed from 1K to 256K tokens with mlx-serve, coding scores, the kernels against Sushi |
 | Ricursive Ripple-65B | [models/ricursive/README.md](models/ricursive/README.md): q \| g and k \| v joined, the value residual and the clamped SwiGLU in the prepares, K3 linears and a K6 head | [models/ricursive/kernels.md](models/ricursive/kernels.md) | none yet: the standard test through the outside plugin `turboexl3_ricursive` decides |
 | DeepSeek-V4.1 | [models/deepseek_v41/README.md](models/deepseek_v41/README.md): the clamped SwiGLU, the banked decode, the grouped `wo_a`, F3, the trunk | [models/deepseek_v41/kernels.md](models/deepseek_v41/kernels.md) | none published here |
+| GLM-5.3-Flash | [models/glm53f/README.md](models/glm53f/README.md): the routed experts at K2 to K5 (half-integer rates too), the banked decode, the clamped SwiGLU, the dense trunk, head, MTP layer and vision tower | none of its own: the core's kernels and DeepSeek-V4.1's banked decode | none yet: the standard test through the outside plugin `turboexl3_glm53f` decides |
 
 ## Other
 

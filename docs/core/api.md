@@ -35,6 +35,8 @@ The routed experts:
 | `moeWithShared` | `moe`, then an MLX add of a shared-expert output that the caller has already gated |
 | `moeClamped` | `moe` with DeepSeek-V4's (and GLM's) clamped SwiGLU, `swiglu_limit` 1 to 128: the gate clamped from above and up to [−limit, limit] before SwiGLU; decode rows on fin7's clamped variant, prefill rows on the clamped mid |
 | `moeClampedBanked` (`moeClampedBankedGateUp`, `moeClampedBankedDown`) | DeepSeek-V4.1 (`models/deepseek_v41/api.zig`): `moeClamped`'s decode launches over an expert streamer's three slot banks: up to 64 routed pairs, each a row-slot whose id is packed (bank << 24 \| slot row), each pair's output at weight 1 with `moeClamped`'s bytes on its bank at top-1; the gate\|up and the down as two calls (the gate\|up half also reads the down's suh: it prepares the down's input) |
+| `moeClampedRows` | GLM-5.3-Flash (`models/glm53f`): `moeClamped`'s prefill chain at top-1 over gathered rows: row-slot p reads x's row `rows[p]` (x [n, hidden], the gather in the chain's prepare, `prefill.text_prep_rows`) through slot `inds[p]` at weight `scores[p]`, y [S, hidden] in a chosen dtype; row p is `moeClamped` over `take(x, rows)` at top-1, its y cast to that dtype, bit for bit (an expert streamer's prompt calls without their gather and casts) |
+| `moeClampedBankedAs` | `moeClampedBanked` with y stored in a chosen dtype (bf16, f16 or f32) by the banked down finish: the f32 y cast to it, bit for bit (a streamer's bf16 joins without their cast) |
 
 Qwen3.8's shared expert and router, at 1 to 4 decode rows (`models/qwen38/api.zig`):
 

@@ -7,6 +7,7 @@ The code only DeepSeek-V4.1 uses, on turboexl3's core:
 | `api.zig` | DeepSeek-V4.1's entry points, re-exported by `root.zig` under their own names |
 | `grouped.zig` | the grouped (block-diagonal) linear at decode rows, the attention's `wo_a` (`root.linearGrouped`) |
 | `banked.zig` | the banked decode over an expert streamer's slot banks and its grouped GEMVs (`Banked`, kept per `decode.Kernels3`) |
+| `banked_wave3.zig` | wave3 (`Config.banked_wave3`): the whole grouped banked call in three launches, prep2bg zeroing the arrival counters, then each grouped GEMV with its finish (fin7cbg's, dfin3bg's) run by the last threadgroup to arrive at each finish unit (`Banked.wave3`), and its texts' CPU test |
 | `f3.zig` | F3: the shared expert's gate and up finishes, the clamped SwiGLU and the down's prepare in one launch (`F3`, kept per `dense.Dense`; `root.sharedSwiglu`) |
 | `deepseek_test.zig`, `deepseek_gemv_test.zig` | the trunk's linears (`linear`, `linearBias`, `linearGrouped`) at every trunk and vision shape against the host reference, and the dense decode GEMV's launch shapes |
 | `f3_test.zig` | F3's tests (`f3.text_swiglu_prep`) |

@@ -679,13 +679,37 @@ def value_of(prog, unit, a, b, env=None):
         return EvalError(f'{type(e).__name__}: {e}')
 
 
+def variant_entry(unit, table):
+    """{field: (a, b)}: the token span of each field of the first entry of the array const `table` in `unit`
+    (`[_]T{ .{ .field = value, ... }, ... }`); None without that const"""
+    t = unit.t
+    for (key, a, b) in unit.decls:
+        if key != f'const {table}':
+            continue
+        for k in range(a, b - 1):
+            if t[k].text == '.' and t[k + 1].text == '{':
+                out = {}
+                for (s, e) in unit.split_commas(k + 2, unit.match(k + 1)):
+                    if e - s >= 4 and t[s].text == '.' and t[s + 2].text == '=':
+                        out[t[s + 1].text] = (s + 3, e)
+                return out
+    return None
+
+
 def kernel_calls(prog, unit):
     """(name, line, source, header, token index) of every newKernel call in the unit (an EvalError where not evaluable)"""
     t, out = unit.t, []
+    # a call's `<v>.<field>` arguments where <v> is an entry of a variant table (VARIANT_TABLES): the first entry's values
+    variants = {v: variant_entry(unit, tbl) for ((f, v), tbl) in VARIANT_TABLES.items() if f == os.path.basename(unit.name)}
+
+    def span(a, b):
+        if b - a == 3 and t[a].kind == 'id' and t[a + 1].text == '.' and variants.get(t[a].text):
+            return variants[t[a].text].get(t[a + 2].text, (a, b))
+        return (a, b)
     for k in range(len(t) - 1):
         if t[k].text == 'newKernel' and t[k + 1].text == '(':
             close = unit.match(k + 1)
-            args = unit.split_commas(k + 2, close)
+            args = [span(a, b) for (a, b) in unit.split_commas(k + 2, close)]
             vals = []
             for (a, b) in (args[3], args[4]):
                 if b - a == 1 and t[a].kind == 'id' and t[a].text not in unit.consts:
@@ -1103,6 +1127,9 @@ RENAMED_TESTS = {
                   "rows 1/4/8 (TURBOEXL3_BENCH=1)"):
         "turboexl3 bench: form-3 variants vs Sushi's chain, K2..K8 (+ n40), Qwen geometry, rows 1/4/8 (TURBOEXL3_BENCH=1)",
 }
+# tests a change edited on purpose, by file and test name, with the reason: check 4 lists them in place of aligning
+# their bodies token for token (their strings are still checked against the kernels they name)
+EDITED_TESTS = {}
 # DeepSeek-V4.1's trunk: the grouped linear (wo_a), the bias helper, their host reference and tests
 ADDED_FILES['grouped.zig'] = ('the grouped linear at decode rows (turboexl3_grouped_prep / _gemv / _finish: dense\'s '
                               'prep_s, the routed down3 and dfin3 texts with their own template arguments)')
@@ -1201,6 +1228,457 @@ ADDED_FILES['models/deepseek_v41/api.zig'] = 'DeepSeek-V4.1\'s entry points, out
 ADDED_FILES['chains_test.zig'] = ('byte tests of the core paths no other test pinned: pg2 against dequantize + matmul + '
                                   'finish, the pieces\' finish against the one-call finish, the unfused chain against the '
                                   'reference')
+# GLM-5.3-Flash's fused paths (glm53f-fused): the routed prefill chain over gathered rows (root.moeClampedRows: the prepare
+# with a row map, turboexl3_pf_prep_r) and the banked decode with its y stored in a chosen dtype (moeClampedBankedAs)
+ADDED_KERNELS[('prefill.zig', 'turboexl3_pf_prep_r')] = ('the prepare with its row line swapped for the row map\'s '
+                                                        '(text_prep_rows: prep_1, prep_rmap, prep_2): each slot\'s x row '
+                                                        'read through rmap, an expert streamer\'s prompt rows gathered '
+                                                        'in the prepare')
+ADDED[('prefill.zig', 'const prep_rows_in')] = 'the row-map prepare\'s operand names (the prepare\'s, then rmap)'
+CHANGED[('prefill.zig', 'const Prefill')] += ('; prep_r (made on first use, prepRowsKernel), prepWith / moeWith / moeT128With: '
+                                              'the chain with each slot\'s x row from a row map (prep / moe / moeT128 call '
+                                              'them with none, the same launches)')
+ADDED[('root.zig', 'fn moeClampedRows')] = ('moeClamped\'s prefill chain at top-1 over gathered rows (the row-map prepare), '
+                                          'y in a chosen dtype: GLM-5.3-Flash\'s prompt calls')
+ADDED[('root.zig', 'const moeClampedBankedAs')] = 'the re-export of models/deepseek_v41/api.zig\'s moeClampedBankedAs'
+ADDED[('models/deepseek_v41/api.zig', 'fn moeClampedBankedAs')] = ('moeClampedBanked on the banked Kernels3 of a chosen '
+                                                                 'output dtype: dfin3b\'s store the one change')
+ADDED_FILES['fused_test.zig'] = ('GLM-5.3-Flash\'s fused paths held to the chains they replace byte for byte: the row-map '
+                                 'prepare\'s text (CPU), moeClampedRows and moeClampedBankedAs at bf16 (GPU); the plugin\'s '
+                                 'schedules held to the default\'s (the banked texts and GEMV variants, the prompt call '
+                                 'sizes, the routed prefill\'s bk128 and half_rows; GPU); every pg2 candidate tile at '
+                                 'every trunk linear held to the chain\'s words (GPU); their timing (TURBOEXL3_GLM_TIME)')
+for _key in ('const bank_experts', 'fn bfExact', 'fn rootBank', 'fn envList', 'fn drawPairs'):
+    CHANGED[('routed_test.zig', _key)] = 'pub: fused_test.zig reuses it'
+# GLM-5.3-Flash's trunk at prefill rows on pg2 (a host's own tiles, pgemm.host_table from pgemm.candidates by the codes of
+# models/glm53f/api.zig) and the routed prefill's bk128 / half_rows options reachable from Config (the plugin's
+# TURBOEXL3_GLM53F_PG2 and _PF_OPTS)
+ADDED_FILES['models/glm53f/api.zig'] = ('GLM-5.3-Flash\'s trunk linears at prefill rows and the pg2 table a host builds from '
+                                        'one tile code a linear (pg2Table), with its CPU tests')
+ADDED[('root.zig', 'const glm53f')] = 'GLM-5.3-Flash\'s host helpers (models/glm53f/api.zig)'
+ADDED[('pgemm.zig', 'const candidates')] = 'the tiles a host times on its machine to fill host_table (named by index)'
+ADDED[('pgemm.zig', 'const host_table')] = 'a host\'s own tiles a (K, N), looked up before table'
+ADDED[('pgemm.zig', 'fn tileOf')] = 'the tile a (K, N): the host\'s table first, then table (tileFor\'s lookup)'
+CHANGED[('pgemm.zig', 'fn tileFor')] = 'its table lookup moved to tileOf (the host\'s table first)'
+CHANGED[('pgemm.zig', 'fn warm')] = 'compiles the host\'s table\'s tiles too'
+CHANGED[('config.zig', 'const Config')] += ('; pf_bk128 and pf_half_rows: the routed prefill\'s bk128 and half_rows '
+                                            '(prefill.Options, the same bytes) from the configuration')
+CHANGED[('root.zig', 'fn pfOptions')] = 'takes bk128 and half_rows from Config.pf_bk128 and pf_half_rows'
+# the routed prefill's 128-row tile launches in 128-deep K stages (prefill.Options.t128_bk128, Config.pf_t128_bk128: the
+# plugin's TURBOEXL3_GLM53F_PF_OPTS tk and bk128.tk): the same kernels, BKS 128 on those launches (pf_stage_test.zig)
+CHANGED[('config.zig', 'const Config')] += ('; pf_t128_bk128: both routed prefill GEMMs\' 128-row tile launches in '
+                                            '128-deep K stages (prefill.Options.t128_bk128, the same bytes)')
+CHANGED[('prefill.zig', 'const Options')] = ('t128_bk128 (taken beside t128 within 32 KB) and t128Stage, the 128-row tile '
+                                             'launch\'s K stage depth')
+CHANGED[('prefill.zig', 'const Prefill')] += ('; t128Gemm runs the 128-row tile launch at Options.t128Stage of the mixed '
+                                              'launch\'s depth')
+CHANGED[('root.zig', 'fn pfOptions')] += '; t128_bk128 from Config.pf_t128_bk128'
+CHANGED[('root.zig', 'fn prefillFor')] = ('t128_bk128 off where the 128-row tiles do not run or their 128-deep stages '
+                                          'exceed 32 KB; the engage line prints it')
+CHANGED[('fused_test.zig', 'const PfOpts')] = 't128_bk128 beside bk128 and half_rows (default off)'
+CHANGED[('fused_test.zig', 'const pf_opts')] = 'tk and bk128.tk appended (the plugin\'s TURBOEXL3_GLM53F_PF_OPTS values)'
+CHANGED[('fused_test.zig', 'const pf_sets')] = 'tk and bk128.tk appended: the prefill options\' byte and timing tests run them'
+CHANGED[('fused_test.zig', 'fn pfOptsConfigure')] = 'sets Config.pf_t128_bk128 too'
+ADDED_FILES['pf_stage_test.zig'] = ('where the routed prefill takes its 128-row tile launches\' 128-deep stages and the depth '
+                                    'each launch then runs (CPU); their bytes are fused_test.zig\'s prefill options test')
+# the mixed launch's outputs at the rows they hold (prefill.Options.t128_zfit, Config.pf_t128_zfit: the plugin's
+# TURBOEXL3_GLM53F_PF_ZFIT): the route's compact bases (zmb, the tables' fourth column), the mixed GEMMs storing there, mid
+# and finish reading there, root.moeClampedRowsFit naming the call's experts (zfit_test.zig)
+CHANGED[('config.zig', 'const Config')] += ('; pf_t128_zfit: beside the 128-row tiles, the mixed launch\'s outputs at the rows '
+                                            'they hold (prefill.Options.t128_zfit, the same bytes)')
+CHANGED[('prefill.zig', 'const Options')] += '; t128_zfit (taken beside t128)'
+CHANGED[('prefill.zig', 'const T128Kernels')] += ('; z (ZKernels): the compact mixed outputs\' route, mixed launches, mid and '
+                                                  'finish, made after the stock set with t128_zfit')
+CHANGED[('prefill.zig', 'const RouteT128')] = 'zmb (the compact bases, t128_zfit) and zcap (the mixed launch\'s output rows)'
+CHANGED[('prefill.zig', 'const ZT128')] = 'zmb, the route\'s compact bases borrowed for mid and finish'
+CHANGED[('prefill.zig', 'const Prefill')] += ('; t128_zfit: routeT128 returns the compact bases, t128Gemm sizes the mixed '
+                                              'launch\'s outputs at zcap rows, midT128 and finishT128 read through zmb, '
+                                              'moeT128With takes call_experts')
+for _key in ('fn gemmText', 'fn gemmSmallText', 'fn gemmMixedText'):
+    RECOMPOSED[('prefill.zig', _key)] = ('zb: the mixed launches\' stores at the table\'s fourth column '
+                                         '(gemm_*op*_xsz_zb.metal in place of gemm_*op*_xsz.metal); every text without it '
+                                         'keeps its value (2)')
+ADDED[('prefill.zig', 'fn t128ZCap')] = 'the compact mixed outputs\' rows for an S-slot call naming its experts or not'
+for _key in ('froute_t128z_out', 'mid_t128z_in', 'fin_t128z_in'):
+    ADDED[('prefill.zig', f'const {_key}')] = 'the compact mixed outputs\' kernels\' operand names (zmb)'
+CHANGED[('root.zig', 'fn pfOptions')] += '; t128_zfit from Config.pf_t128_zfit'
+CHANGED[('root.zig', 'fn prefillFor')] += '; t128_zfit off without the 128-row tiles, printed in the engage line'
+CHANGED[('root.zig', 'fn moeClampedRows')] = 'its body moved to clampedRows (no experts named)'
+ADDED[('root.zig', 'fn moeClampedRowsFit')] = 'moeClampedRows naming the call\'s experts (t128_zfit\'s compact outputs\' rows)'
+ADDED[('root.zig', 'fn clampedRows')] = 'moeClampedRows\' body with the named experts'
+for _key in ('const sigma', 'const prompt_slots', 'const act_rows', 'fn bitsOf', 'fn drawCall', 'fn countDiff', 'fn sortBySlot'):
+    CHANGED[('fused_test.zig', _key)] = 'pub: zfit_test.zig draws, sorts and compares its calls with them'
+for _name, _why in (('turboexl3_pf_t128z_route', 'text_froute_t128 with the compact bases (zmb, the tables\' fourth column) '
+                                                  'between its tables and their spare rows (froute_t128z_2)'),
+                    ('turboexl3_pf_t128z_gum', 'turboexl3_pf_t128_gum storing at the tables\' fourth column (gemm2mz_text)'),
+                    ('turboexl3_pf_t128z_dnm', 'turboexl3_pf_t128_dnm storing at the tables\' fourth column (gemm1mz_text)'),
+                    ('turboexl3_pf_t128z_mid', 'turboexl3_pf_t128_mid reading a remainder position at its compact row '
+                                               '(mid_t128z_pick, mid_t128z_loads)'),
+                    ('turboexl3_pf_t128z_midc', 'turboexl3_pf_t128_midc reading a remainder position at its compact row'),
+                    ('turboexl3_pf_t128z_fin', 'turboexl3_pf_t128_fin reading a remainder slot at its compact row '
+                                               '(finish_t128z_pick, finish_t128z_load)')):
+    ADDED_KERNELS[('prefill.zig', _name)] = 'the compact mixed outputs (t128_zfit): ' + _why
+ADDED_FILES['zfit_test.zig'] = ('the compact mixed outputs\' rows hold every remainder the route leaves (CPU), and moeClampedRows '
+                                'with t128_zfit, the experts named or not, gives the words it gives without under the served '
+                                'options, bk128 and bk128.tk (GPU)')
+
+# the timing tests' 455-row runs: each run's slot computed in u32. @min with a comptime bound narrows its result type (u4
+# for 8, u6 for 35), so the run index times the slot stride overflowed it (undefined in the ReleaseFast gpu-test): the
+# routing the tests name, 9 experts 11 slots apart and 36 experts 2 apart
+for _t in ('turboexl3 gpu glm53f fused timing: each fused path against the chain it replaces at the served shapes '
+           '(TURBOEXL3_GLM_TIME=1)',
+           'turboexl3 gpu glm53f schedule timing: the banked decode\'s schedules at a verify\'s waves, and a prompt bank call '
+           'in calls of 2048 to 16384 rows (TURBOEXL3_GLM_TIME=1)',
+           'turboexl3 gpu glm53f prefill options timing: a 16384-row prompt bank call under the served options, bk128, '
+           'half_rows and both, in calls of 4096 and 16384 rows on each path, over 36 experts\' 455-row runs and over a '
+           'drawn routing (TURBOEXL3_GLM_TIME=1)'):
+    EDITED_TESTS[('fused_test.zig', _t)] = 'the 455-row runs\' slots in u32 (the narrowed @min overflowed their product)'
+
+# DEC-ONE's GEMV variants (Config.dense_variant, Config.dec_bt): dense.zig's Dense.init makes dec0 and dec1 from the variant
+# the configuration names (`dv`, an entry of `dec_variants`: its kernels' names, texts and header). Check 1 reads those
+# calls' `dv.<field>` arguments as the table's first entry's (name "", the default), so the default calls are held to the
+# original calls' names, texts and headers; the other entries are kernels of their own names, built only when the
+# configuration names them (t4 / t1 / t0: an EXL3_T1V define file before header5; ku / kut4: the ku texts)
+VARIANT_TABLES = {('dense.zig', 'dv'): 'dec_variants'}
+ADDED[('config.zig', 'const dense_variants')] = 'DEC-ONE\'s GEMV variant count (dense.dec_variants.len, checked there)'
+ADDED[('dense.zig', 'const DecVariant')] = 'a DEC-ONE GEMV variant: its name, its two kernels\' names, their texts and header'
+ADDED[('dense.zig', 'const dec_variants')] = ('DEC-ONE\'s GEMV variants: the first today\'s dec0 and dec1 (check 1 reads the '
+                                             'calls as it), then t4, t1, t0, ku and kut4; g1 and g2 at GLM-5.3-Flash\'s trunk '
+                                             'shapes only')
+ADDED[('dense.zig', 'comptime #62')] = 'dec_variants.len checked against config.dense_variants'
+ADDED[('dense.zig', 'fn decVariantOf')] = 'dec_variants\' index by name (the plugin\'s TURBOEXL3_GLM53F_DEC)'
+ADDED_FILES['dense_dec_test.zig'] = ('DEC-ONE\'s schedules at sc_3.10\'s 20 dense shapes, rows 1 to 4, bf16 and f32: each variant '
+                                    'and output-tile count against the served configuration\'s bytes (GPU), and a verify\'s '
+                                    'trunk timed per class and schedule (TURBOEXL3_GLM_TIME=1)')
+EDITED_TESTS[('config.zig', 'turboexl3 config: the defaults are valid and served; an unserved form, slice count or layout is '
+              'refused')] = 'DEC-ONE\'s dense_variant and dec_bt: the defaults, every variant and tile count served, others refused'
+
+# wave3 (Config.banked_wave3, banked_wave3.zig; the plugin's TURBOEXL3_GLM53F_BANKED_WAVE3): the whole grouped banked call in
+# three launches where five run: prep2bg zeroing the arrival counters (w3_zero before its skip line), then each grouped GEMV
+# with its finish run by the last threadgroup to arrive at each finish unit (fin7cbg's statements after the gate|up GEMV,
+# dfin3bg's after the down), their grid lines (decode.fin7_1b, dfin3_1b, cut out of fin7_1 and dfin3_1: the same bytes)
+# swapped for the unit's. Every other kernel and text is unchanged.
+ADDED_FILES['banked_wave3.zig'] = ('wave3\'s texts (turboexl3_prep2bgw3, turboexl3_gu3bgw3 and turboexl3_gu3bgm3w3, '
+                                   'turboexl3_down3bgw3 and turboexl3_down3bgm3w3, each grouped GEMV variant\'s too: the '
+                                   'grouped GEMVs\' and finishes\' own pieces with the w3_* pieces around them), its launch '
+                                   'shape, kernels and configs (Wave3), and the texts\' CPU test')
+ADDED_FILES['wave3_test.zig'] = ('wave3\'s option and its exact arrival counts (CPU), and its call against the five launches, '
+                                 'word for word, at every SC rate, 1 to 4 rows of top-8 and other waves with skipped '
+                                 'row-slots, selected and configured, y f32 and bf16 (GPU)')
+for _k, _why in (('fin7_1a', 'fin7_1 to its grid lines: its constants'),
+                 ('fin7_1b', 'fin7_1\'s grid lines and lane (banked_wave3.zig\'s gate|up launch takes its unit\'s there)'),
+                 ('dfin3_1a', 'dfin3_1 to its grid lines: its constants'),
+                 ('dfin3_1b', 'dfin3_1\'s grid lines, lane, thread and exchange (banked_wave3.zig\'s down launch takes its '
+                              'unit\'s there, the exchange at kernel scope)'),
+                 ('dfin3_1c', 'dfin3_1 past its exchange: the output, the MUL1 constants and the slot loop\'s head')):
+    ADDED[('decode.zig', f'const {_k}')] = _why
+ADDED[('banked.zig', 'const banked_wave3')] = 'banked_wave3.zig, the whole grouped call in three launches (Banked.wave3)'
+CHANGED[('banked.zig', 'const Banked')] = (CHANGED.get(('banked.zig', 'const Banked'), 'Banked') +
+                                           '; wave3 (its kernels and configs, freed first in deinit) and bankedMoeSelV, the '
+                                           'whole call as the five launches or wave3\'s three (wave3On, wave3Texts)')
+CHANGED[('config.zig', 'const Config')] += ('; banked_wave3: the whole grouped banked call in three launches (needs '
+                                            'banked_group 4; the same words)')
+ADDED[('models/deepseek_v41/api.zig', 'const BankedOuts')] = 'the whole banked call\'s hd, hs and y (moeClampedBankedWave)'
+ADDED[('models/deepseek_v41/api.zig', 'fn moeClampedBankedWave')] = ('the whole banked call on a selection and variants as '
+                                                                    'five launches or wave3\'s three, or as configured')
+ADDED[('models/deepseek_v41/api.zig', 'fn bankedY')] = 'moeClampedBankedWave\'s y as configured (hd and hs freed)'
+for _k in ('fn moeClampedBankedAs', 'fn moeClampedBankedSelV'):
+    CHANGED[('models/deepseek_v41/api.zig', _k)] = 'the whole call through bankedY: wave3 as configured (Config.banked_wave3)'
+
+# GLM-5.3-Flash's shared expert gate | up in one DEC-ONE launch (glm53f/shared_gu.zig, the plugin's
+# TURBOEXL3_GLM53F_SHARED_GU): dense's text_dec1 with the member chosen over two trellises after its head (jsel_pair) and
+# ricursive's tile address in the member's trellis (jtile), each member at its own K split, suh and svh
+ADDED_FILES['shared_gu.zig'] = ('the shared expert\'s gate | up in one DEC-ONE launch (turboexl3_glm53f_shared_gu: dense\'s '
+                                'DEC-ONE pieces with jsel_pair, ricursive\'s jtile and jstore_pair, over the two trellises as '
+                                'they lie, into two outputs), its plan, the svh join and its CPU tests')
+ADDED_FILES['shared_gu_test.zig'] = ('shared_gu.gateUp against root.linear of each member, word for word, at K6 and K4, decode rows '
+                                     '1 to 8 and 16, bf16 and f32 (GPU)')
+ADDED_KERNELS[('shared_gu.zig', 'turboexl3_glm53f_shared_gu')] = ('dense\'s text_dec1 with the member chosen over two trellises '
+                                                                  'after its head (jsel_pair), the tile read in the member\'s '
+                                                                  'trellis (ricursive\'s jtile) and the finish\'s value stored in '
+                                                                  'the member\'s own output (jstore_pair)')
+CHANGED[('ricursive.zig', 'const jsel')] = 'pub: glm53f/shared_gu.zig\'s text test holds its own member choice beside it'
+CHANGED[('ricursive.zig', 'const jtile')] = 'pub: glm53f/shared_gu.zig\'s text reads the member\'s tile through it'
+ADDED[('models/glm53f/api.zig', 'const shared_gu')] = 'shared_gu.zig, the shared expert\'s gate | up launch (root\'s glm53f.shared_gu)'
+CHANGED[('root.zig', 'const shared_state')] = 'registers glm53f.shared_gu.shared_state'
+
+# the persistent grouped banked GEMVs (Config.banked_ptg, banked_ptg.zig; the plugin's TURBOEXL3_GLM53F_BANKED g4p and
+# g4m3p): a threadgroup builds the call's lead list once (each row-slot's turboexl3_members_g), then runs the grouped
+# GEMV's work items at its index, its index + NPT, ... on the grouped texts' own bodies (gu3g_3, down3g_3, hw4b's m3 ones)
+ADDED_FILES['banked_ptg.zig'] = ('the persistent grouped GEMVs (turboexl3_gu3bgp, turboexl3_down3bgp, hw4b\'s '
+                                 'turboexl3_gu3bgm3p and turboexl3_down3bgm3p, each grouped GEMV variant\'s too: gu3_1 and '
+                                 'down3_1, the lead list and work item loop (ptg_1 .. ptg_3) around the grouped bodies), '
+                                 'their configs at NPT threadgroups and the texts\' CPU test')
+ADDED_FILES['ptg_test.zig'] = ('the persistent grouped GEMVs\' option and names (CPU), and each persistent text set at every '
+                               'grouped GEMV variant the plugin takes, selected and configured (g4m3p and g4p at t4.t4), '
+                               'against the served banked call\'s rows, byte for byte, at every SC rate (GPU)')
+ADDED[('banked.zig', 'const banked_ptg')] = 'banked_ptg.zig, the persistent grouped GEMVs (Banked.ptg)'
+CHANGED[('banked.zig', 'const Banked')] = ('banked_ptg and ptg: at banked_group 4 the grouped GEMVs as persistent '
+                                           'threadgroups (gpSet; the BankedSel and set texts g4p and g4m3p, bankedSetSelV '
+                                           'takes their variants from ptg); a set\'s kernels held by value')
+CHANGED[('config.zig', 'const Config')] += ('; banked_ptg: at banked_group 4, the grouped banked GEMVs as persistent '
+                                            'threadgroups over the call\'s lead list (the same work items, so the same bytes)')
+for _key in ('fn drawWave', 'fn varName', 'fn refusedVariant'):
+    CHANGED[('fused_test.zig', _key)] = 'pub: ptg_test.zig draws its waves, names its variants and skips the refused ones with them'
+EDITED_TESTS[('fused_test.zig', 'turboexl3 gpu glm53f schedule timing: the banked decode\'s schedules at a verify\'s waves, '
+              'and a prompt bank call in calls of 2048 to 16384 rows (TURBOEXL3_GLM_TIME=1)')] += (
+    '; the persistent texts\' selections (g4p, g4m3p) timed beside g4 and g4m3')
+
+# Two linears of one input at their own K splits in one DEC-ONE launch (glm53f/pair_ks.zig, a DSA layer's q_a and kv_a: the
+# plugin's TURBOEXL3_GLM53F_SMALLOP_FUSE): shared_gu's text with its head laying the members out flat at their own K
+# splits (ks_head) and dense's prepare's store at the member's slice (ks_prep1_2, dec_prep1 cut at its store)
+ADDED_FILES['pair_ks.zig'] = ('two linears of one input at their own K splits in one DEC-ONE launch (turboexl3_glm53f_pair_ks: '
+                              'shared_gu\'s pieces with ks_head and dense\'s prepare with ks_prep1_2 for its store), its plan '
+                              'and its CPU tests')
+ADDED_FILES['pair_ks_test.zig'] = ('pair_ks.linear2 against root.linear of each member, word for word, a DSA layer\'s q_a and '
+                                   'kv_a at K6 and K4, decode rows 1 to 8 and 16, bf16 and f32 (GPU)')
+ADDED_KERNELS[('pair_ks.zig', 'turboexl3_glm53f_pair_ks')] = ('shared_gu\'s text with the head laying the members out flat '
+                                                              'along x at their own K splits (ks_head) and the prepare\'s store '
+                                                              'at the member\'s slice (ks_prep1_2)')
+CHANGED[('dense.zig', 'const dec_prep1')] = ('cut into dec_prep1_1, dec_prep1_2 (the store of a prepared input at its offset in '
+                                            'the slice) and dec_prep1_3: the same bytes')
+ADDED[('dense.zig', 'const dec_prep1_1')] = 'dec_prep1 to its store'
+ADDED[('dense.zig', 'const dec_prep1_2')] = 'dec_prep1\'s store (glm53f/pair_ks.zig stores at its member\'s slice instead)'
+ADDED[('dense.zig', 'const dec_prep1_3')] = 'dec_prep1 after its store'
+ADDED[('models/glm53f/api.zig', 'const pair_ks')] = 'pair_ks.zig, two linears at their own K splits in one launch (root\'s glm53f.pair_ks)'
+CHANGED[('root.zig', 'const shared_state')] = 'registers glm53f.shared_gu.shared_state and glm53f.pair_ks.shared_state'
+
+# The routed prefill's size classes (Config.pf_size_class, prefill.Options.size_class; the plugin's
+# TURBOEXL3_GLM53F_PF_REUSE): moeT128With's row-slot-sized arrays at classRows of the call's row-slots, every launch over
+# the call's own rows, y handed back as its first rows' view: the same bytes
+ADDED[('prefill.zig', 'const size_class_rows')] = 'the size classes\' step (256 row-slots)'
+ADDED[('prefill.zig', 'fn classRows')] = 'a call\'s rows rounded up to a multiple of size_class_rows'
+ADDED_FILES['size_class_test.zig'] = ('classRows and the size classes\' rule (CPU), and prompt calls whose row-slot counts are '
+                                      'not multiples of 256 with the size classes against the bytes without them, on both '
+                                      'paths, over a drawn routing and 455-row runs, at every SC rate (GPU)')
+CHANGED[('config.zig', 'const Config')] += ('; pf_size_class: the routed prefill\'s row-slot arrays at size classes (the same '
+                                            'bytes)')
+CHANGED[('prefill.zig', 'const Options')] += ('; size_class: moeT128With\'s row-slot arrays at classRows (with t128, without '
+                                              't128_zfit)')
+CHANGED[('prefill.zig', 'const Prefill')] += ('; prepCap, gemmGUT128Cap, midT128Cap, gemmDT128Cap and finishT128Cap: their '
+                                              'outputs at a cap of rows, each launch over the call\'s; moeT128With at classRows '
+                                              'with size_class, y its first rows\' view')
+CHANGED[('root.zig', 'fn pfOptions')] += '; size_class from Config.pf_size_class'
+CHANGED[('root.zig', 'fn prefillFor')] += '; size_class off without the 128-row tiles or with t128_zfit, its engage line once'
+CHANGED[('root.zig', 'const shared_state')] += ', and pf_class_logged'
+ADDED[('root.zig', 'const pf_class_logged')] = 'the size classes\' engage line, once a process'
+
+# The routed prefill chain in the plugin's prompt calls (glm53f/chain_time_test.zig): the tile-aligned cut (the plugin's
+# TURBOEXL3_GLM53F_PF_ALIGN) and the chain's timing arms (TURBOEXL3_GLM_TIME)
+ADDED_FILES['chain_time_test.zig'] = ('the tile-aligned cut\'s rule (CPU) and its calls against fixed 4096-row calls byte for byte '
+                                      '(GPU); the control chain over 455-row runs and a lognormal routing at both cuts, its '
+                                      'stages cumulatively and the GEMM probes (TURBOEXL3_GLM_TIME)')
+
+
+# GLM-5.3-Flash's DEC-ONE GEMV at its trunk shapes (dense.zig's `g1` and `g2` variants, the plugin's
+# TURBOEXL3_GLM53F_DEC=g1 / g2; Dense.glmShape: K6 and the MTP layer's K4, MUL1, the sc_3.10 dense shapes, any other shape
+# today's texts): text_dec0 with each lane's tile word offsets and shift taken once and the tile and input pointers stepped a
+# constant per input tile (dec_g_1, dec_g_2, dec_g_3), its codewords, decodes, FMAs, folds and finish today's pieces; g2's
+# GEMV reads the prepared rows as f32 (dec_g_xf_1, dec_g_xf_2), which prep_scf writes (prep_sc's text into an f32 xp: the
+# same halves, widened as stored)
+ADDED_KERNELS[('dense.zig', 'turboexl3_dense_prep_scf')] = ('prep_sc\'s text and header with its xp an f32 array (DecVariant.xf: '
+                                                            'g2), made only for that variant: the same halves, stored widened')
+CHANGED[('dense.zig', 'const DecVariant')] = ('glm (the variant serves GLM-5.3-Flash\'s trunk shapes only, Dense.glmShape) and xf '
+                                             '(its GEMV reads f32 prepared rows, prep_scf\'s)')
+CHANGED[('dense.zig', 'const dec_variants')] = ('g1 and g2: text_dec0_g1 / text_dec0_g2 (text_dec1 where the prepare runs inside), '
+                                               'their own kernel names, header5')
+CHANGED[('dense.zig', 'const Dense')] += ('; xf / prep_scf: a variant\'s f32 prepared rows (init makes prep_scf, decCfgs stores '
+                                        'xp as f32, decLinear launches it in prep_sc\'s place, deinit frees it through '
+                                        'freeKernel); glm_shapes / glmShape / variantFor: a glm variant at GLM-5.3-Flash\'s trunk '
+                                        'shapes only, today\'s texts at any other (init takes variantFor\'s and prints the '
+                                        'engage line once a process)')
+CHANGED[('config.zig', 'const dense_variants')] = '8: g1, g2'
+ADDED[('dense.zig', 'const dec_g_said')] = 'a glm variant\'s engage line, once a process'
+CHANGED[('dense.zig', 'const shared_state')] = 'registers dec_g_said'
+EDITED_TESTS[('dense_dec_test.zig', 'turboexl3 glm53f dense decode texts: each variant is today\'s texts with ku\'s tile loop '
+              'in place of today\'s and its own kernel names; today\'s texts are today\'s pieces')] = (
+    'g1 and g2: their compositions (their own head, loop and tile words, then text_dec0\'s pieces from the codewords on), '
+    'g1\'s widening statement today\'s, and their reach (every served shape at its K; not K5, MCG or another model\'s shape)')
+
+# DEC-ONE's arrival counters made on the host (dense.zig's dec_host_zero, the plugin's TURBOEXL3_GLM53F_HOST_ZERO): a call
+# whose prepare runs inside its launch, and glm53f's joined launches (pair_ks.linear2, shared_gu.gateUp), take a new array
+# of zeros copied from the host where they launch dec_zero over their counters: the same zeros, so the same bytes
+ADDED[('dense.zig', 'const dec_host_zero')] = 'host-made arrival counters in place of dec_zero\'s launch (the plugin sets it)'
+ADDED[('dense.zig', 'const dec_host_zeroed')] = 'the calls that took host-made counters'
+ADDED[('dense.zig', 'const host_counters_max')] = 'the most counters hostCounters makes (a call past it launches dec_zero)'
+ADDED[('dense.zig', 'const host_zero_words')] = 'the zeros hostCounters copies'
+ADDED[('dense.zig', 'fn hostCounters')] = 'n zeroed counters copied from the host, with dec_host_zero set'
+CHANGED[('dense.zig', 'const Dense')] += ('; DecCfg.ncnt (the counters\' length, decCfgs stores it) and decLinear\'s counters '
+                                        'from hostCounters where it launched dec_zero')
+CHANGED[('dense.zig', 'const shared_state')] += ', dec_host_zero and dec_host_zeroed'
+CHANGED[('pair_ks.zig', 'fn linear2')] = 'its counters from dense.hostCounters where it launched dec_zero'
+CHANGED[('shared_gu.zig', 'fn gateUp')] = 'its counters from dense.hostCounters where it launched dec_zero'
+
+# Dense.decPrepared: DEC-ONE's GEMV launch alone over rows a caller prepared in a launch of its own (the GLM-5.3-Flash
+# plugin's producer texts, which write prep_sc's outputs), and decPrepSpec, what they write
+CHANGED[('dense.zig', 'const Dense')] += ('; DecPrep / decPrepSpec (what prep_sc hands DEC-ONE\'s GEMV at a row count) and '
+                                        'decPrepared (dec0 at decCfgs\' config over a caller\'s prepared rows)')
+ADDED[('root.zig', 'fn decPrepSpec')] = 'Dense.decPrepSpec on the Dense linear takes'
+ADDED[('root.zig', 'fn decPrepared')] = 'Dense.decPrepared on the Dense linear takes, its operands checked against the spec'
+
+# int8 gate|up and down (prefill.Options.int8, Config.pf_int8; lossy, off by default): the routed prefill's gate, up and
+# down GEMMs on int8 beside the 128-row tiles, 1 a scale each activation 128-block, 2 one scale a row. prep_2 is cut after
+# its two H128s (prep_2_1, prep_2_2) and mid_5 after its H128 (mid_5_1, mid_5_2): the same bytes, so the int8 prepare
+# (prep_1, the row line, prep_2_1, then prep_i8 or prep_i8t) and mid (the 128-row tiles' mid to mid_5_1, then mid_i8 or
+# mid_i8t) are compositions; the GEMM (gemm_i8_1, its op's operands gemm_i8_sel2 or gemm_i8_sel1, gemm_i8_2 on header_i8:
+# an mpp matmul2d of int8 per 128-deep block over the trellis decoded to int8 in threadgroup memory, each block folded at
+# its rows' scales, or with ROWSCALE one fold) writes ZT128's outputs, and finish is the exact chain's
+ADDED_KERNELS[('prefill.zig', 'turboexl3_pf_prep_i8')] = ('the int8 prepare: text_prep to its f16 inputs (prep_2_1), then each '
+                                                          '128-block at its own scale as int8 with its block sums (prep_i8)')
+ADDED_KERNELS[('prefill.zig', 'turboexl3_pf_prep_i8r')] = 'the int8 prepare over a row map (text_prep_rows\' row line)'
+ADDED_KERNELS[('prefill.zig', 'turboexl3_pf_prep_i8t')] = ('the int8 prepare with one scale a row (prep_i8t: the row\'s amax over '
+                                                           'its blocks, one threadgroup a row)')
+ADDED_KERNELS[('prefill.zig', 'turboexl3_pf_prep_i8tr')] = 'turboexl3_pf_prep_i8t over a row map'
+ADDED_KERNELS[('prefill.zig', 'turboexl3_pf_t128_mid_i8')] = ('int8\'s mid: the 128-row tiles\' mid to the down input\'s f16 '
+                                                              'values (mid_5_1), then each 128-block at its own scale as int8 '
+                                                              'with its block sums (mid_i8)')
+ADDED_KERNELS[('prefill.zig', 'turboexl3_pf_t128_mid_i8c')] = 'turboexl3_pf_t128_mid_i8 with the clamped SwiGLU'
+ADDED_KERNELS[('prefill.zig', 'turboexl3_pf_t128_mid_i8t')] = ('int8\'s mid with one scale a row (mid_i8t: the row\'s amax over '
+                                                               'its blocks, one threadgroup a row)')
+ADDED_KERNELS[('prefill.zig', 'turboexl3_pf_t128_mid_i8tc')] = 'turboexl3_pf_t128_mid_i8t with the clamped SwiGLU'
+ADDED_KERNELS[('prefill.zig', 'turboexl3_pf_gemm_i8')] = ('the int8 gate|up GEMMs (gemm_i8_1, gemm_i8_sel2, gemm_i8_2 on '
+                                                          'header_i8: the register path\'s header and the int8 decode, '
+                                                          'i8_helpers)')
+ADDED_KERNELS[('prefill.zig', 'turboexl3_pf_gemm_i8d')] = 'the int8 down GEMM (gemm_i8_1, gemm_i8_sel1, gemm_i8_2 on header_i8)'
+ADDED[('prefill.zig', 'const prep_i8_out')] = 'the int8 prepare\'s outputs (xqg, xqu, inv, xsg, xsu, sxg, sxu)'
+ADDED[('prefill.zig', 'const gemm_i8_in')] = 'the int8 gate|up GEMMs\' inputs (tiles, xq0, xq1, w0, w1, sx0, sx1, xs0, xs1)'
+ADDED[('prefill.zig', 'const gemm_i8d_in')] = 'the int8 down GEMM\'s inputs (tiles, xq0, w0, sx0, xs0)'
+ADDED[('prefill.zig', 'const mid_i8_out')] = 'int8\'s mid\'s outputs (xdq, xsd, sxd)'
+ADDED[('prefill.zig', 'const I8Kernels')] = ('the int8 chain\'s kernels (both schemes\' prepares, row-map prepares and mids, the '
+                                             'gate|up and down GEMMs)')
+CHANGED[('prefill.zig', 'const Options')] += '; int8 (1 a scale each activation 128-block, 2 one scale a row), taken beside t128'
+CHANGED[('prefill.zig', 'const Prefill')] += ('; i8_k (made with Options.int8, freed in deinit; init refuses int8 2 past 32 blocks a '
+                                            'row), prepI8 / prepI8Cap, gemmGUI8 / gemmGUI8Cap, midI8 / midI8Cap, gemmDI8 / '
+                                            'gemmDI8Cap, i8Cfg and moeI8Cap; moeT128With runs moeI8Cap with int8')
+CHANGED[('config.zig', 'const Config')] += '; pf_int8: the routed prefill\'s int8 gate|up and down (prefill.Options.int8), 0 by default'
+CHANGED[('root.zig', 'fn pfOptions')] += '; int8 from Config.pf_int8'
+CHANGED[('root.zig', 'fn prefillFor')] += '; int8 off without the 128-row tiles, the deferred map or with t128_zfit; its engage line'
+ADDED[('root.zig', 'const pf_i8_logged')] = 'the int8 chain\'s engage line, once a process'
+CHANGED[('root.zig', 'const shared_state')] += ' and pf_i8_logged'
+ADDED[('fused_test.zig', 'fn pfI8Configure')] = 'configure with Config.pf_int8 set and the size classes, every engine released first'
+ADDED[('fused_test.zig', 'fn pfI8Restore')] = 'the saved configuration back, every engine released first'
+ADDED[('fused_test.zig', 'fn guStage')] = 'the route, prepare and gate|up launches alone (the int8 timing test\'s stage)'
+ADDED[('fused_test.zig', 'fn dnStage')] = 'the launches through mid and down (the int8 timing test\'s second stage)'
+ADDED[('fused_test.zig', 'test turboexl3 glm53f prefill int8 options: int8 1 or 2 rides the 128-row tiles on the deferred MUL1 map, the mixed outputs at their sorted positions, beside the size classes')] = 'int8\'s option rule (CPU)'
+ADDED[('fused_test.zig', 'test turboexl3 gpu glm53f prefill int8: the routed gate|up and down on int8 (a scale each activation 128-block; one scale a row) agree with the exact chain (cosine >= 0.99, error rms <= 0.1 of y\'s, finite), 16384 row-slots in 4096-row calls with the size classes, on the plugin\'s default path and on moeClampedRows, at every SC rate (TURBOEXL3_GPU=1)')] = 'int8\'s agreement with the exact chain, both schemes (GPU)'
+ADDED[('fused_test.zig', 'test turboexl3 gpu glm53f prefill int8 timing: a 16384-row prompt bank call with the routed gate|up and down on int8 (1: a scale each activation 128-block; 2: one scale a row) against the exact chain, in calls of 4096 and 16384 rows on each path with the size classes, and its route, prepare and gate|up alone and through mid and down, over 36 experts\' 455-row runs and over a drawn routing (TURBOEXL3_GLM_TIME=1)')] = 'int8\'s timing against the exact chain (TURBOEXL3_GLM_TIME)'
+
+# trunk int8 (Config.pf_trunk_int8, core/trunk_q8.zig; lossy, off by default): a dense linear's prefill rows on its matmul
+# path on int8 at the host's shapes (trunk_q8.shapes). dense's text_prep is cut into prep_1, prep_2 (a block's f16 values)
+# and prep_3, its text_dequant into dequant_1 (the tile loaded) and dequant_2, pg2's text_fused into fused_1 and fused_2
+# (the finish over the staged halves): the same bytes, so the int8 prepare (trunk_q8 prep_1, dense prep_2, trunk_q8
+# prep_2), decode (dense dequant_1, trunk_q8 dequant_2) and GEMM (trunk_q8 gemm_1, pg2's fused_2) are compositions
+ADDED_FILES['trunk_q8.zig'] = ('trunk int8: the int8 prepare (one scale a row), the trellis decoded to int8 and the int8 '
+                               'GEMM with pg2\'s finish as its epilogue, Dense.linearOn\'s matmul path at the host\'s shapes')
+ADDED_KERNELS[('trunk_q8.zig', 'turboexl3_trunk_q8_prep')] = ('the int8 prepare: text_prep\'s block statements (dense prep_2) '
+                                                              'a block at a time, one threadgroup a row, the row\'s amax / 127, '
+                                                              'int8 in natural order with the f16 values\' sum')
+ADDED_KERNELS[('trunk_q8.zig', 'turboexl3_trunk_q8_dequant')] = ('dequantize\'s tile load (dense dequant_1), each codeword '
+                                                                 'stored as int8 (exl3pf_q8) in wq [OUT, IN], on header_i8')
+ADDED_KERNELS[('trunk_q8.zig', 'turboexl3_trunk_q8_gemm')] = ('an mpp matmul2d of int8 a BM x BN tile with the routed int8 '
+                                                              'epilogue at one scale a row, then pg2\'s finish (fused_2), '
+                                                              'on header_i8')
+ADDED[('dense.zig', 'const trunk_q8')] = 'trunk_q8.zig, the int8 path Dense.linearOn takes at the host\'s shapes'
+REMOVED[('dense.zig', 'comptime #62')] = 'the same block (dec_variants.len checked), numbered #68 past the pieces added before it'
+ADDED[('dense.zig', 'comptime #68')] = 'comptime #62, renumbered: dec_variants.len checked against config.dense_variants'
+CHANGED[('dense.zig', 'const Dense')] += ('; linearOn takes trunk int8 (trunk_q8.takes: Config.pf_trunk_int8 at the host\'s '
+                                          'shapes) on its matmul path, after the resident un-rotated W_std')
+CHANGED[('config.zig', 'const Config')] += '; pf_trunk_int8: trunk int8 at the host\'s shapes (trunk_q8.zig), false by default'
+ADDED[('root.zig', 'const trunk_q8')] = 'trunk_q8.zig, trunk int8 (the host sets trunk_q8.shapes)'
+ADDED[('fused_test.zig', 'const q8_rows')] = 'the trunk int8 tests\' rows (pg2\'s)'
+ADDED[('fused_test.zig', 'fn q8Linear')] = 'root.linear with the trunk int8 switch and shapes set, restored after; whether int8 served'
+ADDED[('fused_test.zig', 'const q8_time_rows')] = 'the trunk int8 timing\'s rows (a KDA span\'s 4096, a 16384-row chunk)'
+ADDED[('fused_test.zig', 'const Q8Ctx')] = 'the trunk int8 timing\'s operands (the linear, its Dense, a prepared call, its wq)'
+ADDED[('fused_test.zig', 'test turboexl3 gpu glm53f trunk int8: every trunk linear on int8 (one scale a row) agrees with the chain (cosine >= 0.99, error rms <= 0.1 of y\'s, finite) at 100 to 8200 rows, bf16 x and y; the switch off is the chain word for word; a call\'s rows split over two calls give its words (TURBOEXL3_GPU=1)')] = 'trunk int8\'s agreement with the chain at every trunk linear, the switch off, rows split (GPU)'
+ADDED[('fused_test.zig', 'test turboexl3 gpu glm53f trunk int8 timing: every trunk linear on int8 against the linear as the control serves it (pg2 at its codes), at 2048 to 16384 rows, and the int8 prepare, decode and GEMM alone beside the exact decode (TURBOEXL3_GLM_TIME=1)')] = 'trunk int8\'s timing against the linear as the control serves it (TURBOEXL3_GLM_TIME)'
+
+
+# int8 for the other EXL3 plugins (Qwen3.8, DeepSeek-V4.1), model-neutral; every kernel GLM-5.3-Flash serves unchanged:
+# - the int8 weights' center (Config.pf_int8_c2, prefill.Options.int8_c2; 1020 by default, today's texts): the routed int8
+#   GEMM's tail (gemm_i8_2) cut at its epilogue's store into gemm_i8_2_1, gemm_i8_2_2 and gemm_i8_2_3, and trunk int8's
+#   GEMM head (gemm_1) at its halves' store into gemm_1_1, gemm_1_2 and gemm_1_3: the same bytes. The center's variants put
+#   gemm_i8_epc / gemm_1_epc (the rebuild at QC2 / 2, a template argument) in the store's place under new names;
+#   int8_center.zig pins both centers over every MUL1 codeword (CPU);
+# - trunk int8's inner products (Config.pf_trunk_int8_inner): trunk_q8's prep_2 cut at its halves' store (prep_2_1, prep_2_2,
+#   prep_2_3), so the prepare from prepared rows (prep_p_h in its place) is a composition, and the GEMM storing z (gemm_1,
+#   then inner_2) beside the finished one; Dense.innerOf / innerOn / pieceInner / piecePrepared, root.linearPiecesBegin and
+#   attn_io.prefillInner take them where trunk_q8.innerTakes; trunk_q8.Shape.rate_n names a rate;
+# - Config.pf_defer_affine: the routed prefill's deferred MUL1 map, true by default (today's).
+ADDED_FILES['int8_center.zig'] = ('the int8 weights\' center: exl3pf_q8\'s rounding and the epilogue\'s rebuild on the host, both '
+                                  'centers\' error pinned over every MUL1 codeword (CPU, std and format.zig only)')
+ADDED_KERNELS[('prefill.zig', 'turboexl3_pf_gemm_i8c')] = ('turboexl3_pf_gemm_i8 with the rebuild at QC2 / 2 (gemm_i8_epc in '
+                                                           'gemm_i8_2_2\'s place)')
+ADDED_KERNELS[('prefill.zig', 'turboexl3_pf_gemm_i8dc')] = ('turboexl3_pf_gemm_i8d with the rebuild at QC2 / 2 (gemm_i8_epc in '
+                                                            'gemm_i8_2_2\'s place)')
+ADDED_KERNELS[('trunk_q8.zig', 'turboexl3_trunk_q8_gemm_c')] = ('turboexl3_trunk_q8_gemm with the rebuild at QC2 / 2 (gemm_1_epc in '
+                                                                'gemm_1_2\'s place)')
+ADDED_KERNELS[('trunk_q8.zig', 'turboexl3_trunk_q8_prep_p')] = ('the int8 prepare from prepared rows xp (prep_1, prep_2_1, prep_p_h, '
+                                                                'prep_2_3): turboexl3_trunk_q8_prep\'s statements from the halves on')
+ADDED_KERNELS[('trunk_q8.zig', 'turboexl3_trunk_q8_inner')] = 'the int8 GEMM storing z\'s halves (gemm_1, then inner_2), no finish'
+ADDED_KERNELS[('trunk_q8.zig', 'turboexl3_trunk_q8_inner_c')] = 'turboexl3_trunk_q8_inner at QC2 / 2 (gemm_1c, then inner_2)'
+CHANGED[('config.zig', 'const Config')] += ('; pf_int8_c2 (1020 or 1019), pf_trunk_int8_inner (with pf_trunk_int8) and '
+                                            'pf_defer_affine (pf_int8 needs it), each today\'s by default')
+CHANGED[('prefill.zig', 'const Options')] += '; int8_c2 (1020 or 1019)'
+CHANGED[('prefill.zig', 'const I8Kernels')] = ('init takes the center: 1020 turboexl3_pf_gemm_i8 / _i8d (today\'s), else '
+                                               'turboexl3_pf_gemm_i8c / _i8dc')
+CHANGED[('prefill.zig', 'const Prefill')] += ('; init passes Options.int8_c2 to I8Kernels.init; i8Cfg appends QC2 for the center\'s '
+                                            'GEMMs (nine template slots, eight passed at 1020)')
+CHANGED[('root.zig', 'fn pfOptions')] += '; int8_c2 and defer_affine from Config.pf_int8_c2 and pf_defer_affine'
+CHANGED[('root.zig', 'fn prefillFor')] += '; the int8 engage line names a 509.5 center (unchanged at 510)'
+CHANGED[('root.zig', 'fn linearPiecesBegin')] = 'trunk int8\'s wq where trunk_q8.innerTakes (the pieces then run its inner launches)'
+CHANGED[('trunk_q8.zig', 'const Shape')] = 'rate_n: the rate a shape takes int8 at (0 any, the default)'
+CHANGED[('trunk_q8.zig', 'const Kernels')] = 'gemm_c, prep_p, inner and inner_c beside the three'
+CHANGED[('trunk_q8.zig', 'fn kernels')] = 'also makes turboexl3_trunk_q8_gemm_c, _prep_p, _inner and _inner_c'
+CHANGED[('trunk_q8.zig', 'fn takes')] = 'a shape matches through names (its rate_n)'
+CHANGED[('trunk_q8.zig', 'fn gemm')] = ('at Config.pf_int8_c2: 1020 turboexl3_trunk_q8_gemm with today\'s template, else _gemm_c '
+                                        'with QC2')
+CHANGED[('trunk_q8.zig', 'fn engaged')] = 'the engage line names a 509.5 center (unchanged at 510)'
+ADDED[('trunk_q8.zig', 'const prep_p_in')] = 'the prepare from prepared rows\' input (xp)'
+ADDED[('trunk_q8.zig', 'const inner_in')] = 'the inner GEMM\'s inputs (xq, wq, sx, xsum)'
+ADDED[('trunk_q8.zig', 'const inner_out')] = 'the inner GEMM\'s output (z)'
+ADDED[('trunk_q8.zig', 'fn names')] = 'whether a shape names a linear of (in, out) at a rate'
+ADDED[('trunk_q8.zig', 'fn innerTakes')] = 'Config.pf_trunk_int8_inner beside takes'
+ADDED[('trunk_q8.zig', 'fn preparePrepared')] = 'the int8 prepare of prepared rows xp (turboexl3_trunk_q8_prep_p)'
+ADDED[('trunk_q8.zig', 'fn gemmInner')] = 'the int8 GEMM to z half (turboexl3_trunk_q8_inner / _inner_c), no finish'
+ADDED[('trunk_q8.zig', 'fn innerOn')] = 'Dense.innerOn\'s matmul path on int8: the prepare on s, the decode and the inner GEMM on rs'
+ADDED[('trunk_q8.zig', 'fn innerOf')] = 'Dense.innerOf\'s matmul path on int8: the prepare from xp, the decode and the inner GEMM'
+ADDED[('trunk_q8.zig', 'fn pieceInner')] = 'one row piece on int8 against the pieces\' wq: the prepare and the inner GEMM'
+ADDED[('trunk_q8.zig', 'fn piecePrepared')] = 'one row piece from prepared rows on int8: the prepare from xp and the inner GEMM'
+ADDED[('trunk_q8.zig', 'const inner_said')] = 'the inner path\'s engage line, once a process'
+ADDED[('trunk_q8.zig', 'fn innerEngaged')] = 'the inner path\'s engage line'
+ADDED[('trunk_q8.zig', 'fn centerNote')] = 'the engage lines\' word on a 509.5 center (nothing at 510)'
+CHANGED[('dense.zig', 'const Dense')] += ('; innerOf and innerOn take trunk int8\'s inner launches on the matmul path where '
+                                          'trunk_q8.innerTakes, pieceInner and piecePrepared where W is int8 (its wq)')
+CHANGED[('attn_io.zig', 'fn prefillInner')] = 'past small_rows, trunk int8\'s inner launches where trunk_q8.innerTakes'
+ADDED[('attn_io.zig', 'const trunk_q8')] = 'trunk_q8.zig, the inner path prefillInner takes'
+EDITED_TESTS[('config.zig', 'turboexl3 config: the defaults are valid and served; an unserved form, slice count or layout is '
+              'refused')] += '; the int8 center (1020 by default, 1019 served), pf_trunk_int8_inner and pf_defer_affine\'s rules'
+EDITED_TESTS[('trunk_q8.zig', 'turboexl3 trunk int8 texts: the prepare runs text_prep\'s block statements, the decode '
+              'dequantize\'s tile load, the GEMM pg2\'s epilogue; the cut texts are their pieces')] = (
+    'the center\'s GEMM, the inner path\'s prepare and GEMM as compositions, and a shape\'s rate (names)')
+# the int8 options at Qwen3.8's and DeepSeek-V4.1's shapes: each model's trunk linears at prefill rows (api.zig's `trunk`,
+# and `trunkShapes`, the int8 levels' shape lists), the checks the model files run (trunk_q8_test.zig's batteries: trunk
+# int8's OFF / AGREE / SPLIT, its inner products, the routed int8 at both centers), ATTN-IN's and ATTN-OUT's int8 paths
+ADDED_FILES['trunk_q8_test.zig'] = ('the int8 options\' checks the model files run: a trunk linear\'s battery (OFF, AGREE, SPLIT, '
+                                    'INNER, INNER_OFF) and the routed int8\'s agreement at both centers, on synthetic weights')
+ADDED_FILES['qwen38_int8_test.zig'] = ('the int8 options at Qwen3.8\'s shapes: the levels\' shape lists (CPU), the routed int8 at its '
+                                       'geometry and trunk int8 at every trunk linear (GPU)')
+ADDED_FILES['deepseek_int8_test.zig'] = ('the int8 options at DeepSeek-V4.1\'s shapes: the levels\' shape lists (CPU), the routed int8 '
+                                         'at its clamped geometry (one scale a row refused), trunk int8 at every trunk linear and '
+                                         'the grouped wo_a (GPU)')
+for _api, _what in (('models/qwen38/api.zig', 'Qwen3.8-Flash-Next\'s'), ('models/deepseek_v41/api.zig', 'DeepSeek-V4.1\'s')):
+    ADDED[(_api, 'const trunk_q8')] = 'trunk_q8.zig, whose shapes trunkShapes writes'
+    ADDED[(_api, 'const Linear')] = 'one trunk linear at prefill rows: name, K, N (a rate where a shape is shared), attention or not'
+    ADDED[(_api, 'const trunk')] = _what + ' trunk linears at prefill rows, each (K, N) once'
+    ADDED[(_api, 'fn trunkShapes')] = 'the trunk int8 shapes of an int8 level (3: the attention projections; 4: every linear)'
+ADDED[('attn_io_test.zig', 'const t8')] = 'trunk_q8_test.zig, the int8 checks\' helpers'
+ADDED[('attn_io_test.zig', 'const int8_shapes')] = 'the attention projections named for trunk int8 (the indexer at K5)'
+ADDED[('attn_io_test.zig', 'const int8_cells')] = 'the int8 test\'s rows: dequantize + matmul\'s and the register path\'s last'
+ADDED[('attn_io_test.zig', 'fn agreeArr')] = 'two arrays\' cosine and error rms (trunk_q8_test.agreeOf)'
+ADDED[('attn_io_test.zig', 'test turboexl3 gpu attn_io trunk int8: with q|gate, k, v, o and the indexer on trunk int8 and its '
+       'inner products (the 509.5 center), ATTN-IN, ATTN-OUT and the indexer over the four-member prepare equal the host\'s '
+       'chain over linear\'s int8 byte for byte, and agree with the exact ones (TURBOEXL3_GPU=1)')] = (
+    'ATTN-IN\'s, ATTN-OUT\'s and the indexer\'s int8 paths against the chain over linear\'s int8 (GPU)')
 
 
 def metal_strings(fn, toks, corpus):
@@ -1405,7 +1883,7 @@ def path_of(base, units):
 
 def rekey_tables(units):
     """the tables of earlier changes name files by their name in src/: key them by the file's path"""
-    for tbl in (RECUT, RECOMPOSED, REMOVED, ADDED, CHANGED, ADDED_KERNELS, RENAMED_TESTS):
+    for tbl in (RECUT, RECOMPOSED, REMOVED, ADDED, CHANGED, ADDED_KERNELS, RENAMED_TESTS, EDITED_TESTS):
         items = list(tbl.items())
         tbl.clear()
         tbl.update({(path_of(f, units), x): v for ((f, x), v) in items})
@@ -1776,6 +2254,9 @@ def main():
                 if nname != name:
                     print(f'   {f:13s} renamed "{name[:70]}" -> "{nname[:70]}"')
                 if name in DUMP_TESTS:
+                    continue
+                if (f, nname) in EDITED_TESTS:
+                    print(f'   {f:13s} edited   "{nname[:70]}": {EDITED_TESTS[(f, nname)]}')
                     continue
                 n_tests += 1
                 moved, frees, err = align_test(name, nname, f, ou, nu, oprog, nprog)

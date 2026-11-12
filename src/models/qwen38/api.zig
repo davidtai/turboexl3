@@ -23,6 +23,44 @@ const kernels = root.kernels;
 const kernelsFor = root.kernelsFor;
 const rowsOf = root.rowsOf;
 const validateCall = root.validateCall;
+const trunk_q8 = root.trunk_q8;
+
+// ── The trunk linears at prefill rows: the shapes a host names for trunk int8 (`trunk_q8.shapes`) ──
+
+/// One trunk linear at prefill rows: its name, in (K) and out (N); `rate_n` the rate it is told apart at where another
+/// linear shares its (K, N) (`trunk_q8.Shape.rate_n`, 0 any); `attn` an attention projection (the int8 levels' split)
+pub const Linear = struct { name: []const u8, k: u32, n: u32, rate_n: u32 = 0, attn: bool };
+
+/// Qwen3.8-Flash-Next's EXL3 trunk linears that run at prefill rows (the 5.05 pack: K7, the indexer K5, the MTP fc K6),
+/// each (K, N) once: the 36 GDN layers' in_proj_qkv, in_proj_z and out_proj, the 12 full-attention layers' q|gate, k, v,
+/// o and indexer (the MTP layer's attention shares them), the 48 MoE layers' shared expert (the MTP layer's too), the MTP
+/// fc's two halves. A GDN out_proj and an o_proj share a shape, as k and v do; the indexer and the shared gate|up are both
+/// 2560 x 640, the indexer named at its K5. The lm_head and the bf16 linears (in_proj_a / _b, the PLE, the router) are
+/// not here.
+pub const trunk = [_]Linear{
+    .{ .name = "linear_attn.in_proj_qkv", .k = 2560, .n = 10240, .attn = true },
+    .{ .name = "linear_attn.in_proj_z", .k = 2560, .n = 6144, .attn = true },
+    .{ .name = "linear_attn.out_proj|self_attn.o_proj", .k = 6144, .n = 2560, .attn = true },
+    .{ .name = "self_attn.q_proj", .k = 2560, .n = 12288, .attn = true },
+    .{ .name = "self_attn.k_proj|v_proj", .k = 2560, .n = 512, .attn = true },
+    .{ .name = "self_attn.indexer.index_qk_proj", .k = 2560, .n = 640, .rate_n = 80, .attn = true },
+    .{ .name = "mlp.shared_expert.gate_proj|up_proj", .k = 2560, .n = 640, .attn = false },
+    .{ .name = "mlp.shared_expert.down_proj", .k = 640, .n = 2560, .attn = false },
+    .{ .name = "mtp.fc_embedding|fc_hidden", .k = 2560, .n = 2560, .attn = false },
+};
+
+/// The trunk int8 shapes of int8 level `level` (3: the attention projections; 4: every linear of `trunk`; else none),
+/// written to `out` (the caller keeps it while the shapes are in force)
+pub fn trunkShapes(level: u8, out: *[trunk.len]trunk_q8.Shape) []const trunk_q8.Shape {
+    var n: usize = 0;
+    for (trunk) |l| {
+        if (level == 4 or (level == 3 and l.attn)) {
+            out[n] = .{ .k = l.k, .n = l.n, .rate_n = l.rate_n };
+            n += 1;
+        }
+    }
+    return out[0..n];
+}
 
 // ── Decode-row merges at a gated attention layer's EXL3 linears (`decb.zig`) ──
 // Rows 1..kernels.DECODE_ROWS_MAX (the GEMV path), each the bytes of the chain it replaces, with DEC-ONE taking the call or

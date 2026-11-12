@@ -236,9 +236,15 @@ pub const down3_3 = @embedFile("kernels/decode/down3_3.metal");
 /// f16 round, times the score; y f32 [rows, hidden].
 pub const text_dfin3 = dfin3_1 ++ dfin3_expert ++ dfin3_2;
 /// dfin3's pieces, cut at the slot's expert line (the banked text's differs)
-pub const dfin3_1 = @embedFile("kernels/decode/dfin3_1.metal");
+pub const dfin3_1 = dfin3_1a ++ dfin3_1b ++ dfin3_1c;
 const dfin3_expert = @embedFile("kernels/decode/dfin3_expert.metal");
 pub const dfin3_2 = @embedFile("kernels/decode/dfin3_2.metal");
+/// dfin3_1's pieces: its constants; its grid lines (the hidden block, the row), lane, thread and the H128's exchange
+/// (banked_wave3.zig's down launch runs a finish unit's block and row there, at kernel scope its exchange); then the
+/// output, the MUL1 constants and the slot loop's head
+pub const dfin3_1a = @embedFile("kernels/decode/dfin3_1a.metal");
+pub const dfin3_1b = @embedFile("kernels/decode/dfin3_1b.metal");
+pub const dfin3_1c = @embedFile("kernels/decode/dfin3_1c.metal");
 
 /// Form 3's prepare for gate and up in one launch: xg, xu half [RK, DIM] in lane order from x [rows, DIM] and the two suh.
 pub const text_prep2 = prep2_1 ++ expert_line ++ prep2_row ++ prep2_body;
@@ -555,7 +561,11 @@ pub const text_fin7 = fin7_1 ++ expert_line ++ fin7_2 ++ fin7_planes ++ fin7_3 +
 /// fin7's pieces: its constants and grid lines; the expert line (`expert_line`: the banked text reads a bank there); its
 /// body, cut at the planes' read (gu3sf reads the planes through coherent pointers), at the input sums' read and at the
 /// SwiGLU's line (`text_fin7c` clamps there)
-pub const fin7_1 = @embedFile("kernels/decode/fin7_1.metal");
+pub const fin7_1 = fin7_1a ++ fin7_1b;
+/// fin7_1's pieces: its constants, then its grid lines (the intermediate block, the row-slot) and lane (banked_wave3.zig's
+/// gate|up launch runs a finish unit's block and row-slot there)
+pub const fin7_1a = @embedFile("kernels/decode/fin7_1a.metal");
+pub const fin7_1b = @embedFile("kernels/decode/fin7_1b.metal");
 pub const fin7_2 = @embedFile("kernels/decode/fin7_2.metal");
 pub const fin7_planes = @embedFile("kernels/decode/fin7_planes.metal");
 pub const fin7_3 = @embedFile("kernels/decode/fin7_3.metal");
