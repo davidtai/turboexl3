@@ -18,6 +18,8 @@ pub const Role = enum {
     // the routed experts: the routing and the bank
     slots,
     scores,
+    /// a u64 [E] table of each expert's trellis address ([K/16][N/16][n/2 words] each), built by the host; for a
+    /// contiguous bank [E][K/16][N/16][n/2 words], entry e is its base plus e (K/16)(N/16)(n/2) words
     gate_t,
     up_t,
     down_t,
@@ -375,11 +377,13 @@ test "the decode plan's partitions: decode.zig's KS and KS2 at the served ks_max
 /// The GEMM's rows a pass and a route tile (prefill.hip kBM).
 pub const gemm_bm: u32 = 64;
 
-fn gemmName(dec: format.Decode, defer_map: bool) [:0]const u8 {
+/// The GEMM over the routed bank (`table`: gate_t / up_t / down_t are u64 trellis tables) or one dense matrix.
+fn gemmName(dec: format.Decode, defer_map: bool, comptime table: bool) [:0]const u8 {
+    const kind = if (table) "t3_pf_gemm_" else "t3_pf_dgemm_";
     return switch (cbIndex(dec, defer_map)) {
-        0 => "t3_pf_gemm_mcg",
-        1 => "t3_pf_gemm_mul1",
-        else => "t3_pf_gemm_mul1d",
+        0 => kind ++ "mcg",
+        1 => kind ++ "mul1",
+        else => kind ++ "mul1d",
     };
 }
 
@@ -453,7 +457,7 @@ pub fn prefillChain(d: Prefill) error{BadExl3Shape}![6]Launch {
     for ([_]Role{ .x, .order, .slots, .counts, .gate_suh, .up_suh, .xg, .xu, .sg, .su }) |r| prep.add(.{ .buf = r });
     prep.add(.{ .u = d.hidden });
     prep.add(.{ .u = d.topk });
-    var gu: Launch = .{ .symbol = gemmName(d.dec, d.defer_map), .group = "prefill", .grid = .{ d.inter / 128, d.cap(), 2 }, .block = 256 };
+    var gu: Launch = .{ .symbol = gemmName(d.dec, d.defer_map, true), .group = "prefill", .grid = .{ d.inter / 128, d.cap(), 2 }, .block = 256 };
     for ([_]Role{ .xg, .xu, .gate_t, .up_t, .items, .zg }) |r| gu.add(.{ .buf = r });
     for ([_]u32{ d.hidden, d.inter, p, d.rate.n, d.dec.window.mask() }) |v| gu.add(.{ .u = v });
     var mid: Launch = .{ .symbol = if (glm) "t3_pf_mid_glm" else "t3_pf_mid_exl3", .group = "prefill", .grid = .{ d.inter / 128, p, 1 }, .block = 128 };
@@ -461,7 +465,7 @@ pub fn prefillChain(d: Prefill) error{BadExl3Shape}![6]Launch {
     for ([_]u32{ d.hidden, d.inter, p }) |v| mid.add(.{ .u = v });
     mid.add(.{ .i = @intFromBool(d.defer_map) });
     mid.add(.{ .f = d.limit });
-    var down: Launch = .{ .symbol = gemmName(d.dec, d.defer_map), .group = "prefill", .grid = .{ d.hidden / 128, d.cap(), 1 }, .block = 256 };
+    var down: Launch = .{ .symbol = gemmName(d.dec, d.defer_map, true), .group = "prefill", .grid = .{ d.hidden / 128, d.cap(), 1 }, .block = 256 };
     for ([_]Role{ .hd, .hd, .down_t, .down_t, .items, .zd }) |r| down.add(.{ .buf = r });
     for ([_]u32{ d.inter, d.hidden, p, d.rate.n, d.dec.window.mask() }) |v| down.add(.{ .u = v });
     var fin: Launch = .{ .symbol = if (glm) "t3_pf_fin_glm_f32" else switch (d.dtype) {
@@ -484,7 +488,7 @@ pub fn denseGemm(d: Dense) error{BadExl3Shape}![3]Launch {
     var prep = chain[0];
     prep.grid = .{ d.in / 128, d.rows, 1 };
     prep.args[5] = .{ .i = 0 }; // natural order: the GEMM's A
-    var gemm: Launch = .{ .symbol = gemmName(d.dec, d.defer_map), .group = "prefill", .grid = .{ d.out / 128, denseTiles(d.rows), 1 }, .block = 256 };
+    var gemm: Launch = .{ .symbol = gemmName(d.dec, d.defer_map, false), .group = "prefill", .grid = .{ d.out / 128, denseTiles(d.rows), 1 }, .block = 256 };
     for ([_]Role{ .xp, .xp, .trellis, .trellis, .items, .z }) |r| gemm.add(.{ .buf = r });
     for ([_]u32{ d.in, d.out, d.rows, d.rate.n, d.dec.window.mask() }) |v| gemm.add(.{ .u = v });
     var fin = chain[2];

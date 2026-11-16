@@ -6,6 +6,12 @@
 
 namespace t3 {
 
+// Expert e's trellis ([K/16][N/16][n/2 words]): entry e of the bank's u64 [E] table of each expert's trellis address.
+// The host builds the table (for a contiguous bank, its base plus e (K/16)(N/16)(n/2) words).
+__device__ __forceinline__ const uint32_t* expert_trellis(const uint64_t* table, size_t e) {
+    return reinterpret_cast<const uint32_t*>(table[e]);
+}
+
 // The unscaled Hadamard of a 128-block held one value a thread (tid 0..127): five lane stages, then two through
 // xch (turboexl3_h128 of gemv_core.metal).
 __device__ __forceinline__ float h128_thread(float v, float* xch, uint32_t tid) {
