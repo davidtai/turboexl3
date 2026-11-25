@@ -1362,6 +1362,44 @@ pub const Dense = struct {
         return y;
     }
 
+    /// `linearOn` from rows a launch before prepared, xp half [rows, in] in natural order with `linear`'s prepare
+    /// arithmetic (a prepared epilogue's output): its prefill tail without the prepare, by the same launches and configs
+    /// (the register path's GEMM; the fused GEMM; the dequantize, then pg2's launch where the host's switch tables the shape
+    /// (split K included) or MLX's matmul and the finish), so `linear`'s bytes. Refused by name
+    /// (error.Exl3EngineNotImplemented) before any launch where `linearOn` reads x itself or its own prepare's side
+    /// output: the decode rows, an un-rotated resident trellis past `unrot_min_rows` (its one matmul is of x), trunk int8
+    /// (its int8 prepare), the fused GEMM's deferred affine map (prep_s's block sums).
+    pub fn linearPreparedOn(self: *Dense, s: mlx.mlx_stream, rs: mlx.mlx_stream, xp: mlx.mlx_array, trellis: mlx.mlx_array, svh: mlx.mlx_array, rows: usize) !mlx.mlx_array {
+        if (rows <= decode.Kernels.max_rows) return error.Exl3EngineNotImplemented;
+        if (rows <= self.small_rows and !self.fused_prefill) {
+            const c = try self.smallFor(s, rows);
+            const z = try one(self.gemm_rs, c.gemm, &.{ c.tiles, xp, trellis, self.xs_dummy }, s);
+            defer _ = mlx.mlx_array_free(z);
+            return one(self.finish, c.io.finish, &.{ z, svh }, s);
+        }
+        if (rows > unrot_min_rows and residentUnrot(trellis)) return error.Exl3EngineNotImplemented;
+        if (!self.fused_prefill and trunk_q8.takes(self)) return error.Exl3EngineNotImplemented;
+        const fused = self.fused_prefill and (rows + self.pf.bm - 1) / self.pf.bm <= pf_tiles_cap;
+        if (fused and self.pf.defer_affine) return error.Exl3EngineNotImplemented;
+        const c = try self.buildCfg(rows, false);
+        defer _ = mlx.mlx_fast_metal_kernel_config_free(c.prep);
+        defer _ = mlx.mlx_fast_metal_kernel_config_free(c.finish);
+        if (fused) {
+            const z = try self.fusedInner(rs, xp, null, trellis, rows);
+            defer _ = mlx.mlx_array_free(z);
+            return one(self.finish, c.finish, &.{ z, svh }, rs);
+        }
+        const W = try self.dequantize(rs, trellis);
+        defer _ = mlx.mlx_array_free(W);
+        if (try pgemm.fusedOn(rs, xp, W, svh, self.shape.out_dtype)) |y| return y;
+        var inner = mlx.mlx_array_new();
+        defer _ = mlx.mlx_array_free(inner);
+        try mlx.check(mlx.mlx_matmul(&inner, xp, W, rs));
+        const y = try one(self.finish, c.finish, &.{ inner, svh }, rs);
+        pgemm.check(rs, xp, W, svh, self.shape.out_dtype, y);
+        return y;
+    }
+
     /// The operands `linearOn` hands its matmul at `rows` prefill rows: xp half [rows, in] (its prepare, natural order)
     /// and W half [in, out] (`dequantize`), by the same launches and configs. Null where `linearOn` takes another arm at
     /// `rows`: the GEMV or register path, the fused GEMM, or an un-rotated resident. The caller frees both.

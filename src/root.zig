@@ -55,6 +55,34 @@ pub const ling = @import("models/ling/api.zig");
 pub const inkling2 = @import("models/inkling2/api.zig");
 /// GLM-5.3-Flash's trunk linears at prefill rows and the pg2 table a host builds from their tile codes
 pub const glm53f = @import("models/glm53f/api.zig");
+/// Hy4-flash's attention output gate in its linear's finish: o times MLX's sigmoid of the gate's `linear`, at a prompt's
+/// rows (models/hy4f/gate.zig)
+pub const hy4f_gate = @import("models/hy4f/gate.zig");
+pub const linearGateMul = hy4f_gate.linearGateMul;
+pub const linearGateMulAt = hy4f_gate.linearGateMulAt;
+pub const linearGateMulPrep = hy4f_gate.linearGateMulPrep;
+pub const GateOLayout = hy4f_gate.OLayout;
+/// Hy4-flash's shared-expert and dense-MLP SwiGLU in the up linear's finish: (g * sigmoid(g)) * up of the gate's y and
+/// up's `linear`, at a prompt's rows (models/hy4f/swiglu.zig)
+pub const hy4f_swiglu = @import("models/hy4f/swiglu.zig");
+pub const linearSwigluMul = hy4f_swiglu.linearSwigluMul;
+/// Hy4-flash's q_b with its prompt rope in the finish: f32 q with each head's rope dims roped as MLX's fast::rope, at a
+/// prompt's rows (models/hy4f/qrope.zig)
+pub const hy4f_qrope = @import("models/hy4f/qrope.zig");
+pub const linearQRope = hy4f_qrope.linearQRope;
+/// Hy4-flash's pg2 tiles and the host's switch for them: the trunk linears' matmul and finish as one launch, split K
+/// in registers, and the arms' finishes in pg2's launch (models/hy4f/pg2.zig)
+pub const hy4f_pg2 = @import("models/hy4f/pg2.zig");
+pub const linearQRopePrepared = hy4f_qrope.linearQRopePrepared;
+/// Hy4-flash's RMSNorms and the next linear's prepare in a linear's prompt finish: o_proj and the dense down with the
+/// post-norm, the shared down with the add and the MLP post-norm, q_a with the q norm and q_b's prepare, kv_a with the
+/// kv norm and k_pe's rope, the SwiGLU finish with the down linear's prepare (models/hy4f/rms.zig)
+pub const hy4f_rms = @import("models/hy4f/rms.zig");
+pub const RmsSrc = hy4f_rms.Src;
+pub const linearRms = hy4f_rms.linearRms;
+pub const linearRmsPrep = hy4f_rms.linearRmsPrep;
+pub const linearKv = hy4f_rms.linearKv;
+pub const linearSwigluPrep = hy4f_rms.linearSwigluPrep;
 /// DeepSeek-V4.1's shared expert's fused SwiGLU (models/deepseek_v41/api.zig)
 pub const sharedSwigluTakes = deepseek_v41.sharedSwigluTakes;
 pub const sharedSwiglu = deepseek_v41.sharedSwiglu;
@@ -610,6 +638,22 @@ pub fn linearPrepared(s: mlx.mlx_stream, xp: mlx.mlx_array, p: Proj, dec: format
     const z = try d.innerOf(s, xp, p.trellis, rows, path);
     defer freeArr(z);
     return d.finishOf(s, z, p.svh, rows);
+}
+
+/// `linear` from prepared rows xp F16 [rows, in] (natural order, `linear`'s prepare arithmetic: a prepared epilogue's
+/// output) by `linear`'s own prefill tail (`Dense.linearPreparedOn`): the register path's GEMM, the fused GEMM, or the
+/// dequantize with pg2's launch where the host's switch tables the shape (split K included), else MLX's matmul and the
+/// finish; y [rows, out] in `out_dtype`, `linear`'s bytes. Unlike `linearPrepared` (the inner product and finish alone,
+/// trunk int8's own inner launches included) it refuses (error.Exl3EngineNotImplemented) the rows `linear` serves from x
+/// itself: the decode rows, an un-rotated resident trellis, trunk int8 and the fused GEMM's deferred affine map.
+pub fn linearOnPrepared(s: mlx.mlx_stream, xp: mlx.mlx_array, p: Proj, dec: format.Decode, out_dtype: mlx.mlx_dtype) !mlx.mlx_array {
+    const psh = mlx.getShape(xp);
+    if (psh.len != 2 or psh[0] < 1 or mlx.mlx_array_dtype(xp) != .float16) return error.BadExl3Shape;
+    if (out_dtype != .bfloat16 and out_dtype != .float32 and out_dtype != .float16) return error.BadExl3Dtype;
+    // the decode rows: before any engine is made
+    if (@as(usize, @intCast(psh[0])) <= kernels.DECODE_ROWS_MAX) return error.Exl3EngineNotImplemented;
+    const d = try denseOf(p, @intCast(psh[1]), out_dtype, dec);
+    return d.linearPreparedOn(s, s, xp, p.trellis, p.svh, @intCast(psh[0]));
 }
 
 /// What `decPrepared` reads for one projection at `rows` decode rows (`dense.Dense.decPrepSpec` on the `Dense` `linear`
@@ -1383,4 +1427,6 @@ pub const shared_state = .{
     ling_combine.shared_state,
     glm53f.shared_gu.shared_state,
     glm53f.pair_ks.shared_state,
+    hy4f_qrope.shared_state,
+    hy4f_rms.shared_state,
 };
