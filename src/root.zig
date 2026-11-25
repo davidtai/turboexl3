@@ -177,6 +177,16 @@ pub fn kernelsFor(geo: decode.Geometry, out_dtype: mlx.mlx_dtype) !*decode.Kerne
     return &cache.get().*[i].?;
 }
 
+/// A routing diagnostic's host copy of a call's routes: `routes` as a row-major contiguous array, evaluated (the caller
+/// frees it). A router's top-k is a column slice of its argpartition, a strided view whose raw buffer is not row-major.
+fn hostRoutes(s: mlx.mlx_stream, routes: mlx.mlx_array) !mlx.mlx_array {
+    var c = mlx.mlx_array_new();
+    errdefer freeArr(c);
+    try mlx.check(mlx.mlx_contiguous(&c, routes, false, s));
+    try mlx.check(mlx.mlx_array_eval(c));
+    return c;
+}
+
 /// `Config.slot_stats`: a diagnostic that reads every decode call's routing back to the host (a sync per layer, so never on in
 /// a timed run) and prints, every 480 calls, how the row-slots of a call repeat experts: the multiplicity histogram that
 /// sizes the grouping (GROUP 2 covers pairs; 3 and 4 would want wider groups) and the decode work a perfect grouping would
@@ -192,11 +202,12 @@ pub const SlotStats = struct {
         return config.get().slot_stats;
     }
 
-    fn record(inds: mlx.mlx_array, rows: usize, K: usize) !void {
+    fn record(s: mlx.mlx_stream, routes: mlx.mlx_array, rows: usize, K: usize) !void {
         const n = rows * K;
         var buf: [16 * 64]u32 = undefined;
         if (rows > 16 or n > buf.len) return;
-        try mlx.check(mlx.mlx_array_eval(inds));
+        const inds = try hostRoutes(s, routes);
+        defer freeArr(inds);
         if (mlx.mlx_array_dtype(inds) == .int32) {
             const p = mlx.mlx_array_data_int32(inds) orelse return error.NullData;
             for (0..n) |i| buf[i] = @intCast(p[i]);
@@ -854,7 +865,7 @@ pub fn moeSwigluWith(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx.
         if (!config.get().prefill or !config.get().nax) return error.Exl3EngineNotImplemented;
         return moePrefill(s, x, bank, inds, scores, dec, geo, rows, K, limit, clamp, call);
     }
-    if (SlotStats.enabled()) SlotStats.record(inds, rows, @intCast(K)) catch {};
+    if (SlotStats.enabled()) SlotStats.record(s, inds, rows, @intCast(K)) catch {};
     const dgeo: decode.Geometry = .{ .hidden = @intCast(geo.hidden), .inter = @intCast(geo.width), .topk = @intCast(K), .rate = geo.gate_up, .dec = dec, .limit = limit, .clamp = clamp };
     // the operands the kernels take as the host holds them: x [rows, D] (bf16/f16/f32), slots [rows * K] (i32/u32), scores
     // [rows * K] (bf16/f16/f32); the kernels convert in place and write y in x's dtype, so no cast launches per layer. At one
@@ -923,11 +934,12 @@ const PfCapture = struct {
     extern "c" fn fwrite(ptr: *const anyopaque, size: usize, n: usize, f: *anyopaque) usize;
     extern "c" fn fclose(f: *anyopaque) c_int;
 
-    fn record(inds1: mlx.mlx_array, rows: usize) !void {
+    fn record(s: mlx.mlx_stream, routes: mlx.mlx_array, rows: usize) !void {
         const dir = config.get().pf_capture_dir orelse return;
         if (calls.get().* >= 512) return;
         defer calls.get().* += 1;
-        try mlx.check(mlx.mlx_array_eval(inds1));
+        const inds1 = try hostRoutes(s, routes);
+        defer freeArr(inds1);
         const n = mlx.mlx_array_size(inds1);
         var path_buf: [512]u8 = undefined;
         const path = try std.fmt.bufPrintSentinel(&path_buf, "{s}/pf-{d:0>4}-r{d}.u32", .{ dir, calls.get().*, rows }, 0);
@@ -952,7 +964,7 @@ fn moePrefill(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx.mlx_arr
     var inds1 = mlx.mlx_array_new();
     defer freeArr(inds1);
     try mlx.check(mlx.mlx_reshape(&inds1, inds, &[_]c_int{rows_c * K}, 1, s));
-    PfCapture.record(inds1, rows) catch |e| std.debug.print("[turboexl3] prefill capture failed: {s}\n", .{@errorName(e)});
+    PfCapture.record(s, inds1, rows) catch |e| std.debug.print("[turboexl3] prefill capture failed: {s}\n", .{@errorName(e)});
     var s1 = mlx.mlx_array_new();
     defer freeArr(s1);
     try mlx.check(mlx.mlx_reshape(&s1, scores, &[_]c_int{rows_c * K}, 1, s));
@@ -1202,6 +1214,59 @@ pub fn enginesHeld() EnginesHeld {
     for (dense_cache.get().*) |s| n.dense += @intFromBool(s != null);
     for (pf_cache.get().*) |s| n.prefill += @intFromBool(s != null);
     return n;
+}
+
+test "turboexl3 root: the routing diagnostics read a strided route view row by row (TURBOEXL3_GPU=1)" {
+    _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    const t = std.testing;
+    const s = mlx.mlx_default_gpu_stream_new();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    var g = try @import("core/test_support.zig").Graph.init(std.heap.page_allocator, s);
+    defer g.deinit();
+    // [1, 3, 8] u32 routes; a call's top-6 is the column slice [:, :, 0..6], a strided view (a router's top-k slice).
+    // Each row's first six are experts 0-5 and its last two are its own (100 + 2r, 101 + 2r): the view's 18 slots are 6
+    // experts at multiplicity 3, while the raw buffer's first 18 words hold 10 distinct experts.
+    var full: [24]u32 = undefined;
+    for (0..3) |r| for (0..8) |c| {
+        full[r * 8 + c] = if (c < 6) @intCast(c) else @intCast(100 + 2 * r + (c - 6));
+    };
+    const all = try g.hostArray(std.mem.sliceAsBytes(full[0..]), &.{ 1, 3, 8 }, .uint32);
+    const view = try g.slice(all, &.{ 0, 0, 0 }, &.{ 1, 3, 6 }, &.{ 1, 1, 1 });
+    // SlotStats: 6 distinct experts, each at multiplicity 3
+    const d0 = SlotStats.distinct_total.get().*[3];
+    const m0 = SlotStats.mult.get().*[3][3];
+    try SlotStats.record(s, view, 3, 6);
+    try t.expectEqual(@as(u64, 6), SlotStats.distinct_total.get().*[3] - d0);
+    try t.expectEqual(@as(u64, 6), SlotStats.mult.get().*[3][3] - m0);
+    // PfCapture: the file holds the view's 18 slots in row-major order
+    const C = struct {
+        extern "c" fn mkdtemp(template: [*:0]u8) ?[*:0]u8;
+        extern "c" fn fopen(path: [*:0]const u8, mode: [*:0]const u8) ?*anyopaque;
+        extern "c" fn fread(ptr: *anyopaque, size: usize, n: usize, f: *anyopaque) usize;
+        extern "c" fn fclose(f: *anyopaque) c_int;
+        extern "c" fn unlink(path: [*:0]const u8) c_int;
+        extern "c" fn rmdir(path: [*:0]const u8) c_int;
+    };
+    var tmpl = "/tmp/turboexl3-pfcap-XXXXXX".*;
+    const dir = std.mem.span(C.mkdtemp(&tmpl) orelse return error.TmpDir);
+    defer _ = C.rmdir(dir.ptr);
+    const saved = config.get().*;
+    defer config.configure(saved) catch unreachable;
+    var cfg = saved;
+    cfg.pf_capture_dir = dir;
+    try config.configure(cfg);
+    const call = PfCapture.calls.get().*;
+    if (call >= 512) return error.SkipZigTest;
+    try PfCapture.record(s, view, 3);
+    var path_buf: [512]u8 = undefined;
+    const path = try std.fmt.bufPrintSentinel(&path_buf, "{s}/pf-{d:0>4}-r3.u32", .{ dir, call }, 0);
+    defer _ = C.unlink(path.ptr);
+    const f = C.fopen(path.ptr, "rb") orelse return error.CaptureMissing;
+    var got: [18]u32 = undefined;
+    const n = C.fread(&got, 4, got.len, f);
+    _ = C.fclose(f);
+    try t.expectEqual(@as(usize, 18), n);
+    for (0..3) |r| for (0..6) |c| try t.expectEqual(@as(u32, @intCast(c)), got[r * 6 + c]);
 }
 
 test "turboexl3 root: releaseEngines empties every engine cache (a no-op on empty ones)" {
