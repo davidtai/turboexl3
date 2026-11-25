@@ -38,7 +38,8 @@ pub const Geometry = struct {
     /// (`text_fin7c`, forms 7, 8 and 9); `Kernels` and `Kernels5` refuse a clamped geometry.
     limit: u32 = 0,
     /// where a clamped geometry clamps (`format.ClampAt`): `gate_in` fin7's clamped variant (`text_fin7c`), `silu_out`
-    /// Ling-3.1's (`text_fin7co`); an unclamped geometry ignores it
+    /// Ling-3.1's (`text_fin7co`), `softcap` Inkling 2's softcapped SwiGLU (`text_fin7cs`, `limit` the packed caps); an
+    /// unclamped geometry ignores it
     clamp: format.ClampAt = .gate_in,
 
     pub fn admitted(g: Geometry) bool {
@@ -354,8 +355,10 @@ pub const Kernels3 = struct {
                 ks.newKernel("turboexl3_fin7", &fin3_inputs, &fin3_outputs, text_fin7, header5, true)
             else if (geo.clamp == .gate_in)
                 ks.newKernel("turboexl3_fin7c", &fin3_inputs, &fin3_outputs, text_fin7c, header5, true)
+            else if (geo.clamp == .silu_out)
+                ks.newKernel("turboexl3_fin7co", &fin3_inputs, &fin3_outputs, text_fin7co, header5, true)
             else
-                ks.newKernel("turboexl3_fin7co", &fin3_inputs, &fin3_outputs, text_fin7co, header5, true)) orelse return error.KernelCreateFailed,
+                ks.newKernel("turboexl3_fin7cs", &fin3_inputs, &fin3_outputs, text_fin7cs, header5, true)) orelse return error.KernelCreateFailed,
             .dfin7 = ks.newKernel("turboexl3_dfin7", &dfin3_inputs, &down_outputs, text_dfin7, header5, true) orelse return error.KernelCreateFailed,
             .gu8 = ks.newKernel("turboexl3_gu8", &gu8_inputs, &gu8_outputs, text_gu8, header5, true) orelse return error.KernelCreateFailed,
         };
@@ -589,6 +592,10 @@ pub const fin7_swiglu_clamp = @embedFile("kernels/decode/fin7_swiglu_clamp.metal
 /// other statement fin7's.
 pub const text_fin7co = fin7_1 ++ expert_line ++ fin7_2 ++ fin7_planes ++ fin7_3 ++ fin7_sums ++ fin7_4 ++ fin7_swiglu_clamp_out ++ fin7_5;
 pub const fin7_swiglu_clamp_out = @embedFile("kernels/decode/fin7_swiglu_clamp_out.metal");
+/// Form 7's launch 3 with Inkling 2's softcapped SwiGLU (`Geometry.clamp` `softcap`, LIMIT the packed caps,
+/// `format.softcapLimit`): fin7 with its SwiGLU line replaced by `fin7_swiglu_softcap`, every other statement fin7's.
+pub const text_fin7cs = fin7_1 ++ expert_line ++ fin7_2 ++ fin7_planes ++ fin7_3 ++ fin7_sums ++ fin7_4 ++ fin7_swiglu_softcap ++ fin7_5;
+pub const fin7_swiglu_softcap = @embedFile("kernels/decode/fin7_swiglu_softcap.metal");
 
 /// Form 7, launch 5 (dfin3 with the slots side by side): per (128-wide hidden block, row), simdgroup k finishes slot k (the
 /// planes' sum, the deferred map, f16 round, H128 in registers, svh, f16 round) into threadgroup memory, then 128 threads

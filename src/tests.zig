@@ -64,6 +64,7 @@ comptime {
     _ = @import("models/ling/kdanorm.zig");
     _ = @import("models/ling/kdanorm_test.zig");
     _ = @import("models/ling/swiglu_test.zig");
+    _ = @import("models/inkling2/inkling2_test.zig");
     _ = @import("models/glm53f/api.zig");
     _ = @import("models/glm53f/glm53f_test.zig");
     _ = @import("models/glm53f/routed_test.zig");

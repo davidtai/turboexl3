@@ -189,6 +189,56 @@ pub fn moeRowClampedAt(a: std.mem.Allocator, b: *const Bank, dec: format.Decode,
     return hits;
 }
 
+/// One element's softcapped SwiGLU (Inkling 2's, transformers' Inkling2SoftcappedSwiGLU): cg tanh(g / cg) sigmoid(g) *
+/// cu tanh(u / cu), the sigmoid on the raw gate. In f64, rounded once to f32: the reference the kernels' f32 is held to.
+pub fn swigluSoftcap(g: f32, u: f32, caps: format.Softcap) f32 {
+    const gd: f64 = g;
+    const ud: f64 = u;
+    const cg: f64 = caps.gate;
+    const cu: f64 = caps.up;
+    const gs = cg * std.math.tanh(gd / cg);
+    const us = cu * std.math.tanh(ud / cu);
+    return @floatCast(gs / (1.0 + @exp(-gd)) * us);
+}
+
+/// `moeRowDec` with Inkling 2's softcapped SwiGLU (`root.moeInkling2`'s reference): gate and up through the full
+/// projection, `swigluSoftcap` on their f16-rounded values, the down projection on that h and the score-weighted sum in
+/// slot order. Returns the gates and ups past their caps (|v| > c, where tanh(v / c) is under 0.77 of v / c).
+pub fn moeRowSoftcap(a: std.mem.Allocator, b: *const Bank, dec: format.Decode, caps: format.Softcap, x: []const f32, slots: []const u32, scores: []const f32, y: []f32) !Hits {
+    const hidden = b.hidden;
+    const inter = b.inter;
+    @memset(y, 0);
+    const transformed = try a.alloc(f32, hidden);
+    defer a.free(transformed);
+    const inner = try a.alloc(f32, @max(hidden, inter));
+    defer a.free(inner);
+    const gate_y = try a.alloc(f32, inter);
+    defer a.free(gate_y);
+    const up_y = try a.alloc(f32, inter);
+    defer a.free(up_y);
+    const h = try a.alloc(f32, inter);
+    defer a.free(h);
+    const down_y = try a.alloc(f32, hidden);
+    defer a.free(down_y);
+    const stride = b.guStride();
+    var hits: Hits = .{};
+    for (slots, scores) |e_u, w| {
+        const e: usize = e_u;
+        const off = e * stride;
+        format.project(x, b.gate_t[off..][0..stride], b.gate_suh[e * hidden ..][0..hidden], b.gate_svh[e * inter ..][0..inter], hidden, inter, b.rate, dec, transformed, inner[0..inter], gate_y);
+        format.project(x, b.up_t[off..][0..stride], b.up_suh[e * hidden ..][0..hidden], b.up_svh[e * inter ..][0..inter], hidden, inter, b.rate, dec, transformed, inner[0..inter], up_y);
+        for (0..inter) |i| {
+            h[i] = swigluSoftcap(gate_y[i], up_y[i], caps);
+            hits.gate += @intFromBool(@abs(gate_y[i]) > caps.gate);
+            hits.up += @intFromBool(@abs(up_y[i]) > caps.up);
+        }
+        hits.total += inter;
+        format.project(h, b.down_t[off..][0..stride], b.down_suh[e * inter ..][0..inter], b.down_svh[e * hidden ..][0..hidden], inter, hidden, b.rate, dec, inner[0..inter], transformed, down_y);
+        for (0..hidden) |i| y[i] += w * down_y[i];
+    }
+    return hits;
+}
+
 /// max |a - b| and the rms of b.
 pub const Err = struct { max_abs: f64, rms_ref: f64, max_ratio: f64 };
 

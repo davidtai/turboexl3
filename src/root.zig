@@ -51,6 +51,8 @@ pub const qwen38 = @import("models/qwen38/api.zig");
 pub const deepseek_v41 = @import("models/deepseek_v41/api.zig");
 /// Ling-3.1-flash's entry points
 pub const ling = @import("models/ling/api.zig");
+/// Inkling 2's entry points: the routed experts with its softcapped SwiGLU
+pub const inkling2 = @import("models/inkling2/api.zig");
 /// GLM-5.3-Flash's trunk linears at prefill rows and the pg2 table a host builds from their tile codes
 pub const glm53f = @import("models/glm53f/api.zig");
 /// DeepSeek-V4.1's shared expert's fused SwiGLU (models/deepseek_v41/api.zig)
@@ -837,6 +839,7 @@ pub fn moeSwiglu(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx.mlx_
 /// down launches and finish on that engine, the same bytes. Decode rows have no such choice. `moeSwiglu` is this at
 /// `.{}`.
 pub fn moeSwigluWith(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array, scores: mlx.mlx_array, dec: format.Decode, limit: u32, clamp: format.ClampAt, call: prefill.Call) !mlx.mlx_array {
+    if (!format.limitAdmitted(limit, clamp)) return error.InvalidExl3Clamp;
     const geo = try validateCall(x, bank, inds, scores);
     if (geo.gate_up.n != geo.down.n) return error.Exl3EngineNotImplemented;
     const xsh = mlx.getShape(x);
@@ -1057,7 +1060,7 @@ pub fn moeClampedRowsFit(s: mlx.mlx_stream, x: mlx.mlx_array, rows: mlx.mlx_arra
 /// `clamp`; `call_experts` as `moeClampedRowsFit`'s (null: the call's row count bounds the compact outputs); `call` as
 /// `moeSwigluRowsWith`'s.
 fn swigluRows(s: mlx.mlx_stream, x: mlx.mlx_array, rows: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array, scores: mlx.mlx_array, dec: format.Decode, limit: u32, clamp: format.ClampAt, out_dtype: mlx.mlx_dtype, call_experts: ?u32, call: prefill.Call) !mlx.mlx_array {
-    if (limit > 128) return error.InvalidExl3Clamp;
+    if (!format.limitAdmitted(limit, clamp)) return error.InvalidExl3Clamp;
     if (!config.get().prefill or !config.get().nax) return error.Exl3EngineNotImplemented;
     const xsh = mlx.getShape(x);
     const rs = mlx.getShape(rows);
@@ -1126,6 +1129,16 @@ pub const moeLingBanked = ling.moeLingBanked;
 pub const moeLingBankedSel = ling.moeLingBankedSel;
 pub const moeLingBankedGateUp = ling.moeLingBankedGateUp;
 pub const moeLingBankedDown = ling.moeLingBankedDown;
+/// Inkling 2's routed experts with its softcapped SwiGLU, stacked and banked, and a streamer's prompt call over gathered
+/// rows (models/inkling2/api.zig)
+pub const moeInkling2 = inkling2.moeInkling2;
+pub const moeInkling2With = inkling2.moeInkling2With;
+pub const moeInkling2Rows = inkling2.moeInkling2Rows;
+pub const moeInkling2RowsWith = inkling2.moeInkling2RowsWith;
+pub const moeInkling2Banked = inkling2.moeInkling2Banked;
+pub const moeInkling2BankedSel = inkling2.moeInkling2BankedSel;
+pub const moeInkling2BankedGateUp = inkling2.moeInkling2BankedGateUp;
+pub const moeInkling2BankedDown = inkling2.moeInkling2BankedDown;
 /// Ling-3.1-flash's shared expert at decode rows: the gate and the up in one launch with the host's SwiGLU and the down's
 /// prepare in its pairs' second finishes, then the down's GEMV (models/ling/shared.zig)
 pub const lingSharedExpert = ling.sharedExpert;

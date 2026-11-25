@@ -289,7 +289,8 @@ pub fn moeClampedBankedGateUpSelV(s: mlx.mlx_stream, x: mlx.mlx_array, banks: *c
 }
 
 /// A banked call's SwiGLU: its clamp `limit` (0: none) and where it clamps (`format.ClampAt`). DeepSeek-V4.1's entries
-/// pass `limit` 1..128 at `gate_in`; Ling-3.1's (`models/ling/api.zig`) 0, or 1..128 at `silu_out`.
+/// pass `limit` 1..128 at `gate_in`; Ling-3.1's (`models/ling/api.zig`) 0, or 1..128 at `silu_out`; Inkling 2's
+/// (`models/inkling2/api.zig`) the packed caps at `softcap` (`format.limitAdmitted` holds each).
 pub const BankedAct = struct { limit: u32, clamp: format.ClampAt = .gate_in };
 
 /// The banked gate|up at `act` (`moeClampedBankedGateUpSelV` for every SwiGLU the banked texts hold): fin7cb's text is the
@@ -344,7 +345,7 @@ pub fn bankedDownAct(s: mlx.mlx_stream, h: BankedHalf, banks: *const [3]Bank, id
 const BankedCall = struct { geo: decode.Geometry, rows: usize, kb: [3]decode.Kernels.Bank };
 
 fn bankedCall(banks: *const [3]Bank, ids: mlx.mlx_array, dec: format.Decode, act: BankedAct) !BankedCall {
-    if (act.limit > 128) return error.InvalidExl3Clamp;
+    if (!format.limitAdmitted(act.limit, act.clamp)) return error.InvalidExl3Clamp;
     const is = mlx.getShape(ids);
     if (is.len != 1 or is[0] < 1 or is[0] > banked_rows_max) return error.BadExl3Shape;
     const idd = mlx.mlx_array_dtype(ids);
