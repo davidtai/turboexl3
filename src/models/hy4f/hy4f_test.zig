@@ -15,6 +15,11 @@
 //! - routed tiles: form 9 at 4 output tiles from two rows (`Config.decode_bt9` 4) and the x texts (`Config.decode_iop`)
 //!   against the served engine byte for byte at decode rows 1 to 8, K1 to K4; a changed input and the x texts' planted
 //!   defect must move words. Lines: TURBOEXL3_HY4F_ROUTED_TILES.
+//! - verify rows: the chain at 2 output tiles (`Config.chain_bt` 2) against the chain byte for byte; the lean chunks on
+//!   the matrix units (`Config.dense_mma`, reorder-class) within the float64 summation bound on their K-slice planes
+//!   beside today's chain (its rms gap against today's printed), three planted faults past the bound (the red checks),
+//!   and their words against today's counted. Lines: TURBOEXL3_HY4F_VERIFY_ROWS, TURBOEXL3_HY4F_MMA_BAR,
+//!   TURBOEXL3_HY4F_MMA_RED.
 const std = @import("std");
 const sdk = @import("sdk");
 const mlx = sdk.mlx;
@@ -443,4 +448,238 @@ test "turboexl3 gpu hy4f routed tiles: form 9 at 4 output tiles per GEMV threadg
         root.releaseEngines();
     }
     try testing.expectEqual(@as(usize, 0), failed);
+}
+
+test "turboexl3 gpu hy4f dense verify rows: the chain at 2 output tiles (Config.chain_bt 2) gives the three-launch chain's bytes at every Hy4 trunk shape, K6 at rows 5 to 8 and K4 (the 2.08bpw pack's trunk) at the verify's 6 rows, bf16 and f32 x; a changed input does not; the lean chunks on the matrix units (Config.dense_mma) stay within the f32 summation bound against float64 beside today's chain, a planted lane map, dropped row and doubled K part miss it (TURBOEXL3_GPU=1)" {
+    _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    root.releaseEngines();
+    defer root.releaseEngines();
+    const s = mlx.mlx_default_gpu_stream_new();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    const a = std.heap.page_allocator;
+    var g = try G.init(a, s);
+    defer g.deinit();
+    const saved = config.get().*;
+    defer config.configure(saved) catch unreachable;
+    var tiles2 = saved;
+    tiles2.chain_bt = 2;
+    var mma = saved;
+    mma.dense_mma = true;
+    // the MMA GEMV's planted faults the bar must catch (`mma_red`)
+    var faults: [mma_red.len]mlx.mlx_fast_metal_kernel = undefined;
+    var made: usize = 0;
+    defer for (faults[0..made]) |k| decode.freeKernel(k);
+    inline for (mma_red, 0..) |f, i| {
+        faults[i] = ks.newKernel(f.kernel, &dense.dgemv_in, &dense.gemv_out, comptime dense.dgemvMmaText(f.lane, f.live, f.store), dense.header_mma, true) orelse return error.KernelCreateFailed;
+        made = i + 1;
+    }
+    // the rates and row counts: K6 (the 2.25bpw pack's trunk) at rows 5 to 8, K4 (the 2.08bpw pack's) at the verify's 6
+    const Rates = struct { k: u32, rows: []const u32 };
+    const rates = [_]Rates{ .{ .k = 6, .rows = &.{ 5, 6, 7, 8 } }, .{ .k = 4, .rows = &.{6} } };
+    var failed: usize = 0;
+    for (rates) |rt| for (dense_cases) |c| {
+        if (c.out == 120832) continue;
+        defer _ = mlx.mlx_clear_cache();
+        // K6's draws as before; K4's its own
+        var prng = std.Random.DefaultPrng.init(0x4F51 ^ (@as(u64, c.in) << 24) ^ c.out ^ (if (rt.k == 6) 0 else @as(u64, rt.k) << 56));
+        const rnd = prng.random();
+        const rate = format.Rate.fromK(rt.k);
+        var lin = try ref.synthLinear(a, rnd, 1, c.in, c.out, rate, dec);
+        defer lin.deinit(a);
+        const mark = g.mark();
+        defer g.resetTo(mark);
+        const trellis = try g.hostArray(std.mem.sliceAsBytes(lin.trellis), &.{ ci(c.in / 16), ci(c.out / 16), ci(rate.n) }, .int16);
+        const suh = try g.hostArray(std.mem.sliceAsBytes(lin.suh), &.{ci(c.in)}, .float16);
+        const svh = try g.hostArray(std.mem.sliceAsBytes(lin.svh), &.{ci(c.out)}, .float16);
+        for (rt.rows) |rows| {
+            const rm = g.mark();
+            defer g.resetTo(rm);
+            const x = try a.alloc(f32, rows * c.in);
+            defer a.free(x);
+            for (x) |*v| v.* = bfExact(rnd.floatNorm(f32));
+            const xr = try a.dupe(f32, x);
+            defer a.free(xr);
+            xr[c.in / 2] = bfExact(xr[c.in / 2] * 1.5 + 0.25);
+            const got = try a.alloc(f32, 4 * rows * c.out);
+            defer a.free(got);
+            const n = rows * c.out;
+            for ([_]mlx.mlx_dtype{ .bfloat16, .float32 }) |dt| {
+                const x0 = try g.astype(try g.hostArray(std.mem.sliceAsBytes(x), &.{ ci(rows), ci(c.in) }, .float32), dt);
+                const x1 = try g.astype(try g.hostArray(std.mem.sliceAsBytes(xr), &.{ ci(rows), ci(c.in) }, .float32), dt);
+                const runs = [_]struct { cfg: config.Config, x: mlx.mlx_array }{ .{ .cfg = saved, .x = x0 }, .{ .cfg = tiles2, .x = x0 }, .{ .cfg = tiles2, .x = x1 }, .{ .cfg = mma, .x = x0 } };
+                for (runs, 0..) |r, k| {
+                    root.releaseEngines();
+                    try config.configure(r.cfg);
+                    const y = try g.adopt(try root.linear(s, r.x, trellis, suh, svh, dec));
+                    _ = try g.hostF32(try g.astype(y, .float32), got[k * n ..][0..n]);
+                }
+                var d_t2: usize = 0;
+                var d_red: usize = 0;
+                var d_mma: usize = 0;
+                for (got[0..n], got[n..][0..n], got[2 * n ..][0..n], got[3 * n ..][0..n]) |o, t2, rr, m2| {
+                    d_t2 += @intFromBool(@as(u32, @bitCast(t2)) != @as(u32, @bitCast(o)));
+                    d_red += @intFromBool(@as(u32, @bitCast(rr)) != @as(u32, @bitCast(o)));
+                    d_mma += @intFromBool(@as(u32, @bitCast(m2)) != @as(u32, @bitCast(o)));
+                }
+                // the MMA GEMV is reorder-class: its words against the chain's are counted, not held
+                const ok = d_t2 == 0 and d_red > 0;
+                std.debug.print("TURBOEXL3_HY4F_VERIFY_ROWS {s} in={d} out={d} K={d} rows={d} x={s} chainbt2_vs_chain={d}/{d} red_changed_input={d}/{d} mma_vs_chain={d}/{d} {s}\n", .{ c.name, c.in, c.out, rt.k, rows, @tagName(dt), d_t2, n, d_red, n, d_mma, n, if (ok) "PASS" else "FAIL" });
+                failed += @intFromBool(!ok);
+                // the float64 bar on the K-slice planes (the verify's 6 rows in f32 also run the planted faults)
+                const red = rows == 6 and dt == .float32;
+                failed += try mmaBar(a, &g, s, c, rt.k, rows, dt, x0, trellis, suh, saved, mma, if (red) faults[0..] else null);
+            }
+        }
+    };
+    root.releaseEngines();
+    try testing.expectEqual(@as(usize, 0), failed);
+}
+
+/// The planted faults of text_dgemv_mma (`dense.dgemvMmaText` with one served piece replaced): each must miss the bar
+const MmaFault = struct { name: []const u8, kernel: [*:0]const u8, lane: []const u8, live: []const u8, store: []const u8 };
+const mma_red = [_]MmaFault{
+    // the B^T fragment filled from trellis lane L instead of the lane plan's L'
+    .{ .name = "lane_map", .kernel = "turboexl3_test_dgemv_mma_lane_fault", .lane = @embedFile("kernels/test/fault/mma_lane_natural.metal"), .live = dense.mma_live, .store = dense.dgemv_store },
+    // fragment row 2 multiplying zeros: row 2 of each chunk dropped
+    .{ .name = "row_dropped", .kernel = "turboexl3_test_dgemv_mma_row_fault", .lane = dense.mma_lane, .live = @embedFile("kernels/test/fault/mma_live_drop_row.metal"), .store = dense.dgemv_store },
+    // simdgroup 1's part of each K slice summed twice into the plane
+    .{ .name = "k_part_twice", .kernel = "turboexl3_test_dgemv_mma_twice_fault", .lane = dense.mma_lane, .live = dense.mma_live, .store = @embedFile("kernels/test/fault/mma_store_twice.metal") },
+};
+
+/// The worst ratio of |z - ref| to its bound over the sampled outputs, and the error's rms over the rms of the bound's
+/// sums. z f32 [KS rows, out] (the K-slice planes, summed here in slice order in f32 as text_dfinish sums them); want and
+/// mag f64 [rows, cols.len] (the float64 inner product and the sum of |products| of each sampled output).
+const Bar = struct { ratio: f64, rel_rms: f64 };
+fn barOf(z: []const f32, ksn: u32, rows: u32, out: u32, cols: []const u32, want: []const f64, mag: []const f64, gamma: f64) Bar {
+    var worst: f64 = 0;
+    var se: f64 = 0;
+    var sm: f64 = 0;
+    for (0..rows) |r| for (cols, 0..) |col, j| {
+        var acc: f32 = z[r * out + col];
+        for (1..ksn) |kk| acc += z[(kk * rows + r) * out + col];
+        const i = r * cols.len + j;
+        if (!std.math.isFinite(acc)) {
+            worst = std.math.inf(f64);
+            continue;
+        }
+        const e = @abs(@as(f64, acc) - want[i]);
+        const b = gamma * mag[i];
+        worst = @max(worst, if (b > 0) e / b else if (e > 0) std.math.inf(f64) else 0);
+        se += e * e;
+        sm += mag[i] * mag[i];
+    };
+    return .{ .ratio = worst, .rel_rms = if (sm > 0) @sqrt(se / sm) else 0 };
+}
+
+/// The lean chunks on the matrix units (`mma`'s configuration, `Dense.prepareGemv`) and today's chain (`today`) at one
+/// shape, rate, row count and x dtype: each K-slice plane set z, summed in slice order in f32, against the float64 inner
+/// product of the very operands the GEMV reads (prep_s's lane-order rows read back and put in natural order, the dequantize
+/// launch's W), at three 128-column blocks (the first, middle and last: every lane, tile pair and fragment column). The bar
+/// of an output is the summation bound of n = in exact products (half x half is exact in f32), any order, f32 round to
+/// nearest: gamma_{n-1} sum_k |x_k w_k|, gamma_m = m u / (1 - m u), u = 2^-24. Both must hold it; each planted fault in
+/// `faults` (swapped into the Dense's MMA kernel) must miss it. The MMA's rms gap against today's and the planes' words
+/// against today's are printed. Returns the failures.
+fn mmaBar(a: std.mem.Allocator, g: *G, s: mlx.mlx_stream, c: DenseCase, k: u32, rows: u32, dt: mlx.mlx_dtype, x: mlx.mlx_array, trellis: mlx.mlx_array, suh: mlx.mlx_array, today: config.Config, mma: config.Config, faults: ?[]const mlx.mlx_fast_metal_kernel) !usize {
+    const shape: dense.Shape = .{ .in = c.in, .out = c.out, .rate = format.Rate.fromK(k), .dec = dec, .out_dtype = dt };
+    const m = g.mark();
+    defer g.resetTo(m);
+    const nob = c.out / 128;
+    const blocks = [3]u32{ 0, nob / 2, nob - 1 };
+    var cols: [3 * 128]u32 = undefined;
+    for (blocks, 0..) |b, i| for (0..128) |j| {
+        cols[i * 128 + j] = b * 128 + @as(u32, @intCast(j));
+    };
+    const nc = cols.len;
+    root.releaseEngines();
+    try config.configure(mma);
+    const d = try root.denseCached(shape);
+    const cm = try d.cfgs(rows);
+    const ksn = d.ks_split;
+    const nz = ksn * rows * c.out;
+    // the GEMV's operands: prep_s's lane-order rows at the chain's config (the launch prepareGemv makes) and W
+    var po: [2]mlx.mlx_array = undefined;
+    try ks.applyConfig(d.prep_s, cm.prep, &.{ x, suh }, &po, s);
+    const xp = try g.adopt(po[0]);
+    _ = try g.adopt(po[1]);
+    const xl = try a.alloc(f32, rows * c.in);
+    defer a.free(xl);
+    _ = try g.hostF32(try g.astype(xp, .float32), xl);
+    const W = try g.adopt(try d.decodeTrellis(s, trellis));
+    const wc = try a.alloc(f32, c.in * nc);
+    defer a.free(wc);
+    const wb = try a.alloc(f32, c.in * 128);
+    defer a.free(wb);
+    for (blocks, 0..) |b, i| {
+        const v = try g.slice(W, &.{ 0, ci(b * 128) }, &.{ ci(c.in), ci(b * 128 + 128) }, &.{ 1, 1 });
+        _ = try g.hostF32(try g.astype(v, .float32), wb);
+        for (0..c.in) |kk| @memcpy(wc[kk * nc + i * 128 ..][0..128], wb[kk * 128 ..][0..128]);
+    }
+    // the float64 reference and the bound's sums: element kk of a 16-block of a lane-order row sits at slot alayPos16(kk)
+    const want = try a.alloc(f64, rows * nc);
+    defer a.free(want);
+    const mag = try a.alloc(f64, rows * nc);
+    defer a.free(mag);
+    @memset(want, 0);
+    @memset(mag, 0);
+    for (0..rows) |r| for (0..c.in) |kk| {
+        const xv: f64 = xl[r * c.in + (kk & ~@as(usize, 15)) + prefill.alayPos16(@intCast(kk & 15))];
+        if (xv == 0) continue;
+        const wr = wc[kk * nc ..][0..nc];
+        const wo = want[r * nc ..][0..nc];
+        const mo = mag[r * nc ..][0..nc];
+        for (wr, wo, mo) |wv, *o, *mm| {
+            const p = xv * @as(f64, wv);
+            o.* += p;
+            mm.* += @abs(p);
+        }
+    };
+    const u = std.math.pow(f64, 2, -24);
+    const nt: f64 = @floatFromInt(c.in - 1);
+    const gamma = nt * u / (1 - nt * u);
+    const zm = try a.alloc(f32, nz);
+    defer a.free(zm);
+    const zf = try a.alloc(f32, nz);
+    defer a.free(zf);
+    {
+        const zz = try d.prepareGemv(s, x, trellis, suh, rows);
+        _ = try g.adopt(zz[1]);
+        _ = try g.hostF32(try g.adopt(zz[0]), zm);
+    }
+    const bm = barOf(zm, ksn, rows, c.out, &cols, want, mag, gamma);
+    var failed: usize = 0;
+    if (faults) |fs| {
+        var red: [mma_red.len]f64 = undefined;
+        for (fs, 0..) |fk, i| {
+            const kept = d.dgemv_mma;
+            d.dgemv_mma = fk;
+            defer d.dgemv_mma = kept;
+            const zz = try d.prepareGemv(s, x, trellis, suh, rows);
+            _ = try g.adopt(zz[1]);
+            _ = try g.hostF32(try g.adopt(zz[0]), zf);
+            red[i] = barOf(zf, ksn, rows, c.out, &cols, want, mag, gamma).ratio;
+        }
+        var ok = cm.mma;
+        for (red) |r| ok = ok and r > 1;
+        std.debug.print("TURBOEXL3_HY4F_MMA_RED {s} in={d} out={d} K={d} rows={d} x={s} on_mma={} {s}={e:.3} {s}={e:.3} {s}={e:.3} (each must exceed 1) {s}\n", .{ c.name, c.in, c.out, k, rows, @tagName(dt), cm.mma, mma_red[0].name, red[0], mma_red[1].name, red[1], mma_red[2].name, red[2], if (ok) "PASS" else "FAIL" });
+        failed += @intFromBool(!ok);
+    }
+    // today's chain (the engine `d` belonged to is freed here)
+    root.releaseEngines();
+    try config.configure(today);
+    const d0 = try root.denseCached(shape);
+    const c0 = try d0.cfgs(rows);
+    {
+        const zz = try d0.prepareGemv(s, x, trellis, suh, rows);
+        _ = try g.adopt(zz[1]);
+        _ = try g.hostF32(try g.adopt(zz[0]), zf);
+    }
+    const bt = barOf(zf, ksn, rows, c.out, &cols, want, mag, gamma);
+    var zdiff: usize = 0;
+    for (zm, zf) |p, q| zdiff += @intFromBool(@as(u32, @bitCast(p)) != @as(u32, @bitCast(q)));
+    // both within the f32 summation bound (exact products, f32 accumulation; the gaps
+    // against today's are printed, rms_vs_today, not held)
+    const ok = bm.ratio <= 1 and bt.ratio <= 1;
+    std.debug.print("TURBOEXL3_HY4F_MMA_BAR {s} in={d} out={d} K={d} rows={d} x={s} on_mma={} today_lean={} ks={d} bar=gamma_{d}*sum|p| mma_worst={e:.3} today_worst={e:.3} mma_rel_rms={e:.3} today_rel_rms={e:.3} rms_vs_today={d:.3} z_words_vs_today={d}/{d} {s}\n", .{ c.name, c.in, c.out, k, rows, @tagName(dt), cm.mma, c0.lean, ksn, c.in - 1, bm.ratio, bt.ratio, bm.rel_rms, bt.rel_rms, if (bt.rel_rms > 0) bm.rel_rms / bt.rel_rms else 0, zdiff, nz, if (ok) "PASS" else "FAIL" });
+    failed += @intFromBool(!ok);
+    return failed;
 }

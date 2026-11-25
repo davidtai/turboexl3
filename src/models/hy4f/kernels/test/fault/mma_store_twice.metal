@@ -1,0 +1,6 @@
+    // planted fault: simdgroup 1's part of the K slice summed twice into the plane
+    for (uint i = tid; i < RBC * 16u * BTC; i += 128u) {
+        const uint r = i / (16u * BTC);
+        const uint row = r0 + r;
+        if (row < ROWSC) z[(ulong(ksl) * ulong(ROWSC) + row) * ulong(OUTC) + blk * (16u * BTC) + (i - r * 16u * BTC)] = (((red[0][i] + red[1][i]) + red[2][i]) + red[3][i]) + red[1][i];
+    }

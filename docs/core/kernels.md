@@ -957,6 +957,30 @@ dequantize + matmul, the finishes and the un-rotated trunk. F3 (DeepSeek-V4.1's 
   prefill paths (TURBOEXL3_GPU=1)" and `src/models/deepseek_v41/deepseek_test.zig` "turboexl3 gpu deepseek: root.linear
   and root.linearBias equal the host reference at every DeepSeek-V4.1 ..." (GPU, the bars at 8 and 16 rows).
 
+### `turboexl3_dense_dgemv_mma`
+
+- **Used by:** core: with `Config.dense_mma` (off by default; needs `Config.nax`), the chain's lean chunks
+  (`Dense.leanAt`: chunks of 6 to 8 rows, and of 5 where `Dense.wideLean` holds) in place of
+  `turboexl3_dense_dgemv_lean`, through `root.linear`, F3 (`Dense.prepareGemv`, `linearPrepared`) and every caller of
+  the chain. Hy4-flash's 6-row verify: the quant plugin turboexl3_hy4f sets it.
+- **Shapes and dtypes:** the same as `turboexl3_dense_dgemv_lean`: xp f16 [rows, IN] in lane order; w the trellis U16
+  or I16 [IN/16, OUT/16, NHW]. Out: z f32 [KS · rows, OUT], the same K-slice planes, finished by
+  `turboexl3_dense_dfinish` unchanged.
+- **Grid and threadgroup:** `((OUT/16/BT) · 128, chunks, KS)` / `(128, 1, 1)`; BT is `Dense.mma_bt` (2: BT 4 ran 2x
+  slower at every Hy4 trunk shape).
+- **Template args:** NHW, CODEBOOK, WBITS, IN, OUT, KS, BT (even: one 16 x 32 x 16 MMA per tile pair and input tile),
+  RB (1 to 8; the chunk's rows are fragment rows 0..RB-1, the rest zeros), ROWS, DEFER. Header: `dense.header_mma`
+  (`prefill.header_nax_small` and `dense/mma_helpers`'s strict-precision `turboexl3_mma16`).
+- **Replaces:** `turboexl3_dense_dgemv_lean`'s 6 to 8 FMAs per decoded weight a lane: lane L decodes trellis lane
+  `prefill.smallLanePlan(L)`'s eight codewords straight into its B^T fragment (no shuffles) and the matrix units
+  multiply them with the chunk's rows.
+- **Bits:** reorder-class, not the lean text's bytes: half x half products exact in f32, f32 accumulation, the MMA's
+  order (`relaxed_precision` false), each MMA's 16-deep sum from zero added to the f32 accumulators on the ALUs. Each
+  output within gamma_{IN-1} · sum |x_k w_k| of the float64 inner product of the same operands.
+- **Pinned by:** `src/models/hy4f/hy4f_test.zig` "turboexl3 gpu hy4f dense verify rows: ..." (GPU: the float64 bar at
+  every Hy4 trunk shape, K6 rows 5 to 8 and K4 rows 6, bf16 and f32 x, beside today's chain; three planted faults,
+  `kernels/test/fault/mma_*`, miss it; the rms gap and words against today's chain printed).
+
 ### `turboexl3_dense_finish`
 
 <!-- kernel-facts: turboexl3_dense_finish -->

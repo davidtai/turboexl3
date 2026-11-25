@@ -3,8 +3,9 @@
 //!   has kernel names of its own, and today's texts are today's pieces.
 //! - GPU (TURBOEXL3_GPU=1, else skipped): every variant and every output-tile count against the served configuration,
 //!   byte for byte, at each sc_3.10bpw dense shape (`served`: the K6 trunk and head, the MTP layer's K4 linears), decode
-//!   rows 1 to 4, bf16 x (the served activations) and f32. Each configuration's engines are freed before the next is
-//!   made (`root.releaseEngines`), so each is built from its configuration. TURBOEXL3_GLM_DEC_K (a comma list of K)
+//!   rows 1 to 4, 6 and 8 (a verify's widths past DEC-ONE: the chain off the lean text, and at 2 output tiles,
+//!   `Config.chain_bt`), bf16 x (the served activations) and f32. Each configuration's engines are freed before the next
+//!   is made (`root.releaseEngines`), so each is built from its configuration. TURBOEXL3_GLM_DEC_K (a comma list of K)
 //!   narrows the shapes. Lines: TURBOEXL3_GLM_DEC_BYTES per shape, rows, dtype and schedule, and a total.
 //! - TURBOEXL3_GLM_TIME=1 (with TURBOEXL3_GPU=1, else skipped): the trunk's dense linears at a verify's rows
 //!   (TURBOEXL3_GLM_DEC_ROWS, default 3: 1 + the pinned depth 2) as one forward's work, each class a chain over as many
@@ -61,17 +62,22 @@ pub const served = [_]DecCase{
 
 /// A schedule: a DEC-ONE variant at the default output tiles, or today's text at one output-tile count for every decode
 /// row count (`bt` 0: the default).
-pub const Sched = struct { variant: u8 = 0, bt: u8 = 0 };
+pub const Sched = struct { variant: u8 = 0, bt: u8 = 0, lean_off: bool = false, chain_bt: u8 = 0 };
 
 /// Every schedule the switch can name: each variant past today's, then today's text at each output-tile count.
 pub const scheds = blk: {
-    var s: [dense.dec_variants.len - 1 + 4]Sched = undefined;
+    var s: [dense.dec_variants.len - 1 + 4 + 2]Sched = undefined;
     for (1..dense.dec_variants.len) |v| s[v - 1] = .{ .variant = v };
     for ([_]u8{ 1, 2, 4, 8 }, 0..) |b, i| s[dense.dec_variants.len - 1 + i] = .{ .bt = b };
+    // past DEC-ONE's 4 rows (a verify's 5 to 8): the chain off the lean text, and the chain at 2 output tiles
+    s[dense.dec_variants.len - 1 + 4] = .{ .lean_off = true };
+    s[dense.dec_variants.len - 1 + 5] = .{ .chain_bt = 2 };
     break :blk s;
 };
 
 fn schedName(sc: Sched, buf: []u8) []const u8 {
+    if (sc.lean_off) return "lean_off";
+    if (sc.chain_bt != 0) return std.fmt.bufPrint(buf, "chainbt{d}", .{sc.chain_bt}) catch "chainbt?";
     if (sc.variant == 0 and sc.bt == 0) return "served";
     if (sc.bt == 0) return dense.dec_variants[sc.variant].name;
     return std.fmt.bufPrint(buf, "bt{d}", .{sc.bt}) catch "bt?";
@@ -82,6 +88,8 @@ fn configureSched(base: config.Config, sc: Sched) !void {
     var c = base;
     c.dense_variant = sc.variant;
     c.dec_bt = .{ 0, sc.bt, sc.bt, sc.bt, sc.bt };
+    c.chain_bt = sc.chain_bt;
+    if (sc.lean_off) c.dense_lean = false;
     try config.configure(c);
     root.releaseEngines();
 }
@@ -111,7 +119,7 @@ test "turboexl3 glm53f dense decode texts: each variant is today's texts with ku
     for (dense.dec_variants, 0..) |v, i| try testing.expectEqual(@as(?u8, @intCast(i)), dense.decVariantOf(v.name));
     try testing.expectEqual(@as(?u8, null), dense.decVariantOf("sh"));
     // every schedule the test and the switch name is a configuration turboexl3 serves
-    for (scheds) |sc| try testing.expect((config.Config{ .dense_variant = sc.variant, .dec_bt = .{ 0, sc.bt, sc.bt, sc.bt, sc.bt } }).valid());
+    for (scheds) |sc| try testing.expect((config.Config{ .dense_variant = sc.variant, .dec_bt = .{ 0, sc.bt, sc.bt, sc.bt, sc.bt }, .dense_lean = !sc.lean_off, .chain_bt = sc.chain_bt }).valid());
     // g1 / g2: their own head, loop and tile words (the offsets taken once, the pointers stepped), then text_dec0's pieces
     // from the codewords on; no tile load call, no tile address and no x load of today's in the loop
     const tail = dense.dec_gemv_arrive_2b ++ dense.dec_gemv_arrive_2c ++ dense.dec_xsum0 ++ dense.dec_finish_v ++ dense.dec_finish_store;
@@ -184,7 +192,7 @@ fn projOf(g: *G, a: std.mem.Allocator, rnd: std.Random, tw: []const u16, in: u32
     };
 }
 
-test "turboexl3 gpu glm53f dense decode schedules: every DEC-ONE variant and output-tile count gives the served configuration's y byte for byte at each sc_3.10bpw dense shape, decode rows 1 to 4, bf16 and f32 x (TURBOEXL3_GPU=1)" {
+test "turboexl3 gpu glm53f dense decode schedules: every DEC-ONE variant and output-tile count gives the served configuration's y byte for byte at each sc_3.10bpw dense shape, decode rows 1 to 4, 6 and 8, bf16 and f32 x (TURBOEXL3_GPU=1)" {
     _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
     const s = mlx.mlx_default_gpu_stream_new();
     if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
@@ -210,7 +218,8 @@ test "turboexl3 gpu glm53f dense decode schedules: every DEC-ONE variant and out
         defer g.resetTo(mark);
         const p = try randomProj(&g, a, rnd, c.in, c.out, c.k);
         try g.evalAll(&.{ p.trellis, p.suh, p.svh });
-        for (1..5) |rows| {
+        // rows 1 to 4 (DEC-ONE's), 6 and 8 (a verify's widths past them: the chain)
+        for ([_]usize{ 1, 2, 3, 4, 6, 8 }) |rows| {
             const xh = try a.alloc(f32, rows * c.in);
             defer a.free(xh);
             for (xh) |*v| v.* = routed.bfExact(rnd.floatNorm(f32));

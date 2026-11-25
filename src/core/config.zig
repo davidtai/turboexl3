@@ -94,6 +94,10 @@ pub const Config = struct {
     /// DEC-ONE's GEMV variant (`dense.dec_variants`, `dense_variants` of them; 0 today's): another schedule of the same
     /// reads, decodes and sums, so the same bytes. A dense shape's engine reads it when it is made.
     dense_variant: u8 = 0,
+    /// The three-launch chain's output tiles per GEMV threadgroup at 5 to 8 decode rows (a verify's widths past DEC-ONE):
+    /// 0 keeps `dense.Dense.btAt`'s, 2 runs two. Launch shape only (a row's sums do not depend on it): the same bytes. A
+    /// dense shape's engine reads it when it is made.
+    chain_bt: u8 = 0,
     /// DEC-ONE's output tiles per GEMV threadgroup at each decode row count (index: the call's rows, 1 to 4; 0 the
     /// default, `dense.Dense.btFor`'s): 1, 2, 4 or 8. Launch shape only (a row's sums do not depend on it), so the same
     /// bytes. A dense shape's engine reads it when it is made.
@@ -105,6 +109,11 @@ pub const Config = struct {
     /// (`dense.Dense.wideLean`: DeepSeek-V4.1's LM head, wq_b and wo_a at 5, 9 and 10 rows); false keeps them on
     /// text_dgemv at BT 1. The same bytes.
     dense_lean5: bool = true,
+    /// The dense decode chain's lean chunks (`dense.Dense.leanAt`: 6 to 8 rows a chunk, and 5 where `dense_lean5` takes
+    /// them) on the matrix units (`dense.text_dgemv_mma`): each weight decoded once into the MMA's operand, half x half
+    /// products exact in f32, each 16-deep sum added to f32 accumulators. Reorder-class, NOT the same bytes. Needs `nax`.
+    /// A dense shape's engine reads it when it is made.
+    dense_mma: bool = false,
     /// The banked decode's row-slots of one packed id per GEMV lead threadgroup (`moeClampedBanked`): 2 pairs them, 4 runs
     /// the grouped texts, which take up to four and skip a row-slot whose id is `skip_id` (no decode, its y row 0). The
     /// same bytes for every other row-slot.
@@ -158,7 +167,8 @@ pub const Config = struct {
             ((c.banked_variant_gu == 0 and c.banked_variant_dn == 0) or c.banked_group == 4) and
             c.dense_variant < dense_variants and decBtValid(c.dec_bt) and
             (!c.banked_wave3 or (c.banked_group == 4 and !ptgSet(c))) and
-            (c.decode_bt9 == 0 or c.decode_bt9 == 4);
+            (c.decode_bt9 == 0 or c.decode_bt9 == 4) and (c.chain_bt == 0 or c.chain_bt == 2) and
+            (!c.dense_mma or c.nax);
     }
 
     /// Whether `c` also names the persistent grouped GEMVs (`banked_ptg`, where this build has that field; false where
@@ -203,6 +213,9 @@ test "turboexl3 config: the defaults are valid and served; an unserved form, sli
     // form 9's tiles from two rows: 0 (the engine's) or 4
     try t.expect(d.decode_bt9 == 0 and (Config{ .decode_bt9 = 4 }).valid());
     for ([_]u8{ 1, 2, 3, 8 }) |b| try t.expect(!(Config{ .decode_bt9 = b }).valid());
+    // the chain's tiles at 5 to 8 rows: 0 (the engine's) or 2
+    try t.expect(d.chain_bt == 0 and (Config{ .chain_bt = 2 }).valid());
+    for ([_]u8{ 1, 3, 4, 8 }) |b| try t.expect(!(Config{ .chain_bt = b }).valid());
     // the x texts: off by default
     try t.expect(!d.decode_iop);
     try t.expect((Config{ .decode_iop = true }).valid());
@@ -237,6 +250,10 @@ test "turboexl3 config: the defaults are valid and served; an unserved form, sli
     try t.expect(!(Config{ .banked_group = 4, .banked_variant_gu = banked_variants }).valid());
     try t.expect(!(Config{ .banked_group = 4, .banked_variant_dn = banked_variants }).valid());
     try t.expect(d.dense_lean);
+    // the lean chunks on the matrix units: off by default, served only on the NAX path
+    try t.expect(!d.dense_mma);
+    try t.expect((Config{ .dense_mma = true }).valid());
+    try t.expect(!(Config{ .dense_mma = true, .nax = false }).valid());
     try t.expect(d.fused_fin_fold);
     try t.expect(!d.dec_one_row_table);
     try t.expect((Config{ .dec_one_row_table = true }).valid());

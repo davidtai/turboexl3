@@ -2,7 +2,8 @@
 //! points, for the trunk of a fully EXL3 model (attention / GDN projections, shared expert, lm_head, MTP). Decode rows
 //! (<= DECODE_ROWS_MAX) run prepare (f16 round, suh, H128), a multi-row trellis GEMV that decodes every weight once per
 //! row chunk (split-K partial planes; `Dense.chainRb`: chunks of up to `lean_rb` (8) rows, a chunk past `max_rb` (5) rows
-//! on the lean GEMV text, or of up to 5 with `Config.dense_lean` off) and finish (sum the planes, H128, svh, f16 round);
+//! on the lean GEMV text, or of up to 5 with `Config.dense_lean` off; with `Config.dense_mma` the lean chunks on the matrix
+//! units, `text_dgemv_mma`, reorder-class) and finish (sum the planes, H128, svh, f16 round);
 //! `Dense.rowslot` keeps the row-slot kernels of `unfused.zig` (one decode per row), the tests' reference. Rows up to
 //! `small_rows` (32: a prefill's snapshot tail) run the expert chain's register-path GEMM with one op
 //! (`prefill.gemm1s_text`): each 32-row tile decodes the trellis once straight into the matrix units' B registers, no
@@ -97,6 +98,42 @@ pub const dgemv_store = @embedFile("kernels/dense/dgemv_store.metal");
 /// threadgroups). text_dgemv's bytes.
 pub const text_dgemv_lean = dgemv_1 ++ dgemv_2 ++ dgemv_j ++ dgemv_3;
 pub const dgemv_j = @embedFile("kernels/dense/dgemv_j.metal");
+
+/// The chain's lean chunks on the matrix units (`Config.dense_mma`; reorder-class: not text_dgemv_lean's bytes). The grid,
+/// K slices, simdgroup split of a slice, reduction buffer and plane store are text_dgemv's (`dgemv_store` verbatim), so z
+/// f32 [KS * ROWS, OUT] is the same planes and text_dfinish finishes them unchanged. Per input tile, lane L decodes the
+/// eight codewords of trellis lane L' = prefill.smallLanePlan(L) straight into its B^T fragment (columns fm, fm + 8 at k
+/// 2q + {0, 1, 8, 9}: no shuffles), loads its A elements of row fm as one half4 of the lane-order rows (slot 4q + j is that
+/// k), and each pair of output tiles takes one 16 x 32 x 16 MMA (`turboexl3_mma16`, strict precision) from zero with the
+/// chunk's RB (<= 8) rows in fragment rows 0..RB-1 and zeros in the rest, its sums added to the f32 accumulators on the
+/// ALUs. Every weight is decoded once for all rows of the chunk; products half x half (exact in f32), f32 accumulation.
+/// BT `Dense.mma_bt` (2: one tile pair a simdgroup).
+pub const text_dgemv_mma = dgemvMmaText(mma_lane, mma_live, dgemv_store);
+/// text_dgemv_mma's pieces: the constants and fragment slot, the trellis lane plan (`mma_lane`), the decode plan, slice and
+/// A row, the live fragment rows (`mma_live`), the tile loop and the reduction buffer's stores
+pub const mma_1 = @embedFile("kernels/dense/mma_1.metal");
+pub const mma_lane = @embedFile("kernels/dense/mma_lane.metal");
+pub const mma_2 = @embedFile("kernels/dense/mma_2.metal");
+pub const mma_live = @embedFile("kernels/dense/mma_live.metal");
+pub const mma_3 = @embedFile("kernels/dense/mma_3.metal");
+/// text_dgemv_mma with `lane`, `live` and `store` in the places of `mma_lane`, `mma_live` and `dgemv_store` (a test's
+/// planted fault; the served pieces give text_dgemv_mma)
+pub fn dgemvMmaText(comptime lane: []const u8, comptime live: []const u8, comptime store: []const u8) [:0]const u8 {
+    return sentinel(mma_1 ++ lane ++ mma_2 ++ live ++ mma_3 ++ store);
+}
+/// text_dgemv_mma's header: the register-path GEMM's (MLX steel's NAX tiles, the decode helpers, `exl3pf_bfrag`) and the
+/// strict-precision MMA
+pub const header_mma: [:0]const u8 = sentinel(prefill.header_nax_small ++ @embedFile("kernels/dense/mma_helpers.metal"));
+
+/// A comptime string as a NUL-terminated slice (the C API's text arguments).
+fn sentinel(comptime s: []const u8) [:0]const u8 {
+    comptime {
+        var buf: [s.len:0]u8 = undefined;
+        @memcpy(buf[0..s.len], s);
+        const final = buf;
+        return &final;
+    }
+}
 
 /// text_dfinish up to the 128-point butterfly (decb.zig's finish variants reuse these statements verbatim)
 pub const dfinish_v = @embedFile("kernels/dense/dfinish_v.metal");
@@ -253,11 +290,11 @@ const dec_zero_out = [_][*:0]const u8{"cnt"};
 const prep_in = [_][*:0]const u8{ "x", "suh" };
 const prep_out = [_][*:0]const u8{"xp"};
 const gemv_in = [_][*:0]const u8{ "xp", "slots", "w" };
-const gemv_out = [_][*:0]const u8{"z"};
+pub const gemv_out = [_][*:0]const u8{"z"};
 const finish_in = [_][*:0]const u8{ "z", "svh" };
 const finish_out = [_][*:0]const u8{"y"};
 const dequant_in = [_][*:0]const u8{"w"};
-const dgemv_in = [_][*:0]const u8{ "xp", "w" };
+pub const dgemv_in = [_][*:0]const u8{ "xp", "w" };
 const dfinish_in = [_][*:0]const u8{ "z", "svh", "xs" };
 const prep_s_out = [_][*:0]const u8{ "xp", "xs" };
 const dequant_out = [_][*:0]const u8{"W"};
@@ -333,6 +370,8 @@ pub const Dense = struct {
     dgemv: mlx.mlx_fast_metal_kernel,
     /// the lean GEMV text (text_dgemv_lean), for the chain's chunks past 5 rows
     dgemv_lean: mlx.mlx_fast_metal_kernel,
+    /// the lean chunks' GEMV on the matrix units (text_dgemv_mma), where `mma` holds
+    dgemv_mma: mlx.mlx_fast_metal_kernel,
     dfinish: mlx.mlx_fast_metal_kernel,
     prep_s: mlx.mlx_fast_metal_kernel,
     /// MUL1 packs: the GEMV sums x times the codeword's byte sum and the finish applies the affine map once per output
@@ -343,6 +382,9 @@ pub const Dense = struct {
     /// the chain's row chunks under `lean_rb` with the chunks past 5 rows on the lean GEMV text (so 6..8 rows take one
     /// chunk, 9..16 two); false keeps text_dgemv under max_rb (`Config.dense_lean`). Set before the first call.
     lean: bool,
+    /// the chain's lean chunks (`leanAt`) on text_dgemv_mma at `mma_bt` output tiles a threadgroup instead of the lean
+    /// text (`Config.dense_mma`, with `Config.nax`; reorder-class). Set before the first call.
+    mma: bool,
     /// the per-row-slot GEMV (every row decodes the trellis again): the tests' reference, off in service
     rowslot: bool,
     /// prefill rows through the fused GEMM (`prefill.zig`'s one-op text: the trellis decoded per 64-deep stage into threadgroup
@@ -398,8 +440,9 @@ pub const Dense = struct {
     /// (`resetCfgs` drops the built ones).
     bt_set: [decode.Kernels.max_rows + 1]u8 = @splat(0),
 
-    /// `lean`: `gemv` is the lean GEMV text's config (text_dgemv_lean), not text_dgemv's
-    pub const Cfg = struct { prep: mlx.mlx_fast_metal_kernel_config, gemv: mlx.mlx_fast_metal_kernel_config, finish: mlx.mlx_fast_metal_kernel_config, lean: bool = false };
+    /// `lean`: `gemv` is the lean GEMV text's config (text_dgemv_lean), not text_dgemv's; `mma`: text_dgemv_mma's (its
+    /// chunks lean ones, `mma`)
+    pub const Cfg = struct { prep: mlx.mlx_fast_metal_kernel_config, gemv: mlx.mlx_fast_metal_kernel_config, finish: mlx.mlx_fast_metal_kernel_config, lean: bool = false, mma: bool = false };
     /// DEC-ONE at one row count: `prep` is prep_sc's config (prepare outside) or dec_zero's (inside); `gemv` dec0's or dec1's;
     /// `ncnt` the arrival counters (`hostCounters`' length where the prepare runs inside)
     pub const DecCfg = struct { prep_in: bool, prep: mlx.mlx_fast_metal_kernel_config, gemv: mlx.mlx_fast_metal_kernel_config, ncnt: u32 = 8 };
@@ -430,6 +473,9 @@ pub const Dense = struct {
     pub const max_rb: u32 = 5;
     /// the chain's cap on the lean text: 2 BT RB accumulators and 2 RB input registers, 32 at 8 rows (BT 1)
     pub const lean_rb: u32 = 8;
+    /// text_dgemv_mma's output tiles per threadgroup: one pair, so a simdgroup's state is one MMA's (16 accumulators, 8 +
+    /// 16 operand halves); 4 ran 2x slower at every Hy4 trunk shape on Apple M5 Max, 128 GB (K4 and K6, 6 rows)
+    pub const mma_bt: u32 = 2;
 
     /// rows per chunk for `rows` rows under `cap`: the fewest chunks of at most `cap` rows, the rows spread evenly over them
     pub fn rbCap(rows: u32, cap: u32) u32 {
@@ -581,11 +627,13 @@ pub const Dense = struct {
             .dequant = ks.newKernel("turboexl3_dense_dequant", &dequant_in, &dequant_out, text_dequant, decode.header, true) orelse return error.KernelCreateFailed,
             .dgemv = ks.newKernel("turboexl3_dense_dgemv", &dgemv_in, &gemv_out, text_dgemv, decode.header, true) orelse return error.KernelCreateFailed,
             .dgemv_lean = ks.newKernel("turboexl3_dense_dgemv_lean", &dgemv_in, &gemv_out, text_dgemv_lean, decode.header, true) orelse return error.KernelCreateFailed,
+            .dgemv_mma = ks.newKernel("turboexl3_dense_dgemv_mma", &dgemv_in, &gemv_out, text_dgemv_mma, header_mma, true) orelse return error.KernelCreateFailed,
             .dfinish = ks.newKernel("turboexl3_dense_dfinish", &dfinish_in, &finish_out, text_dfinish, decode.header, true) orelse return error.KernelCreateFailed,
             .prep_s = ks.newKernel("turboexl3_dense_prep_s", &prep_in, &prep_s_out, text_prep_s, decode.header, true) orelse return error.KernelCreateFailed,
             .defer_affine = deferFor(shape.dec),
             .ks_split = ksFor(shape.in, shape.out),
             .lean = config.get().dense_lean,
+            .mma = config.get().dense_mma and config.get().nax,
             .rowslot = false,
             .gemm_pf = ks.newKernel("turboexl3_dense_pf_gemm", &prefill.gemm1_in, &prefill.gemm1_out, prefill.gemm1_text, prefill.header_nax, true) orelse return error.KernelCreateFailed,
             .fused_prefill = false,
@@ -613,6 +661,10 @@ pub const Dense = struct {
     pub fn btSetFor(cfg: config.Config, shape: Shape) [decode.Kernels.max_rows + 1]u8 {
         var b: [decode.Kernels.max_rows + 1]u8 = @splat(0);
         for (cfg.dec_bt, 0..) |v, r| b[r] = v;
+        // the chain's verify widths past DEC-ONE (`Config.chain_bt`)
+        if (cfg.chain_bt != 0) for (b[5..@min(b.len, 9)]) |*v| {
+            v.* = cfg.chain_bt;
+        };
         if (cfg.dec_one_row_table) if (oneRowFor(shape)) |e| {
             b[1] = e.bt;
         };
@@ -838,7 +890,7 @@ pub const Dense = struct {
             c.* = null;
         };
         if (self.xs_dummy.ctx != null) _ = mlx.mlx_array_free(self.xs_dummy);
-        inline for (.{ self.prep, self.gemv, self.finish, self.dequant, self.dgemv, self.dgemv_lean, self.dfinish, self.prep_s, self.gemm_pf, self.gemm_rs, self.dec0, self.dec1, self.prep_sc, self.dec_zero }) |k| decode.freeKernel(k);
+        inline for (.{ self.prep, self.gemv, self.finish, self.dequant, self.dgemv, self.dgemv_lean, self.dgemv_mma, self.dfinish, self.prep_s, self.gemm_pf, self.gemm_rs, self.dec0, self.dec1, self.prep_sc, self.dec_zero }) |k| decode.freeKernel(k);
         if (self.finish_pieces) |k| decode.freeKernel(k);
         self.finish_pieces = null;
         if (self.prep_scf) |k| decode.freeKernel(k);
@@ -870,7 +922,9 @@ pub const Dense = struct {
         const OUT: c_int = @intCast(self.shape.out);
         const t = self.templ();
         const rb: u32 = self.chainRb(@intCast(rows));
-        const bt = self.btAt(rows, rb);
+        const lean = self.leanAt(rows, rb);
+        const on_mma = lean and self.mma;
+        const bt = if (on_mma) mma_bt else self.btAt(rows, rb);
         if (8 % bt != 0) return error.BadExl3Shape;
         const chunks: u32 = (@as(u32, @intCast(rows)) + rb - 1) / rb;
         const ksv: c_int = @intCast(self.ks_split);
@@ -880,7 +934,8 @@ pub const Dense = struct {
             .prep = try ks.buildConfig(.{ .grid = .{ (self.shape.in / 128) * 32, @intCast(rows), 1 }, .threadgroup = .{ 32, 1, 1 }, .out_shapes = &.{ &[_]c_int{ r, IN }, &[_]c_int{ r, @intCast(self.shape.in / 128) } }, .out_dtypes = &.{ .float16, .float32 }, .template = &.{ .{ .name = "DIM", .value = .{ .int = IN } }, .{ .name = "LANE_ORDER", .value = .{ .int = 1 } } } }),
             .gemv = try ks.buildConfig(.{ .grid = .{ (self.shape.out / 16 / bt) * 128, chunks, self.ks_split }, .threadgroup = .{ 128, 1, 1 }, .out_shapes = &.{&[_]c_int{ ksv * r, OUT }}, .out_dtypes = &.{.float32}, .template = &.{ t[0], t[1], t[2], .{ .name = "IN", .value = .{ .int = IN } }, .{ .name = "OUT", .value = .{ .int = OUT } }, .{ .name = "KS", .value = .{ .int = ksv } }, .{ .name = "BT", .value = .{ .int = @intCast(bt) } }, .{ .name = "RB", .value = .{ .int = @intCast(rb) } }, .{ .name = "ROWS", .value = .{ .int = r } }, defer_t } }),
             .finish = try ks.buildConfig(.{ .grid = .{ (self.shape.out / 128) * 32, @intCast(rows), 1 }, .threadgroup = .{ 32, 1, 1 }, .out_shapes = &.{&[_]c_int{ r, OUT }}, .out_dtypes = &.{self.shape.out_dtype}, .template = &.{ .{ .name = "DIM", .value = .{ .int = OUT } }, out_t, .{ .name = "KS", .value = .{ .int = ksv } }, .{ .name = "ROWS", .value = .{ .int = r } }, .{ .name = "INBLK", .value = .{ .int = @intCast(self.shape.in / 128) } }, defer_t } }),
-            .lean = self.leanAt(rows, rb),
+            .lean = lean,
+            .mma = on_mma,
         };
     }
 
@@ -895,6 +950,11 @@ pub const Dense = struct {
             .gemv = if (with_gemv) try ks.buildConfig(.{ .grid = .{ (self.shape.out / 128) * 128, @intCast(rows), 1 }, .threadgroup = .{ 128, 1, 1 }, .out_shapes = &.{&[_]c_int{ r, OUT }}, .out_dtypes = &.{.float32}, .template = &.{ t[0], t[1], t[2], .{ .name = "IN", .value = .{ .int = IN } }, .{ .name = "OUT", .value = .{ .int = OUT } } } }) else undefined,
             .finish = try ks.buildConfig(.{ .grid = .{ (self.shape.out / 128) * 32, @intCast(rows), 1 }, .threadgroup = .{ 32, 1, 1 }, .out_shapes = &.{&[_]c_int{ r, OUT }}, .out_dtypes = &.{self.shape.out_dtype}, .template = &.{ .{ .name = "DIM", .value = .{ .int = OUT } }, out_t } }),
         };
+    }
+
+    /// the chain's GEMV kernel for a config of `cfgs`: text_dgemv_mma's, the lean text's or text_dgemv's
+    fn gemvOf(self: *const Dense, c: Cfg) mlx.mlx_fast_metal_kernel {
+        return if (c.mma) self.dgemv_mma else if (c.lean) self.dgemv_lean else self.dgemv;
     }
 
     fn one(k: mlx.mlx_fast_metal_kernel, c: mlx.mlx_fast_metal_kernel_config, ins: []const mlx.mlx_array, s: mlx.mlx_stream) !mlx.mlx_array {
@@ -1199,7 +1259,7 @@ pub const Dense = struct {
     pub fn linearPrepared(self: *Dense, s: mlx.mlx_stream, xp: mlx.mlx_array, xs: mlx.mlx_array, trellis: mlx.mlx_array, svh: mlx.mlx_array, rows: usize) !mlx.mlx_array {
         if (!self.preparedTakes(rows)) return error.Exl3EngineNotImplemented;
         const c = try self.cfgs(rows);
-        const z = try one(if (c.lean) self.dgemv_lean else self.dgemv, c.gemv, &.{ xp, trellis }, s);
+        const z = try one(self.gemvOf(c), c.gemv, &.{ xp, trellis }, s);
         defer _ = mlx.mlx_array_free(z);
         return one(self.dfinish, c.finish, &.{ z, svh, xs }, s);
     }
@@ -1213,7 +1273,7 @@ pub const Dense = struct {
         try ks.applyConfig(self.prep_s, c.prep, &.{ x, suh }, &po, s);
         defer _ = mlx.mlx_array_free(po[0]);
         errdefer _ = mlx.mlx_array_free(po[1]);
-        const z = try one(if (c.lean) self.dgemv_lean else self.dgemv, c.gemv, &.{ po[0], trellis }, s);
+        const z = try one(self.gemvOf(c), c.gemv, &.{ po[0], trellis }, s);
         return .{ z, po[1] };
     }
 
@@ -1236,7 +1296,7 @@ pub const Dense = struct {
                 defer for (po) |a| {
                     _ = mlx.mlx_array_free(a);
                 };
-                const z = try one(if (c.lean) self.dgemv_lean else self.dgemv, c.gemv, &.{ po[0], trellis }, s);
+                const z = try one(self.gemvOf(c), c.gemv, &.{ po[0], trellis }, s);
                 defer _ = mlx.mlx_array_free(z);
                 return one(self.dfinish, c.finish, &.{ z, svh, po[1] }, s);
             }
