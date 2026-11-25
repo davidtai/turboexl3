@@ -173,6 +173,18 @@ pub fn kernelsFor(geo: decode.Geometry, out_dtype: mlx.mlx_dtype) !*decode.Kerne
     // row-slots (2 per lead): the fastest at 4 and 8 rows on the M5 Max, a tie at 1 row
     var k3 = try decode.Kernels3.initWith(geo, 1, 4, 2);
     k3.out_dtype = out_dtype;
+    // form 9's launch shape from two rows where the configuration names one (`Config.decode_bt9`; launch shape only)
+    const cfg = config.get();
+    if (cfg.decode_bt9 != 0) k3.bt9 = cfg.decode_bt9;
+    // the x texts (`Config.decode_iop`): gu3's and down3's bytes; the 32-bit tile index only where an expert's tile words
+    // fit it
+    if (cfg.decode_iop and decode.iopFits(geo)) {
+        const x = try decode.newXKernels();
+        decode.freeKernel(k3.gu);
+        decode.freeKernel(k3.down);
+        k3.gu = x.gu;
+        k3.down = x.down;
+    }
     cache.get().*[i] = k3;
     return &cache.get().*[i].?;
 }

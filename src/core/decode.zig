@@ -215,7 +215,10 @@ pub const text_gu3 = gu3_1 ++ rk_line ++ gu3_body;
 /// gu3's pieces after its rk line, cut where gu3sf differs: after its reduction buffer (its declarations) and at the
 /// planes' stores; and where the banked text differs: at the weight base (`gu3_w`)
 pub const gu3_1 = @embedFile("kernels/decode/gu3_1.metal");
-pub const gu3_2 = @embedFile("kernels/decode/gu3_2.metal");
+/// gu3_2 cut where the x texts (`text_gu3x`) put their weight base: before the members scan
+pub const gu3_2 = gu3_2a ++ gu3_2b;
+pub const gu3_2a = @embedFile("kernels/decode/gu3_2a.metal");
+pub const gu3_2b = @embedFile("kernels/decode/gu3_2b.metal");
 pub const gu3_w = @embedFile("kernels/decode/gu3_w.metal");
 pub const gu3_3 = @embedFile("kernels/decode/gu3_3.metal");
 pub const gu3_stores = @embedFile("kernels/decode/gu3_stores.metal");
@@ -232,7 +235,10 @@ pub const text_down3 = down3_1 ++ rk_line ++ down3_2 ++ down3_w ++ down3_3;
 /// down3's pieces: its constants and grid line, then its body cut at the weight base (`down3_w`; the banked text's
 /// differs)
 pub const down3_1 = @embedFile("kernels/decode/down3_1.metal");
-pub const down3_2 = @embedFile("kernels/decode/down3_2.metal");
+/// down3_2 cut as gu3_2 is (`text_down3x`)
+pub const down3_2 = down3_2a ++ down3_2b;
+pub const down3_2a = @embedFile("kernels/decode/down3_2a.metal");
+pub const down3_2b = @embedFile("kernels/decode/down3_2b.metal");
 pub const down3_w = @embedFile("kernels/decode/down3_w.metal");
 pub const down3_3 = @embedFile("kernels/decode/down3_3.metal");
 
@@ -268,6 +274,38 @@ pub const fin3_outputs = [_][*:0]const u8{ "hd", "hs" };
 pub const down3_inputs = [_][*:0]const u8{ "hdp", "slots", "down_t" };
 pub const down3_outputs = [_][*:0]const u8{"zd"};
 pub const dfin3_inputs = [_][*:0]const u8{ "zd", "slots", "scores", "down_svh", "hsx" };
+
+/// Form 3's GEMVs on the x texts (`Config.decode_iop`; kernels/decode/gemv_x.metal): each tile's words by a 32-bit index
+/// from the expert base, the same reads, decodes and FMA order as gu3 / down3, so their bytes. The weight base comes
+/// before the members scan; the GEMV is `turboexl3_gemv_x`. Inputs and outputs: gu3's and down3's.
+pub const text_gu3x = gu3_1 ++ rk_line ++ gu3_2a ++ gu3_w ++ gu3_2b ++ @embedFile("kernels/decode/gu3_3x.metal") ++ gu3_stores ++ gu3_4;
+pub const text_down3x = down3_1 ++ rk_line ++ down3_2a ++ down3_w ++ down3_2b ++ @embedFile("kernels/decode/down3_3x.metal");
+const metal_gemv_x = @embedFile("kernels/decode/gemv_x.metal");
+
+/// The x texts' header with a planted defect (`red`: 0 none; 1 gemv_x.metal's EXL3_RED, the tests' red check only)
+pub fn xHeader(comptime red: u1) [:0]const u8 {
+    return std.fmt.comptimePrint("#define EXL3_RED {d}\n", .{red}) ++ header ++ metal_gemv_x;
+}
+
+/// The x kernels' names per defect (each its own: a kernel cache keys by name)
+pub fn xName(comptime proj: []const u8, comptime red: u1) [:0]const u8 {
+    return std.fmt.comptimePrint("turboexl3_{s}x_iop_r{d}", .{ proj, red });
+}
+
+/// gu3x and down3x; the caller frees both (`freeKernel`)
+pub fn newXKernels() !struct { gu: mlx.mlx_fast_metal_kernel, down: mlx.mlx_fast_metal_kernel } {
+    const gu = ks.newKernel(xName("gu3", 0), &gu3_inputs, &gu3_outputs, text_gu3x, xHeader(0), true) orelse return error.KernelCreateFailed;
+    const dn = ks.newKernel(xName("down3", 0), &down3_inputs, &down3_outputs, text_down3x, xHeader(0), true) orelse {
+        freeKernel(gu);
+        return error.KernelCreateFailed;
+    };
+    return .{ .gu = gu, .down = dn };
+}
+
+/// Whether a geometry's tile word offsets within one expert fit the x texts' 32-bit index (`Config.decode_iop`)
+pub fn iopFits(geo: Geometry) bool {
+    return @as(u64, geo.hidden / 16) * @as(u64, geo.inter / 16) * @as(u64, geo.rate.n / 2) < (1 << 32);
+}
 
 
 /// Form 3: five launches (prepare gate and up, split-K gate/up planes, finish + SwiGLU + down prepare, split-K down

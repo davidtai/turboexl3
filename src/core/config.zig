@@ -10,6 +10,15 @@ pub const Config = struct {
     /// two launches); 7 keeps fin / dfin's H128s in registers, 8 also moves the prepare into the gate|up launch, and 9 runs
     /// 8 at one row and 7 from two.
     decode_form: u8 = 9,
+    /// Form 9's output tiles per GEMV threadgroup from two rows (`decode.Kernels3.bt9`): 0 keeps the engine's (2), 4 runs
+    /// four. Launch shape only (the K partition, so every sum, does not depend on it): the same bytes. A geometry's
+    /// engine reads it when it is made.
+    decode_bt9: u8 = 0,
+    /// The resident routed decode's gate|up and down GEMVs (form 3's gu3 / down3) on the x texts (`decode.text_gu3x`,
+    /// `text_down3x`): each tile's words by a 32-bit index from the expert base and, at integer rates, the tile's 64-bit
+    /// window without the variable funnel (a geometry whose expert passes 2^32 tile words keeps the 64-bit index); the
+    /// same reads, decodes and FMA order, so the same bytes. A geometry's engine reads it when it is made.
+    decode_iop: bool = false,
     /// Gate|up K slices per GEMV threadgroup of the fused shared expert (of its 20): 1, 2, 4, 5, 10 or 20. Launch shape
     /// only.
     shared_spt: u32 = 4,
@@ -148,7 +157,8 @@ pub const Config = struct {
             c.banked_variant_gu < banked_variants and c.banked_variant_dn < banked_variants and
             ((c.banked_variant_gu == 0 and c.banked_variant_dn == 0) or c.banked_group == 4) and
             c.dense_variant < dense_variants and decBtValid(c.dec_bt) and
-            (!c.banked_wave3 or (c.banked_group == 4 and !ptgSet(c)));
+            (!c.banked_wave3 or (c.banked_group == 4 and !ptgSet(c))) and
+            (c.decode_bt9 == 0 or c.decode_bt9 == 4);
     }
 
     /// Whether `c` also names the persistent grouped GEMVs (`banked_ptg`, where this build has that field; false where
@@ -190,6 +200,12 @@ test "turboexl3 config: the defaults are valid and served; an unserved form, sli
     try t.expect(d.prefill and d.nax and d.dec_one and d.pf_t128 and !d.slot_stats and d.pf_capture_dir == null);
     for ([_]u8{ 3, 5, 6, 7, 8, 9 }) |f| try t.expect((Config{ .decode_form = f }).valid());
     for ([_]u8{ 0, 4, 10 }) |f| try t.expect(!(Config{ .decode_form = f }).valid());
+    // form 9's tiles from two rows: 0 (the engine's) or 4
+    try t.expect(d.decode_bt9 == 0 and (Config{ .decode_bt9 = 4 }).valid());
+    for ([_]u8{ 1, 2, 3, 8 }) |b| try t.expect(!(Config{ .decode_bt9 = b }).valid());
+    // the x texts: off by default
+    try t.expect(!d.decode_iop);
+    try t.expect((Config{ .decode_iop = true }).valid());
     try t.expect(!(Config{ .shared_spt = 3 }).valid());
     try t.expect(!(Config{ .pf_alay = 3 }).valid());
     // the routed prefill's fused finish: off by default

@@ -102,8 +102,8 @@ test "turboexl3 banked decode texts: each is its base text with the bank's lines
         try testing.expect(std.mem.indexOf(u8, piece, pin[2]) != null);
         try testing.expect(std.mem.indexOf(u8, piece, pin[3]) != null);
     }
-    try testing.expect(std.mem.indexOf(u8, @embedFile("../../core/kernels/decode/gu3_2.metal"), pin[4]) != null);
-    try testing.expect(std.mem.indexOf(u8, @embedFile("../../core/kernels/decode/down3_2.metal"), pin[4]) != null);
+    try testing.expect(std.mem.indexOf(u8, decode.gu3_2, pin[4]) != null);
+    try testing.expect(std.mem.indexOf(u8, decode.down3_2, pin[4]) != null);
 }
 
 /// A zero host array of `shape` in `dt` (the refusals read shapes and dtypes only).
