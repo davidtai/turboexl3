@@ -152,6 +152,11 @@ pub const Config = struct {
     banked_wave3: bool = false,
     /// A diagnostic: the first 512 routed prefill calls' routing written under this directory (a sync per call).
     pf_capture_dir: ?[]const u8 = null,
+    /// The routed prefill GEMMs' occupancy variant (`prefill.Options.occ`: 1 the trellis words and A rows by 32-bit
+    /// offsets; 0 the served kernels), where the 128-row tiles run (`pf_t128`). The same bytes.
+    pf_occ: u8 = 0,
+    /// The red checks' planted fault in `pf_occ`'s variant (`prefill.Options.occ_fault`; tests only, outputs wrong).
+    pf_occ_fault: bool = false,
 
     /// Whether every field holds a value the library serves.
     pub fn valid(c: Config) bool {
@@ -168,7 +173,7 @@ pub const Config = struct {
             c.dense_variant < dense_variants and decBtValid(c.dec_bt) and
             (!c.banked_wave3 or (c.banked_group == 4 and !ptgSet(c))) and
             (c.decode_bt9 == 0 or c.decode_bt9 == 4) and (c.chain_bt == 0 or c.chain_bt == 2) and
-            (!c.dense_mma or c.nax);
+            (!c.dense_mma or c.nax) and c.pf_occ <= 1;
     }
 
     /// Whether `c` also names the persistent grouped GEMVs (`banked_ptg`, where this build has that field; false where

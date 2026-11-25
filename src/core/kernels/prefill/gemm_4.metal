@@ -10,19 +10,27 @@
         const uint qnx = ((L >> 2u) & 2u) | (L & 1u);
         const device half* xs = xa + ((ALAY == 1) ? 8u : ((ALAY == 2) ? 4u : 2u)) * qnx;
         const int lastr = max(sgp - 1, 0);
+#if (EXL3_PF_OCC & 1)
+        arw.b = xs;
+        arw.o[0] = uint(min(int(fmx), lastr)) * uint(KDC);
+        arw.o[1] = uint(min(int(fmx) + 8, lastr)) * uint(KDC);
+        arw.o[2] = uint(min(int(fmx) + 16, lastr)) * uint(KDC);
+        arw.o[3] = uint(min(int(fmx) + 24, lastr)) * uint(KDC);
+#else
         arw.r[0] = xs + ulong(min(int(fmx), lastr)) * ulong(KDC);
         arw.r[1] = xs + ulong(min(int(fmx) + 8, lastr)) * ulong(KDC);
         arw.r[2] = xs + ulong(min(int(fmx) + 16, lastr)) * ulong(KDC);
         arw.r[3] = xs + ulong(min(int(fmx) + 24, lastr)) * ulong(KDC);
+#endif
     }
     int boff[JOBS];
-    ulong woff[JOBS];
+    exl3pf_woff_t woff[JOBS];
     for (int jj = 0; jj < JOBS; ++jj) {
         const int j = max(dsg, 0) + DEC * jj;
         const int kt = j >> 2;
         const int ntl = j & 3;
         boff[jj] = (FRAGB != 0) ? (ntl * 4 + kt) * 256 : (ntl * 16 + int(c)) * LDB + kt * 16 + 2 * int(q);
-        woff[jj] = (ulong(kt) * ulong(N16) + ulong(ntl)) * ulong(N / 2u);
+        woff[jj] = (exl3pf_woff_t(kt) * exl3pf_woff_t(N16) + exl3pf_woff_t(ntl)) * exl3pf_woff_t(N / 2u);
     }
     const bool full = sgp == SM;
     NAXTile<float, 2, 2> Dt;
@@ -40,7 +48,11 @@
                 const int f = cb * STAGES + s;
                 const bool last = s + 1 == STAGES;
                 const bool more = !last || cb + 1 < NCBC;
+#if (EXL3_PF_OCC & 1)
+                const device uint* wn = wb + uint(4 * (last ? cb + 1 : cb)) * uint(N / 2u);
+#else
                 const device uint* wn = wb + ulong(4 * (last ? cb + 1 : cb)) * ulong(N / 2u);
+#endif
                 const int sn = last ? 0 : s + 1;
                 STEEL_PRAGMA_UNROLL
                 for (int h = 0; h < SUBS; ++h) {

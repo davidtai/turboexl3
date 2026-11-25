@@ -805,6 +805,8 @@ fn pfOptions() prefill.Options {
     o.int8 = config.get().pf_int8;
     o.int8_c2 = config.get().pf_int8_c2;
     o.defer_affine = config.get().pf_defer_affine;
+    o.occ = config.get().pf_occ;
+    o.occ_fault = config.get().pf_occ_fault;
     return o;
 }
 
@@ -831,6 +833,9 @@ fn pfOptionsFor(geo: prefill.Geometry) prefill.Options {
     if (!o.t128 or o.stageBytes(128) > 32768) o.t128_bk128 = false;
     // the compact mixed outputs: the 128-row tiles' mixed launch
     if (!o.t128) o.t128_zfit = false;
+    // the GEMMs' occupancy variant: the 128-row tiles' four GEMM launches, not the compact mixed outputs'
+    if (!o.t128 or o.t128_zfit) o.occ = 0;
+    if (o.occ == 0) o.occ_fault = false;
     // the size classes: the 128-row tiles' arrays at their sorted positions (not the compact mixed outputs)
     if (!o.t128 or o.t128_zfit) o.size_class = false;
     // int8 gate|up and down: beside the 128-row tiles, on the deferred map, the mixed outputs at their sorted positions

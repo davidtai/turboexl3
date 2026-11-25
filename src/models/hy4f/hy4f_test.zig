@@ -59,6 +59,9 @@
 //!   CPU: the texts, and the decode rows and wrong operands refuse before any engine. No f32 matmul runs on either side,
 //!   so MLX's TF32 setting moves no word. The gate's prep finish (`linearGateMulPrep`) and pg2 from prepared rows
 //!   (`root.linearOnPrepared`, `linearQRopePrepared`) likewise. Lines: TURBOEXL3_HY4F_FINPREP_*(_RED, _DONE).
+//! - prefill occ: the routed prompt GEMMs' occupancy variant (`Config.pf_occ` 1) against the served engine byte for
+//!   byte at 3584, 3125 and 31 rows, K1 to K4; its planted fault must move words. Lines: TURBOEXL3_HY4F_OCC_WORDS,
+//!   TURBOEXL3_HY4F_OCC_RED.
 const std = @import("std");
 const sdk = @import("sdk");
 const mlx = sdk.mlx;
@@ -2544,5 +2547,72 @@ test "turboexl3 gpu hy4f finprep gateprep: linearGateMulPrep gives o_proj's own 
     std.debug.print("TURBOEXL3_HY4F_FINPREP_GATEPREP_DONE lines={d} pg2_lines={d} failed={d} {s}\n", .{ lines, pg2_lines, failed, if (failed == 0 and pg2_lines > 0) "PASS" else "FAIL" });
     try testing.expectEqual(@as(usize, gate_cases.len * 3 * 2 * 2 + 2), lines);
     try testing.expect(pg2_lines > 0);
+    try testing.expectEqual(@as(usize, 0), failed);
+}
+
+/// `moeRows` on the served engine with the routed GEMMs' occupancy variant `occ` (`Config.pf_occ`) and its planted fault
+/// (`Config.pf_occ_fault`), the engines rebuilt for it (they read the configuration when made).
+fn occRows(g: *G, s: mlx.mlx_stream, rb: root.Bank, c: *const Call, rows: u32, occ: u8, fault: bool, saved: config.Config, out: []f32) !void {
+    var cfg = saved;
+    cfg.pf_occ = occ;
+    cfg.pf_occ_fault = fault;
+    try config.configure(cfg);
+    root.releaseEngines();
+    try moeRows(g, s, rb, c, rows, .bfloat16, out);
+}
+
+fn wordsApart(x: []const f32, y: []const f32) usize {
+    var n: usize = 0;
+    for (x, y) |u, v| n += @intFromBool(@as(u32, @bitCast(u)) != @as(u32, @bitCast(v)));
+    return n;
+}
+
+// The routed prompt GEMMs' occupancy variant (`Config.pf_occ` 1, `prefill.Options.occ`: the trellis words and A rows by
+// 32-bit offsets) on the served engine (`root.moeSwiglu`: bm 64 mixed, the 128-row tiles, alay 2, Hy4's clamp), at a
+// 3,584-row and a 3,125-row prompt chunk and a 31-row tail, K1 to K4, spread routing: the variant gives the served
+// kernels' bytes; its planted fault (`Config.pf_occ_fault`) moves them.
+test "turboexl3 gpu hy4f prefill occ: the routed prompt GEMMs' occupancy variant (Config.pf_occ 1) gives the served engine's bytes at 3584, 3125 and 31 rows, K1 to K4; its planted fault moves them (TURBOEXL3_GPU=1)" {
+    _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    root.releaseEngines();
+    defer root.releaseEngines();
+    const s = mlx.mlx_default_gpu_stream_new();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    const a = std.heap.page_allocator;
+    var g = try G.init(a, s);
+    defer g.deinit();
+    const saved = config.get().*;
+    defer config.configure(saved) catch unreachable;
+    var failed: usize = 0;
+    var nbuf: [8]u32 = undefined;
+    const rates = envList("TURBOEXL3_HY4F_N", &.{ 16, 32, 48, 64 }, &nbuf);
+    for (rates) |n| {
+        defer _ = mlx.mlx_clear_cache();
+        const rate = format.Rate.fromN(n) orelse return error.Exl3RateUnsupported;
+        const mark = g.mark();
+        defer g.resetTo(mark);
+        var prng = std.Random.DefaultPrng.init(0x4F43 ^ @as(u64, n));
+        const rnd = prng.random();
+        var bank = try ref.synthBank(a, rnd, experts, width, width, rate);
+        defer bank.deinit(a);
+        const rb = try rootBank(&g, &bank);
+        for ([_]u32{ 3584, 3125, 31 }) |rows| {
+            var c = try Call.make(a, rnd, rows);
+            defer c.deinit(a);
+            const want = try a.alloc(f32, rows * width);
+            defer a.free(want);
+            const got = try a.alloc(f32, rows * width);
+            defer a.free(got);
+            try occRows(&g, s, rb, &c, rows, 0, false, saved, want);
+            const occ: u8 = 1;
+            try occRows(&g, s, rb, &c, rows, occ, false, saved, got);
+            const d = wordsApart(got, want);
+            std.debug.print("TURBOEXL3_HY4F_OCC_WORDS n={d} rows={d} occ={d} differing={d}/{d} {s}\n", .{ n, rows, occ, d, got.len, if (d == 0) "PASS" else "FAIL" });
+            failed += @intFromBool(d != 0);
+            try occRows(&g, s, rb, &c, rows, occ, true, saved, got);
+            const r = wordsApart(got, want);
+            std.debug.print("TURBOEXL3_HY4F_OCC_RED n={d} rows={d} occ={d} fault moved={d}/{d} (must be > 0) {s}\n", .{ n, rows, occ, r, got.len, if (r > 0) "PASS" else "FAIL" });
+            failed += @intFromBool(r == 0);
+        }
+    }
     try testing.expectEqual(@as(usize, 0), failed);
 }
