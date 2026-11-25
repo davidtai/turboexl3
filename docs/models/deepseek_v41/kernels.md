@@ -1109,6 +1109,37 @@ decode among the row-slots of one id (`Config.banked_group`). `Banked` keeps the
   0 and 10, `banked_group` 2 and 4, trellis I16 and U16, Ling's routed geometry over synthetic banks of 20, 12 and 8
   experts at n 40 and 32).
 
+### `turboexl3_fin7csb`
+
+- **Used by:** Inkling 2: launch 3 of `root.moeInkling2Banked` (every layer; `Config.banked_group` 2).
+- **Shapes and dtypes:** as `turboexl3_fin7cb`.
+- **Grid and threadgroup:** as `turboexl3_fin7cb`.
+- **Template args:** fin7's five, then LIMIT: the two caps packed by `format.softcapLimit` (cg in bits 0-7, cu in bits
+  8-15; Inkling 2's 4 and 25), cg·tanh(g/cg)·sigmoid(g) · cu·tanh(u/cu) in f32 on the finished f16 values, the sigmoid
+  on the raw gate.
+- **Replaces:** `turboexl3_fin7cs`, launched once per bank by each bank's own `moeInkling2` call: one launch over the
+  three banks.
+- **Bits:** byte-identical to `moeInkling2` on the pair's bank at top-1 with score 1: `turboexl3_fin7cb` with the
+  softcap piece in place of DeepSeek's clamp, every other statement the same.
+- **Pinned by:** `src/models/inkling2/inkling2_test.zig` "turboexl3 inkling2 texts: each softcap kernel is its base text
+  with the SwiGLU line swapped ..." (CPU: the one swap, nothing else); `src/models/inkling2/inkling2_test.zig`
+  "turboexl3 gpu inkling2 banked: every pair of moeInkling2Banked over three banks is moeInkling2's ..." (GPU: every pair
+  byte for byte, rows 1, 2, 8, 16, 48, trellis I16 and U16, Inkling 2's routed geometry over MCG banks of 20, 12 and 8
+  experts at n 16 and 32).
+
+### `turboexl3_fin7csbg`
+
+- **Used by:** Inkling 2: as `turboexl3_fin7csb`, under `Config.banked_group` 4 (and hw4b's M = 3 path).
+- **Shapes and dtypes:** as `turboexl3_fin7cbg`.
+- **Grid and threadgroup:** as `turboexl3_fin7cbg`.
+- **Template args:** as `turboexl3_fin7csb`.
+- **Replaces:** as `turboexl3_fin7csb`.
+- **Bits:** byte-identical to `turboexl3_fin7csb` on every row-slot it serves: `turboexl3_fin7cbg` with the softcap
+  piece in place of DeepSeek's clamp.
+- **Pinned by:** `src/models/inkling2/inkling2_test.zig` "turboexl3 inkling2 texts: ..." (CPU: the one swap);
+  `src/models/inkling2/inkling2_test.zig` "turboexl3 gpu inkling2 banked: ..." (GPU: the g4 and g4m3 selections, byte
+  for byte against `moeInkling2`).
+
 ### `turboexl3_dense_swiglu_prep`
 
 <!-- kernel-facts: turboexl3_dense_swiglu_prep -->
