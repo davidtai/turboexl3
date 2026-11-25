@@ -200,6 +200,12 @@ const mid_swiglu_clamp_out = @embedFile("kernels/prefill/mid_swiglu_clamp_out.me
 pub const text_midco = mid_1 ++ mid_2 ++ mid_3 ++ mid_4 ++ mid_swiglu_clamp_out ++ mid_5;
 pub const text_mid_vco = mid_v_1 ++ mid_swiglu_clamp_out ++ mid_v_2;
 pub const text_mid_t128co: [:0]const u8 = sentinel(mid_1 ++ mid_t128_pick ++ mid_2 ++ mid_t128_loads ++ mid_4 ++ mid_swiglu_clamp_out ++ mid_5);
+/// Inkling 2's softcapped SwiGLU (`Geometry.clamp` `softcap`, LIMIT the packed caps, `format.softcapLimit`): each mid with
+/// its SwiGLU line replaced by `mid_swiglu_softcap`, every other statement the mid's.
+const mid_swiglu_softcap = @embedFile("kernels/prefill/mid_swiglu_softcap.metal");
+pub const text_midcs = mid_1 ++ mid_2 ++ mid_3 ++ mid_4 ++ mid_swiglu_softcap ++ mid_5;
+pub const text_mid_vcs = mid_v_1 ++ mid_swiglu_softcap ++ mid_v_2;
+pub const text_mid_t128cs: [:0]const u8 = sentinel(mid_1 ++ mid_t128_pick ++ mid_2 ++ mid_t128_loads ++ mid_4 ++ mid_swiglu_softcap ++ mid_5);
 
 /// The down finish and the slot reduce, per (128-block of hidden, row): y OUT_T [R, HID] = sum over the row's slots in slot
 /// order of score * f16(H128(zd[inv[slot]]) * 2^-3.5 * svh_e).
@@ -543,7 +549,8 @@ pub const Geometry = struct {
     /// variant (`text_midc`, `text_mid_vc`, `text_mid_t128c`) with LIMIT = limit; nothing else changes
     limit: u32 = 0,
     /// where a clamped geometry clamps (`format.ClampAt`): `gate_in` the clamped mids above, `silu_out` Ling-3.1's
-    /// (`text_midco`, `text_mid_vco`, `text_mid_t128co`); an unclamped geometry ignores it
+    /// (`text_midco`, `text_mid_vco`, `text_mid_t128co`), `softcap` Inkling 2's (`text_midcs`, `text_mid_vcs`,
+    /// `text_mid_t128cs`, `limit` the packed caps); an unclamped geometry ignores it
     clamp: format.ClampAt = .gate_in,
 
     pub fn admitted(g: Geometry) bool {
@@ -674,8 +681,21 @@ pub const Options = struct {
     /// the int8 GEMMs' rebuild center, doubled (the notes above `text_prep_i8`): 1020 (510, `text_gemm_i8` and
     /// `text_gemm_i8d`) or 1019 (509.5, their `_c` variants at QC2 1019)
     int8_c2: u16 = 1020,
+    /// The routed GEMMs' occupancy variant (`EXL3_PF_OCC` in their header, kernels/prefill/gemm_helpers.metal; 0 the served
+    /// kernels): 1, the shared-decode body's and the register path's trellis words and A rows by 32-bit element offsets
+    /// from the call's bases in place of 64-bit pointer math. The same loads into the same fragment slots, the same decodes
+    /// and MMAs in the same order: identical outputs. Needs `t128` (its four GEMM launches take it) without `t128_zfit`
+    occ: u8 = 0,
+    /// The red checks' planted fault in `occ`'s variant (tests only; outputs wrong): the register path's last K step left
+    /// out, and the shared-decode body's trellis words read in swapped pairs
+    occ_fault: bool = false,
 
     pub const Small = enum { off, all, mixed };
+
+    /// `EXL3_PF_OCC`'s value: `occ`, plus 4 for `occ_fault`
+    pub fn occCode(o: Options) u8 {
+        return o.occ | (if (o.occ_fault) @as(u8, 4) else 0);
+    }
 
     pub fn valid(o: Options) bool {
         if (o.small == .mixed and o.wsp != 0) return false;
@@ -708,6 +728,7 @@ pub const Options = struct {
         // int8: the 128-row tiles' route and launches, the deferred map, outputs at the sorted positions
         if (o.int8 > 2 or (o.int8 != 0 and (!o.t128 or !o.defer_affine or o.t128_zfit))) return false;
         if (o.int8_c2 != 1020 and o.int8_c2 != 1019) return false;
+        if (o.occ > 1 or (o.occ != 0 and (!o.t128 or o.t128_zfit)) or (o.occ_fault and o.occ == 0)) return false;
         // the fused finish runs its own down launch over the 128-row tiles' tables at their sorted positions: none of the
         // other 128-row tile options (their 128-deep stages, the compact mixed outputs, the size classes, int8) beside it
         if (o.dfin and (o.t128_bk128 or o.t128_zfit or o.size_class or o.int8 != 0)) return false;
@@ -887,6 +908,27 @@ pub fn t128Tables(a: std.mem.Allocator, counts: []const u32, bm: u32, cut: u8, t
     return t;
 }
 
+/// `header_nax` with `Options.occ`'s variant defined (`EXL3_PF_OCC`, read by the GEMM helpers and both bodies; bit 4 the
+/// red checks' planted fault, `Options.occ_fault`); 0 is `header_nax` itself (the served kernels' text).
+fn headerNaxOcc(code: u8) [:0]const u8 {
+    return switch (code) {
+        inline 1, 5 => |c| comptime sentinel(std.fmt.comptimePrint("#define EXL3_PF_OCC {d}\n", .{c}) ++ header_nax),
+        else => header_nax,
+    };
+}
+/// The 128-row tiles' four GEMM kernels' names by `Options.occCode` (a variant's text is its own kernel)
+fn t128GemmNames(code: u8) [4][*:0]const u8 {
+    return switch (code) {
+        inline 1, 5 => |c| comptime .{
+            std.fmt.comptimePrint("turboexl3_pf_t128_gum_o{d}", .{c}),
+            std.fmt.comptimePrint("turboexl3_pf_t128_gut_o{d}", .{c}),
+            std.fmt.comptimePrint("turboexl3_pf_t128_dnm_o{d}", .{c}),
+            std.fmt.comptimePrint("turboexl3_pf_t128_dnt_o{d}", .{c}),
+        },
+        else => .{ "turboexl3_pf_t128_gum", "turboexl3_pf_t128_gut", "turboexl3_pf_t128_dnm", "turboexl3_pf_t128_dnt" },
+    };
+}
+
 /// The 128-row tiles' kernels (`Options.t128`): the route, both GEMMs' launches (over the remainder table: the mixed launch;
 /// over the 128-row tiles: the shared-decode body at bm 128; the mixed chain's texts, header, inputs and outputs), and mid
 /// and finish taking each row from the launch that computed it (mid's clamped variant where the geometry clamps).
@@ -911,19 +953,23 @@ pub const T128Kernels = struct {
         fin: mlx.mlx_fast_metal_kernel,
     };
 
-    fn init(limit: u32, clamp: format.ClampAt, zfit: bool) !T128Kernels {
+    fn init(limit: u32, clamp: format.ClampAt, zfit: bool, occ: u8) !T128Kernels {
+        const hn = headerNaxOcc(occ);
+        const nm = t128GemmNames(occ);
         var k: T128Kernels = .{
             .route = ks.newKernel("turboexl3_pf_t128_route", &froute_in, &froute_t128_out, text_froute_t128, header_small, true) orelse return error.KernelCreateFailed,
-            .gu_mixed = ks.newKernel("turboexl3_pf_t128_gum", &gemm2_in, &gemm2_out, gemm2m_text, header_nax, true) orelse return error.KernelCreateFailed,
-            .gu_t128 = ks.newKernel("turboexl3_pf_t128_gut", &gemm2_in, &gemm2_out, gemm2_text, header_nax, true) orelse return error.KernelCreateFailed,
-            .dn_mixed = ks.newKernel("turboexl3_pf_t128_dnm", &gemm1_in, &gemm1_out, gemm1m_text, header_nax, true) orelse return error.KernelCreateFailed,
-            .dn_t128 = ks.newKernel("turboexl3_pf_t128_dnt", &gemm1_in, &gemm1_out, gemm1_text, header_nax, true) orelse return error.KernelCreateFailed,
+            .gu_mixed = ks.newKernel(nm[0], &gemm2_in, &gemm2_out, gemm2m_text, hn, true) orelse return error.KernelCreateFailed,
+            .gu_t128 = ks.newKernel(nm[1], &gemm2_in, &gemm2_out, gemm2_text, hn, true) orelse return error.KernelCreateFailed,
+            .dn_mixed = ks.newKernel(nm[2], &gemm1_in, &gemm1_out, gemm1m_text, hn, true) orelse return error.KernelCreateFailed,
+            .dn_t128 = ks.newKernel(nm[3], &gemm1_in, &gemm1_out, gemm1_text, hn, true) orelse return error.KernelCreateFailed,
             .mid = (if (limit == 0)
                 ks.newKernel("turboexl3_pf_t128_mid", &mid_t128_in, &mid_out, text_mid_t128, header_small, true)
             else if (clamp == .gate_in)
                 ks.newKernel("turboexl3_pf_t128_midc", &mid_t128_in, &mid_out, text_mid_t128c, header_small, true)
+            else if (clamp == .silu_out)
+                ks.newKernel("turboexl3_pf_t128_midco", &mid_t128_in, &mid_out, text_mid_t128co, header_small, true)
             else
-                ks.newKernel("turboexl3_pf_t128_midco", &mid_t128_in, &mid_out, text_mid_t128co, header_small, true)) orelse return error.KernelCreateFailed,
+                ks.newKernel("turboexl3_pf_t128_midcs", &mid_t128_in, &mid_out, text_mid_t128cs, header_small, true)) orelse return error.KernelCreateFailed,
             .fin = ks.newKernel("turboexl3_pf_t128_fin", &fin_t128_in, &fin_out, text_finish_t128, header_small, true) orelse return error.KernelCreateFailed,
         };
         if (zfit) k.z = .{
@@ -1044,8 +1090,10 @@ pub const Prefill = struct {
                 ks.newKernel("turboexl3_pf_mid", &mid_in, &mid_out, text_mid, header_small, true)
             else if (geo.clamp == .gate_in)
                 ks.newKernel("turboexl3_pf_midc", &mid_in, &mid_out, text_midc, header_small, true)
+            else if (geo.clamp == .silu_out)
+                ks.newKernel("turboexl3_pf_midco", &mid_in, &mid_out, text_midco, header_small, true)
             else
-                ks.newKernel("turboexl3_pf_midco", &mid_in, &mid_out, text_midco, header_small, true)) orelse return error.KernelCreateFailed,
+                ks.newKernel("turboexl3_pf_midcs", &mid_in, &mid_out, text_midcs, header_small, true)) orelse return error.KernelCreateFailed,
             .fin = ks.newKernel("turboexl3_pf_fin", &fin_in, &fin_out, text_finish, header_small, true) orelse return error.KernelCreateFailed,
             .gemm2s = ks.newKernel("turboexl3_pf_gemm2s", &gemm2_in, &gemm2_out, gemm2s_text, header_nax_small, true) orelse return error.KernelCreateFailed,
             .gemm1s = ks.newKernel("turboexl3_pf_gemm1s", &gemm1_in, &gemm1_out, gemm1s_text, header_nax_small, true) orelse return error.KernelCreateFailed,
@@ -1059,10 +1107,12 @@ pub const Prefill = struct {
                 ks.newKernel("turboexl3_pf_mid_v", &mid_in, &mid_out, text_mid_v, header_small, true)
             else if (geo.clamp == .gate_in)
                 ks.newKernel("turboexl3_pf_mid_vc", &mid_in, &mid_out, text_mid_vc, header_small, true)
+            else if (geo.clamp == .silu_out)
+                ks.newKernel("turboexl3_pf_mid_vco", &mid_in, &mid_out, text_mid_vco, header_small, true)
             else
-                ks.newKernel("turboexl3_pf_mid_vco", &mid_in, &mid_out, text_mid_vco, header_small, true)) orelse return error.KernelCreateFailed,
+                ks.newKernel("turboexl3_pf_mid_vcs", &mid_in, &mid_out, text_mid_vcs, header_small, true)) orelse return error.KernelCreateFailed,
             .fin_v = ks.newKernel("turboexl3_pf_fin_v", &fin_in, &fin_out, text_finish_v, header_small, true) orelse return error.KernelCreateFailed,
-            .t128_k = if (!opts.t128) null else try T128Kernels.init(geo.limit, geo.clamp, opts.t128_zfit),
+            .t128_k = if (!opts.t128) null else try T128Kernels.init(geo.limit, geo.clamp, opts.t128_zfit, opts.occCode()),
             .dfin_k = if (!opts.dfin) null else ks.newKernel("turboexl3_pf_dfin", &dfin_in, &dfin_out, text_dfin, header_nax_dfin, true) orelse return error.KernelCreateFailed,
             .i8_k = if (opts.int8 == 0) null else try I8Kernels.init(geo.limit, opts.int8_c2),
         };
@@ -2219,6 +2269,19 @@ test "turboexl3 prefill 128-row tiles metal sources: the route, both GEMMs' laun
     printMetal("turboexl3_pf_t128_mid", header_small, pin[9], mid, text_mid_t128);
     const fin = pin[10];
     printMetal("turboexl3_pf_t128_fin", header_small, pin[11], fin, text_finish_t128);
+}
+
+test "turboexl3 prefill occ texts: the GEMM bodies read EXL3_PF_OCC in preprocessor lines only (the register path also compiles under header_nax_small, where it is not defined: turboexl3_dense_rs_gemm)" {
+    const t = std.testing;
+    try t.expect(std.mem.indexOf(u8, header_nax_small, "EXL3_PF_OCC") == null);
+    for ([_][]const u8{ gemm1s_text, gemm2s_text, gemm1_text, gemm2_text, text_dfin }) |txt| {
+        var it = std.mem.splitScalar(u8, txt, '\n');
+        while (it.next()) |line| {
+            if (std.mem.indexOf(u8, line, "EXL3_PF_OCC") == null) continue;
+            const l = std.mem.trimStart(u8, line, " ");
+            try t.expect(std.mem.startsWith(u8, l, "#") or std.mem.startsWith(u8, l, "//"));
+        }
+    }
 }
 
 test "turboexl3 prefill variant texts: the fused down GEMM is gemm1_text with its tile read and its store swapped for the two-table read and the finish's own statements" {

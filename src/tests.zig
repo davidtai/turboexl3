@@ -64,6 +64,13 @@ comptime {
     _ = @import("models/ling/kdanorm.zig");
     _ = @import("models/ling/kdanorm_test.zig");
     _ = @import("models/ling/swiglu_test.zig");
+    _ = @import("models/inkling2/inkling2_test.zig");
+    _ = @import("models/hy4f/gate.zig");
+    _ = @import("models/hy4f/swiglu.zig");
+    _ = @import("models/hy4f/qrope.zig");
+    _ = @import("models/hy4f/pg2.zig");
+    _ = @import("models/hy4f/rms.zig");
+    _ = @import("models/hy4f/hy4f_test.zig");
     _ = @import("models/glm53f/api.zig");
     _ = @import("models/glm53f/glm53f_test.zig");
     _ = @import("models/glm53f/routed_test.zig");

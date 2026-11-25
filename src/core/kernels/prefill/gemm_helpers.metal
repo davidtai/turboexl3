@@ -1,6 +1,21 @@
+// EXL3_PF_OCC (`prefill.Options.occ`; unset, 0: the served kernels, whose text is the #else branches): bit 1, the
+// shared-decode body's trellis words and A rows, and the register path's, addressed by 32-bit element offsets from the
+// call's bases in place of 64-bit pointer math. The same loads into the same fragment slots, the same decodes and MMAs in
+// the same order. Bit 4 (with bit 1; the red checks only) plants a fault.
+#ifndef EXL3_PF_OCC
+#define EXL3_PF_OCC 0
+#endif
+#if (EXL3_PF_OCC & 1)
+struct Arows { const device half* b; uint o[4]; };
+#define EXL3PF_AR(arw, i, k) ((arw).b + ((arw).o[i] + uint(k)))
+typedef uint exl3pf_woff_t;
+#else
 struct Arows { const device half* r[4]; };
+#define EXL3PF_AR(arw, i, k) ((arw).r[i] + (k))
+typedef ulong exl3pf_woff_t;
+#endif
 template <uint N, uint WMASK, int CB, int JOBS, int N16, int LDB, int P, int FB, int IR, int DF>
-inline void exl3pf_stage(const device uint* wb, int s, thread const ulong* woff, thread const int* boff, threadgroup half* Bs, uint qb, uint ga, uint lp, uint lnx) {
+inline void exl3pf_stage(const device uint* wb, int s, thread const exl3pf_woff_t* woff, thread const int* boff, threadgroup half* Bs, uint qb, uint ga, uint lp, uint lnx) {
     for (int jj = 0; jj < JOBS; ++jj) {
         if (P & 1) {
             const half k0 = half(float(s & 7) * 0.125f);
@@ -12,7 +27,12 @@ inline void exl3pf_stage(const device uint* wb, int s, thread const ulong* woff,
             *reinterpret_cast<threadgroup half2*>(d + 8 * LDB + 8) = half2(k0, k0);
             continue;
         }
+#if (EXL3_PF_OCC & 1)
+        // (EXL3_PF_OCC bit 4, the red checks only: each tile's words read in swapped pairs)
+        const device uint* tw = wb + ((uint(s) * uint(4 * N16) * uint(N / 2u) + woff[jj]) ^ ((EXL3_PF_OCC & 4) ? 1u : 0u));
+#else
         const device uint* tw = wb + ulong(s) * ulong(4 * N16) * ulong(N / 2u) + woff[jj];
+#endif
         const auto ww = exl3_tile_load<N, IR>(tw, qb, ga, lp);
         const half v0 = exl3pf_w<CB, DF>(exl3pf_cw<N, WMASK, 0, IR>(ww, lp));
         const half v1 = exl3pf_w<CB, DF>(exl3pf_cw<N, WMASK, 1, IR>(ww, lp));
@@ -57,8 +77,8 @@ inline void exl3pf_mma(thread NAXTile<float, 2, 2>& Dt, const device half* xa, t
                 const int k32 = s * 64 + i * 32;
                 if (P & 4) At.clear();
                 else {
-                    exl3pf_afrag2(At.frag_at(0, 0), At.frag_at(0, 1), arw.r[0] + k32, arw.r[1] + k32);
-                    if (!top) exl3pf_afrag2(At.frag_at(1, 0), At.frag_at(1, 1), arw.r[2] + k32, arw.r[3] + k32);
+                    exl3pf_afrag2(At.frag_at(0, 0), At.frag_at(0, 1), EXL3PF_AR(arw, 0, k32), EXL3PF_AR(arw, 1, k32));
+                    if (!top) exl3pf_afrag2(At.frag_at(1, 0), At.frag_at(1, 1), EXL3PF_AR(arw, 2, k32), EXL3PF_AR(arw, 3, k32));
                 }
             }
             STEEL_PRAGMA_UNROLL
@@ -66,8 +86,8 @@ inline void exl3pf_mma(thread NAXTile<float, 2, 2>& Dt, const device half* xa, t
                 const int k0 = s * 64 + i * 32 + kk * 16;
                 if (AL != 1) {
                     if (P & 4) { At.frag_at(0, kk) = vec<half, 8>(0); At.frag_at(1, kk) = vec<half, 8>(0); }
-                    else if (AL == 2) { exl3pf_afrag4(At.frag_at(0, kk), arw.r[0] + k0, arw.r[1] + k0); if (!top) exl3pf_afrag4(At.frag_at(1, kk), arw.r[2] + k0, arw.r[3] + k0); }
-                    else { exl3pf_afrag(At.frag_at(0, kk), arw.r[0] + k0, arw.r[1] + k0); if (!top) exl3pf_afrag(At.frag_at(1, kk), arw.r[2] + k0, arw.r[3] + k0); }
+                    else if (AL == 2) { exl3pf_afrag4(At.frag_at(0, kk), EXL3PF_AR(arw, 0, k0), EXL3PF_AR(arw, 1, k0)); if (!top) exl3pf_afrag4(At.frag_at(1, kk), EXL3PF_AR(arw, 2, k0), EXL3PF_AR(arw, 3, k0)); }
+                    else { exl3pf_afrag(At.frag_at(0, kk), EXL3PF_AR(arw, 0, k0), EXL3PF_AR(arw, 1, k0)); if (!top) exl3pf_afrag(At.frag_at(1, kk), EXL3PF_AR(arw, 2, k0), EXL3PF_AR(arw, 3, k0)); }
                 }
                 STEEL_PRAGMA_UNROLL
                 for (int nn = 0; nn < 2; ++nn) {

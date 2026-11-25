@@ -51,8 +51,38 @@ pub const qwen38 = @import("models/qwen38/api.zig");
 pub const deepseek_v41 = @import("models/deepseek_v41/api.zig");
 /// Ling-3.1-flash's entry points
 pub const ling = @import("models/ling/api.zig");
+/// Inkling 2's entry points: the routed experts with its softcapped SwiGLU
+pub const inkling2 = @import("models/inkling2/api.zig");
 /// GLM-5.3-Flash's trunk linears at prefill rows and the pg2 table a host builds from their tile codes
 pub const glm53f = @import("models/glm53f/api.zig");
+/// Hy4-flash's attention output gate in its linear's finish: o times MLX's sigmoid of the gate's `linear`, at a prompt's
+/// rows (models/hy4f/gate.zig)
+pub const hy4f_gate = @import("models/hy4f/gate.zig");
+pub const linearGateMul = hy4f_gate.linearGateMul;
+pub const linearGateMulAt = hy4f_gate.linearGateMulAt;
+pub const linearGateMulPrep = hy4f_gate.linearGateMulPrep;
+pub const GateOLayout = hy4f_gate.OLayout;
+/// Hy4-flash's shared-expert and dense-MLP SwiGLU in the up linear's finish: (g * sigmoid(g)) * up of the gate's y and
+/// up's `linear`, at a prompt's rows (models/hy4f/swiglu.zig)
+pub const hy4f_swiglu = @import("models/hy4f/swiglu.zig");
+pub const linearSwigluMul = hy4f_swiglu.linearSwigluMul;
+/// Hy4-flash's q_b with its prompt rope in the finish: f32 q with each head's rope dims roped as MLX's fast::rope, at a
+/// prompt's rows (models/hy4f/qrope.zig)
+pub const hy4f_qrope = @import("models/hy4f/qrope.zig");
+pub const linearQRope = hy4f_qrope.linearQRope;
+/// Hy4-flash's pg2 tiles and the host's switch for them: the trunk linears' matmul and finish as one launch, split K
+/// in registers, and the arms' finishes in pg2's launch (models/hy4f/pg2.zig)
+pub const hy4f_pg2 = @import("models/hy4f/pg2.zig");
+pub const linearQRopePrepared = hy4f_qrope.linearQRopePrepared;
+/// Hy4-flash's RMSNorms and the next linear's prepare in a linear's prompt finish: o_proj and the dense down with the
+/// post-norm, the shared down with the add and the MLP post-norm, q_a with the q norm and q_b's prepare, kv_a with the
+/// kv norm and k_pe's rope, the SwiGLU finish with the down linear's prepare (models/hy4f/rms.zig)
+pub const hy4f_rms = @import("models/hy4f/rms.zig");
+pub const RmsSrc = hy4f_rms.Src;
+pub const linearRms = hy4f_rms.linearRms;
+pub const linearRmsPrep = hy4f_rms.linearRmsPrep;
+pub const linearKv = hy4f_rms.linearKv;
+pub const linearSwigluPrep = hy4f_rms.linearSwigluPrep;
 /// DeepSeek-V4.1's shared expert's fused SwiGLU (models/deepseek_v41/api.zig)
 pub const sharedSwigluTakes = deepseek_v41.sharedSwigluTakes;
 pub const sharedSwiglu = deepseek_v41.sharedSwiglu;
@@ -171,8 +201,30 @@ pub fn kernelsFor(geo: decode.Geometry, out_dtype: mlx.mlx_dtype) !*decode.Kerne
     // row-slots (2 per lead): the fastest at 4 and 8 rows on the M5 Max, a tie at 1 row
     var k3 = try decode.Kernels3.initWith(geo, 1, 4, 2);
     k3.out_dtype = out_dtype;
+    // form 9's launch shape from two rows where the configuration names one (`Config.decode_bt9`; launch shape only)
+    const cfg = config.get();
+    if (cfg.decode_bt9 != 0) k3.bt9 = cfg.decode_bt9;
+    // the x texts (`Config.decode_iop`): gu3's and down3's bytes; the 32-bit tile index only where an expert's tile words
+    // fit it
+    if (cfg.decode_iop and decode.iopFits(geo)) {
+        const x = try decode.newXKernels();
+        decode.freeKernel(k3.gu);
+        decode.freeKernel(k3.down);
+        k3.gu = x.gu;
+        k3.down = x.down;
+    }
     cache.get().*[i] = k3;
     return &cache.get().*[i].?;
+}
+
+/// A routing diagnostic's host copy of a call's routes: `routes` as a row-major contiguous array, evaluated (the caller
+/// frees it). A router's top-k is a column slice of its argpartition, a strided view whose raw buffer is not row-major.
+fn hostRoutes(s: mlx.mlx_stream, routes: mlx.mlx_array) !mlx.mlx_array {
+    var c = mlx.mlx_array_new();
+    errdefer freeArr(c);
+    try mlx.check(mlx.mlx_contiguous(&c, routes, false, s));
+    try mlx.check(mlx.mlx_array_eval(c));
+    return c;
 }
 
 /// `Config.slot_stats`: a diagnostic that reads every decode call's routing back to the host (a sync per layer, so never on in
@@ -190,11 +242,12 @@ pub const SlotStats = struct {
         return config.get().slot_stats;
     }
 
-    fn record(inds: mlx.mlx_array, rows: usize, K: usize) !void {
+    fn record(s: mlx.mlx_stream, routes: mlx.mlx_array, rows: usize, K: usize) !void {
         const n = rows * K;
         var buf: [16 * 64]u32 = undefined;
         if (rows > 16 or n > buf.len) return;
-        try mlx.check(mlx.mlx_array_eval(inds));
+        const inds = try hostRoutes(s, routes);
+        defer freeArr(inds);
         if (mlx.mlx_array_dtype(inds) == .int32) {
             const p = mlx.mlx_array_data_int32(inds) orelse return error.NullData;
             for (0..n) |i| buf[i] = @intCast(p[i]);
@@ -587,6 +640,22 @@ pub fn linearPrepared(s: mlx.mlx_stream, xp: mlx.mlx_array, p: Proj, dec: format
     return d.finishOf(s, z, p.svh, rows);
 }
 
+/// `linear` from prepared rows xp F16 [rows, in] (natural order, `linear`'s prepare arithmetic: a prepared epilogue's
+/// output) by `linear`'s own prefill tail (`Dense.linearPreparedOn`): the register path's GEMM, the fused GEMM, or the
+/// dequantize with pg2's launch where the host's switch tables the shape (split K included), else MLX's matmul and the
+/// finish; y [rows, out] in `out_dtype`, `linear`'s bytes. Unlike `linearPrepared` (the inner product and finish alone,
+/// trunk int8's own inner launches included) it refuses (error.Exl3EngineNotImplemented) the rows `linear` serves from x
+/// itself: the decode rows, an un-rotated resident trellis, trunk int8 and the fused GEMM's deferred affine map.
+pub fn linearOnPrepared(s: mlx.mlx_stream, xp: mlx.mlx_array, p: Proj, dec: format.Decode, out_dtype: mlx.mlx_dtype) !mlx.mlx_array {
+    const psh = mlx.getShape(xp);
+    if (psh.len != 2 or psh[0] < 1 or mlx.mlx_array_dtype(xp) != .float16) return error.BadExl3Shape;
+    if (out_dtype != .bfloat16 and out_dtype != .float32 and out_dtype != .float16) return error.BadExl3Dtype;
+    // the decode rows: before any engine is made
+    if (@as(usize, @intCast(psh[0])) <= kernels.DECODE_ROWS_MAX) return error.Exl3EngineNotImplemented;
+    const d = try denseOf(p, @intCast(psh[1]), out_dtype, dec);
+    return d.linearPreparedOn(s, s, xp, p.trellis, p.svh, @intCast(psh[0]));
+}
+
 /// What `decPrepared` reads for one projection at `rows` decode rows (`dense.Dense.decPrepSpec` on the `Dense` `linear`
 /// takes for an x of `out_dtype`): null where DEC-ONE does not take the call or runs its prepare inside its GEMV launch
 /// (the caller runs `linear`).
@@ -736,6 +805,8 @@ fn pfOptions() prefill.Options {
     o.int8 = config.get().pf_int8;
     o.int8_c2 = config.get().pf_int8_c2;
     o.defer_affine = config.get().pf_defer_affine;
+    o.occ = config.get().pf_occ;
+    o.occ_fault = config.get().pf_occ_fault;
     return o;
 }
 
@@ -762,6 +833,9 @@ fn pfOptionsFor(geo: prefill.Geometry) prefill.Options {
     if (!o.t128 or o.stageBytes(128) > 32768) o.t128_bk128 = false;
     // the compact mixed outputs: the 128-row tiles' mixed launch
     if (!o.t128) o.t128_zfit = false;
+    // the GEMMs' occupancy variant: the 128-row tiles' four GEMM launches, not the compact mixed outputs'
+    if (!o.t128 or o.t128_zfit) o.occ = 0;
+    if (o.occ == 0) o.occ_fault = false;
     // the size classes: the 128-row tiles' arrays at their sorted positions (not the compact mixed outputs)
     if (!o.t128 or o.t128_zfit) o.size_class = false;
     // int8 gate|up and down: beside the 128-row tiles, on the deferred map, the mixed outputs at their sorted positions
@@ -837,6 +911,7 @@ pub fn moeSwiglu(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx.mlx_
 /// down launches and finish on that engine, the same bytes. Decode rows have no such choice. `moeSwiglu` is this at
 /// `.{}`.
 pub fn moeSwigluWith(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array, scores: mlx.mlx_array, dec: format.Decode, limit: u32, clamp: format.ClampAt, call: prefill.Call) !mlx.mlx_array {
+    if (!format.limitAdmitted(limit, clamp)) return error.InvalidExl3Clamp;
     const geo = try validateCall(x, bank, inds, scores);
     if (geo.gate_up.n != geo.down.n) return error.Exl3EngineNotImplemented;
     const xsh = mlx.getShape(x);
@@ -851,7 +926,7 @@ pub fn moeSwigluWith(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx.
         if (!config.get().prefill or !config.get().nax) return error.Exl3EngineNotImplemented;
         return moePrefill(s, x, bank, inds, scores, dec, geo, rows, K, limit, clamp, call);
     }
-    if (SlotStats.enabled()) SlotStats.record(inds, rows, @intCast(K)) catch {};
+    if (SlotStats.enabled()) SlotStats.record(s, inds, rows, @intCast(K)) catch {};
     const dgeo: decode.Geometry = .{ .hidden = @intCast(geo.hidden), .inter = @intCast(geo.width), .topk = @intCast(K), .rate = geo.gate_up, .dec = dec, .limit = limit, .clamp = clamp };
     // the operands the kernels take as the host holds them: x [rows, D] (bf16/f16/f32), slots [rows * K] (i32/u32), scores
     // [rows * K] (bf16/f16/f32); the kernels convert in place and write y in x's dtype, so no cast launches per layer. At one
@@ -920,11 +995,12 @@ const PfCapture = struct {
     extern "c" fn fwrite(ptr: *const anyopaque, size: usize, n: usize, f: *anyopaque) usize;
     extern "c" fn fclose(f: *anyopaque) c_int;
 
-    fn record(inds1: mlx.mlx_array, rows: usize) !void {
+    fn record(s: mlx.mlx_stream, routes: mlx.mlx_array, rows: usize) !void {
         const dir = config.get().pf_capture_dir orelse return;
         if (calls.get().* >= 512) return;
         defer calls.get().* += 1;
-        try mlx.check(mlx.mlx_array_eval(inds1));
+        const inds1 = try hostRoutes(s, routes);
+        defer freeArr(inds1);
         const n = mlx.mlx_array_size(inds1);
         var path_buf: [512]u8 = undefined;
         const path = try std.fmt.bufPrintSentinel(&path_buf, "{s}/pf-{d:0>4}-r{d}.u32", .{ dir, calls.get().*, rows }, 0);
@@ -949,7 +1025,7 @@ fn moePrefill(s: mlx.mlx_stream, x: mlx.mlx_array, bank: Bank, inds: mlx.mlx_arr
     var inds1 = mlx.mlx_array_new();
     defer freeArr(inds1);
     try mlx.check(mlx.mlx_reshape(&inds1, inds, &[_]c_int{rows_c * K}, 1, s));
-    PfCapture.record(inds1, rows) catch |e| std.debug.print("[turboexl3] prefill capture failed: {s}\n", .{@errorName(e)});
+    PfCapture.record(s, inds1, rows) catch |e| std.debug.print("[turboexl3] prefill capture failed: {s}\n", .{@errorName(e)});
     var s1 = mlx.mlx_array_new();
     defer freeArr(s1);
     try mlx.check(mlx.mlx_reshape(&s1, scores, &[_]c_int{rows_c * K}, 1, s));
@@ -1057,7 +1133,7 @@ pub fn moeClampedRowsFit(s: mlx.mlx_stream, x: mlx.mlx_array, rows: mlx.mlx_arra
 /// `clamp`; `call_experts` as `moeClampedRowsFit`'s (null: the call's row count bounds the compact outputs); `call` as
 /// `moeSwigluRowsWith`'s.
 fn swigluRows(s: mlx.mlx_stream, x: mlx.mlx_array, rows: mlx.mlx_array, bank: Bank, inds: mlx.mlx_array, scores: mlx.mlx_array, dec: format.Decode, limit: u32, clamp: format.ClampAt, out_dtype: mlx.mlx_dtype, call_experts: ?u32, call: prefill.Call) !mlx.mlx_array {
-    if (limit > 128) return error.InvalidExl3Clamp;
+    if (!format.limitAdmitted(limit, clamp)) return error.InvalidExl3Clamp;
     if (!config.get().prefill or !config.get().nax) return error.Exl3EngineNotImplemented;
     const xsh = mlx.getShape(x);
     const rs = mlx.getShape(rows);
@@ -1126,6 +1202,16 @@ pub const moeLingBanked = ling.moeLingBanked;
 pub const moeLingBankedSel = ling.moeLingBankedSel;
 pub const moeLingBankedGateUp = ling.moeLingBankedGateUp;
 pub const moeLingBankedDown = ling.moeLingBankedDown;
+/// Inkling 2's routed experts with its softcapped SwiGLU, stacked and banked, and a streamer's prompt call over gathered
+/// rows (models/inkling2/api.zig)
+pub const moeInkling2 = inkling2.moeInkling2;
+pub const moeInkling2With = inkling2.moeInkling2With;
+pub const moeInkling2Rows = inkling2.moeInkling2Rows;
+pub const moeInkling2RowsWith = inkling2.moeInkling2RowsWith;
+pub const moeInkling2Banked = inkling2.moeInkling2Banked;
+pub const moeInkling2BankedSel = inkling2.moeInkling2BankedSel;
+pub const moeInkling2BankedGateUp = inkling2.moeInkling2BankedGateUp;
+pub const moeInkling2BankedDown = inkling2.moeInkling2BankedDown;
 /// Ling-3.1-flash's shared expert at decode rows: the gate and the up in one launch with the host's SwiGLU and the down's
 /// prepare in its pairs' second finishes, then the down's GEMV (models/ling/shared.zig)
 pub const lingSharedExpert = ling.sharedExpert;
@@ -1189,6 +1275,59 @@ pub fn enginesHeld() EnginesHeld {
     for (dense_cache.get().*) |s| n.dense += @intFromBool(s != null);
     for (pf_cache.get().*) |s| n.prefill += @intFromBool(s != null);
     return n;
+}
+
+test "turboexl3 root: the routing diagnostics read a strided route view row by row (TURBOEXL3_GPU=1)" {
+    _ = std.c.getenv("TURBOEXL3_GPU") orelse return error.SkipZigTest;
+    const t = std.testing;
+    const s = mlx.mlx_default_gpu_stream_new();
+    if (!mlx.streamIsGpu(s)) return error.SkipZigTest;
+    var g = try @import("core/test_support.zig").Graph.init(std.heap.page_allocator, s);
+    defer g.deinit();
+    // [1, 3, 8] u32 routes; a call's top-6 is the column slice [:, :, 0..6], a strided view (a router's top-k slice).
+    // Each row's first six are experts 0-5 and its last two are its own (100 + 2r, 101 + 2r): the view's 18 slots are 6
+    // experts at multiplicity 3, while the raw buffer's first 18 words hold 10 distinct experts.
+    var full: [24]u32 = undefined;
+    for (0..3) |r| for (0..8) |c| {
+        full[r * 8 + c] = if (c < 6) @intCast(c) else @intCast(100 + 2 * r + (c - 6));
+    };
+    const all = try g.hostArray(std.mem.sliceAsBytes(full[0..]), &.{ 1, 3, 8 }, .uint32);
+    const view = try g.slice(all, &.{ 0, 0, 0 }, &.{ 1, 3, 6 }, &.{ 1, 1, 1 });
+    // SlotStats: 6 distinct experts, each at multiplicity 3
+    const d0 = SlotStats.distinct_total.get().*[3];
+    const m0 = SlotStats.mult.get().*[3][3];
+    try SlotStats.record(s, view, 3, 6);
+    try t.expectEqual(@as(u64, 6), SlotStats.distinct_total.get().*[3] - d0);
+    try t.expectEqual(@as(u64, 6), SlotStats.mult.get().*[3][3] - m0);
+    // PfCapture: the file holds the view's 18 slots in row-major order
+    const C = struct {
+        extern "c" fn mkdtemp(template: [*:0]u8) ?[*:0]u8;
+        extern "c" fn fopen(path: [*:0]const u8, mode: [*:0]const u8) ?*anyopaque;
+        extern "c" fn fread(ptr: *anyopaque, size: usize, n: usize, f: *anyopaque) usize;
+        extern "c" fn fclose(f: *anyopaque) c_int;
+        extern "c" fn unlink(path: [*:0]const u8) c_int;
+        extern "c" fn rmdir(path: [*:0]const u8) c_int;
+    };
+    var tmpl = "/tmp/turboexl3-pfcap-XXXXXX".*;
+    const dir = std.mem.span(C.mkdtemp(&tmpl) orelse return error.TmpDir);
+    defer _ = C.rmdir(dir.ptr);
+    const saved = config.get().*;
+    defer config.configure(saved) catch unreachable;
+    var cfg = saved;
+    cfg.pf_capture_dir = dir;
+    try config.configure(cfg);
+    const call = PfCapture.calls.get().*;
+    if (call >= 512) return error.SkipZigTest;
+    try PfCapture.record(s, view, 3);
+    var path_buf: [512]u8 = undefined;
+    const path = try std.fmt.bufPrintSentinel(&path_buf, "{s}/pf-{d:0>4}-r3.u32", .{ dir, call }, 0);
+    defer _ = C.unlink(path.ptr);
+    const f = C.fopen(path.ptr, "rb") orelse return error.CaptureMissing;
+    var got: [18]u32 = undefined;
+    const n = C.fread(&got, 4, got.len, f);
+    _ = C.fclose(f);
+    try t.expectEqual(@as(usize, 18), n);
+    for (0..3) |r| for (0..6) |c| try t.expectEqual(@as(u32, @intCast(c)), got[r * 6 + c]);
 }
 
 test "turboexl3 root: releaseEngines empties every engine cache (a no-op on empty ones)" {
@@ -1293,4 +1432,6 @@ pub const shared_state = .{
     ling_combine.shared_state,
     glm53f.shared_gu.shared_state,
     glm53f.pair_ks.shared_state,
+    hy4f_qrope.shared_state,
+    hy4f_rms.shared_state,
 };

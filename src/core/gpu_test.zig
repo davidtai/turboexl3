@@ -37,6 +37,12 @@ const cases = [_]Case{
     .{ .hidden = 512, .inter = 256, .topk = 4, .rows = 2, .experts = 6, .n = 64, .dec = .mul1 },
     .{ .hidden = 512, .inter = 256, .topk = 4, .rows = 2, .experts = 6, .n = 80, .dec = .mul1 },
     .{ .hidden = 512, .inter = 256, .topk = 4, .rows = 2, .experts = 6, .n = 128, .dec = .mcg },
+    // K1 (n 16, one bit per weight), both codebooks: the Inkling 2 packs' late expert layers (1.99bpw 30-47, 1.02bpw all)
+    .{ .hidden = 512, .inter = 256, .topk = 4, .rows = 2, .experts = 6, .n = 16, .dec = .mul1 },
+    .{ .hidden = 512, .inter = 256, .topk = 4, .rows = 2, .experts = 6, .n = 16, .dec = .mcg },
+    // Inkling 2's routed widths (4608 x 2304) at K1 on MCG, the pack's codebook: one decode row and a verify width
+    .{ .hidden = 4608, .inter = 2304, .topk = 8, .rows = 1, .experts = 10, .n = 16, .dec = .mcg },
+    .{ .hidden = 4608, .inter = 2304, .topk = 8, .rows = 4, .experts = 10, .n = 16, .dec = .mcg },
     // Qwen3.8-Flash-Next's geometry at the served rate: 1 row (decode), 4 and 8 rows (MTP verify widths)
     .{ .hidden = 2560, .inter = 640, .topk = 10, .rows = 1, .experts = 12, .n = 80, .dec = .mul1, .timed = true },
     .{ .hidden = 2560, .inter = 640, .topk = 10, .rows = 4, .experts = 12, .n = 80, .dec = .mul1, .timed = true },
@@ -387,6 +393,10 @@ test "turboexl3 gpu: dense.linear equals format.project per row at the trunk's r
         .{ .in = 2560, .out = 512, .n = 96, .dec = .mul1 },
         .{ .in = 2560, .out = 640, .n = 80, .dec = .mul1 },
         .{ .in = 512, .out = 256, .n = 48, .dec = .{ .codebook = .mcg, .window = .w12 } },
+        // K1, both codebooks: every path (GEMV, register path, prefill) at one bit per weight
+        .{ .in = 512, .out = 256, .n = 16, .dec = .mul1 },
+        .{ .in = 512, .out = 256, .n = 16, .dec = .mcg },
+        .{ .in = 4608, .out = 1024, .n = 16, .dec = .mcg },
     };
     // 1..5, 8: one chunk of the multi-row GEMV at every RB it serves; 9 and 16: two chunks (a partial one at 9); 17, 31, 32:
     // the register-path GEMM (one partial or full 32-row tile); 40, 129, 200: prefill (dequantize + matmul at the default
@@ -394,7 +404,16 @@ test "turboexl3 gpu: dense.linear equals format.project per row at the trunk's r
     const row_counts = [_]u32{ 1, 2, 3, 4, 5, 8, 9, 16, 17, 31, 32, 40, 129, 200 };
     // the trunk's widest GEMV shapes (a GDN qkv in-projection, an out-projection: the deepest K splits) at decode and verify
     // widths only, so the host reference stays seconds
-    const big = [_]Shape{ .{ .in = 2560, .out = 10240, .n = 112, .dec = .mul1 }, .{ .in = 6144, .out = 2560, .n = 112, .dec = .mul1 } };
+    // Inkling 2's trunk on MCG at its packs' trunk rates (K6 2.99bpw, K5 1.99bpw, K3 1.02bpw): wq_du / gate_attn, wk_dv /
+    // wv_dv, wr_du and wo_ud
+    const big = [_]Shape{
+        .{ .in = 2560, .out = 10240, .n = 112, .dec = .mul1 },
+        .{ .in = 6144, .out = 2560, .n = 112, .dec = .mul1 },
+        .{ .in = 4608, .out = 6144, .n = 96, .dec = .mcg },
+        .{ .in = 4608, .out = 1024, .n = 80, .dec = .mcg },
+        .{ .in = 4608, .out = 768, .n = 48, .dec = .mcg },
+        .{ .in = 6144, .out = 4608, .n = 96, .dec = .mcg },
+    };
     const big_rows = [_]u32{ 1, 3, 4, 9 };
     for (shapes ++ big, 0..) |sh, si| {
         var prng = std.Random.DefaultPrng.init(0xD3A5E ^ sh.n ^ sh.out);

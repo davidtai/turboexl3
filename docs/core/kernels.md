@@ -663,6 +663,26 @@ streamer's slot banks and its grouped variants DeepSeek-V4.1's ([its catalog](..
   ..." (GPU: at limit 128 with x ~ N(0, 1) `moe`'s bytes at rows 1, 16 and 400, bf16 and f32; at limits 0 and 10 with x
   ~ N(0, 8^2) within 5e-3 of `ref.moeRowClampedAt` at `silu_out` on sampled rows of 1, 4, 16, 32 and 1328, n 40 and 32).
 
+### `turboexl3_fin7cs`
+
+- **Used by:** core: `root.moeInkling2` at 1 to 16 decode rows (launch 3 of forms 7, 8 and 9 as configured, form 9 for
+  forms 3, 5 and 6): a geometry with `clamp` `softcap` builds it in `fin7`'s place. Inkling 2 (`models/inkling2/api.zig`):
+  its routed experts on every layer, whose SwiGLU is softcapped: cg·tanh(g/cg)·sigmoid(g) · cu·tanh(u/cu) (transformers'
+  Inkling2SoftcappedSwiGLU, caps 4 and 25).
+- **Shapes and dtypes:** as `turboexl3_fin7c`.
+- **Grid and threadgroup:** as `fin7`: `((INTER/128)·32, RK, 1)` / `(32, 1, 1)`.
+- **Template args:** fin7's five (INTER, RKC, KS, DEFER, NBH), then LIMIT: the two caps packed by
+  `format.softcapLimit` (cg in bits 0-7, cu in bits 8-15, whole numbers 1 to 255; Inkling 2's 4 | 25 << 8). In f32 on
+  the finished f16 values, the sigmoid on the raw gate; a NaN passes through.
+- **Replaces:** `turboexl3_fin7`'s launch with the softcap (the unfused chain has none).
+- **Bits:** `turboexl3_fin7`'s statements but the SwiGLU line; within 5e-3 of `ref.moeRowSoftcap` (f32 `ref.compare`;
+  bf16 `ref.compareRounded` at 2^-8) at Inkling 2's routed geometry (4608 x 2304, 384 experts, top-8, MCG), at least 1%
+  of the gates and of the ups past their caps.
+- **Pinned by:** `src/models/inkling2/inkling2_test.zig` "turboexl3 inkling2 texts: each softcap kernel is its base text
+  with the SwiGLU line swapped ..." (CPU: the one swap, nothing else); `src/models/inkling2/inkling2_test.zig`
+  "turboexl3 gpu inkling2: root.moeInkling2 at Inkling 2's routed geometry ..." (GPU: within 5e-3 of
+  `ref.moeRowSoftcap` on sampled rows of 1, 4 and 16, MCG at n 16 and 32).
+
 ## `src/core/dense.zig`
 
 The dense EXL3 linear (`linear` and the entries built on it): DEC-ONE, the multi-row GEMV chain, the register-path GEMM,
@@ -936,6 +956,30 @@ dequantize + matmul, the finishes and the un-rotated trunk. F3 (DeepSeek-V4.1's 
   `src/core/gpu_test.zig` "turboexl3 gpu: dense.linear equals format.project per row at the trunk's rates, GEMV and
   prefill paths (TURBOEXL3_GPU=1)" and `src/models/deepseek_v41/deepseek_test.zig` "turboexl3 gpu deepseek: root.linear
   and root.linearBias equal the host reference at every DeepSeek-V4.1 ..." (GPU, the bars at 8 and 16 rows).
+
+### `turboexl3_dense_dgemv_mma`
+
+- **Used by:** core: with `Config.dense_mma` (off by default; needs `Config.nax`), the chain's lean chunks
+  (`Dense.leanAt`: chunks of 6 to 8 rows, and of 5 where `Dense.wideLean` holds) in place of
+  `turboexl3_dense_dgemv_lean`, through `root.linear`, F3 (`Dense.prepareGemv`, `linearPrepared`) and every caller of
+  the chain. Hy4-flash's 6-row verify: the quant plugin turboexl3_hy4f sets it.
+- **Shapes and dtypes:** the same as `turboexl3_dense_dgemv_lean`: xp f16 [rows, IN] in lane order; w the trellis U16
+  or I16 [IN/16, OUT/16, NHW]. Out: z f32 [KS · rows, OUT], the same K-slice planes, finished by
+  `turboexl3_dense_dfinish` unchanged.
+- **Grid and threadgroup:** `((OUT/16/BT) · 128, chunks, KS)` / `(128, 1, 1)`; BT is `Dense.mma_bt` (2: BT 4 ran 2x
+  slower at every Hy4 trunk shape).
+- **Template args:** NHW, CODEBOOK, WBITS, IN, OUT, KS, BT (even: one 16 x 32 x 16 MMA per tile pair and input tile),
+  RB (1 to 8; the chunk's rows are fragment rows 0..RB-1, the rest zeros), ROWS, DEFER. Header: `dense.header_mma`
+  (`prefill.header_nax_small` and `dense/mma_helpers`'s strict-precision `turboexl3_mma16`).
+- **Replaces:** `turboexl3_dense_dgemv_lean`'s 6 to 8 FMAs per decoded weight a lane: lane L decodes trellis lane
+  `prefill.smallLanePlan(L)`'s eight codewords straight into its B^T fragment (no shuffles) and the matrix units
+  multiply them with the chunk's rows.
+- **Bits:** reorder-class, not the lean text's bytes: half x half products exact in f32, f32 accumulation, the MMA's
+  order (`relaxed_precision` false), each MMA's 16-deep sum from zero added to the f32 accumulators on the ALUs. Each
+  output within gamma_{IN-1} · sum |x_k w_k| of the float64 inner product of the same operands.
+- **Pinned by:** `src/models/hy4f/hy4f_test.zig` "turboexl3 gpu hy4f dense verify rows: ..." (GPU: the float64 bar at
+  every Hy4 trunk shape, K6 rows 5 to 8 and K4 rows 6, bf16 and f32 x, beside today's chain; three planted faults,
+  `kernels/test/fault/mma_*`, miss it; the rms gap and words against today's chain printed).
 
 ### `turboexl3_dense_finish`
 
@@ -2570,6 +2614,19 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
   SwiGLU line swapped for Ling's clamp ..." (CPU: this text is its base with the one swap, nothing else; only a clamp
   reads LIMIT).
 
+### `turboexl3_pf_mid_vcs`
+
+- **Used by:** core: as `turboexl3_pf_midcs`, in the vector-layout arm (`Options.aux` 8). Inkling 2
+  (`models/inkling2/api.zig`): its routed experts' softcapped SwiGLU, cg·tanh(g/cg)·sigmoid(g) · cu·tanh(u/cu).
+- **Shapes and dtypes:** as `turboexl3_pf_mid_vc`.
+- **Grid and threadgroup:** as `turboexl3_pf_mid_v`.
+- **Template args:** the mid's three, then LIMIT: the two caps packed by `format.softcapLimit` (cg in bits 0-7, cu in
+  bits 8-15; Inkling 2's 4 and 25), in f32 on the finished f16 values, the sigmoid on the raw gate.
+- **Replaces:** `turboexl3_pf_mid_v`'s launch with the softcap.
+- **Bits:** `turboexl3_pf_mid_v`'s statements but the SwiGLU line.
+- **Pinned by:** `src/models/inkling2/inkling2_test.zig` "turboexl3 inkling2 texts: each softcap kernel is its base text
+  with the SwiGLU line swapped ..." (CPU: the one swap, nothing else).
+
 ### `turboexl3_pf_midco`
 
 <!-- kernel-facts: turboexl3_pf_midco -->
@@ -2598,6 +2655,21 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
 - **Pinned by:** `src/models/ling/ling_test.zig` "turboexl3 ling texts: each Ling kernel is its base text with the
   SwiGLU line swapped for Ling's clamp ..." (CPU: this text is its base with the one swap, nothing else; only a clamp
   reads LIMIT).
+
+### `turboexl3_pf_midcs`
+
+- **Used by:** core: `root.moeInkling2`'s prefill chain where the mixed chain runs without the 128-row tiles
+  (`prefill.Prefill` at a geometry with `clamp` `softcap`); `root` serves the 128-row tiles' mid
+  (`turboexl3_pf_t128_midcs`). Inkling 2 (`models/inkling2/api.zig`): its routed experts' softcapped SwiGLU,
+  cg·tanh(g/cg)·sigmoid(g) · cu·tanh(u/cu) (transformers' Inkling2SoftcappedSwiGLU, caps 4 and 25).
+- **Shapes and dtypes:** as `turboexl3_pf_midc`.
+- **Grid and threadgroup:** as `turboexl3_pf_mid`.
+- **Template args:** the mid's three, then LIMIT: the two caps packed by `format.softcapLimit` (cg in bits 0-7, cu in
+  bits 8-15), in f32 on the finished f16 values, the sigmoid on the raw gate; a NaN passes through.
+- **Replaces:** `turboexl3_pf_mid`'s launch with the softcap.
+- **Bits:** `turboexl3_pf_mid`'s statements but the SwiGLU line.
+- **Pinned by:** `src/models/inkling2/inkling2_test.zig` "turboexl3 inkling2 texts: each softcap kernel is its base text
+  with the SwiGLU line swapped ..." (CPU: the one swap, nothing else).
 
 ### `turboexl3_pf_t128_midco`
 
@@ -2630,6 +2702,24 @@ clamped mids (DeepSeek-V4.1) and the 128-row tiles.
   reads LIMIT); `src/models/ling/ling_test.zig` "turboexl3 gpu ling: root.moeLing at Ling-3.1-flash's routed geometry
   ..." (GPU: at limit 128 with x ~ N(0, 1) `moe`'s bytes at rows 1, 16 and 400, bf16 and f32; at limits 0 and 10 with x
   ~ N(0, 8^2) within 5e-3 of `ref.moeRowClampedAt` at `silu_out` on sampled rows of 1, 4, 16, 32 and 1328, n 40 and 32).
+
+### `turboexl3_pf_t128_midcs`
+
+- **Used by:** core: `root.moeInkling2` and `root.moeInkling2Rows` at prefill rows (more than 16): the served chain's
+  mid (the 128-row tiles), built in `turboexl3_pf_t128_mid`'s place at a geometry with `clamp` `softcap`. Inkling 2
+  (`models/inkling2/api.zig`): its routed experts' softcapped SwiGLU, cg·tanh(g/cg)·sigmoid(g) · cu·tanh(u/cu).
+- **Shapes and dtypes:** as `turboexl3_pf_t128_midc`.
+- **Grid and threadgroup:** as `turboexl3_pf_t128_mid`.
+- **Template args:** the mid's three, then LIMIT: the two caps packed by `format.softcapLimit` (cg in bits 0-7, cu in
+  bits 8-15), in f32 on the finished f16 values, the sigmoid on the raw gate; a NaN passes through.
+- **Replaces:** `turboexl3_pf_t128_mid`'s launch with the softcap.
+- **Bits:** `turboexl3_pf_t128_mid`'s statements but the SwiGLU line; within 5e-3 of `ref.moeRowSoftcap` at Inkling
+  2's routed geometry (prefill rows 32 and 1328, MCG).
+- **Pinned by:** `src/models/inkling2/inkling2_test.zig` "turboexl3 inkling2 texts: each softcap kernel is its base text
+  with the SwiGLU line swapped ..." (CPU: the one swap, nothing else); `src/models/inkling2/inkling2_test.zig`
+  "turboexl3 gpu inkling2: root.moeInkling2 at Inkling 2's routed geometry ..." (GPU: within 5e-3 of
+  `ref.moeRowSoftcap` on sampled rows of 32 and 1328, MCG at n 16 and 32); "turboexl3 gpu inkling2 rows: ..." (GPU:
+  `moeInkling2Rows` word for word against `moeInkling2` over the gathered rows).
 
 ### `turboexl3_pf_t128z_dnm`
 

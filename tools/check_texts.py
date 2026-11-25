@@ -2153,6 +2153,16 @@ SPLIT_ADDED_KERNELS['turboexl3_ling_finish_sgu'] = ('Ling-3.1\'s prefill SwiGLU 
                                                   'SwiGLU of the gate\'s value and its own; ling.upSwiglu')
 SPLIT_ADDED_KERNELS['turboexl3_ling_finish_sguco'] = ('turboexl3_ling_finish_sgu with the clamp after the SiLU '
                                                     '(shared/sgu_swiglu_clamp_out)')
+# Inkling 2's softcapped SwiGLU (models/inkling2/api.zig): each its base text with the SwiGLU line swapped for the softcap
+# piece (decode/fin7_swiglu_softcap, prefill/mid_swiglu_softcap), LIMIT the two caps packed (format.softcapLimit)
+for _name, _why in (('turboexl3_fin7cs', 'text_fin7 with fin7_swiglu_softcap in its SwiGLU line\'s place'),
+                    ('turboexl3_pf_midcs', 'text_mid with mid_swiglu_softcap in its SwiGLU line\'s place'),
+                    ('turboexl3_pf_mid_vcs', 'text_mid_v, the same swap'),
+                    ('turboexl3_pf_t128_midcs', 'text_mid_t128, the same swap'),
+                    ('turboexl3_fin7csb', 'the banked fin7 with the softcap: fin7cb with fin7_swiglu_softcap in place of '
+                                          'the clamp'),
+                    ('turboexl3_fin7csbg', 'fin7csb\'s grouped text (fin7cbg with fin7_swiglu_softcap)')):
+    SPLIT_ADDED_KERNELS[_name] = 'Inkling 2\'s softcapped SwiGLU: ' + _why
 SPLIT_CHANGED_CONSTS = {
     'head': 'models/ling/router.zig: launch 1\'s router threadgroups at 512 / 16 a row (MLX\'s gemv tiles)',
     'pred_open': 'models/ling/router.zig: the predictor\'s threadgroups after 512 / 16 a row of the router\'s',

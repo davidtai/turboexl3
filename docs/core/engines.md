@@ -9,7 +9,7 @@ The Metal text of each kernel is a file `<folder>/kernels/<module>/<name>.metal`
 `<folder>` is `src/core` or `src/models/<model>`, and `<module>` is the name of that Zig file without `.zig` (so
 `src/core/kernels/decode/`, `src/models/qwen38/kernels/attn_io/`). The steel headers lie directly in `src/core/kernels/`
 (`steel_nax.metal`), and the texts of each folder's tests lie in its `kernels/test/`. A Zig file imports each text with `@embedFile`. A kernel can
-be several numbered pieces that the Zig file joins, for example `gu3_1.metal` and `gu3_2.metal`.
+be several numbered pieces that the Zig file joins, for example `gu3_1.metal` and `gu3_2a.metal`.
 
 The file headers (`//!`) and the `///` comments in `src/` hold the full statements; this page is the map. The
 [glossary](glossary.md) defines every term, and a link marks the first use of a term on this page. The

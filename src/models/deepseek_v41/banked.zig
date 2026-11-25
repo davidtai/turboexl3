@@ -35,6 +35,7 @@ const fin7_4 = decode.fin7_4;
 const fin7_swiglu_clamp = decode.fin7_swiglu_clamp;
 const fin7_swiglu = decode.fin7_swiglu;
 const fin7_swiglu_clamp_out = decode.fin7_swiglu_clamp_out;
+const fin7_swiglu_softcap = decode.fin7_swiglu_softcap;
 const fin7_5 = decode.fin7_5;
 const down3_1 = decode.down3_1;
 const down3_2 = decode.down3_2;
@@ -64,6 +65,8 @@ pub const text_fin7cb = fin7_1 ++ fin7b_expert ++ fin7_2 ++ fin7_planes ++ fin7_
 /// with Ling's clamp after the SiLU (`Geometry.clamp` `silu_out`), every other statement fin7cb's.
 pub const text_fin7b = fin7_1 ++ fin7b_expert ++ fin7_2 ++ fin7_planes ++ fin7_3 ++ fin7_sums ++ fin7_4 ++ fin7_swiglu ++ fin7_5;
 pub const text_fin7cob = fin7_1 ++ fin7b_expert ++ fin7_2 ++ fin7_planes ++ fin7_3 ++ fin7_sums ++ fin7_4 ++ fin7_swiglu_clamp_out ++ fin7_5;
+/// Inkling 2 (`models/inkling2/api.zig`): fin7cb with the softcapped SwiGLU (`Geometry.clamp` `softcap`).
+pub const text_fin7csb = fin7_1 ++ fin7b_expert ++ fin7_2 ++ fin7_planes ++ fin7_3 ++ fin7_sums ++ fin7_4 ++ fin7_swiglu_softcap ++ fin7_5;
 pub const text_down3b = down3_1 ++ rk_line ++ down3_2 ++ down3b_w ++ down3_3;
 pub const text_dfin3b = dfin3_1 ++ dfin3b_expert ++ dfin3_2;
 const prep2b_expert = @embedFile("kernels/banked/prep2b_expert.metal");
@@ -157,6 +160,8 @@ pub const text_fin7cbg = fin7_1 ++ skip_rk ++ fin7b_expert ++ fin7_2 ++ fin7_pla
 /// fin7cbg's Ling-3.1 forms, as `text_fin7b` and `text_fin7cob` are fin7cb's.
 pub const text_fin7bg = fin7_1 ++ skip_rk ++ fin7b_expert ++ fin7_2 ++ fin7_planes ++ fin7_3 ++ fin7_sums ++ fin7_4 ++ fin7_swiglu ++ fin7_5;
 pub const text_fin7cobg = fin7_1 ++ skip_rk ++ fin7b_expert ++ fin7_2 ++ fin7_planes ++ fin7_3 ++ fin7_sums ++ fin7_4 ++ fin7_swiglu_clamp_out ++ fin7_5;
+/// fin7cbg's Inkling 2 form, as `text_fin7csb` is fin7cb's.
+pub const text_fin7csbg = fin7_1 ++ skip_rk ++ fin7b_expert ++ fin7_2 ++ fin7_planes ++ fin7_3 ++ fin7_sums ++ fin7_4 ++ fin7_swiglu_softcap ++ fin7_5;
 pub const text_down3bg = down3_1 ++ rk_line ++ down3g_2 ++ down3b_w ++ down3g_3;
 pub const text_dfin3bg = dfin3_1 ++ skip_rk_next ++ dfin3b_expert ++ dfin3_2;
 /// hw4b: the grouped GEMVs with an M = 3 member path (`gu3g_3m3`, `down3g_3m3`): a lead with three members runs it, where
@@ -269,13 +274,16 @@ pub const Banked = struct {
         errdefer freeKernel(prep);
         const gu = ks.newKernel("turboexl3_gu3b", &gu3b_inputs, &gu3_outputs, text_gu3b, header, true) orelse return error.KernelCreateFailed;
         errdefer freeKernel(gu);
-        // the geometry's SwiGLU: DeepSeek-V4.1's clamp (fin7cb), none (fin7b) or Ling-3.1's clamp after the SiLU (fin7cob)
+        // the geometry's SwiGLU: DeepSeek-V4.1's clamp (fin7cb), none (fin7b), Ling-3.1's clamp after the SiLU (fin7cob) or
+        // Inkling 2's softcap (fin7csb)
         const fin = (if (k3.geo.limit != 0 and k3.geo.clamp == .gate_in)
             ks.newKernel("turboexl3_fin7cb", &fin7b_inputs, &fin3_outputs, text_fin7cb, header5, true)
         else if (k3.geo.limit == 0)
             ks.newKernel("turboexl3_fin7b", &fin7b_inputs, &fin3_outputs, text_fin7b, header5, true)
+        else if (k3.geo.clamp == .silu_out)
+            ks.newKernel("turboexl3_fin7cob", &fin7b_inputs, &fin3_outputs, text_fin7cob, header5, true)
         else
-            ks.newKernel("turboexl3_fin7cob", &fin7b_inputs, &fin3_outputs, text_fin7cob, header5, true)) orelse return error.KernelCreateFailed;
+            ks.newKernel("turboexl3_fin7csb", &fin7b_inputs, &fin3_outputs, text_fin7csb, header5, true)) orelse return error.KernelCreateFailed;
         errdefer freeKernel(fin);
         const down = ks.newKernel("turboexl3_down3b", &down3b_inputs, &down3_outputs, text_down3b, header, true) orelse return error.KernelCreateFailed;
         errdefer freeKernel(down);
@@ -304,13 +312,15 @@ pub const Banked = struct {
         errdefer freeKernel(prep);
         const gu = ks.newKernel("turboexl3_gu3bg", &gu3b_inputs, &gu3_outputs, text_gu3bg, header_group, true) orelse return error.KernelCreateFailed;
         errdefer freeKernel(gu);
-        // the geometry's SwiGLU: fin7cbg, fin7bg or fin7cobg (as bankedKernels' fin7cb, fin7b or fin7cob)
+        // the geometry's SwiGLU: fin7cbg, fin7bg, fin7cobg or fin7csbg (as bankedKernels' fin7cb, fin7b, fin7cob or fin7csb)
         const fin = (if (k3.geo.limit != 0 and k3.geo.clamp == .gate_in)
             ks.newKernel("turboexl3_fin7cbg", &fin7b_inputs, &fin3_outputs, text_fin7cbg, header5, true)
         else if (k3.geo.limit == 0)
             ks.newKernel("turboexl3_fin7bg", &fin7b_inputs, &fin3_outputs, text_fin7bg, header5, true)
+        else if (k3.geo.clamp == .silu_out)
+            ks.newKernel("turboexl3_fin7cobg", &fin7b_inputs, &fin3_outputs, text_fin7cobg, header5, true)
         else
-            ks.newKernel("turboexl3_fin7cobg", &fin7b_inputs, &fin3_outputs, text_fin7cobg, header5, true)) orelse return error.KernelCreateFailed;
+            ks.newKernel("turboexl3_fin7csbg", &fin7b_inputs, &fin3_outputs, text_fin7csbg, header5, true)) orelse return error.KernelCreateFailed;
         errdefer freeKernel(fin);
         const down = ks.newKernel("turboexl3_down3bg", &down3b_inputs, &down3_outputs, text_down3bg, header_group, true) orelse return error.KernelCreateFailed;
         errdefer freeKernel(down);
@@ -338,13 +348,15 @@ pub const Banked = struct {
         errdefer freeKernel(prep);
         const gu = ks.newKernel("turboexl3_gu3bgm3", &gu3b_inputs, &gu3_outputs, text_gu3bgm3, header_group, true) orelse return error.KernelCreateFailed;
         errdefer freeKernel(gu);
-        // the geometry's SwiGLU: fin7cbg, fin7bg or fin7cobg (as bankedKernels' fin7cb, fin7b or fin7cob)
+        // the geometry's SwiGLU: fin7cbg, fin7bg, fin7cobg or fin7csbg (as bankedKernels' fin7cb, fin7b, fin7cob or fin7csb)
         const fin = (if (k3.geo.limit != 0 and k3.geo.clamp == .gate_in)
             ks.newKernel("turboexl3_fin7cbg", &fin7b_inputs, &fin3_outputs, text_fin7cbg, header5, true)
         else if (k3.geo.limit == 0)
             ks.newKernel("turboexl3_fin7bg", &fin7b_inputs, &fin3_outputs, text_fin7bg, header5, true)
+        else if (k3.geo.clamp == .silu_out)
+            ks.newKernel("turboexl3_fin7cobg", &fin7b_inputs, &fin3_outputs, text_fin7cobg, header5, true)
         else
-            ks.newKernel("turboexl3_fin7cobg", &fin7b_inputs, &fin3_outputs, text_fin7cobg, header5, true)) orelse return error.KernelCreateFailed;
+            ks.newKernel("turboexl3_fin7csbg", &fin7b_inputs, &fin3_outputs, text_fin7csbg, header5, true)) orelse return error.KernelCreateFailed;
         errdefer freeKernel(fin);
         const down = ks.newKernel("turboexl3_down3bgm3", &down3b_inputs, &down3_outputs, text_down3bgm3, header_group, true) orelse return error.KernelCreateFailed;
         errdefer freeKernel(down);

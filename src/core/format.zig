@@ -80,7 +80,40 @@ pub const Decode = struct {
 /// Where a clamped SwiGLU clamps (a geometry's `limit` > 0): `gate_in`, DeepSeek-V4's and GLM's, clamps the gate from
 /// above before the SiLU, silu(min(g, L)) * clamp(u, -L, L); `silu_out`, Ling-3.1's (exllamav3's `act_limit` with SiLU),
 /// clamps the SiLU's output from above, min(silu(g), L) * clamp(u, -L, L). The up is clamped both ways in either.
-pub const ClampAt = enum { gate_in, silu_out };
+/// `softcap`, Inkling 2's, is no clamp: cg tanh(g / cg) sigmoid(g) * cu tanh(u / cu), with `limit` the two caps packed
+/// (`softcapLimit`), so a softcapped geometry always takes the clamped kernels' slot.
+pub const ClampAt = enum { gate_in, silu_out, softcap };
+
+/// Inkling 2's SwiGLU caps (text_config `mlp_gate_softcap`, `mlp_up_softcap`: 4 and 25).
+pub const Softcap = struct { gate: f32, up: f32 };
+
+/// The largest cap `softcapLimit` packs: each cap is one byte of the kernels' template int LIMIT.
+pub const softcap_max: u32 = 255;
+
+/// A geometry's `limit` for `caps` at `ClampAt.softcap`: the gate's cap in bits 0-7, the up's in bits 8-15. Null unless
+/// both caps are whole numbers in 1..softcap_max (a NaN included), so every kernel reads them exactly.
+pub fn softcapLimit(caps: Softcap) ?u32 {
+    const lo: f32 = 1;
+    const hi: f32 = @floatFromInt(softcap_max);
+    for ([_]f32{ caps.gate, caps.up }) |c| {
+        if (!(c >= lo and c <= hi) or @floor(c) != c) return null;
+    }
+    return @as(u32, @intFromFloat(caps.gate)) | (@as(u32, @intFromFloat(caps.up)) << 8);
+}
+
+/// The caps a softcapped `limit` packs (`softcapLimit`'s inverse).
+pub fn softcapOf(limit: u32) Softcap {
+    return .{ .gate = @floatFromInt(limit & 255), .up = @floatFromInt((limit >> 8) & 255) };
+}
+
+/// Whether `limit` is one a geometry at `clamp` takes: 0..128 for a clamp (0 none), a packed pair of nonzero caps for
+/// `softcap`.
+pub fn limitAdmitted(limit: u32, clamp: ClampAt) bool {
+    return switch (clamp) {
+        .gate_in, .silu_out => limit <= 128,
+        .softcap => limit >> 16 == 0 and limit & 255 != 0 and (limit >> 8) & 255 != 0,
+    };
+}
 
 /// A trellis rate K = n/16 bits per weight, n the halfwords a packed 256-weight tile carries (even, 16..128).
 /// Weight t's codeword is the 16-bit window of the tile's circular bitstream ending at `bitEnd(t)`.
@@ -568,4 +601,19 @@ test "turboexl3 project: a 128x128 K4 linear with identity-like scales reproduce
     }
     try testing.expect(max_ref > 0);
     try testing.expect(max_err <= 0.02 * max_ref);
+}
+
+test "turboexl3 format softcap: the caps pack into one byte each, whole numbers 1..255 only, and limitAdmitted reads them back" {
+    const l = softcapLimit(.{ .gate = 4, .up = 25 }).?;
+    try testing.expectEqual(@as(u32, 4 | 25 << 8), l);
+    try testing.expectEqual(Softcap{ .gate = 4, .up = 25 }, softcapOf(l));
+    try testing.expect(limitAdmitted(l, .softcap));
+    try testing.expect(!limitAdmitted(l, .silu_out));
+    try testing.expect(!limitAdmitted(4, .softcap)); // an up cap of 0
+    try testing.expect(!limitAdmitted(25 << 8, .softcap)); // a gate cap of 0
+    try testing.expect(!limitAdmitted(1 << 16 | l, .softcap));
+    try testing.expect(limitAdmitted(0, .gate_in) and limitAdmitted(128, .silu_out) and !limitAdmitted(129, .gate_in));
+    for ([_]Softcap{ .{ .gate = 0, .up = 25 }, .{ .gate = 4, .up = 0 }, .{ .gate = 4.5, .up = 25 }, .{ .gate = 4, .up = 256 }, .{ .gate = -4, .up = 25 }, .{ .gate = std.math.nan(f32), .up = 25 }, .{ .gate = 4, .up = std.math.inf(f32) } }) |c|
+        try testing.expectEqual(@as(?u32, null), softcapLimit(c));
+    try testing.expectEqual(@as(?u32, 1 | 255 << 8), softcapLimit(.{ .gate = 1, .up = 255 }));
 }

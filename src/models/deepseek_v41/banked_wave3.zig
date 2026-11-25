@@ -161,7 +161,8 @@ pub const Shape = struct {
 /// take.
 pub fn shapeFor(k3: *const Kernels3, rows: usize) !Shape {
     const g = k3.geo;
-    if (g.topk != 1 or g.limit == 0) return error.Exl3EngineNotImplemented;
+    // wave3's finish is fin7cbg's text: DeepSeek-V4.1's and GLM's clamp at the gate's input only
+    if (g.topk != 1 or g.limit == 0 or g.clamp != .gate_in) return error.Exl3EngineNotImplemented;
     if (rows == 0 or rows > banked.banked_rows_max) return error.BadExl3Shape;
     const bt: u32 = if (rows == 1) k3.bt1 else k3.bt9;
     if (bt != 1 and bt != 2 and bt != 4 and bt != 8) return error.BadExl3Shape;

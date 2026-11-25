@@ -38,7 +38,8 @@ pub const Geometry = struct {
     /// (`text_fin7c`, forms 7, 8 and 9); `Kernels` and `Kernels5` refuse a clamped geometry.
     limit: u32 = 0,
     /// where a clamped geometry clamps (`format.ClampAt`): `gate_in` fin7's clamped variant (`text_fin7c`), `silu_out`
-    /// Ling-3.1's (`text_fin7co`); an unclamped geometry ignores it
+    /// Ling-3.1's (`text_fin7co`), `softcap` Inkling 2's softcapped SwiGLU (`text_fin7cs`, `limit` the packed caps); an
+    /// unclamped geometry ignores it
     clamp: format.ClampAt = .gate_in,
 
     pub fn admitted(g: Geometry) bool {
@@ -214,7 +215,10 @@ pub const text_gu3 = gu3_1 ++ rk_line ++ gu3_body;
 /// gu3's pieces after its rk line, cut where gu3sf differs: after its reduction buffer (its declarations) and at the
 /// planes' stores; and where the banked text differs: at the weight base (`gu3_w`)
 pub const gu3_1 = @embedFile("kernels/decode/gu3_1.metal");
-pub const gu3_2 = @embedFile("kernels/decode/gu3_2.metal");
+/// gu3_2 cut where the x texts (`text_gu3x`) put their weight base: before the members scan
+pub const gu3_2 = gu3_2a ++ gu3_2b;
+pub const gu3_2a = @embedFile("kernels/decode/gu3_2a.metal");
+pub const gu3_2b = @embedFile("kernels/decode/gu3_2b.metal");
 pub const gu3_w = @embedFile("kernels/decode/gu3_w.metal");
 pub const gu3_3 = @embedFile("kernels/decode/gu3_3.metal");
 pub const gu3_stores = @embedFile("kernels/decode/gu3_stores.metal");
@@ -231,7 +235,10 @@ pub const text_down3 = down3_1 ++ rk_line ++ down3_2 ++ down3_w ++ down3_3;
 /// down3's pieces: its constants and grid line, then its body cut at the weight base (`down3_w`; the banked text's
 /// differs)
 pub const down3_1 = @embedFile("kernels/decode/down3_1.metal");
-pub const down3_2 = @embedFile("kernels/decode/down3_2.metal");
+/// down3_2 cut as gu3_2 is (`text_down3x`)
+pub const down3_2 = down3_2a ++ down3_2b;
+pub const down3_2a = @embedFile("kernels/decode/down3_2a.metal");
+pub const down3_2b = @embedFile("kernels/decode/down3_2b.metal");
 pub const down3_w = @embedFile("kernels/decode/down3_w.metal");
 pub const down3_3 = @embedFile("kernels/decode/down3_3.metal");
 
@@ -267,6 +274,38 @@ pub const fin3_outputs = [_][*:0]const u8{ "hd", "hs" };
 pub const down3_inputs = [_][*:0]const u8{ "hdp", "slots", "down_t" };
 pub const down3_outputs = [_][*:0]const u8{"zd"};
 pub const dfin3_inputs = [_][*:0]const u8{ "zd", "slots", "scores", "down_svh", "hsx" };
+
+/// Form 3's GEMVs on the x texts (`Config.decode_iop`; kernels/decode/gemv_x.metal): each tile's words by a 32-bit index
+/// from the expert base, the same reads, decodes and FMA order as gu3 / down3, so their bytes. The weight base comes
+/// before the members scan; the GEMV is `turboexl3_gemv_x`. Inputs and outputs: gu3's and down3's.
+pub const text_gu3x = gu3_1 ++ rk_line ++ gu3_2a ++ gu3_w ++ gu3_2b ++ @embedFile("kernels/decode/gu3_3x.metal") ++ gu3_stores ++ gu3_4;
+pub const text_down3x = down3_1 ++ rk_line ++ down3_2a ++ down3_w ++ down3_2b ++ @embedFile("kernels/decode/down3_3x.metal");
+const metal_gemv_x = @embedFile("kernels/decode/gemv_x.metal");
+
+/// The x texts' header with a planted defect (`red`: 0 none; 1 gemv_x.metal's EXL3_RED, the tests' red check only)
+pub fn xHeader(comptime red: u1) [:0]const u8 {
+    return std.fmt.comptimePrint("#define EXL3_RED {d}\n", .{red}) ++ header ++ metal_gemv_x;
+}
+
+/// The x kernels' names per defect (each its own: a kernel cache keys by name)
+pub fn xName(comptime proj: []const u8, comptime red: u1) [:0]const u8 {
+    return std.fmt.comptimePrint("turboexl3_{s}x_iop_r{d}", .{ proj, red });
+}
+
+/// gu3x and down3x; the caller frees both (`freeKernel`)
+pub fn newXKernels() !struct { gu: mlx.mlx_fast_metal_kernel, down: mlx.mlx_fast_metal_kernel } {
+    const gu = ks.newKernel(xName("gu3", 0), &gu3_inputs, &gu3_outputs, text_gu3x, xHeader(0), true) orelse return error.KernelCreateFailed;
+    const dn = ks.newKernel(xName("down3", 0), &down3_inputs, &down3_outputs, text_down3x, xHeader(0), true) orelse {
+        freeKernel(gu);
+        return error.KernelCreateFailed;
+    };
+    return .{ .gu = gu, .down = dn };
+}
+
+/// Whether a geometry's tile word offsets within one expert fit the x texts' 32-bit index (`Config.decode_iop`)
+pub fn iopFits(geo: Geometry) bool {
+    return @as(u64, geo.hidden / 16) * @as(u64, geo.inter / 16) * @as(u64, geo.rate.n / 2) < (1 << 32);
+}
 
 
 /// Form 3: five launches (prepare gate and up, split-K gate/up planes, finish + SwiGLU + down prepare, split-K down
@@ -354,8 +393,10 @@ pub const Kernels3 = struct {
                 ks.newKernel("turboexl3_fin7", &fin3_inputs, &fin3_outputs, text_fin7, header5, true)
             else if (geo.clamp == .gate_in)
                 ks.newKernel("turboexl3_fin7c", &fin3_inputs, &fin3_outputs, text_fin7c, header5, true)
+            else if (geo.clamp == .silu_out)
+                ks.newKernel("turboexl3_fin7co", &fin3_inputs, &fin3_outputs, text_fin7co, header5, true)
             else
-                ks.newKernel("turboexl3_fin7co", &fin3_inputs, &fin3_outputs, text_fin7co, header5, true)) orelse return error.KernelCreateFailed,
+                ks.newKernel("turboexl3_fin7cs", &fin3_inputs, &fin3_outputs, text_fin7cs, header5, true)) orelse return error.KernelCreateFailed,
             .dfin7 = ks.newKernel("turboexl3_dfin7", &dfin3_inputs, &down_outputs, text_dfin7, header5, true) orelse return error.KernelCreateFailed,
             .gu8 = ks.newKernel("turboexl3_gu8", &gu8_inputs, &gu8_outputs, text_gu8, header5, true) orelse return error.KernelCreateFailed,
         };
@@ -589,6 +630,10 @@ pub const fin7_swiglu_clamp = @embedFile("kernels/decode/fin7_swiglu_clamp.metal
 /// other statement fin7's.
 pub const text_fin7co = fin7_1 ++ expert_line ++ fin7_2 ++ fin7_planes ++ fin7_3 ++ fin7_sums ++ fin7_4 ++ fin7_swiglu_clamp_out ++ fin7_5;
 pub const fin7_swiglu_clamp_out = @embedFile("kernels/decode/fin7_swiglu_clamp_out.metal");
+/// Form 7's launch 3 with Inkling 2's softcapped SwiGLU (`Geometry.clamp` `softcap`, LIMIT the packed caps,
+/// `format.softcapLimit`): fin7 with its SwiGLU line replaced by `fin7_swiglu_softcap`, every other statement fin7's.
+pub const text_fin7cs = fin7_1 ++ expert_line ++ fin7_2 ++ fin7_planes ++ fin7_3 ++ fin7_sums ++ fin7_4 ++ fin7_swiglu_softcap ++ fin7_5;
+pub const fin7_swiglu_softcap = @embedFile("kernels/decode/fin7_swiglu_softcap.metal");
 
 /// Form 7, launch 5 (dfin3 with the slots side by side): per (128-wide hidden block, row), simdgroup k finishes slot k (the
 /// planes' sum, the deferred map, f16 round, H128 in registers, svh, f16 round) into threadgroup memory, then 128 threads

@@ -35,6 +35,7 @@ These variables set or narrow the cases of a test group. The comments of each fi
 | `TURBOEXL3_GLM_ROUTED_N`, `_ROUTED_ROWS`, `_BANKED_ROWS` | `routed_test.zig` | the routed rates (halfwords per tile), `moeClamped`'s row counts and the banked call's pair counts at GLM-5.3-Flash's routed geometry |
 | `TURBOEXL3_GLM_ROUTED_N`, `_ROWS_S`, `_BANKED_ROWS` | `fused_test.zig` | the routed rates (also of the schedules' byte tests), the prompt calls' row-slots and the decode waves' pairs of the fused paths' and the banked schedules' byte tests |
 | `TURBOEXL3_CLAMP_N`, `_ROWS` | `clamped_test.zig` | the rates (halfwords per tile) and row counts of the clamped SwiGLU's test at DeepSeek-V4.1-Flash's geometry |
+| `TURBOEXL3_INKLING2_N` | `inkling2_test.zig` | the routed rates (halfwords per tile; default 16,32: K1 and K2) of Inkling 2's softcap, banked and gathered-rows tests (with `TURBOEXL3_GPU=1`) |
 
 `python3 tools/check_texts.py <src before the change>` checks a refactor on the host. It fails on any Zig string that
 holds Metal. It also proves that each kernel source and header is byte-identical to the one before the change, or
